@@ -4,6 +4,19 @@ use slint::{ComponentHandle, Model, ModelRc, VecModel};
 use switchx::app::{AppError, Snapshot, data_directory, load_snapshot};
 use tokio::sync::mpsc::error::TrySendError;
 
+fn matching_providers(providers: &ModelRc<ProviderRow>, query: &str) -> Vec<ProviderRow> {
+    let query = query.trim().to_lowercase();
+    providers
+        .iter()
+        .filter(|provider| provider.name.to_lowercase().contains(&query))
+        .collect()
+}
+
+fn filter_providers(app: &AppWindow, query: &str) {
+    let rows = matching_providers(&app.get_providers(), query);
+    app.set_filtered_providers(ModelRc::new(VecModel::from(rows)));
+}
+
 fn show_result(app: &AppWindow, result: Result<Snapshot, AppError>) {
     app.set_loading(false);
     match result {
@@ -19,6 +32,7 @@ fn show_result(app: &AppWindow, result: Result<Snapshot, AppError>) {
                 })
                 .collect::<Vec<_>>();
             app.set_providers(ModelRc::new(VecModel::from(rows)));
+            filter_providers(app, &app.get_provider_query());
             app.set_status_text(
                 format!(
                     "本地资料已读取 · {count} 个上游记录{}",
@@ -111,6 +125,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             }
         }
     });
+    let weak = app.as_weak();
+    app.on_filter_providers(move |query| {
+        if let Some(app) = weak.upgrade() {
+            filter_providers(&app, &query);
+        }
+    });
     sender.try_send(false)?;
 
     let result = app.run();
@@ -119,4 +139,29 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     drop(sender);
     drop(runtime);
     result.map_err(Into::into)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn provider_filter_matches_chinese_names_and_ignores_case() {
+        let providers = ModelRc::new(VecModel::from(vec![
+            ProviderRow {
+                name: "DeepSeek 官方".into(),
+                endpoint: "https://example.invalid".into(),
+                credential_status: "凭据未检查".into(),
+            },
+            ProviderRow {
+                name: "备用上游".into(),
+                endpoint: "https://backup.invalid".into(),
+                credential_status: "凭据未检查".into(),
+            },
+        ]));
+        assert_eq!(matching_providers(&providers, "deep").len(), 1);
+        assert_eq!(matching_providers(&providers, " 上游 ").len(), 1);
+        assert_eq!(matching_providers(&providers, "  ").len(), 2);
+        assert!(matching_providers(&providers, "missing").is_empty());
+    }
 }
