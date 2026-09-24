@@ -1,0 +1,67 @@
+{
+  "models": [
+    {
+      "slug": "deepseek-flash",
+      "display_name": "Synthetic DeepSeek fixture",
+      "description": "Schema probe only; capabilities require live verification.",
+      "default_reasoning_level": "high",
+      "supported_reasoning_levels": [
+        { "effort": "low", "description": "Low" },
+        { "effort": "high", "description": "High" },
+        { "effort": "max", "description": "Max" }
+      ],
+      "shell_type": "unified_exec",
+      "visibility": "list",
+      "supported_in_api": true,
+      "priority": 1,
+      "upgrade": null,
+      "support_verbosity": true,
+      "default_verbosity": "low",
+      "apply_patch_tool_type": "freeform",
+      "truncation_policy": { "mode": "tokens", "limit": 10000 },
+      "supports_image_detail_original": true,
+      "context_window": 1048576,
+      "max_context_window": 1048576,
+      "input_modalities": ["text", "image"],
+      "use_responses_lite": false,
+      "multi_agent_version": null,
+      "tool_mode": null,
+      "experimental_supported_tools": [],
+      "model_messages": {
+        "instructions_template": "You are a coding assistant in a synthetic catalog test. Report what you actually verified."
+      }
+    },
+    {
+      "slug": "gpt-5.5",
+      "display_name": "Synthetic OpenAI fixture",
+      "description": "Schema probe only; capabilities require live verification.",
+      "default_reasoning_level": "medium",
+      "supported_reasoning_levels": [
+        { "effort": "low", "description": "Low" },
+        { "effort": "medium", "description": "Medium" },
+        { "effort": "high", "description": "High" },
+        { "effort": "xhigh", "description": "Xhigh" }
+      ],
+      "shell_type": "unified_exec",
+      "visibility": "list",
+      "supported_in_api": true,
+      "priority": 2,
+      "upgrade": null,
+      "support_verbosity": true,
+      "default_verbosity": "low",
+      "apply_patch_tool_type": "freeform",
+      "truncation_policy": { "mode": "tokens", "limit": 10000 },
+      "supports_image_detail_original": true,
+      "context_window": 272000,
+      "max_context_window": 272000,
+      "input_modalities": ["text", "image"],
+      "use_responses_lite": false,
+      "multi_agent_version": null,
+      "tool_mode": null,
+      "experimental_supported_tools": [],
+      "model_messages": {
+        "instructions_template": "You are a coding assistant in a synthetic catalog test. Report what you actually verified."
+      }
+    }
+  ]
+}
