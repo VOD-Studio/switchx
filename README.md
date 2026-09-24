@@ -2,7 +2,7 @@
 
 Rust + Slint 原生桌面应用，按 `docs/SWITCHX-PLAN.md` 的 M0 闸门逐步实现。
 
-当前有应用骨架、**合成目录夹具**、独立的 loopback 路由模块、SQLite 上游元数据存储和系统凭据存储适配。界面尚未启动路由；`catalog_probe` 不读取账号、凭据或现有 Codex 配置，也不会写入 `CODEX_HOME`。夹具的能力字段只用于验证目录 schema，不能作为真实模型能力或发布模板。SQLite 只存凭据引用；界面与路由尚未接入实际凭据。
+当前有应用骨架、**合成目录夹具**、独立的 loopback 路由模块、SQLite 上游元数据存储和系统凭据存储适配。界面尚未启动路由；`catalog_probe` 不读取账号、凭据或现有 Codex 配置，也不会写入 `CODEX_HOME`。夹具的能力字段只用于验证目录 schema，不能作为真实模型能力或发布模板。SQLite 只存凭据引用；M2 直连使用系统凭据，路由尚未接入保存的凭据。
 
 ```sh
 cargo run
@@ -18,7 +18,7 @@ CODEX_HOME="$(mktemp -d)" npx -y @openai/codex@0.156.1 \
 
 macOS 可运行 `sh scripts/bundle-macos.sh` 生成仅供本机交互检查的 `target/debug/SwitchX.app`。主窗口关闭后应驻留菜单栏，可从菜单栏重新打开或退出。此调试 bundle 未签名、未公证，不能作为发布包。
 
-M1 原生界面已提供设计 token、可通过键盘操作的按钮、基础卡片/状态控件、深浅主题、侧栏、状态抽屉和真实本地空态。启动后在平台应用数据目录创建权限受限的 SQLite 元数据文件，并经后台通道读取上游列表；列表只显示目标站点，隐藏 URL 中可能携带的凭据、路径和查询参数。只有点击“检查凭据”才读取已保存的钥匙串引用，界面只接收状态、不接收密钥。读取失败时保留上次成功的列表并显示错误原因和下一步。可用绝对路径 `SWITCHX_DATA_DIR` 隔离测试数据。主题和导航只保存在本次窗口实例中；路由、Codex 配置和未接入页面仍明确标注未启用。macOS 已人工检查深浅主题、空态、上游列表、抽屉、Esc 关闭和错误态。
+M1 原生界面已提供设计 token、可通过键盘操作的按钮、基础卡片/状态控件、深浅主题、侧栏、状态抽屉和真实本地空态。启动后在平台应用数据目录创建权限受限的 SQLite 元数据文件，并经后台通道读取上游列表；列表只显示目标站点，隐藏 URL 中可能携带的凭据、路径和查询参数。只有点击“检查凭据”才读取已保存的钥匙串引用，界面只接收状态、不接收密钥。读取失败时保留上次成功的列表并显示错误原因和下一步。可用绝对路径 `SWITCHX_DATA_DIR` 隔离测试数据。主题和导航只保存在本次窗口实例中；路由和未接入页面仍明确标注未启用。macOS 已人工检查深浅主题、空态、上游列表、抽屉、Esc 关闭和错误态。
 
 M1 收口检查（2026-09-24，macOS 调试 bundle，隔离的 `SWITCHX_DATA_DIR` 与两条合成上游记录）：上游页现在有按名称筛选，输入英文可实时筛选，中文字符经无障碍文本写入后可正确筛选；无匹配时显示空态。Tab 可从输入框移到“检查凭据”；抽屉用 Esc 关闭后焦点返回“状态详情”。深浅主题下均已查看筛选布局。关闭窗口后 SwitchX 进程仍在运行。**尚未完成**输入法拼音预编辑/候选上屏和托盘菜单重新打开/退出的实际操作验证；当前 UI 自动化无法访问该菜单栏项目，不能把进程驻留等同于完整托盘验收。上述检查未读取真实凭据，也未修改 Codex 配置。
 
@@ -28,7 +28,7 @@ M1 收口检查（2026-09-24，macOS 调试 bundle，隔离的 `SWITCHX_DATA_DIR
 
 `cargo run --example config_probe -- /tmp/switchx-models.json` 只把合成 `config.toml` 差异预览输出到 stdout。预览保留其他 provider、MCP、项目、安全设置和注释；它不写用户配置。生成的 `env_key = "SWITCHX_LOCAL_TOKEN"` 仅在启动 Codex 的环境已提供本地令牌时才可用于请求。
 
-`config_transaction::PreparedSwitch` 已实现配置切换的独立事务核心：检查目标文件未变化、先写不可变目录和恢复 journal、再原子替换 `config.toml`。`restore` 按受管字段做三方比较，保留外部新增设置；同一字段发生冲突时保留外部值和 journal。自动化测试只在临时目录运行。界面尚未调用该模块；应用必须先验证路由器、本地令牌和目标客户端，再允许切换真实配置。当前 `env_key` 方案仍要求 Codex 启动环境提供 `SWITCHX_LOCAL_TOKEN`。
+`config_transaction::PreparedSwitch` 已实现路由模式配置切换的独立事务核心：检查目标文件未变化、先写不可变目录和恢复 journal、再原子替换 `config.toml`。`restore` 按受管字段做三方比较，保留外部新增设置；同一字段发生冲突时保留外部值和 journal。自动化测试只在临时目录运行。界面尚未调用这个**路由模式**模块；应用必须先验证路由器、本地令牌和目标客户端，再允许切换真实路由配置。当前路由模式的 `env_key` 方案仍要求 Codex 启动环境提供 `SWITCHX_LOCAL_TOKEN`。
 
 `cargo run --example codex_cli_probe` 会通过 npm 执行 Codex CLI 0.156.1，在独立临时 `CODEX_HOME` 中启动同一个 SwitchX 路由入口和两个本地假上游。实测两个别名分别到达对应假上游，且 `sx-ds-flash` 完成一次读取临时文件、回传工具结果、第二轮回答。运行结束会删除该临时目录；无真实 API Key、登录态或模型调用。
 
@@ -37,3 +37,13 @@ M1 收口检查（2026-09-24，macOS 调试 bundle，隔离的 `SWITCHX_DATA_DIR
 `cargo run --example chatgpt_auth_probe -- --synthetic` 在独立临时 `CODEX_HOME` 中用合成 API Key 验证 CLI 0.156.1 的 `requires_openai_auth` 与独立 `x-switchx-local-token` 请求头能同时抵达本地 mock；本地 mock 不转发模型请求。2026-09-24 本机已通过；另以无效的合成 ChatGPT 形状凭据测试，也观察到 CLI 把请求送到本地 `/v1/responses`，但不代表真实账号可用。
 
 去掉 `--synthetic` 后，探针会要求在临时目录完成一次官方 ChatGPT 浏览器登录，随后把合成模型请求送到本地 mock；正常结束时删除临时登录数据。2026-09-24 真实账号实测通过：CLI 0.156.1 完成登录，独立本地校验头与 Bearer 头抵达本地 mock，CLI 收到并完成合成回复。探针只检查 `x-openai-account-id`，本次该头未出现；不能由此断言其他账号头不存在。Codex CLI 0.156.1 支持将 ChatGPT 请求体压成 zstd；探针仅在自己的临时配置中关闭请求压缩，因此未验证默认压缩路径。产品路由器现接受有大小上限的 zstd 请求并向上游发送普通 JSON，本地假上游测试覆盖该路径；尚未让真实 Codex 默认压缩请求通过产品路由器。mock 不转发模型请求，此结果也不证明真实官方上游、续期、失效或切回。假上游测试确认选中 DeepSeek 时不会转发客户端的官方认证或账号头。
+
+## M2 直连进度
+
+原生“上游供应商”页面现可添加、编辑、删除 Responses 上游，保存名称、API 地址、模型 ID 和系统钥匙串凭据。已有 SQLite v1 上游资料迁移到 v2 后保留原记录，缺少模型 ID 的旧记录需编辑补齐。输入地址只允许 HTTPS 或 `127.0.0.1` HTTP，拒绝 URL 内的用户名、密码、查询参数与片段。“检查”读取上游 `/models` 并核对所选 ID；它不发送推理请求，也不证明工具调用兼容。直连生效期间暂不允许编辑或删除上游，避免已配置的客户端拿到另一上游的 Key。
+
+“配置与恢复”页面可选择绝对路径的 Codex 配置目录、读取当前配置、将当前自定义上游的**元数据**填入新建表单，以及查看 `codex login status` 报告的 ChatGPT 登录、API Key 登录或未知状态。导入不复制原配置中的凭据，也不读取 `auth.json`；新建上游须重新输入自己的 API Key。`SWITCHX_CODEX_CLI` 可指向要检查的 CLI；默认优先使用本机 ChatGPT.app 内的 CLI。
+
+从上游列表点“直连”会预览受管字段。点“应用直连”时再检查钥匙串、`/models`、模型 ID 与目标配置文件是否变化，然后以 journal 和原子替换写入 `config.toml`。只管理 `model`、`model_provider`、`model_catalog_json` 和 SwitchX 新建的 provider 表；其他配置和注释保留。若待移除的 `model_catalog_json` 带注释，切换会拒绝并要求先手动移走注释，不把原始注释写进 journal。生成的 provider 使用 Codex `auth.command` 调用当前 SwitchX 程序，从系统钥匙串读取 Bearer token；配置与 SQLite 均不保存明文 Key。可从页面或托盘恢复，恢复时保留外部改动并报告冲突。直连不依赖 SwitchX 常驻，但移动或删除当前 SwitchX 程序会让已生成的 helper 路径失效。切换只对新启动的目标客户端生效。
+
+`cargo test` 使用临时目录和本地 mock 验证数据库迁移、目录检查、差异写入、恢复及冲突。隔离探针：先运行 `cargo build --bin switchx`，再运行 `cargo run --example direct_cli_probe`。它在临时 `CODEX_HOME`、合成钥匙串条目与本地假上游中启动 Codex CLI 0.156.1；2026-09-24 已验证 CLI 通过 helper 取凭据、发送直连 Responses 请求并完成合成回答，结束后恢复配置并删除测试凭据。该探针不使用真实供应商 Key，也不证明真实上游的 Responses 工具对话、取消或 Desktop/IDE 兼容；M2 真上游验收与托盘菜单的实际操作验证仍待完成。

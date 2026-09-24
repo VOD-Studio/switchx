@@ -3,8 +3,11 @@ import { Theme } from "tokens.slint";
 import { QuietButton, SurfaceCard, StatusPill } from "components.slint";
 
 export struct ProviderRow {
+    id: string,
     name: string,
     endpoint: string,
+    base-url: string,
+    model-id: string,
     credential-status: string,
 }
 
@@ -19,6 +22,7 @@ export component AppWindow inherits Window {
     in-out property <int> active-page: 0;
     in-out property <bool> drawer-open: false;
     in-out property <bool> loading: true;
+    in-out property <bool> busy: false;
     in-out property <string> error-code: "";
     in-out property <string> error-message: "";
     in-out property <string> error-action: "";
@@ -27,8 +31,37 @@ export component AppWindow inherits Window {
     in-out property <[ProviderRow]> providers: [];
     in-out property <[ProviderRow]> filtered-providers: [];
     in-out property <string> provider-query: "";
+    in-out property <bool> editor-open: false;
+    in-out property <bool> delete-confirm: false;
+    in-out property <string> edit-id: "";
+    in-out property <string> edit-name: "";
+    in-out property <string> edit-url: "";
+    in-out property <string> edit-model: "";
+    in-out property <string> edit-key: "";
+    in-out property <string> config-home: "";
+    in-out property <string> config-status: "尚未读取 Codex 配置";
+    in-out property <bool> direct-active: false;
+    in-out property <string> auth-status: "官方登录状态尚未检查";
+    in-out property <string> selected-provider-id: "";
+    in-out property <string> direct-preview: "";
+    in-out property <bool> direct-preview-ready: false;
+    in-out property <string> action-message: "";
+    changed active-page => {
+        root.error-code = "";
+        root.error-message = "";
+        root.error-action = "";
+    }
     callback refresh(bool);
     callback filter-providers(string);
+    callback save-provider(string, string, string, string, string);
+    callback delete-provider(string);
+    callback check-provider(string);
+    callback inspect-direct(string, string);
+    callback apply-direct();
+    callback restore-direct(string);
+    callback inspect-config(string);
+    callback import-current(string);
+    callback check-login(string);
     changed drawer-open => {
         if (root.drawer-open) { drawer-keyboard.focus(); }
         else { status-button.focus(); }
@@ -128,6 +161,10 @@ export component AppWindow inherits Window {
                     Text { text: root.error-action; color: Theme.muted-text; font-size: 12px; }
                 }
             }
+            if root.action-message != "" : SurfaceCard {
+                height: 64px;
+                Text { text: root.action-message; color: Theme.primary-text; font-size: 13px; wrap: word-wrap; vertical-alignment: center; }
+            }
 
             if root.active-page == 0 : ScrollView {
                 vertical-stretch: 1;
@@ -141,9 +178,9 @@ export component AppWindow inherits Window {
                             HorizontalLayout {
                                 spacing: 12px;
                                 Text { text: "连接控制台"; color: Theme.primary-text; font-size: 17px; font-weight: 600; }
-                                StatusPill { label: "未启用"; ink: Theme.warning; }
+                                StatusPill { label: root.direct-active ? "直连已配置" : "未启用"; ink: root.direct-active ? Theme.success : Theme.warning; }
                                 Rectangle { horizontal-stretch: 1; }
-                                Text { text: "本地只读"; color: Theme.muted-text; font-size: 12px; }
+                                Text { text: root.direct-active ? "待客户端重启" : "本地状态"; color: Theme.muted-text; font-size: 12px; }
                             }
                             HorizontalLayout {
                                 spacing: 12px;
@@ -155,7 +192,7 @@ export component AppWindow inherits Window {
                                         padding: 14px;
                                         spacing: 5px;
                                         Text { text: "Codex"; color: Theme.primary-text; font-size: 15px; font-weight: 600; }
-                                        Text { text: "本应用未检查配置"; color: Theme.muted-text; font-size: 12px; }
+                                        Text { text: root.direct-active ? "直连已写入" : "查看配置与恢复"; color: Theme.muted-text; font-size: 12px; }
                                     }
                                 }
                                 Rectangle { height: 1px; background: Theme.border; horizontal-stretch: 1; }
@@ -184,7 +221,7 @@ export component AppWindow inherits Window {
                                 }
                             }
                             Rectangle { height: 1px; background: Theme.border; }
-                            Text { text: "SwitchX 未修改 Codex 配置。此窗口不会发送模型请求。"; color: Theme.muted-text; font-size: 12px; }
+                            Text { text: root.direct-active ? "Codex 直连所选上游；SwitchX 不经手推理请求。" : "此窗口不会发送模型请求。直连需从上游列表预览后应用。"; color: Theme.muted-text; font-size: 12px; }
                         }
                     }
                     HorizontalLayout {
@@ -254,15 +291,71 @@ export component AppWindow inherits Window {
                         }
                         QuietButton { width: 106px; text: "检查凭据"; clicked => { root.refresh(true); } }
                         QuietButton { width: 70px; text: "刷新"; clicked => { root.refresh(false); } }
+                        QuietButton {
+                            width: 92px;
+                            text: "添加上游";
+                            clicked => {
+                                root.edit-id = "";
+                                root.edit-name = "";
+                                root.edit-url = "";
+                                root.edit-model = "";
+                                root.edit-key = "";
+                                root.delete-confirm = false;
+                                root.editor-open = true;
+                            }
+                        }
                     }
-                    Text { height: 28px; text: "此页只读。凭据值不会进入界面；检查操作只返回可读取性。"; color: Theme.muted-text; font-size: 13px; }
+                    Text { height: 28px; text: "仅支持原生 Responses 上游；API Key 保存到系统凭据存储。"; color: Theme.muted-text; font-size: 13px; }
+                    if root.editor-open : SurfaceCard {
+                        height: 302px;
+                        VerticalLayout {
+                            padding: 16px;
+                            spacing: 7px;
+                            Text { text: root.edit-id == "" ? "添加上游" : "编辑上游"; color: Theme.primary-text; font-size: 17px; font-weight: 600; }
+                            HorizontalLayout {
+                                spacing: 8px;
+                                Text { width: 92px; text: "名称"; color: Theme.muted-text; vertical-alignment: center; }
+                                LineEdit { text <=> root.edit-name; placeholder-text: "例如 DeepSeek"; accessible-label: "上游名称"; }
+                            }
+                            HorizontalLayout {
+                                spacing: 8px;
+                                Text { width: 92px; text: "API 地址"; color: Theme.muted-text; vertical-alignment: center; }
+                                LineEdit { text <=> root.edit-url; placeholder-text: "https://example.com/v1"; accessible-label: "上游 API 地址"; }
+                            }
+                            HorizontalLayout {
+                                spacing: 8px;
+                                Text { width: 92px; text: "模型 ID"; color: Theme.muted-text; vertical-alignment: center; }
+                                LineEdit { text <=> root.edit-model; placeholder-text: "上游实际模型 ID"; accessible-label: "上游模型 ID"; }
+                            }
+                            HorizontalLayout {
+                                spacing: 8px;
+                                Text { width: 92px; text: "API Key"; color: Theme.muted-text; vertical-alignment: center; }
+                                LineEdit { text <=> root.edit-key; input-type: password; placeholder-text: root.edit-id == "" ? "必填" : "留空则保留已保存的 Key"; accessible-label: "上游 API Key"; }
+                            }
+                            HorizontalLayout {
+                                spacing: 8px;
+                                QuietButton {
+                                    text: "保存"; primary: true; enabled: !root.busy;
+                                    clicked => {
+                                        root.save-provider(root.edit-id, root.edit-name, root.edit-url, root.edit-model, root.edit-key);
+                                        root.edit-key = "";
+                                    }
+                                }
+                                QuietButton { text: "取消"; clicked => { root.edit-key = ""; root.editor-open = false; } }
+                                if root.edit-id != "" : QuietButton { text: root.delete-confirm ? "确认删除" : "删除"; enabled: !root.busy; clicked => {
+                                    if (root.delete-confirm) { root.delete-provider(root.edit-id); root.edit-key = ""; }
+                                    else { root.delete-confirm = true; }
+                                } }
+                            }
+                        }
+                    }
                     if !root.loading && root.error-code == "" && root.providers.length == 0 : SurfaceCard {
                         height: 140px;
                         VerticalLayout {
                             padding: 22px;
                             spacing: 10px;
                             Text { text: "还没有上游"; color: Theme.primary-text; font-size: 18px; font-weight: 600; }
-                            Text { text: "添加、编辑与连接验证暂不可用。"; color: Theme.muted-text; font-size: 13px; }
+                            Text { text: "点击“添加上游”保存 Responses API 连接。"; color: Theme.muted-text; font-size: 13px; }
                         }
                     }
                     if !root.loading && root.error-code == "" && root.providers.length > 0 && root.filtered-providers.length == 0 : SurfaceCard {
@@ -270,38 +363,103 @@ export component AppWindow inherits Window {
                         Text { text: "没有匹配的上游。清除筛选可查看全部记录。"; color: Theme.muted-text; font-size: 13px; horizontal-alignment: center; vertical-alignment: center; }
                     }
                     for provider in root.filtered-providers : SurfaceCard {
-                        height: 100px;
+                        height: 108px;
                         HorizontalLayout {
                             padding: 20px;
-                            spacing: 20px;
+                            spacing: 10px;
                             VerticalLayout {
                                 spacing: 7px;
                                 Text { text: provider.name; color: Theme.primary-text; font-size: 16px; font-weight: 600; }
                                 Text { text: provider.endpoint; color: Theme.muted-text; font-size: 12px; }
+                                Text { text: provider.model-id; color: Theme.muted-text; font-size: 12px; }
                             }
                             Rectangle { horizontal-stretch: 1; }
                             Text { text: provider.credential-status; color: Theme.muted-text; font-size: 12px; }
+                            QuietButton { width: 62px; text: "编辑"; clicked => {
+                                root.edit-id = provider.id;
+                                root.edit-name = provider.name;
+                                root.edit-url = provider.base-url;
+                                root.edit-model = provider.model-id;
+                                root.edit-key = "";
+                                root.delete-confirm = false;
+                                root.editor-open = true;
+                            } }
+                            QuietButton { width: 70px; text: "检查"; enabled: !root.busy; clicked => { root.check-provider(provider.id); } }
+                            QuietButton { width: 70px; text: "直连"; enabled: !root.busy; clicked => {
+                                root.selected-provider-id = provider.id;
+                                root.active-page = 5;
+                                root.inspect-direct(provider.id, root.config-home);
+                            } }
                         }
                     }
                 }
             }
 
-            if root.active-page >= 2 && root.active-page <= 5 : SurfaceCard {
+            if root.active-page >= 2 && root.active-page <= 4 : SurfaceCard {
                 height: 200px;
                 VerticalLayout {
                     padding: 24px;
                     spacing: 14px;
                     Text {
-                        text: root.active-page == 2 ? "目录与路由尚未启用" : root.active-page == 3 ? "还没有请求记录" : root.active-page == 4 ? "MCP 与 Skills 尚未接入" : "尚未管理 Codex 配置";
+                        text: root.active-page == 2 ? "目录与路由尚未启用" : root.active-page == 3 ? "还没有请求记录" : "MCP 与 Skills 尚未接入";
                         color: Theme.primary-text;
                         font-size: 19px;
                         font-weight: 600;
                     }
                     Text {
-                        text: root.active-page == 2 ? "模型目录与路由尚未对当前客户端启用。" : root.active-page == 3 ? "界面未启动路由，因此不会出现真实请求。" : root.active-page == 4 ? "不会自动导入或执行外部命令。" : "当前只能查看状态，尚未启用配置切换。";
+                        text: root.active-page == 2 ? "模型目录与路由尚未对当前客户端启用。" : root.active-page == 3 ? "界面未启动路由，因此不会出现真实请求。" : "不会自动导入或执行外部命令。";
                         color: Theme.muted-text;
                         font-size: 13px;
                         wrap: word-wrap;
+                    }
+                }
+            }
+
+            if root.active-page == 5 : ScrollView {
+                vertical-stretch: 1;
+                VerticalLayout {
+                    spacing: 14px;
+                    SurfaceCard {
+                        height: 176px;
+                        VerticalLayout {
+                            padding: 18px;
+                            spacing: 10px;
+                            Text { text: "Codex 配置目录"; color: Theme.primary-text; font-size: 16px; font-weight: 600; }
+                            LineEdit { text <=> root.config-home; accessible-label: "Codex 配置目录绝对路径"; }
+                            Text { text: "只管理此目录的 config.toml；切换对新启动的客户端生效。"; color: Theme.muted-text; font-size: 12px; }
+                            HorizontalLayout {
+                                spacing: 8px;
+                                QuietButton { text: "读取当前配置"; enabled: !root.busy; clicked => { root.inspect-config(root.config-home); } }
+                                QuietButton { text: "导入当前上游"; enabled: !root.busy; clicked => { root.import-current(root.config-home); } }
+                                QuietButton { text: "检查官方登录"; enabled: !root.busy; clicked => { root.check-login(root.config-home); } }
+                            }
+                        }
+                    }
+                    SurfaceCard {
+                        height: 154px;
+                        VerticalLayout {
+                            padding: 18px;
+                            spacing: 10px;
+                            Text { text: root.config-status; color: Theme.primary-text; font-size: 15px; wrap: word-wrap; }
+                            Text { text: root.auth-status; color: Theme.muted-text; font-size: 13px; wrap: word-wrap; }
+                            Text { text: "API Key 直连与 ChatGPT 官方登录是两条独立路径。导入只读取上游资料，不复制原凭据。"; color: Theme.muted-text; font-size: 12px; wrap: word-wrap; }
+                        }
+                    }
+                    SurfaceCard {
+                        height: 230px;
+                        VerticalLayout {
+                            padding: 18px;
+                            spacing: 12px;
+                            Text { text: "直连切换"; color: Theme.primary-text; font-size: 17px; font-weight: 600; }
+                            Text { text: root.direct-preview == "" ? "从上游列表选择“直连”，先查看受管字段差异。" : root.direct-preview; color: Theme.muted-text; font-size: 13px; wrap: word-wrap; }
+                            Text { text: "应用前会再次检查 /models 和所选模型；这不能证明 Responses 工具调用兼容。"; color: Theme.warning; font-size: 12px; wrap: word-wrap; }
+                            HorizontalLayout {
+                                spacing: 8px;
+                                QuietButton { text: "应用直连"; primary: true; enabled: root.direct-preview-ready && !root.busy; clicked => { root.apply-direct(); } }
+                                QuietButton { text: "恢复原配置"; enabled: !root.busy; clicked => { root.restore-direct(root.config-home); } }
+                            }
+                            Text { text: "直连凭据依赖当前 SwitchX 程序路径；移动或删除应用前请恢复原配置。"; color: Theme.muted-text; font-size: 12px; wrap: word-wrap; }
+                        }
                     }
                 }
             }
@@ -354,9 +512,11 @@ export component SwitchXTray inherits SystemTrayIcon {
     icon: @image-url("../assets/tray.svg");
     tooltip: "switchx";
     callback show-app();
+    callback restore-config();
     callback quit-app();
     Menu {
         MenuItem { title: "打开 switchx"; activated => { root.show-app(); } }
+        MenuItem { title: "恢复直连前配置"; activated => { root.restore-config(); } }
         MenuItem { title: "退出"; activated => { root.quit-app(); } }
     }
 }
