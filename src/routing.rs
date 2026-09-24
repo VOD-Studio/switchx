@@ -20,6 +20,8 @@ use tokio::net::TcpListener;
 
 use crate::catalog::Publication;
 
+pub const LOCAL_TOKEN_HEADER: &str = "x-switchx-local-token";
+
 pub struct Upstream {
     responses_url: Url,
     api_key: String,
@@ -146,10 +148,19 @@ fn authorize(headers: &HeaderMap, state: &RouterState) -> Option<Response> {
             "Origin is not allowed",
         ));
     }
-    let presented = headers
-        .get(header::AUTHORIZATION)
-        .and_then(|v| v.to_str().ok())
-        .and_then(|v| v.strip_prefix("Bearer "));
+    let mut local_headers = headers.get_all(LOCAL_TOKEN_HEADER).iter();
+    let presented = if let Some(value) = local_headers.next() {
+        if local_headers.next().is_some() {
+            None
+        } else {
+            value.to_str().ok()
+        }
+    } else {
+        headers
+            .get(header::AUTHORIZATION)
+            .and_then(|v| v.to_str().ok())
+            .and_then(|v| v.strip_prefix("Bearer "))
+    };
     let valid = presented
         .map(|token| {
             token
