@@ -1,0 +1,19 @@
+# Keep this synthetic user configuration intact.
+model = "gpt-example" # chosen by user
+model_provider = "other"
+approval_policy = "on-request"
+sandbox_mode = "workspace-write"
+
+[model_providers.other]
+name = "Other"
+base_url = "https://example.invalid/v1"
+wire_api = "responses"
+env_key = "OTHER_TEST_KEY"
+
+# user comment about MCP
+[mcp_servers.sample]
+command = "echo"
+args = ["hello"]
+
+[projects."/tmp/user-project"]
+trust_level = "trusted"
