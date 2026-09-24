@@ -8,7 +8,7 @@ use toml_edit::{DocumentMut, Value, table, value};
 use crate::catalog::Publication;
 
 pub const LOCAL_TOKEN_ENV: &str = "SWITCHX_LOCAL_TOKEN";
-const PROVIDER_ID: &str = "switchx_router";
+pub(crate) const PROVIDER_ID: &str = "switchx_router";
 
 #[derive(Debug)]
 pub struct Preview {
@@ -141,6 +141,10 @@ mod tests {
                 "model_catalog_json",
                 "model_providers.switchx_router"
             ]
+        );
+        assert_eq!(
+            preview.proposed,
+            include_str!("../tests/fixtures/routed-user-config.toml")
         );
         assert!(preview.proposed.contains("# user comment about MCP"));
         assert!(preview.proposed.contains("# chosen by user"));

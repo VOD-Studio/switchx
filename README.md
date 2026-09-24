@@ -18,11 +18,15 @@ CODEX_HOME="$(mktemp -d)" npx -y @openai/codex@0.156.1 \
 
 macOS 可运行 `sh scripts/bundle-macos.sh` 生成仅供本机交互检查的 `target/debug/SwitchX.app`。主窗口关闭后应驻留菜单栏，可从菜单栏重新打开或退出。此调试 bundle 未签名、未公证，不能作为发布包。
 
-原生界面已提供深浅主题、侧栏导航和状态抽屉。未接入的页面明确显示开发中；主题和导航状态目前只保存在本次窗口实例中。
+M1 原生界面已提供设计 token、可通过键盘操作的按钮、基础卡片/状态控件、深浅主题、侧栏、状态抽屉和真实本地空态。启动后在平台应用数据目录创建权限受限的 SQLite 元数据文件，并经后台通道读取上游列表；列表只显示目标站点，隐藏 URL 中可能携带的凭据、路径和查询参数。只有点击“检查凭据”才读取已保存的钥匙串引用，界面只接收状态、不接收密钥。读取失败时保留上次成功的列表并显示错误原因和下一步。可用绝对路径 `SWITCHX_DATA_DIR` 隔离测试数据。主题和导航只保存在本次窗口实例中；路由、Codex 配置和未接入页面仍明确标注未启用。macOS 已人工检查深浅主题、空态、上游列表、抽屉、Esc 关闭和错误态。
+
+`tests/fixtures/published-models.json` 与 `tests/fixtures/routed-user-config.toml` 是合成目录和 Codex 配置的 golden fixtures，用于检查 schema 输出与无关 TOML 字段、注释的保留。
 
 `cargo run --example keychain_probe` 在系统凭据存储中写入一次独立的合成测试条目，读取后立即删除；不读取现有账号数据。macOS 本机测试已通过。
 
 `cargo run --example config_probe -- /tmp/switchx-models.json` 只把合成 `config.toml` 差异预览输出到 stdout。预览保留其他 provider、MCP、项目、安全设置和注释；它不写用户配置。生成的 `env_key = "SWITCHX_LOCAL_TOKEN"` 仅在启动 Codex 的环境已提供本地令牌时才可用于请求。
+
+`config_transaction::PreparedSwitch` 已实现配置切换的独立事务核心：检查目标文件未变化、先写不可变目录和恢复 journal、再原子替换 `config.toml`。`restore` 按受管字段做三方比较，保留外部新增设置；同一字段发生冲突时保留外部值和 journal。自动化测试只在临时目录运行。界面尚未调用该模块；应用必须先验证路由器、本地令牌和目标客户端，再允许切换真实配置。当前 `env_key` 方案仍要求 Codex 启动环境提供 `SWITCHX_LOCAL_TOKEN`。
 
 `cargo run --example codex_cli_probe` 会通过 npm 执行 Codex CLI 0.156.1，在独立临时 `CODEX_HOME` 中启动同一个 SwitchX 路由入口和两个本地假上游。实测两个别名分别到达对应假上游，且 `sx-ds-flash` 完成一次读取临时文件、回传工具结果、第二轮回答。运行结束会删除该临时目录；无真实 API Key、登录态或模型调用。
 

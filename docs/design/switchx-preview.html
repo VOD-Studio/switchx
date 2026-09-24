@@ -1,0 +1,314 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<link rel="icon" href="data:,">
+<title>SwitchX · Quiet Circuit 设计预览</title>
+<style>
+  :root { color-scheme: dark; --bg:#101113; --panel:#17191d; --raised:#1d2025; --hover:#23262c; --line:#2b2e35; --text:#f1f0f4; --muted:#a1a3af; --faint:#9698a3; --accent:#b3a0ff; --accent-soft:#2d263e; --mint:#9de5c3; --mint-soft:#20372d; --blue:#90b6ff; --peach:#e8c5a8; --shadow:0 16px 52px #0002; --ease:cubic-bezier(.2,.8,.2,1); }
+  * { box-sizing:border-box; }
+  body { margin:0; background:#08090b; color:var(--text); font-family:-apple-system,BlinkMacSystemFont,"Segoe UI","PingFang SC","Microsoft YaHei",sans-serif; font-size:13px; -webkit-font-smoothing:antialiased; }
+  body.light { color-scheme:light; --bg:#f5f4f1; --panel:#fff; --raised:#efeeeb; --hover:#e9e7e3; --line:#dfddd8; --text:#24242a; --muted:#666571; --faint:#716f7b; --accent:#7154c4; --accent-soft:#eae3fa; --mint:#327554; --mint-soft:#e3f0e8; --blue:#386bb5; --peach:#976d47; --shadow:0 16px 52px #2424240c; background:#dedbd5; }
+  button,select { font:inherit; }
+  button { color:inherit; cursor:pointer; }
+  button,select,a { -webkit-tap-highlight-color:transparent; }
+  button:focus-visible,select:focus-visible,a:focus-visible { outline:2px solid var(--accent); outline-offset:4px; }
+  button:disabled { opacity:.45; cursor:not-allowed; }
+  svg { fill:none; stroke:currentColor; stroke-width:1.6; stroke-linecap:round; stroke-linejoin:round; }
+  .icon { width:18px; height:18px; flex:none; }
+  .desktop { max-width:1450px; min-height:860px; height:100vh; margin:auto; display:flex; flex-direction:column; background:var(--bg); overflow:hidden; }
+  .titlebar { height:49px; flex:none; display:flex; align-items:center; border-bottom:1px solid var(--line); padding:0 24px; gap:28px; }
+  .traffic { display:flex; gap:8px; }
+  .traffic i { width:11px; height:11px; background:#f17b79; border-radius:50%; }
+  .traffic i:nth-child(2) { background:#e6c173; }.traffic i:nth-child(3) { background:#78c39a; }
+  .crumb { color:var(--muted); font-size:11px; letter-spacing:.2px; }.crumb span { color:var(--faint); margin:0 12px; }
+  .top-right { margin-left:auto; display:flex; gap:14px; align-items:center; }
+  .design-badge { font-size:10px; color:var(--muted); letter-spacing:1.2px; }
+  .icon-button { width:30px; height:30px; display:grid; place-items:center; border:1px solid var(--line); border-radius:8px; background:transparent; }
+  .shell { display:grid; grid-template-columns:202px minmax(0,1fr); flex:1; min-height:0; }
+  aside { border-right:1px solid var(--line); display:flex; flex-direction:column; padding:29px 16px 20px; }
+  .brand { display:flex; align-items:center; gap:10px; padding:0 12px; font-size:23px; letter-spacing:-1px; font-weight:650; }
+  .brand-mark { color:var(--accent); width:28px; height:28px; }
+  .brand .x { color:var(--accent); }
+  .workspace { margin:28px 0 24px; padding:12px; display:flex; align-items:center; gap:10px; border:1px solid var(--line); border-radius:10px; background:var(--panel); }
+  .workspace-avatar { width:28px; height:28px; display:grid; place-items:center; border-radius:8px; background:var(--raised); color:var(--peach); font-weight:600; }
+  .workspace b { font-size:12px; font-weight:550; display:block; }.workspace small { display:block; color:var(--faint); font-size:10px; margin-top:4px; }
+  .chevron { color:var(--faint); margin-left:auto; }
+  .nav-label { font-size:10px; letter-spacing:1.8px; color:var(--faint); padding:0 12px; margin:2px 0 10px; }
+  nav { display:flex; flex-direction:column; gap:5px; }
+  .nav-item { padding:11px 12px; border:0; background:none; color:var(--muted); border-radius:9px; display:flex; gap:12px; align-items:center; text-align:left; transition:background 140ms,color 140ms; }
+  .nav-item:hover { background:var(--raised); color:var(--text); }.nav-item.active { color:var(--accent); background:var(--accent-soft); }
+  .nav-item small { margin-left:auto; font-size:10px; color:var(--faint); }
+  .nav-group { margin-top:29px; }
+  .sidebar-bottom { margin-top:auto; padding-top:25px; }
+  .local-status { margin:18px 12px 0; display:flex; gap:8px; align-items:center; color:var(--muted); font-size:10px; }
+  .dot { width:6px; height:6px; display:inline-block; background:var(--mint); border-radius:50%; flex:none; }.dot.paused { background:var(--faint); }
+  main { overflow:auto; padding:34px 36px 26px; }
+  .heading { display:flex; align-items:center; justify-content:space-between; margin-bottom:28px; gap:20px; }
+  .eyebrow { letter-spacing:2.3px; color:var(--faint); font-size:10px; margin-bottom:11px; }
+  h1 { margin:0; font-weight:560; font-size:29px; letter-spacing:-.8px; } h1 .muted { color:var(--faint); }
+  .intro { margin:11px 0 0; color:var(--muted); font-size:12px; line-height:1.6; }
+  .actions { display:flex; align-items:center; gap:10px; }
+  .button { border:1px solid var(--line); background:var(--panel); color:var(--text); border-radius:9px; padding:10px 13px; display:flex; align-items:center; gap:8px; transition:transform 120ms,background 140ms; white-space:nowrap; }
+  .button:hover { background:var(--hover); }.button:active { transform:scale(.98); }
+  .button.primary { border-color:transparent; background:var(--accent); color:var(--bg); font-weight:650; }
+  .button.primary:hover { filter:brightness(1.08); }.button .icon { width:15px; height:15px; }
+  .hero { background:var(--panel); border:1px solid var(--line); border-radius:18px; padding:22px 24px 18px; position:relative; overflow:hidden; }
+  .hero-heading { display:flex; align-items:center; justify-content:space-between; gap:14px; }
+  .section-name { display:flex; align-items:center; gap:9px; font-size:14px; font-weight:560; }
+  .pill { font-size:10px; font-weight:450; padding:5px 8px; border-radius:6px; color:var(--mint); background:var(--mint-soft); white-space:nowrap; }
+  .segmented { display:flex; position:relative; padding:3px; border:1px solid var(--line); border-radius:9px; background:var(--bg); }
+  .segmented button { min-width:68px; padding:7px 9px; background:none; border:0; color:var(--muted); font-size:11px; z-index:1; }
+  .segment-indicator { position:absolute; top:3px; bottom:3px; width:68px; left:71px; background:var(--raised); border-radius:6px; transition:left 200ms var(--ease); }
+  .segmented button[aria-pressed=true] { color:var(--text); }.segmented.direct .segment-indicator { left:3px; }
+  .route-stage { display:grid; grid-template-columns:1fr 90px 1.2fr 90px 1fr; align-items:center; padding:28px 8px 24px; }
+  .node { display:flex; flex-direction:column; align-items:center; gap:8px; }
+  .node-icon { width:49px; height:49px; display:grid; place-items:center; background:var(--raised); border:1px solid var(--line); border-radius:14px; font:22px ui-monospace,SFMono-Regular,monospace; }
+  .node-name { font-size:12px; font-weight:560; }.node-sub { font-size:10px; color:var(--faint); }
+  .router-node .node-icon { background:var(--accent-soft); border-color:color-mix(in srgb,var(--accent) 35%,transparent); color:var(--accent); width:58px; height:58px; border-radius:17px; }
+  .router-node .node-icon svg { width:33px; height:33px; }.router-node { transition:opacity 180ms; }
+  .route-wire { height:70px; width:100%; color:var(--line); overflow:visible; }.route-wire .active-wire { stroke:var(--accent); opacity:.7; }
+  .route-wire .packet { stroke:var(--mint); stroke-width:3; stroke-dasharray:8 130; stroke-dashoffset:130; opacity:0; }
+  .route-stage.sending .packet { animation:packet 750ms linear 2; }.route-stage.direct-route .router-node { opacity:.35; }
+  @keyframes packet { 0% { stroke-dashoffset:130; opacity:1; } 90% { opacity:1; } 100% { stroke-dashoffset:0; opacity:0; } }
+  .upstreams { display:flex; flex-direction:column; gap:10px; }.upstream-mini { background:var(--raised); border:1px solid var(--line); padding:10px 12px; border-radius:10px; display:flex; align-items:center; gap:9px; font-size:11px; transition:border-color 180ms; }
+  .upstream-mini.selected { border-color:var(--accent); }.provider-symbol { color:var(--blue); font-weight:650; }.provider-symbol.official { color:var(--peach); }
+  .upstream-mini .dot { margin-left:auto; width:5px; height:5px; }
+  .hero-footer { border-top:1px solid var(--line); padding-top:15px; display:flex; align-items:center; justify-content:space-between; color:var(--muted); font-size:10px; gap:12px; }
+  .endpoint { font-family:ui-monospace,SFMono-Regular,monospace; color:var(--faint); }.hero-footer b { color:var(--text); font-weight:500; }
+  .content-grid { display:grid; grid-template-columns:minmax(0,1.45fr) minmax(260px,1fr); gap:22px; margin-top:26px; }
+  .section-title { display:flex; justify-content:space-between; align-items:center; margin-bottom:13px; }.section-title h2 { margin:0; font-size:13px; font-weight:600; }.section-title h2 span { margin-left:8px; color:var(--faint); font-size:10px; font-weight:400; }
+  .text-button { padding:0; background:none; border:0; color:var(--muted); font-size:10px; }.text-button:hover { color:var(--accent); }
+  .provider-list { display:flex; flex-direction:column; gap:10px; }
+  .provider-card { border:1px solid var(--line); background:var(--panel); border-radius:12px; padding:16px; width:100%; text-align:left; display:flex; gap:12px; align-items:center; transition:background 140ms,border-color 140ms,transform 140ms; }
+  .provider-card:hover { background:var(--raised); border-color:var(--faint); transform:translateY(-1px); }
+  .provider-avatar { width:36px; height:36px; border:1px solid var(--line); background:var(--raised); border-radius:11px; display:grid; place-items:center; font:600 17px ui-monospace,SFMono-Regular,monospace; color:var(--blue); flex:none; }.provider-avatar.official { color:var(--peach); }
+  .provider-info { min-width:0; }.provider-info b { display:block; font-size:12px; font-weight:550; }.provider-info small { margin-top:6px; display:block; color:var(--faint); font-size:10px; }
+  .provider-meta { margin-left:auto; text-align:right; }.provider-meta strong { color:var(--mint); font-size:10px; font-weight:450; }.provider-meta small { display:block; font-size:10px; color:var(--faint); margin-top:6px; }
+  .hint { color:var(--faint); font-size:10px; margin:13px 2px 0; display:flex; gap:6px; line-height:1.6; }.hint .icon { width:13px; height:13px; margin-top:1px; }
+  .catalog { border:1px solid var(--line); border-radius:12px; background:var(--panel); overflow:hidden; }
+  .catalog-header { padding:14px 16px; display:flex; justify-content:space-between; align-items:center; border-bottom:1px solid var(--line); color:var(--muted); font-size:11px; }.catalog-header kbd { font:10px ui-monospace,SFMono-Regular,monospace; padding:3px 6px; border:1px solid var(--line); border-radius:4px; }
+  .model-option { display:flex; align-items:center; width:100%; border:0; background:none; padding:15px 16px; text-align:left; gap:11px; transition:background 140ms; }.model-option:hover { background:var(--raised); }.model-option[aria-pressed=true] { background:var(--accent-soft); }
+  .model-radio { width:13px; height:13px; border:1px solid var(--faint); border-radius:50%; flex:none; display:grid; place-items:center; }.model-option[aria-pressed=true] .model-radio { border-color:var(--accent); }.model-option[aria-pressed=true] .model-radio:after { content:""; width:5px; height:5px; background:var(--accent); border-radius:50%; }
+  .model-name { display:block; font-size:12px; }.model-desc { display:block; font-size:10px; margin-top:5px; color:var(--muted); }.model-option .tag { color:var(--faint); margin-left:auto; font-size:9px; }
+  .catalog-footer { font-size:10px; color:var(--faint); padding:11px 16px; border-top:1px solid var(--line); }
+  .activity { margin-top:25px; }.activity-table { width:100%; border-collapse:collapse; text-align:left; table-layout:fixed; }.activity-table th { color:var(--faint); font-size:10px; font-weight:400; padding:0 0 11px; border-bottom:1px solid var(--line); }.activity-table td { padding:14px 0; color:var(--muted); font-size:11px; border-bottom:1px solid var(--line); }.activity-table td:first-child { color:var(--text); }.activity-table th:last-child,.activity-table td:last-child { text-align:right; }.activity-table .success { color:var(--mint); }.activity-table .model-cell { display:flex; gap:8px; align-items:center; }.activity-table .route-label { font-size:10px; color:var(--faint); }
+  .bottom-bar { height:30px; padding:0 21px; display:flex; align-items:center; gap:18px; border-top:1px solid var(--line); color:var(--faint); font-size:9px; flex:none; }.bottom-bar span:last-child { margin-left:auto; }
+  .drawer-backdrop { position:fixed; inset:49px 0 30px; background:#0005; opacity:0; visibility:hidden; transition:opacity 200ms,visibility 200ms; z-index:4; }
+  .drawer { position:absolute; top:0; bottom:0; right:0; width:380px; max-width:94vw; padding:28px; background:var(--panel); border-left:1px solid var(--line); transform:translateX(30px); transition:transform 240ms var(--ease); box-shadow:var(--shadow); }
+  .drawer-backdrop.open { opacity:1; visibility:visible; }.drawer-backdrop.open .drawer { transform:translateX(0); }.drawer-close { float:right; }
+  .drawer h2 { font-size:22px; font-weight:550; margin:27px 0 10px; }.drawer p { font-size:12px; color:var(--muted); line-height:1.8; }.detail-row { padding:17px 0; display:flex; justify-content:space-between; font-size:11px; border-bottom:1px solid var(--line); color:var(--muted); }.detail-row strong { color:var(--text); font-weight:450; }.drawer-note { margin-top:25px; padding:15px; border:1px solid var(--line); border-radius:10px; color:var(--muted); font-size:11px; line-height:1.8; }
+  .toast { position:fixed; bottom:50px; left:calc(50% + 80px); transform:translate(-50%,8px); background:var(--raised); color:var(--text); border:1px solid var(--line); border-radius:10px; padding:13px 18px; font-size:12px; box-shadow:var(--shadow); opacity:0; pointer-events:none; transition:opacity 150ms,transform 180ms var(--ease); z-index:5; }.toast.visible { opacity:1; transform:translate(-50%,0); }
+  .page-enter { animation:page-enter 200ms var(--ease); } @keyframes page-enter { from { opacity:.3; transform:translateY(6px); } to { opacity:1; transform:translateY(0); } }
+  .extra-view { display:none; }.extra-view.visible { display:block; }.overview.hidden { display:none; }
+  .empty-panel { border:1px solid var(--line); padding:30px; border-radius:16px; background:var(--panel); }.empty-panel h2 { font-size:19px; font-weight:550; }.empty-panel p { line-height:1.9; color:var(--muted); max-width:640px; }.feature-grid { display:grid; grid-template-columns:repeat(2,1fr); gap:15px; margin-top:25px; }.feature-tile { padding:20px; border-radius:12px; background:var(--raised); }.feature-tile b { font-size:12px; font-weight:550; }.feature-tile p { margin-bottom:0; font-size:11px; }
+  @media(min-width:1380px) { main { padding-left:46px; padding-right:46px; }.route-stage { padding-top:36px; padding-bottom:32px; }.content-grid { margin-top:30px; }.provider-card { padding:20px; }.activity { margin-top:30px; } }
+  @media(max-width:1060px) { .shell { grid-template-columns:176px minmax(0,1fr); } main { padding:28px 24px; }.route-stage { grid-template-columns:1fr 50px 1fr 50px 1fr; }.content-grid { gap:16px; }.hero { padding:20px; }.intro { max-width:360px; }.button { font-size:11px; }.heading { align-items:flex-start; } }
+  @media(max-width:820px) { .desktop { height:auto; min-height:100vh; }.shell { grid-template-columns:74px minmax(0,1fr); } aside { padding:28px 10px; }.brand { padding:0 10px; }.brand-word,.workspace,.nav-label,.nav-item .nav-text,.nav-item small,.local-status { display:none; }.brand-mark { width:26px; }.nav-item { justify-content:center; padding:13px; }nav { margin-top:25px; }.sidebar-bottom { margin-top:30px; }.content-grid { grid-template-columns:1fr; }.heading { flex-wrap:wrap; }.route-stage { grid-template-columns:1fr 35px 1fr 35px 1fr; }.hero-footer { flex-wrap:wrap; }.bottom-bar { height:auto; min-height:32px; flex-wrap:wrap; padding:10px; }.design-badge { display:none; }main { padding:25px 18px; }.activity-table th:nth-child(3),.activity-table td:nth-child(3) { display:none; }.upstream-mini { padding:9px 7px; font-size:9px; }.node-sub { font-size:8px; } }
+  @media(prefers-reduced-motion:reduce) { *,*:before,*:after { animation-duration:.01ms!important; animation-iteration-count:1!important; transition-duration:.01ms!important; } }
+</style>
+</head>
+<body>
+<svg width="0" height="0" style="position:absolute" aria-hidden="true"><defs>
+  <symbol id="sx-mark" viewBox="0 0 32 32"><path d="M6 7h8l12 18M6 25h8L26 7" stroke-width="2.7"/><path d="M21 7h5v5M21 25h5v-5" stroke-width="2.7"/></symbol>
+  <symbol id="ic-grid" viewBox="0 0 24 24"><rect x="3" y="3" width="7" height="7" rx="1.8"/><rect x="14" y="3" width="7" height="7" rx="1.8"/><rect x="3" y="14" width="7" height="7" rx="1.8"/><rect x="14" y="14" width="7" height="7" rx="1.8"/></symbol>
+  <symbol id="ic-stack" viewBox="0 0 24 24"><path d="m3 7 9-4 9 4-9 4-9-4Zm0 5 9 4 9-4M3 17l9 4 9-4"/></symbol>
+  <symbol id="ic-route" viewBox="0 0 24 24"><circle cx="5" cy="12" r="2.5"/><circle cx="19" cy="5" r="2.5"/><circle cx="19" cy="19" r="2.5"/><path d="M7.5 12h3c4 0 1-7 6-7M10 12c4 0 1 7 6.5 7"/></symbol>
+  <symbol id="ic-chart" viewBox="0 0 24 24"><path d="M4 3v17h17M9 15V9m5 6V5m5 10v-4"/></symbol>
+  <symbol id="ic-tool" viewBox="0 0 24 24"><path d="M8 4V2m8 2V2M5 7h14v6a7 7 0 0 1-14 0V7Zm7 13v3"/></symbol>
+  <symbol id="ic-history" viewBox="0 0 24 24"><path d="M3 10a9 9 0 1 1 2 8M3 4v6h6m3-4v6l4 2"/></symbol>
+  <symbol id="ic-settings" viewBox="0 0 24 24"><path d="M4 6h16M4 12h16M4 18h16"/><circle cx="8" cy="6" r="2" fill="var(--bg)"/><circle cx="16" cy="12" r="2" fill="var(--bg)"/><circle cx="10" cy="18" r="2" fill="var(--bg)"/></symbol>
+  <symbol id="ic-plus" viewBox="0 0 24 24"><path d="M12 5v14M5 12h14"/></symbol>
+  <symbol id="ic-play" viewBox="0 0 24 24"><path d="m8 4 12 8-12 8V4Z"/></symbol>
+  <symbol id="ic-moon" viewBox="0 0 24 24"><path d="M20.5 14a9 9 0 0 1-10.6-10.5A9 9 0 1 0 20.5 14Z"/></symbol>
+  <symbol id="ic-close" viewBox="0 0 24 24"><path d="m6 6 12 12M6 18 18 6"/></symbol>
+  <symbol id="ic-info" viewBox="0 0 24 24"><circle cx="12" cy="12" r="9"/><path d="M12 11v6m0-10v.2"/></symbol>
+</defs></svg>
+<div class="desktop">
+  <header class="titlebar">
+    <div class="traffic" aria-hidden="true"><i></i><i></i><i></i></div>
+    <div class="crumb">个人空间 <span>/</span> Codex</div>
+    <div class="top-right"><span class="design-badge">QUIET CIRCUIT · CONCEPT 01</span><button class="icon-button" id="theme-toggle" aria-label="切换浅色或深色主题"><svg class="icon"><use href="#ic-moon"/></svg></button></div>
+  </header>
+  <div class="shell">
+    <aside>
+      <div class="brand"><svg class="brand-mark"><use href="#sx-mark"/></svg><span class="brand-word">switch<span class="x">x</span></span></div>
+      <div class="workspace"><span class="workspace-avatar">C</span><div><b>Codex</b><small>本地工作空间</small></div><span class="chevron">⌄</span></div>
+      <div class="nav-label">WORKSPACE</div>
+      <nav aria-label="主导航">
+        <button class="nav-item active" data-page="overview" aria-current="page"><svg class="icon"><use href="#ic-grid"/></svg><span class="nav-text">总览</span></button>
+        <button class="nav-item" data-page="providers"><svg class="icon"><use href="#ic-stack"/></svg><span class="nav-text">上游供应商</span><small>02</small></button>
+        <button class="nav-item" data-page="routing"><svg class="icon"><use href="#ic-route"/></svg><span class="nav-text">模型路由</span><small>02</small></button>
+        <button class="nav-item" data-page="activity"><svg class="icon"><use href="#ic-chart"/></svg><span class="nav-text">请求与用量</span></button>
+      </nav>
+      <div class="nav-label nav-group">TOOLBOX</div>
+      <nav aria-label="工具导航">
+        <button class="nav-item" data-page="toolbox"><svg class="icon"><use href="#ic-tool"/></svg><span class="nav-text">MCP · Skills</span></button>
+        <button class="nav-item" data-page="recovery"><svg class="icon"><use href="#ic-history"/></svg><span class="nav-text">配置与恢复</span></button>
+      </nav>
+      <div class="sidebar-bottom"><button class="nav-item" data-page="settings"><svg class="icon"><use href="#ic-settings"/></svg><span class="nav-text">偏好设置</span></button><div class="local-status"><i class="dot"></i>本地优先 · 凭据不上传</div></div>
+    </aside>
+    <main>
+      <div class="heading"><div><div class="eyebrow" id="eyebrow">YOUR MODELS. ONE PLACE.</div><h1 id="page-title">模型，<span class="muted">各就各位。</span></h1><p class="intro" id="page-intro">一个 Codex，自由连接你信任的每一个模型。</p></div><div class="actions"><button class="button" id="add-provider"><svg class="icon"><use href="#ic-plus"/></svg>添加上游</button><button class="button primary" id="simulate"><svg class="icon"><use href="#ic-play"/></svg>演示一次请求</button></div></div>
+      <div class="overview" id="overview">
+        <section class="hero" aria-label="路由模式预览">
+          <div class="hero-heading"><div class="section-name">连接控制台 <span class="pill" id="mode-status">路由模式 · 演示</span></div><div class="segmented" id="mode-control" aria-label="连接模式"><div class="segment-indicator"></div><button id="direct-mode" aria-pressed="false">直连</button><button id="router-mode" aria-pressed="true">路由</button></div></div>
+          <div class="route-stage" id="route-stage">
+            <div class="node"><div class="node-icon">›_</div><span class="node-name">Codex</span><span class="node-sub">CLI · Desktop · IDE</span></div>
+            <svg class="route-wire" viewBox="0 0 100 70" preserveAspectRatio="none" aria-hidden="true"><path class="active-wire" d="M0 35H100"/><path class="packet" d="M0 35H100"/></svg>
+            <div class="node router-node"><div class="node-icon"><svg><use href="#sx-mark"/></svg></div><span class="node-name">SwitchX Router</span><span class="node-sub" id="router-description">按模型精确分发</span></div>
+            <svg class="route-wire" viewBox="0 0 100 70" preserveAspectRatio="none" aria-hidden="true"><path d="M0 35H25C50 35 50 12 75 12H100M25 35C50 35 50 58 75 58H100"/><path class="active-wire" id="branch-path" d="M0 35H25C50 35 50 12 75 12H100"/><path class="packet" id="branch-packet" d="M0 35H25C50 35 50 12 75 12H100"/></svg>
+            <div class="upstreams"><div class="upstream-mini selected" id="deepseek-upstream"><span class="provider-symbol">D</span>DeepSeek<i class="dot"></i></div><div class="upstream-mini" id="official-upstream"><span class="provider-symbol official">O</span>OpenAI 官方<i class="dot"></i></div></div>
+          </div>
+          <div class="hero-footer"><span><i class="dot" id="route-dot"></i> <b id="connection-state">统一入口已就绪</b> · 示例状态</span><span class="endpoint">127.0.0.1:18731/v1</span><span id="model-count">2 个已发布模型 · 2 个上游</span></div>
+        </section>
+        <div class="content-grid">
+          <section><div class="section-title"><h2>已连接的上游 <span>02</span></h2><button class="text-button" id="manage-providers">管理上游 ↗</button></div><div class="provider-list">
+            <button class="provider-card" data-provider="deepseek"><div class="provider-avatar">D</div><div class="provider-info"><b>DeepSeek</b><small>原生 Responses · API Key</small></div><div class="provider-meta"><strong>● 已连接（示例）</strong><small>1 个发布模型</small></div></button>
+            <button class="provider-card" data-provider="official"><div class="provider-avatar official">O</div><div class="provider-info"><b>OpenAI 官方</b><small>原生 Responses · API Key 示例</small></div><div class="provider-meta"><strong>● 已连接（示例）</strong><small>1 个发布模型</small></div></button>
+          </div><div class="hint"><svg class="icon"><use href="#ic-info"/></svg><span>ChatGPT 订阅账号是独立接入方式，需单独通过兼容验证。</span></div></section>
+          <section><div class="section-title"><h2>Codex 模型菜单</h2><span class="text-button">交互预览</span></div><div class="catalog"><div class="catalog-header"><span>选择你的下一个模型</span><kbd>/model</kbd></div><button class="model-option" data-model="deepseek" aria-pressed="true"><span class="model-radio"></span><span><span class="model-name">DeepSeek · Flash</span><span class="model-desc">sx-ds-flash</span></span><span class="tag">原生</span></button><button class="model-option" data-model="official" aria-pressed="false"><span class="model-radio"></span><span><span class="model-name">OpenAI · Coding</span><span class="model-desc">sx-oai-coding</span></span><span class="tag">示例</span></button><div class="catalog-footer">点击模型，观察路由去向 · 非真实 Codex 界面</div></div></section>
+        </div>
+        <section class="activity"><div class="section-title"><h2>最近的请求 <span>演示数据</span></h2><button class="text-button" id="show-activity">查看全部 ↗</button></div><table class="activity-table"><colgroup><col style="width:32%"><col style="width:24%"><col style="width:28%"><col style="width:16%"></colgroup><thead><tr><th>模型</th><th>实际上游</th><th>分发方式</th><th>状态</th></tr></thead><tbody id="request-rows"><tr><td><span class="model-cell"><i class="dot"></i>DeepSeek · Flash</span></td><td>DeepSeek</td><td class="route-label">精确映射 → deepseek-flash</td><td class="success">完成 · 示例</td></tr><tr><td><span class="model-cell"><i class="dot"></i>OpenAI · Coding</span></td><td>OpenAI 官方</td><td class="route-label">精确映射 → 已发现模型</td><td class="success">完成 · 示例</td></tr></tbody></table></section>
+      </div>
+      <section class="extra-view" id="extra-view" aria-live="polite"></section>
+    </main>
+  </div>
+  <footer class="bottom-bar"><span>SwitchX · DESIGN PREVIEW</span><span>所有连接状态均为演示，不访问网络、不修改 Codex</span><span>Rust + Slint 目标设计 · 2026.09</span></footer>
+</div>
+<div class="drawer-backdrop" id="drawer-backdrop"><section class="drawer" id="drawer" role="dialog" aria-modal="true" aria-labelledby="drawer-title" tabindex="-1"><button class="icon-button drawer-close" id="drawer-close" aria-label="关闭详情"><svg class="icon"><use href="#ic-close"/></svg></button><div class="eyebrow">PROVIDER DETAILS</div><h2 id="drawer-title">DeepSeek</h2><p id="drawer-description">直观管理连接，而不把复杂性放在首页。</p><div id="drawer-details"></div><div class="drawer-note" id="drawer-note">凭据只保存在系统钥匙串。模型能力由目录和探测共同验证。</div></section></div>
+<div class="toast" id="toast" role="status"></div>
+<script>
+  const ui = Object.fromEntries([...document.querySelectorAll('[id]')].map(element => [element.id, element]));
+  const state = { model:'deepseek', mode:'router', sending:false, toastTimer:null, focusBeforeDrawer:null };
+  const modelData = { deepseek:{ name:'DeepSeek · Flash', provider:'DeepSeek', upstream:'deepseek-flash' }, official:{ name:'OpenAI · Coding', provider:'OpenAI 官方', upstream:'已发现模型' } };
+  const pages = {
+    overview:['YOUR MODELS. ONE PLACE.','模型，各就各位。','一个 Codex，自由连接你信任的每一个模型。'],
+    providers:['CONNECTIONS, CONSIDERED.','上游供应商','连接信息、模型能力和验证状态，各自清楚。'],
+    routing:['ONE ENTRY. EVERY MODEL.','模型路由','在 Codex 中选模型，让 SwitchX 负责找到正确的上游。'],
+    activity:['EVERY REQUEST, EXPLAINED.','请求与用量','看到实际去向、失败原因，以及真正发生的切换。'],
+    toolbox:['YOUR TOOLS. YOUR RULES.','MCP · Skills','统一管理工具与提示词；所有安装先审阅，再应用。'],
+    recovery:['SAFE TO SWITCH. EASY TO UNDO.','配置与恢复','每次切换都有差异预览、快照与可追踪的恢复记录。'],
+    settings:['MAKE IT YOURS.','偏好设置','跟随系统外观，尊重减少动态效果，保持本地优先。']
+  };
+  function notify(message) {
+    clearTimeout(state.toastTimer);
+    ui.toast.textContent = message;
+    ui.toast.classList.add('visible');
+    state.toastTimer = setTimeout(() => ui.toast.classList.remove('visible'), 3200);
+  }
+  function updateRoute() {
+    const isDeepSeek = state.model === 'deepseek';
+    const branch = isDeepSeek ? 'M0 35H25C50 35 50 12 75 12H100' : 'M0 35H25C50 35 50 58 75 58H100';
+    ui['branch-path'].setAttribute('d', branch);
+    ui['branch-packet'].setAttribute('d', branch);
+    ui['deepseek-upstream'].classList.toggle('selected', isDeepSeek);
+    ui['official-upstream'].classList.toggle('selected', !isDeepSeek);
+    document.querySelectorAll('[data-model]').forEach(button => button.setAttribute('aria-pressed', button.dataset.model === state.model));
+  }
+  function setMode(mode) {
+    state.mode = mode;
+    const isDirect = mode === 'direct';
+    ui['mode-control'].classList.toggle('direct', isDirect);
+    ui['direct-mode'].setAttribute('aria-pressed', isDirect);
+    ui['router-mode'].setAttribute('aria-pressed', !isDirect);
+    ui['route-stage'].classList.toggle('direct-route', isDirect);
+    ui['mode-status'].textContent = isDirect ? '直连模式 · 演示' : '路由模式 · 演示';
+    ui['router-description'].textContent = isDirect ? '旁路 · 不经过本地代理' : '按模型精确分发';
+    ui['connection-state'].textContent = isDirect ? 'Codex 直连选定上游' : '统一入口已就绪';
+    document.querySelector('.endpoint').textContent = isDirect ? '直连 → '+modelData[state.model].provider : '127.0.0.1:18731/v1';
+    document.querySelectorAll('[data-model]').forEach(button => button.disabled = isDirect);
+    notify(isDirect ? '直连模式只使用选定上游；这里只演示状态变化。' : '已切到路由演示，可在右侧切换模型。');
+  }
+  function openDrawer(title, description, rows, note) {
+    state.focusBeforeDrawer = document.activeElement;
+    ui['drawer-title'].textContent = title;
+    ui['drawer-description'].textContent = description;
+    ui['drawer-details'].replaceChildren(...rows.map(([label,value]) => {
+      const row = document.createElement('div');
+      row.className = 'detail-row';
+      const name = document.createElement('span');
+      name.textContent = label;
+      const text = document.createElement('strong');
+      text.textContent = value;
+      row.append(name,text);
+      return row;
+    }));
+    ui['drawer-note'].textContent = note;
+    ui['drawer-backdrop'].classList.add('open');
+    ui['drawer-close'].focus();
+  }
+  function closeDrawer() {
+    ui['drawer-backdrop'].classList.remove('open');
+    state.focusBeforeDrawer?.focus();
+  }
+  function setPage(page) {
+    document.querySelectorAll('[data-page]').forEach(button => {
+      button.classList.toggle('active',button.dataset.page === page);
+      if (button.dataset.page === page) button.setAttribute('aria-current','page');
+      else button.removeAttribute('aria-current');
+    });
+    const [eyebrow,title,intro] = pages[page];
+    ui.eyebrow.textContent = eyebrow;
+    ui['page-title'].textContent = title;
+    ui['page-intro'].textContent = intro;
+    const mainView = ['overview','providers','routing','activity'].includes(page);
+    ui.overview.classList.toggle('hidden',!mainView);
+    ui['extra-view'].classList.toggle('visible',!mainView);
+    if (!mainView) {
+      const content = {
+        toolbox:[['MCP 服务器','连接状态、权限说明、启停与日志；导入命令不会自动执行。'],['Skills 与提示词','按来源和版本管理；安装前审阅文件与脚本。']],
+        recovery:[['切换记录','备份 → 生成目录 → 校验 → 应用 → 等待客户端重载。'],['安全恢复','只恢复本应用管理的字段；外部修改出现冲突时交给用户决定。']],
+        settings:[['外观与动效','深色、浅色和跟随系统。转场 160–240ms；减少动态效果时取消位移。'],['隐私与后台','默认不记录请求正文；关闭窗口保留路由，完全退出前确认恢复配置。']]
+      }[page];
+      ui['extra-view'].innerHTML = '<div class="empty-panel"><div class="eyebrow">DESIGN DIRECTION</div><h2>'+title+'</h2><p>'+intro+' 此页展示信息组织，不代表功能已经实现。</p><div class="feature-grid">'+content.map(([heading,description])=>'<div class="feature-tile"><b>'+heading+'</b><p>'+description+'</p></div>').join('')+'</div></div>';
+    }
+    const animated = mainView ? ui.overview : ui['extra-view'];
+    animated.classList.remove('page-enter');
+    requestAnimationFrame(() => animated.classList.add('page-enter'));
+    if (page === 'providers') document.querySelector('.content-grid').scrollIntoView({block:'nearest'});
+    if (page === 'activity') document.querySelector('.activity').scrollIntoView({block:'nearest'});
+  }
+  document.querySelectorAll('[data-page]').forEach(button => button.addEventListener('click', () => setPage(button.dataset.page)));
+  document.querySelectorAll('[data-model]').forEach(button => button.addEventListener('click', () => { state.model = button.dataset.model; updateRoute(); notify('下一次演示请求将发送到 '+modelData[state.model].provider); }));
+  document.querySelectorAll('[data-provider]').forEach(button => button.addEventListener('click', () => {
+    const provider = button.dataset.provider;
+    openDrawer(modelData[provider].provider,'上游详情 · 全部为设计演示数据',[['协议','原生 Responses'],['认证','API Key · 系统钥匙串'],['模型发布','手动选择后加入目录'],['故障切换','仅用户允许的候选']],provider === 'official' ? '这里演示官方 API 接入。ChatGPT 订阅账号使用独立认证路径，必须验证登录续期、工具调用和客户端兼容性。' : '能力未验证的模型只保留草稿，不自动出现在 Codex 的模型菜单中。');
+  }));
+  ui['theme-toggle'].addEventListener('click', () => document.body.classList.toggle('light'));
+  ui['direct-mode'].addEventListener('click', () => setMode('direct'));
+  ui['router-mode'].addEventListener('click', () => setMode('router'));
+  ui['manage-providers'].addEventListener('click', () => setPage('providers'));
+  ui['show-activity'].addEventListener('click', () => setPage('activity'));
+  ui['add-provider'].addEventListener('click', () => openDrawer('添加上游','向导采用渐进展开，而不是一次填满所有配置。',[['01 · 连接','名称、地址与认证方式'],['02 · 模型','发现模型、检查能力'],['03 · 发布','选择目录项、预览路由']],'这是视觉方案，未接入真实账号，也不会提交或保存任何凭据。'));
+  ui['drawer-close'].addEventListener('click', closeDrawer);
+  ui['drawer-backdrop'].addEventListener('click', event => { if (event.target === ui['drawer-backdrop']) closeDrawer(); });
+  document.addEventListener('keydown',event => { if (ui['drawer-backdrop'].classList.contains('open')) { if (event.key === 'Escape') closeDrawer(); if (event.key === 'Tab') { event.preventDefault(); ui['drawer-close'].focus(); } } });
+  ui.simulate.addEventListener('click', () => {
+    if (state.sending) return;
+    state.sending = true;
+    ui.simulate.disabled = true;
+    ui['direct-mode'].disabled = true;
+    ui['router-mode'].disabled = true;
+    document.querySelectorAll('[data-model]').forEach(button => button.disabled = true);
+    const selectedModel = modelData[state.model];
+    const selectedMode = state.mode;
+    if (selectedMode === 'router') ui['route-stage'].classList.add('sending');
+    setTimeout(() => {
+      ui['route-stage'].classList.remove('sending');
+      const row = document.createElement('tr');
+      [selectedModel.name,selectedModel.provider,(selectedMode === 'router' ? '精确映射 → ' : '直连 → ')+selectedModel.upstream,'完成 · 演示'].forEach((value,index) => { const cell=document.createElement('td'); cell.textContent=value; if (index===3) cell.className='success'; row.append(cell); });
+      ui['request-rows'].prepend(row);
+      while (ui['request-rows'].children.length > 3) ui['request-rows'].lastElementChild.remove();
+      notify('演示完成：'+selectedModel.name+' → '+selectedModel.provider+'，没有发送真实请求。');
+      state.sending = false;
+      ui.simulate.disabled = false;
+      ui['direct-mode'].disabled = false;
+      ui['router-mode'].disabled = false;
+      document.querySelectorAll('[data-model]').forEach(button => button.disabled = state.mode === 'direct');
+    },1500);
+  });
+</script>
+</body>
+</html>

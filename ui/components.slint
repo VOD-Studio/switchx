@@ -1,0 +1,82 @@
+import { Theme } from "tokens.slint";
+
+export component SurfaceCard inherits Rectangle {
+    background: Theme.panel;
+    border-width: 1px;
+    border-color: Theme.border;
+    border-radius: 16px;
+    @children
+}
+
+export component StatusPill inherits Rectangle {
+    in property <string> label;
+    in property <color> ink: Theme.muted-text;
+    in property <color> fill: Theme.raised;
+    width: 112px;
+    height: 27px;
+    border-radius: 8px;
+    background: fill;
+
+    Text {
+        text: root.label;
+        color: root.ink;
+        font-size: 12px;
+        font-weight: 600;
+        horizontal-alignment: center;
+        vertical-alignment: center;
+    }
+}
+
+export component QuietButton inherits Rectangle {
+    in property <string> text;
+    in property <bool> selected: false;
+    in property <bool> primary: false;
+    in property <bool> left-aligned: false;
+    in property <bool> enabled <=> hit-area.enabled;
+    callback clicked;
+
+    height: 36px;
+    min-width: 80px;
+    horizontal-stretch: 1;
+    vertical-stretch: 0;
+    border-radius: 9px;
+    border-width: 1px;
+    border-color: selected ? Theme.brand : Theme.border;
+    background: primary ? Theme.brand : selected ? Theme.brand-surface : hit-area.has-hover ? Theme.raised : Theme.panel;
+    animate background { duration: 120ms; }
+    forward-focus: key-focus;
+    accessible-role: button;
+    accessible-enabled: root.enabled;
+    accessible-label: root.text;
+    accessible-action-default => { hit-area.clicked(); }
+
+    Text {
+        x: 12px;
+        width: parent.width - 24px;
+        text: root.text;
+        color: root.primary ? Theme.on-brand : root.selected ? Theme.brand : Theme.primary-text;
+        font-size: 13px;
+        font-weight: root.selected || root.primary ? 600 : 400;
+        horizontal-alignment: root.left-aligned ? left : center;
+        vertical-alignment: center;
+        accessible-role: none;
+    }
+    hit-area := TouchArea { clicked => { root.clicked(); } }
+    key-focus := FocusScope {
+        x: 0px;
+        width: 0px;
+        enabled <=> root.enabled;
+        key-pressed(event) => {
+            if (event.text == Key.Space || event.text == Key.Return) {
+                hit-area.clicked();
+                return accept;
+            }
+            return reject;
+        }
+    }
+    if key-focus.has-focus : Rectangle {
+        border-radius: 9px;
+        border-width: 2px;
+        border-color: Theme.brand;
+    }
+}

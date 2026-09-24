@@ -1,0 +1,30 @@
+# Keep this synthetic user configuration intact.
+model = "sx-ds-flash" # chosen by user
+model_provider = "switchx_router"
+approval_policy = "on-request"
+sandbox_mode = "workspace-write"
+model_catalog_json = "/tmp/switchx-test/catalog-v1.json"
+
+[model_providers.other]
+name = "Other"
+base_url = "https://example.invalid/v1"
+wire_api = "responses"
+env_key = "OTHER_TEST_KEY"
+
+[model_providers.switchx_router]
+name = "SwitchX Router"
+base_url = "http://127.0.0.1:18731/v1"
+wire_api = "responses"
+env_key = "SWITCHX_LOCAL_TOKEN"
+requires_openai_auth = false
+supports_websockets = false
+request_max_retries = 0
+stream_max_retries = 0
+
+# user comment about MCP
+[mcp_servers.sample]
+command = "echo"
+args = ["hello"]
+
+[projects."/tmp/user-project"]
+trust_level = "trusted"

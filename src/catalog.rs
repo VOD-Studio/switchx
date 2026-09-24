@@ -107,6 +107,9 @@ mod tests {
         ];
         let publication = publish(&templates(), &selections).unwrap();
         let models = publication.catalog["models"].as_array().unwrap();
+        let expected: Value =
+            serde_json::from_str(include_str!("../tests/fixtures/published-models.json")).unwrap();
+        assert_eq!(publication.catalog, expected);
 
         assert_eq!(models[0]["slug"], "sx-ds-flash");
         assert_eq!(models[0]["context_window"], 1_048_576);
