@@ -23,3 +23,5 @@ macOS 可运行 `sh scripts/bundle-macos.sh` 生成仅供本机交互检查的 `
 `cargo run --example keychain_probe` 在系统凭据存储中写入一次独立的合成测试条目，读取后立即删除；不读取现有账号数据。macOS 本机测试已通过。
 
 `cargo run --example config_probe -- /tmp/switchx-models.json` 只把合成 `config.toml` 差异预览输出到 stdout。预览保留其他 provider、MCP、项目、安全设置和注释；它不写用户配置。生成的 `env_key = "SWITCHX_LOCAL_TOKEN"` 仅在启动 Codex 的环境已提供本地令牌时才可用于请求。
+
+`cargo run --example codex_cli_probe` 会通过 npm 执行 Codex CLI 0.156.1，在独立临时 `CODEX_HOME` 中启动同一个 SwitchX 路由入口和两个本地假上游。实测两个别名分别到达对应假上游，且 `sx-ds-flash` 完成一次读取临时文件、回传工具结果、第二轮回答。运行结束会删除该临时目录；无真实 API Key、登录态或模型调用。
