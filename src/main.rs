@@ -1,6 +1,66 @@
 slint::include_modules!();
 
-use slint::ComponentHandle;
+use slint::{ComponentHandle, Model, ModelRc, VecModel};
+use switchx::app::{AppError, Snapshot, data_directory, load_snapshot};
+use tokio::sync::mpsc::error::TrySendError;
+
+fn show_result(app: &AppWindow, result: Result<Snapshot, AppError>) {
+    app.set_loading(false);
+    match result {
+        Ok(snapshot) => {
+            let count = snapshot.providers.len();
+            let rows = snapshot
+                .providers
+                .into_iter()
+                .map(|provider| ProviderRow {
+                    name: provider.name.into(),
+                    endpoint: provider.endpoint.into(),
+                    credential_status: provider.credential_status.into(),
+                })
+                .collect::<Vec<_>>();
+            app.set_providers(ModelRc::new(VecModel::from(rows)));
+            app.set_status_text(
+                format!(
+                    "本地资料已读取 · {count} 个上游记录{}",
+                    if snapshot.credentials_checked {
+                        " · 凭据状态已检查"
+                    } else {
+                        " · 凭据尚未检查"
+                    }
+                )
+                .into(),
+            );
+            app.set_error_code("".into());
+            app.set_error_message("".into());
+            app.set_error_action("".into());
+        }
+        Err(error) => {
+            let retained = app.get_providers().row_count() != 0;
+            app.set_error_code(error.code().into());
+            app.set_error_message(error.message().into());
+            app.set_error_action(
+                format!(
+                    "{}{}",
+                    if retained {
+                        "仍显示上次成功读取的资料。"
+                    } else {
+                        ""
+                    },
+                    error.action()
+                )
+                .into(),
+            );
+            app.set_status_text(
+                if !retained {
+                    "本地资料未读取"
+                } else {
+                    "读取失败，仍显示上次成功读取的资料"
+                }
+                .into(),
+            );
+        }
+    }
+}
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let runtime = tokio::runtime::Builder::new_multi_thread()
@@ -17,20 +77,46 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     tray.on_quit_app(|| {
         let _ = slint::quit_event_loop();
     });
+    let directory = data_directory();
+    app.set_data_path(
+        directory
+            .as_ref()
+            .map(|path| path.display().to_string())
+            .unwrap_or_else(|_| "不可用".into())
+            .into(),
+    );
+    let (sender, mut receiver) = tokio::sync::mpsc::channel::<bool>(4);
     let weak = app.as_weak();
-    let handle = runtime.handle().clone();
-
-    app.on_probe(move || {
-        let weak = weak.clone();
-        handle.spawn(async move {
-            tokio::time::sleep(std::time::Duration::from_millis(120)).await;
-            let _ = weak.upgrade_in_event_loop(|app| {
-                app.set_probe_status("后台任务已返回；尚未连接 Codex 或上游".into());
-            });
-        });
+    runtime.handle().spawn_blocking(move || {
+        while let Some(check_credentials) = receiver.blocking_recv() {
+            let result = directory
+                .as_ref()
+                .map_err(|error| *error)
+                .and_then(|path| load_snapshot(path, check_credentials));
+            let _ = weak.upgrade_in_event_loop(move |app| show_result(&app, result));
+        }
     });
+    let weak = app.as_weak();
+    let refresh_sender = sender.clone();
+    app.on_refresh(move |check_credentials| {
+        if let Some(app) = weak.upgrade() {
+            app.set_loading(true);
+            app.set_status_text("正在读取本地资料…".into());
+            match refresh_sender.try_send(check_credentials) {
+                Ok(()) => {}
+                Err(TrySendError::Full(_)) => show_result(&app, Err(AppError::Busy)),
+                Err(TrySendError::Closed(_)) => {
+                    show_result(&app, Err(AppError::WorkerStopped));
+                }
+            }
+        }
+    });
+    sender.try_send(false)?;
 
-    app.run()?;
+    let result = app.run();
+    drop(app);
     drop(tray);
-    Ok(())
+    drop(sender);
+    drop(runtime);
+    result.map_err(Into::into)
 }

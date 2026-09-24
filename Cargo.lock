@@ -5124,6 +5124,7 @@ dependencies = [
  "keyring",
  "reqwest",
  "rusqlite",
+ "serde",
  "serde_json",
  "slint",
  "slint-build",

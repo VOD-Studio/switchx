@@ -1,0 +1,100 @@
+{
+  "models": [
+    {
+      "apply_patch_tool_type": "freeform",
+      "context_window": 1048576,
+      "default_reasoning_level": "high",
+      "default_verbosity": "low",
+      "description": "Schema probe only; capabilities require live verification.",
+      "display_name": "DeepSeek · Flash",
+      "experimental_supported_tools": [],
+      "input_modalities": [
+        "text",
+        "image"
+      ],
+      "max_context_window": 1048576,
+      "model_messages": {
+        "instructions_template": "You are a coding assistant in a synthetic catalog test. Report what you actually verified."
+      },
+      "multi_agent_version": null,
+      "priority": 1,
+      "shell_type": "unified_exec",
+      "slug": "sx-ds-flash",
+      "support_verbosity": true,
+      "supported_in_api": true,
+      "supported_reasoning_levels": [
+        {
+          "description": "Low",
+          "effort": "low"
+        },
+        {
+          "description": "High",
+          "effort": "high"
+        },
+        {
+          "description": "Max",
+          "effort": "max"
+        }
+      ],
+      "supports_image_detail_original": true,
+      "tool_mode": null,
+      "truncation_policy": {
+        "limit": 10000,
+        "mode": "tokens"
+      },
+      "upgrade": null,
+      "use_responses_lite": false,
+      "visibility": "list"
+    },
+    {
+      "apply_patch_tool_type": "freeform",
+      "context_window": 272000,
+      "default_reasoning_level": "medium",
+      "default_verbosity": "low",
+      "description": "Schema probe only; capabilities require live verification.",
+      "display_name": "OpenAI · Coding",
+      "experimental_supported_tools": [],
+      "input_modalities": [
+        "text",
+        "image"
+      ],
+      "max_context_window": 272000,
+      "model_messages": {
+        "instructions_template": "You are a coding assistant in a synthetic catalog test. Report what you actually verified."
+      },
+      "multi_agent_version": null,
+      "priority": 2,
+      "shell_type": "unified_exec",
+      "slug": "sx-oai-coding",
+      "support_verbosity": true,
+      "supported_in_api": true,
+      "supported_reasoning_levels": [
+        {
+          "description": "Low",
+          "effort": "low"
+        },
+        {
+          "description": "Medium",
+          "effort": "medium"
+        },
+        {
+          "description": "High",
+          "effort": "high"
+        },
+        {
+          "description": "Xhigh",
+          "effort": "xhigh"
+        }
+      ],
+      "supports_image_detail_original": true,
+      "tool_mode": null,
+      "truncation_policy": {
+        "limit": 10000,
+        "mode": "tokens"
+      },
+      "upgrade": null,
+      "use_responses_lite": false,
+      "visibility": "list"
+    }
+  ]
+}
