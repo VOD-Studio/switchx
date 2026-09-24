@@ -25,6 +25,7 @@ struct Captured {
     authorization: Option<String>,
     cookie: Option<String>,
     account: Option<String>,
+    chatgpt_account: Option<String>,
     model: String,
 }
 
@@ -52,6 +53,9 @@ async fn mock_upstream(
                 .map(|v| v.to_str().unwrap().to_owned()),
             account: headers
                 .get("x-openai-account-id")
+                .map(|v| v.to_str().unwrap().to_owned()),
+            chatgpt_account: headers
+                .get("chatgpt-account-id")
                 .map(|v| v.to_str().unwrap().to_owned()),
             model: model.clone(),
         })
@@ -202,6 +206,7 @@ async fn exact_routes_stream_and_keep_credentials_isolated() {
     );
     assert_eq!(captured.cookie, None);
     assert_eq!(captured.account, None);
+    assert_eq!(captured.chatgpt_account, None);
     assert!(openai_rx.try_recv().is_err());
     release.notify_one();
     let second = timeout(Duration::from_secs(3), response.chunk())
@@ -217,6 +222,7 @@ async fn exact_routes_stream_and_keep_credentials_isolated() {
         .bearer_auth(official_auth)
         .header(LOCAL_TOKEN_HEADER, token)
         .header("x-openai-account-id", "synthetic-chatgpt-account")
+        .header("chatgpt-account-id", "synthetic-chatgpt-account")
         .header(header::COOKIE, "private=do-not-forward")
         .header(header::CONTENT_TYPE, "application/json")
         .body(json!({ "model": "sx-ds-flash", "input": "hello" }).to_string())
@@ -230,8 +236,75 @@ async fn exact_routes_stream_and_keep_credentials_isolated() {
         Some("Bearer deepseek-only-key")
     );
     assert_eq!(captured.account, None);
+    assert_eq!(captured.chatgpt_account, None);
     assert_eq!(captured.cookie, None);
     assert!(openai_rx.try_recv().is_err());
+
+    let compressed = zstd::stream::encode_all(
+        json!({ "model": "sx-ds-flash", "input": "compressed" })
+            .to_string()
+            .as_bytes(),
+        0,
+    )
+    .unwrap();
+    let response = client
+        .post(format!("{base}/v1/responses"))
+        .bearer_auth(official_auth)
+        .header(LOCAL_TOKEN_HEADER, token)
+        .header("chatgpt-account-id", "synthetic-chatgpt-account")
+        .header(header::CONTENT_TYPE, "application/json")
+        .header(header::CONTENT_ENCODING, "zstd")
+        .body(compressed)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let captured = deepseek_rx.recv().await.unwrap();
+    assert_eq!(captured.model, "deepseek-flash");
+    assert_eq!(captured.chatgpt_account, None);
+    assert_eq!(
+        captured.authorization.as_deref(),
+        Some("Bearer deepseek-only-key")
+    );
+
+    let oversized = zstd::stream::encode_all(
+        json!({ "model": "sx-ds-flash", "input": "x".repeat(2 * 1024 * 1024) })
+            .to_string()
+            .as_bytes(),
+        0,
+    )
+    .unwrap();
+    let oversized = client
+        .post(format!("{base}/v1/responses"))
+        .bearer_auth(token)
+        .header(header::CONTENT_TYPE, "application/json")
+        .header(header::CONTENT_ENCODING, "zstd")
+        .body(oversized)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(oversized.status(), StatusCode::PAYLOAD_TOO_LARGE);
+    let unsupported = client
+        .post(format!("{base}/v1/responses"))
+        .bearer_auth(token)
+        .header(header::CONTENT_TYPE, "application/json")
+        .header(header::CONTENT_ENCODING, "gzip")
+        .body("ignored")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(unsupported.status(), StatusCode::UNSUPPORTED_MEDIA_TYPE);
+    let invalid = client
+        .post(format!("{base}/v1/responses"))
+        .bearer_auth(token)
+        .header(header::CONTENT_TYPE, "application/json")
+        .header(header::CONTENT_ENCODING, "zstd")
+        .body("not zstd")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(invalid.status(), StatusCode::BAD_REQUEST);
+    assert!(deepseek_rx.try_recv().is_err());
 
     let missing_local_header = client
         .post(format!("{base}/v1/responses"))

@@ -1,5 +1,6 @@
 use std::{
     collections::HashMap,
+    io::Read,
     net::{IpAddr, Ipv4Addr, SocketAddr},
     sync::Arc,
     time::Duration,
@@ -21,6 +22,7 @@ use tokio::net::TcpListener;
 use crate::catalog::Publication;
 
 pub const LOCAL_TOKEN_HEADER: &str = "x-switchx-local-token";
+const MAX_BODY_BYTES: usize = 2 * 1024 * 1024;
 
 pub struct Upstream {
     responses_url: Url,
@@ -109,7 +111,7 @@ pub fn router(state: RouterState) -> Router {
         .route("/v1/models", get(models))
         .route("/v1/responses", post(responses))
         .route("/v1/responses/compact", post(compact))
-        .layer(DefaultBodyLimit::max(2 * 1024 * 1024))
+        .layer(DefaultBodyLimit::max(MAX_BODY_BYTES))
         .with_state(Arc::new(state))
 }
 
@@ -225,6 +227,54 @@ async fn responses(
             "JSON is required",
         );
     }
+    let mut encodings = headers.get_all(header::CONTENT_ENCODING).iter();
+    let encoding = encodings.next().map(|value| value.to_str());
+    if encodings.next().is_some() {
+        return error(
+            StatusCode::UNSUPPORTED_MEDIA_TYPE,
+            "unsupported_content_encoding",
+            "request content encoding is not supported",
+        );
+    }
+    let body = match encoding {
+        None => body,
+        Some(Ok(value)) if value.eq_ignore_ascii_case("identity") => body,
+        Some(Ok(value)) if value.eq_ignore_ascii_case("zstd") => {
+            let decoded = tokio::task::spawn_blocking(move || {
+                let decoder = zstd::stream::read::Decoder::new(body.as_ref())?;
+                let mut output = Vec::new();
+                decoder
+                    .take(MAX_BODY_BYTES as u64 + 1)
+                    .read_to_end(&mut output)?;
+                Ok::<_, std::io::Error>(output)
+            })
+            .await;
+            match decoded {
+                Ok(Ok(output)) if output.len() <= MAX_BODY_BYTES => Bytes::from(output),
+                Ok(Ok(_)) => {
+                    return error(
+                        StatusCode::PAYLOAD_TOO_LARGE,
+                        "request_too_large",
+                        "decoded request body is too large",
+                    );
+                }
+                _ => {
+                    return error(
+                        StatusCode::BAD_REQUEST,
+                        "invalid_compressed_body",
+                        "invalid zstd request body",
+                    );
+                }
+            }
+        }
+        _ => {
+            return error(
+                StatusCode::UNSUPPORTED_MEDIA_TYPE,
+                "unsupported_content_encoding",
+                "request content encoding is not supported",
+            );
+        }
+    };
     let Ok(mut request) = serde_json::from_slice::<Value>(&body) else {
         return error(
             StatusCode::BAD_REQUEST,
