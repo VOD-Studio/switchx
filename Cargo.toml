@@ -21,3 +21,4 @@ slint-build = "=1.18.1"
 
 [dev-dependencies]
 futures-util = "0.3.34"
+getrandom = "0.3.4"
