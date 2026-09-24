@@ -2,7 +2,7 @@
 
 Rust + Slint 原生桌面应用，按 `docs/SWITCHX-PLAN.md` 的 M0 闸门逐步实现。
 
-当前有应用骨架、**合成目录夹具**和独立的 loopback 路由模块。界面尚未启动路由；`catalog_probe` 不读取账号、凭据或现有 Codex 配置，也不会写入 `CODEX_HOME`。夹具的能力字段只用于验证目录 schema，不能作为真实模型能力或发布模板。
+当前有应用骨架、**合成目录夹具**、独立的 loopback 路由模块和 SQLite 上游元数据存储。界面尚未启动路由；`catalog_probe` 不读取账号、凭据或现有 Codex 配置，也不会写入 `CODEX_HOME`。夹具的能力字段只用于验证目录 schema，不能作为真实模型能力或发布模板。SQLite 只存凭据引用，实际凭据接入仍在开发中。
 
 ```sh
 cargo run
