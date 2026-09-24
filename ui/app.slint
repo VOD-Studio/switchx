@@ -1,4 +1,5 @@
-import { Button } from "std-widgets.slint";
+import { Button, Palette } from "std-widgets.slint";
+import { Theme } from "tokens.slint";
 
 export component AppWindow inherits Window {
     title: "switchx";
@@ -6,9 +7,11 @@ export component AppWindow inherits Window {
     preferred-height: 760px;
     min-width: 1040px;
     min-height: 680px;
-    background: #101113;
+    background: Theme.background;
 
     in-out property <string> probe-status: "尚未连接 Codex 或上游";
+    in-out property <int> active-page: 0;
+    in-out property <bool> drawer-open: false;
     callback probe();
 
     HorizontalLayout {
@@ -16,45 +19,56 @@ export component AppWindow inherits Window {
 
         Rectangle {
             width: 208px;
-            background: #17191d;
+            background: Theme.panel;
 
             VerticalLayout {
                 padding: 24px;
-                spacing: 18px;
+                spacing: 12px;
 
                 Text {
                     text: "switchx";
-                    color: #f1f0f4;
+                    color: Theme.primary-text;
                     font-size: 27px;
                     font-weight: 700;
                 }
 
                 Text {
                     text: "CODEX CONTROL";
-                    color: #a1a3af;
+                    color: Theme.muted-text;
                     font-size: 11px;
                 }
 
                 Rectangle {
                     height: 1px;
-                    background: #2b2e35;
+                    background: Theme.border;
                 }
 
-                Text {
-                    text: "总览";
-                    color: #b3a0ff;
-                    font-size: 15px;
+                Button {
+                    text: root.active-page == 0 ? "●  总览" : "总览";
+                    clicked => { root.active-page = 0; }
                 }
-
-                Text { text: "上游供应商"; color: #a1a3af; font-size: 15px; }
-                Text { text: "模型路由"; color: #a1a3af; font-size: 15px; }
-                Text { text: "请求与用量"; color: #a1a3af; font-size: 15px; }
+                Button {
+                    text: root.active-page == 1 ? "●  上游供应商" : "上游供应商";
+                    clicked => { root.active-page = 1; }
+                }
+                Button {
+                    text: root.active-page == 2 ? "●  模型路由" : "模型路由";
+                    clicked => { root.active-page = 2; }
+                }
+                Button {
+                    text: root.active-page == 3 ? "●  请求与用量" : "请求与用量";
+                    clicked => { root.active-page = 3; }
+                }
+                Button {
+                    text: root.active-page == 4 ? "●  设置" : "设置";
+                    clicked => { root.active-page = 4; }
+                }
 
                 Rectangle { vertical-stretch: 1; }
 
                 Text {
                     text: "M0 · 可行性验证";
-                    color: #a1a3af;
+                    color: Theme.muted-text;
                     font-size: 12px;
                 }
             }
@@ -64,25 +78,43 @@ export component AppWindow inherits Window {
             padding: 40px;
             spacing: 24px;
 
-            Text {
-                text: "模型，各就各位。";
-                color: #f1f0f4;
-                font-size: 30px;
-                font-weight: 700;
+            HorizontalLayout {
+                spacing: 16px;
+
+                Text {
+                    text: root.active-page == 0 ? "模型，各就各位。"
+                        : root.active-page == 1 ? "上游供应商"
+                        : root.active-page == 2 ? "模型路由"
+                        : root.active-page == 3 ? "请求与用量" : "设置";
+                    color: Theme.primary-text;
+                    font-size: 30px;
+                    font-weight: 700;
+                    horizontal-stretch: 1;
+                }
+
+                Button {
+                    text: Theme.dark ? "浅色" : "深色";
+                    clicked => {
+                        Theme.dark = !Theme.dark;
+                        Palette.color-scheme = Theme.dark ? ColorScheme.dark : ColorScheme.light;
+                    }
+                }
             }
 
             Text {
-                text: "先验证目录、认证与路由，再启用真实连接。";
-                color: #a1a3af;
+                text: root.active-page == 0
+                    ? "先验证目录、认证与路由，再启用真实连接。"
+                    : "当前仅提供界面骨架；此页尚未接入真实数据。";
+                color: Theme.muted-text;
                 font-size: 14px;
             }
 
-            Rectangle {
-                height: 180px;
+            if root.active-page == 0 : Rectangle {
+                height: 220px;
                 border-radius: 18px;
                 border-width: 1px;
-                border-color: #2b2e35;
-                background: #17191d;
+                border-color: Theme.border;
+                background: Theme.panel;
 
                 VerticalLayout {
                     padding: 24px;
@@ -90,28 +122,96 @@ export component AppWindow inherits Window {
 
                     Text {
                         text: "当前状态";
-                        color: #f1f0f4;
+                        color: Theme.primary-text;
                         font-size: 17px;
                         font-weight: 600;
                     }
 
                     Text {
                         text: root.probe-status;
-                        color: #a1a3af;
+                        color: Theme.muted-text;
                         font-size: 14px;
                     }
 
-                    Button {
-                        text: "检查后台通道";
-                        clicked => {
-                            root.probe-status = "后台任务运行中…";
-                            root.probe();
+                    HorizontalLayout {
+                        spacing: 12px;
+                        Button {
+                            text: "检查后台通道";
+                            clicked => {
+                                root.probe-status = "后台任务运行中…";
+                                root.probe();
+                            }
+                        }
+                        Button {
+                            text: "状态详情";
+                            clicked => { root.drawer-open = true; }
                         }
                     }
                 }
             }
 
+            if root.active-page != 0 : Rectangle {
+                height: 180px;
+                border-radius: 18px;
+                border-width: 1px;
+                border-color: Theme.border;
+                background: Theme.panel;
+
+                VerticalLayout {
+                    padding: 24px;
+                    spacing: 16px;
+                    Text {
+                        text: "功能开发中";
+                        color: Theme.primary-text;
+                        font-size: 17px;
+                        font-weight: 600;
+                    }
+                    Text {
+                        text: "不会显示模拟连接或伪造的请求记录。";
+                        color: Theme.muted-text;
+                        font-size: 14px;
+                    }
+                }
+            }
+
             Rectangle { vertical-stretch: 1; }
+        }
+    }
+
+    if root.drawer-open : Rectangle {
+        x: root.width - 400px;
+        y: 0px;
+        width: 400px;
+        height: root.height;
+        background: Theme.panel;
+        border-width: 1px;
+        border-color: Theme.border;
+
+        VerticalLayout {
+            padding: 32px;
+            spacing: 20px;
+            Text {
+                text: "连接状态";
+                color: Theme.primary-text;
+                font-size: 22px;
+                font-weight: 700;
+            }
+            Text {
+                text: root.probe-status;
+                color: Theme.muted-text;
+                font-size: 14px;
+            }
+            Text {
+                text: "当前不会修改 Codex 配置或发送模型请求。";
+                color: Theme.muted-text;
+                font-size: 14px;
+                wrap: word-wrap;
+            }
+            Rectangle { vertical-stretch: 1; }
+            Button {
+                text: "关闭";
+                clicked => { root.drawer-open = false; }
+            }
         }
     }
 }

@@ -1,0 +1,12 @@
+import { Palette } from "std-widgets.slint";
+
+export global Theme {
+    in-out property <bool> dark: Palette.color-scheme != ColorScheme.light;
+    out property <color> background: dark ? #101113 : #f5f4f1;
+    out property <color> panel: dark ? #17191d : #ffffff;
+    out property <color> raised: dark ? #1d2025 : #efeeeb;
+    out property <color> border: dark ? #2b2e35 : #dfddd8;
+    out property <color> primary-text: dark ? #f1f0f4 : #24242a;
+    out property <color> muted-text: dark ? #a1a3af : #666571;
+    out property <color> brand: dark ? #b3a0ff : #7154c4;
+}
