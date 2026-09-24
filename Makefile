@@ -1,6 +1,9 @@
 .DEFAULT_GOAL := build
 
-.PHONY: build lint format format-check test check
+SLINT_LSP ?= slint-lsp
+SLINT_FILES := $(wildcard ui/*.slint)
+
+.PHONY: build lint format format-check test check require-slint-lsp
 
 build:
 	cargo build --locked
@@ -8,11 +11,19 @@ build:
 lint:
 	cargo clippy --locked --all-targets -- -D warnings
 
-format:
+format: require-slint-lsp
 	cargo fmt --all
+	$(SLINT_LSP) format -i $(SLINT_FILES)
 
-format-check:
+format-check: require-slint-lsp
 	cargo fmt --all -- --check
+	@tmp=$$(mktemp); trap 'rm -f "$$tmp"' 0; \
+	for file in $(SLINT_FILES); do \
+		$(SLINT_LSP) format "$$file" > "$$tmp" && diff -u "$$file" "$$tmp" || exit 1; \
+	done
+
+require-slint-lsp:
+	@command -v $(SLINT_LSP) >/dev/null || { echo 'Install slint-lsp 1.18.1: cargo install slint-lsp --version 1.18.1 --locked' >&2; exit 1; }
 
 test:
 	cargo test --locked

@@ -61,7 +61,11 @@ export component QuietButton inherits Rectangle {
         vertical-alignment: center;
         accessible-role: none;
     }
-    hit-area := TouchArea { clicked => { root.clicked(); } }
+
+    hit-area := TouchArea {
+        clicked => { root.clicked(); }
+    }
+
     key-focus := FocusScope {
         x: 0px;
         width: 0px;
@@ -74,7 +78,8 @@ export component QuietButton inherits Rectangle {
             return reject;
         }
     }
-    if key-focus.has-focus : Rectangle {
+
+    if key-focus.has-focus: Rectangle {
         border-radius: 9px;
         border-width: 2px;
         border-color: Theme.brand;
