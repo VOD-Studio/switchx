@@ -1,4 +1,4 @@
-//! Isolated Codex login transport probe. The model request ends at a local mock.
+//! Isolated Codex login transport probe with a local mock response.
 
 use std::{
     fs,
@@ -9,9 +9,10 @@ use std::{
 };
 
 use axum::{
-    Json, Router,
+    Router,
+    body::Bytes,
     extract::State,
-    http::{HeaderMap, StatusCode, header},
+    http::{HeaderMap, StatusCode, Uri, header},
     response::{IntoResponse, Response},
     routing::post,
 };
@@ -21,7 +22,12 @@ use switchx::{
     catalog::{Selection, publish},
     routing::LOCAL_TOKEN_HEADER,
 };
-use tokio::{net::TcpListener, process::Command, sync::mpsc, time::timeout};
+use tokio::{
+    net::TcpListener,
+    process::Command,
+    sync::mpsc::{self, Sender},
+    time::timeout,
+};
 
 const CODEX_VERSION: &str = "@openai/codex@0.156.1";
 const TOKEN_ENV: &str = "SWITCHX_PROBE_TOKEN";
@@ -63,17 +69,31 @@ impl Drop for ProbeHome {
 struct ProbeState {
     host: String,
     local_token: String,
-    observed: mpsc::Sender<bool>,
+    observed: Sender<ProbeEvent>,
+}
+
+#[derive(Debug, PartialEq, Eq)]
+enum ProbeEvent {
+    Accepted { account_header_present: bool },
+    Rejected(&'static str),
+    UnexpectedPath(&'static str),
 }
 
 async fn capture_request(
     State(state): State<ProbeState>,
     headers: HeaderMap,
-    Json(body): Json<Value>,
+    body: Bytes,
 ) -> Response {
-    if headers.get(header::HOST).and_then(|v| v.to_str().ok()) != Some(state.host.as_str())
-        || headers.contains_key(header::ORIGIN)
-    {
+    if headers.get(header::HOST).and_then(|v| v.to_str().ok()) != Some(state.host.as_str()) {
+        let _ = state
+            .observed
+            .try_send(ProbeEvent::Rejected("unexpected Host"));
+        return StatusCode::FORBIDDEN.into_response();
+    }
+    if headers.contains_key(header::ORIGIN) {
+        let _ = state
+            .observed
+            .try_send(ProbeEvent::Rejected("unexpected Origin"));
         return StatusCode::FORBIDDEN.into_response();
     }
     let mut local_values = headers.get_all(LOCAL_TOKEN_HEADER).iter();
@@ -91,16 +111,33 @@ async fn capture_request(
         .get(header::AUTHORIZATION)
         .and_then(|value| value.to_str().ok())
         .and_then(|value| value.strip_prefix("Bearer "));
-    if !local_valid || bearer.is_none_or(|value| value.is_empty() || value == state.local_token) {
+    if !local_valid {
+        let _ = state.observed.try_send(ProbeEvent::Rejected(
+            "missing or invalid local token header",
+        ));
         return StatusCode::UNAUTHORIZED.into_response();
     }
+    if bearer.is_none_or(|value| value.is_empty() || value == state.local_token) {
+        let _ = state.observed.try_send(ProbeEvent::Rejected(
+            "missing or invalid Codex bearer header",
+        ));
+        return StatusCode::UNAUTHORIZED.into_response();
+    }
+    let Ok(body) = serde_json::from_slice::<Value>(&body) else {
+        let _ = state
+            .observed
+            .try_send(ProbeEvent::Rejected("invalid JSON body"));
+        return StatusCode::BAD_REQUEST.into_response();
+    };
     if body["model"] != "sx-oai-coding" {
+        let _ = state
+            .observed
+            .try_send(ProbeEvent::Rejected("unexpected model ID"));
         return StatusCode::BAD_REQUEST.into_response();
     }
-    let _ = state
-        .observed
-        .send(headers.contains_key("x-openai-account-id"))
-        .await;
+    let _ = state.observed.try_send(ProbeEvent::Accepted {
+        account_header_present: headers.contains_key("x-openai-account-id"),
+    });
 
     let item = json!({
         "id": "msg_switchx_auth_probe",
@@ -123,6 +160,17 @@ async fn capture_request(
         ),
     )
         .into_response()
+}
+
+async fn unexpected_request(State(state): State<ProbeState>, uri: Uri) -> StatusCode {
+    let path = match uri.path() {
+        "/v1/models" => "/v1/models",
+        "/v1/responses/compact" => "/v1/responses/compact",
+        "/responses" => "/responses",
+        _ => "another local path",
+    };
+    let _ = state.observed.try_send(ProbeEvent::UnexpectedPath(path));
+    StatusCode::NOT_FOUND
 }
 
 fn command(home: &Path) -> Command {
@@ -169,9 +217,7 @@ async fn run_probe(home: &Path, synthetic: bool) -> Result<(), Box<dyn std::erro
     if synthetic {
         synthetic_login(home)?;
     } else {
-        eprintln!(
-            "Complete the official ChatGPT sign-in in the browser. No model request is sent upstream."
-        );
+        eprintln!("Complete the official ChatGPT sign-in in the browser.");
         let login = command(home)
             .arg("login")
             .stdin(Stdio::inherit())
@@ -217,9 +263,10 @@ async fn run_probe(home: &Path, synthetic: bool) -> Result<(), Box<dyn std::erro
         .iter()
         .map(|byte| format!("{byte:02x}"))
         .collect::<String>();
-    let (observed_tx, mut observed_rx) = mpsc::channel(1);
+    let (observed_tx, mut observed_rx) = mpsc::channel(16);
     let app = Router::new()
         .route("/v1/responses", post(capture_request))
+        .fallback(unexpected_request)
         .with_state(ProbeState {
             host: address.to_string(),
             local_token: local_token.clone(),
@@ -237,6 +284,7 @@ async fn run_probe(home: &Path, synthetic: bool) -> Result<(), Box<dyn std::erro
         command(home)
             .args([
                 "exec",
+                "--json",
                 "--ephemeral",
                 "--skip-git-repo-check",
                 "-s",
@@ -249,18 +297,58 @@ async fn run_probe(home: &Path, synthetic: bool) -> Result<(), Box<dyn std::erro
             .stdin(Stdio::null())
             .output(),
     )
-    .await??;
-    let account_header_present = timeout(Duration::from_secs(3), observed_rx.recv())
-        .await?
-        .ok_or("Codex did not send an authenticated request to the local probe")?;
+    .await
+    .map_err(|_| "Codex exec timed out after 60 seconds")??;
+    let first_event = timeout(Duration::from_secs(1), observed_rx.recv())
+        .await
+        .ok()
+        .flatten();
+    let mut events = first_event.into_iter().collect::<Vec<_>>();
+    while let Ok(event) = observed_rx.try_recv() {
+        events.push(event);
+    }
     server.abort();
+    let account_header_present = events.iter().find_map(|event| match event {
+        ProbeEvent::Accepted {
+            account_header_present,
+        } => Some(*account_header_present),
+        _ => None,
+    });
+    let Some(account_header_present) = account_header_present else {
+        let local_result = events.iter().find_map(|event| match event {
+            ProbeEvent::Rejected(reason) => Some(format!("local mock rejected request: {reason}")),
+            ProbeEvent::UnexpectedPath(path) => {
+                Some(format!("Codex requested {path} instead of /v1/responses"))
+            }
+            _ => None,
+        });
+        let result = local_result.unwrap_or_else(|| "no request reached the local mock".into());
+        let event_types = output
+            .stdout
+            .split(|byte| *byte == b'\n')
+            .filter_map(|line| serde_json::from_slice::<Value>(line).ok())
+            .filter_map(|event| event["type"].as_str().map(str::to_owned))
+            .take(12)
+            .collect::<Vec<_>>()
+            .join(", ");
+        return Err(format!(
+            "{result}; Codex exit: {}; event types: [{event_types}]; stderr bytes: {}",
+            output.status,
+            output.stderr.len()
+        )
+        .into());
+    };
     if !output.status.success()
         || !String::from_utf8_lossy(&output.stdout).contains("hello-switchx")
     {
-        return Err("Codex did not complete the local mock response".into());
+        return Err(format!(
+            "Codex reached the local mock but did not complete its response; exit: {}",
+            output.status
+        )
+        .into());
     }
     println!(
-        "{} reached the local probe with separate local authentication; account header present: {account_header_present}. No model request was forwarded.",
+        "{} reached the local probe with separate local authentication; account header present: {account_header_present}. The local mock forwarded no model request.",
         if synthetic {
             "Synthetic API key"
         } else {
@@ -286,5 +374,79 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             interrupt?;
             Err("probe interrupted; isolated data removed".into())
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn rejected_local_request_is_reported() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let (sender, mut observed) = mpsc::channel(1);
+        let app = Router::new()
+            .route("/v1/responses", post(capture_request))
+            .with_state(ProbeState {
+                host: address.to_string(),
+                local_token: "synthetic-local-token".into(),
+                observed: sender,
+            });
+        let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        let response = reqwest::Client::builder()
+            .no_proxy()
+            .build()
+            .unwrap()
+            .post(format!("http://{address}/v1/responses"))
+            .bearer_auth("synthetic-official-auth")
+            .header(header::CONTENT_TYPE, "application/json")
+            .body(json!({"model": "sx-oai-coding"}).to_string())
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+        assert_eq!(
+            timeout(Duration::from_millis(200), observed.recv())
+                .await
+                .unwrap(),
+            Some(ProbeEvent::Rejected(
+                "missing or invalid local token header"
+            ))
+        );
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn multiple_requests_finish_without_draining_observations() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let (sender, _observed) = mpsc::channel(1);
+        let app = Router::new()
+            .route("/v1/responses", post(capture_request))
+            .with_state(ProbeState {
+                host: address.to_string(),
+                local_token: "synthetic-local-token".into(),
+                observed: sender,
+            });
+        let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        let client = reqwest::Client::builder().no_proxy().build().unwrap();
+        for _ in 0..2 {
+            let response = timeout(
+                Duration::from_millis(300),
+                client
+                    .post(format!("http://{address}/v1/responses"))
+                    .bearer_auth("synthetic-official-auth")
+                    .header(LOCAL_TOKEN_HEADER, "synthetic-local-token")
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .body(json!({"model": "sx-oai-coding"}).to_string())
+                    .send(),
+            )
+            .await
+            .expect("a second request must not wait for observation draining")
+            .unwrap();
+            assert_eq!(response.status(), StatusCode::OK);
+        }
+        server.abort();
     }
 }
