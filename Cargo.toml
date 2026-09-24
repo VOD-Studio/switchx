@@ -5,9 +5,15 @@ edition = "2024"
 publish = false
 
 [dependencies]
+axum = "0.8.9"
+reqwest = { version = "0.13.5", default-features = false, features = ["rustls", "stream"] }
 serde_json = "1.0.151"
 slint = "=1.18.1"
-tokio = { version = "1.53.1", features = ["rt-multi-thread", "time"] }
+subtle = "2.6.1"
+tokio = { version = "1.53.1", features = ["rt-multi-thread", "time", "net", "macros", "sync"] }
 
 [build-dependencies]
 slint-build = "=1.18.1"
+
+[dev-dependencies]
+futures-util = "0.3.34"
