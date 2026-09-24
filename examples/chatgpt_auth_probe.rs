@@ -123,6 +123,23 @@ async fn capture_request(
         ));
         return StatusCode::UNAUTHORIZED.into_response();
     }
+    let encoding = headers
+        .get(header::CONTENT_ENCODING)
+        .and_then(|value| value.to_str().ok());
+    if encoding.is_some_and(|value| value.eq_ignore_ascii_case("zstd"))
+        || body.starts_with(&[0x28, 0xb5, 0x2f, 0xfd])
+    {
+        let _ = state
+            .observed
+            .try_send(ProbeEvent::Rejected("zstd-compressed request body"));
+        return StatusCode::UNSUPPORTED_MEDIA_TYPE.into_response();
+    }
+    if encoding.is_some_and(|value| !value.eq_ignore_ascii_case("identity")) {
+        let _ = state
+            .observed
+            .try_send(ProbeEvent::Rejected("unsupported request content encoding"));
+        return StatusCode::UNSUPPORTED_MEDIA_TYPE.into_response();
+    }
     let Ok(body) = serde_json::from_slice::<Value>(&body) else {
         let _ = state
             .observed
@@ -276,7 +293,7 @@ async fn run_probe(home: &Path, synthetic: bool) -> Result<(), Box<dyn std::erro
     let catalog_literal =
         toml_edit::Value::from(catalog_path.to_str().ok_or("invalid path")?).to_string();
     let config = format!(
-        "cli_auth_credentials_store = \"file\"\nmodel = \"sx-oai-coding\"\nmodel_provider = \"switchx_official_probe\"\nmodel_catalog_json = {catalog_literal}\n\n[model_providers.switchx_official_probe]\nname = \"OpenAI\"\nbase_url = \"http://{address}/v1\"\nwire_api = \"responses\"\nrequires_openai_auth = true\nsupports_websockets = false\nrequest_max_retries = 0\nstream_max_retries = 0\n\n[model_providers.switchx_official_probe.env_http_headers]\n{LOCAL_TOKEN_HEADER} = \"{TOKEN_ENV}\"\n"
+        "cli_auth_credentials_store = \"file\"\nmodel = \"sx-oai-coding\"\nmodel_provider = \"switchx_official_probe\"\nmodel_catalog_json = {catalog_literal}\n\n[features]\nenable_request_compression = false\n\n[model_providers.switchx_official_probe]\nname = \"OpenAI\"\nbase_url = \"http://{address}/v1\"\nwire_api = \"responses\"\nrequires_openai_auth = true\nsupports_websockets = false\nrequest_max_retries = 0\nstream_max_retries = 0\n\n[model_providers.switchx_official_probe.env_http_headers]\n{LOCAL_TOKEN_HEADER} = \"{TOKEN_ENV}\"\n"
     );
     fs::write(home.join("config.toml"), config)?;
     let output = timeout(
@@ -380,6 +397,35 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn compressed_request_is_identified_before_json_parsing() {
+        let (sender, mut observed) = mpsc::channel(1);
+        let state = ProbeState {
+            host: "127.0.0.1:18731".into(),
+            local_token: "synthetic-local-token".into(),
+            observed: sender,
+        };
+        let mut headers = HeaderMap::new();
+        headers.insert(header::HOST, "127.0.0.1:18731".parse().unwrap());
+        headers.insert(LOCAL_TOKEN_HEADER, "synthetic-local-token".parse().unwrap());
+        headers.insert(
+            header::AUTHORIZATION,
+            "Bearer synthetic-chatgpt".parse().unwrap(),
+        );
+        headers.insert(header::CONTENT_ENCODING, "zstd".parse().unwrap());
+        let response = capture_request(
+            State(state),
+            headers,
+            Bytes::from_static(&[0x28, 0xb5, 0x2f, 0xfd]),
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::UNSUPPORTED_MEDIA_TYPE);
+        assert_eq!(
+            observed.recv().await,
+            Some(ProbeEvent::Rejected("zstd-compressed request body"))
+        );
+    }
 
     #[tokio::test]
     async fn rejected_local_request_is_reported() {
