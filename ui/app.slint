@@ -115,3 +115,21 @@ export component AppWindow inherits Window {
         }
     }
 }
+
+export component SwitchXTray inherits SystemTrayIcon {
+    icon: @image-url("../assets/tray.svg");
+    tooltip: "switchx";
+    callback show-app();
+    callback quit-app();
+
+    Menu {
+        MenuItem {
+            title: "打开 switchx";
+            activated => { root.show-app(); }
+        }
+        MenuItem {
+            title: "退出";
+            activated => { root.quit-app(); }
+        }
+    }
+}
