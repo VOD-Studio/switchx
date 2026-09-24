@@ -27,13 +27,13 @@ struct FieldChange {
 }
 
 #[derive(Debug, Serialize, Deserialize, PartialEq, Eq)]
-struct HeaderDecor {
+pub(crate) struct HeaderDecor {
     prefix: Option<String>,
     suffix: Option<String>,
 }
 
 impl HeaderDecor {
-    fn from_table(table: &Table) -> Self {
+    pub(crate) fn from_table(table: &Table) -> Self {
         Self {
             prefix: table
                 .decor()
@@ -96,6 +96,9 @@ impl PreparedSwitch {
             return Err("config target must be config.toml".into());
         }
         let journal_path = state_dir.join(JOURNAL_NAME);
+        if state_dir.join("direct-journal.json").exists() {
+            return Err("a SwitchX direct switch is active; restore it first".into());
+        }
         if journal_path.exists() {
             return Err("a SwitchX journal already exists; restore or resolve it first".into());
         }
@@ -304,7 +307,7 @@ pub fn restore(config_path: &Path, state_dir: &Path) -> Result<RestoreResult, St
     Ok(RestoreResult { conflicts, changed })
 }
 
-fn read_config(path: &Path) -> Result<Option<Vec<u8>>, String> {
+pub(crate) fn read_config(path: &Path) -> Result<Option<Vec<u8>>, String> {
     match fs::symlink_metadata(path) {
         Ok(meta) if meta.file_type().is_symlink() || !meta.is_file() => {
             Err("Codex config must be a regular file, not a symlink".into())
@@ -332,7 +335,7 @@ fn write_new(path: &Path, bytes: &[u8]) -> Result<(), String> {
     sync_parent(path)
 }
 
-fn write_exclusive_atomic(path: &Path, bytes: &[u8]) -> Result<(), String> {
+pub(crate) fn write_exclusive_atomic(path: &Path, bytes: &[u8]) -> Result<(), String> {
     let temporary = temporary_path(path)?;
     let result = (|| {
         write_new(&temporary, bytes)?;
@@ -347,7 +350,7 @@ fn write_exclusive_atomic(path: &Path, bytes: &[u8]) -> Result<(), String> {
     result
 }
 
-fn replace(
+pub(crate) fn replace(
     path: &Path,
     bytes: &[u8],
     permissions: Option<Permissions>,
@@ -383,7 +386,7 @@ fn temporary_path(path: &Path) -> Result<PathBuf, String> {
     )))
 }
 
-fn sync_parent(path: &Path) -> Result<(), String> {
+pub(crate) fn sync_parent(path: &Path) -> Result<(), String> {
     #[cfg(unix)]
     File::open(path.parent().unwrap())
         .and_then(|dir| dir.sync_all())

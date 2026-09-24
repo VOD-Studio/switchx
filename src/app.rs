@@ -4,7 +4,8 @@ use std::{
 };
 
 use crate::{
-    credentials::{CredentialError, CredentialStore, PROVIDER_KEY_SERVICE},
+    credentials::{CredentialError, CredentialStore, PROVIDER_KEY_SERVICE, Secret},
+    direct::validate_provider,
     storage::{ProviderRecord, Store},
 };
 
@@ -51,8 +52,11 @@ impl AppError {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ProviderView {
+    pub id: String,
     pub name: String,
     pub endpoint: String,
+    pub base_url: String,
+    pub model_id: String,
     pub credential_status: &'static str,
 }
 
@@ -132,17 +136,137 @@ fn provider_view(
         },
     };
     ProviderView {
-        name: provider.name,
+        id: provider.id,
+        name: provider.name.clone(),
         endpoint: reqwest::Url::parse(&provider.base_url)
             .ok()
             .filter(|url| matches!(url.scheme(), "http" | "https") && url.host_str().is_some())
             .map(|url| url.origin().ascii_serialization())
             .unwrap_or_else(|| "地址无效".into()),
+        base_url: validate_provider(&provider.name, &provider.base_url, &provider.model_id)
+            .map(|url| url.to_string())
+            .unwrap_or_default(),
+        model_id: provider.model_id,
         credential_status,
     }
 }
 
-fn open_store(data_dir: &Path) -> Result<Store, AppError> {
+pub fn save_provider(
+    data_dir: &Path,
+    id: Option<&str>,
+    name: &str,
+    base_url: &str,
+    model_id: &str,
+    key: String,
+) -> Result<(), String> {
+    if data_dir.join("direct-journal.json").exists() {
+        return Err("直连切换正在使用上游，请先恢复原配置再编辑".into());
+    }
+    let url = validate_provider(name, base_url, model_id)?;
+    let store = open_store(data_dir).map_err(|error| error.message())?;
+    let old = match id {
+        Some(id) => Some(
+            store
+                .provider(id)
+                .map_err(|_| "无法读取上游资料")?
+                .ok_or("上游不存在，请刷新后重试")?,
+        ),
+        None => None,
+    };
+    let id = match &old {
+        Some(record) => record.id.clone(),
+        None => new_id()?,
+    };
+    let changing_key = !key.is_empty();
+    let reference = if key.is_empty() {
+        old.as_ref()
+            .and_then(|record| record.credential_ref.clone())
+            .ok_or("请输入 API Key")?
+    } else {
+        id.clone()
+    };
+    let credentials =
+        CredentialStore::new(PROVIDER_KEY_SERVICE).map_err(|_| "系统凭据存储不可用")?;
+    let previous_secret = if !key.is_empty()
+        && old
+            .as_ref()
+            .is_some_and(|record| record.credential_ref.as_deref() == Some(id.as_str()))
+    {
+        match credentials.get(&id) {
+            Ok(secret) => Some(secret),
+            Err(CredentialError::Missing) => None,
+            Err(_) => return Err("无法读取旧 API Key，未修改上游".into()),
+        }
+    } else {
+        None
+    };
+    if changing_key {
+        credentials
+            .put(&reference, &Secret::new(key))
+            .map_err(|_| "无法保存 API Key 到系统凭据存储")?;
+    }
+    let record = ProviderRecord {
+        id: id.clone(),
+        name: name.trim().into(),
+        base_url: url.to_string(),
+        model_id: model_id.into(),
+        credential_ref: Some(reference.clone()),
+    };
+    if store.put_provider(&record).is_err() {
+        if changing_key {
+            if let Some(previous_secret) = &previous_secret {
+                let _ = credentials.put(&reference, previous_secret);
+            } else {
+                let _ = credentials.delete(&reference);
+            }
+        }
+        return Err("无法保存上游资料".into());
+    }
+    Ok(())
+}
+
+pub fn delete_provider(data_dir: &Path, id: &str) -> Result<(), String> {
+    if data_dir.join("direct-journal.json").exists() {
+        return Err("直连切换正在使用上游，请先恢复原配置".into());
+    }
+    let store = open_store(data_dir).map_err(|error| error.message())?;
+    let record = store
+        .provider(id)
+        .map_err(|_| "无法读取上游资料")?
+        .ok_or("上游不存在")?;
+    let credentials =
+        CredentialStore::new(PROVIDER_KEY_SERVICE).map_err(|_| "系统凭据存储不可用")?;
+    if record.credential_ref.as_deref() == Some(id) {
+        match credentials.get(id) {
+            Ok(_) | Err(CredentialError::Missing) => {}
+            Err(_) => return Err("无法检查系统凭据，未删除上游".into()),
+        }
+    }
+    store.delete_provider(id).map_err(|_| "无法删除上游资料")?;
+    if let Some(reference) = record.credential_ref.filter(|reference| reference == id) {
+        match credentials.delete(&reference) {
+            Ok(()) | Err(CredentialError::Missing) => {}
+            Err(_) => return Err("上游资料已删除，但系统凭据清理失败".into()),
+        }
+    }
+    Ok(())
+}
+
+pub fn load_provider(data_dir: &Path, id: &str) -> Result<ProviderRecord, String> {
+    open_store(data_dir)
+        .map_err(|error| error.message())?
+        .provider(id)
+        .map_err(|_| "无法读取上游资料".to_owned())?
+        .ok_or_else(|| "上游不存在，请刷新后重试".into())
+}
+
+fn new_id() -> Result<String, String> {
+    let mut bytes = [0_u8; 16];
+    getrandom::fill(&mut bytes).map_err(|_| "无法生成上游 ID")?;
+    Ok(bytes.iter().map(|byte| format!("{byte:02x}")).collect())
+}
+
+pub(crate) fn open_store(data_dir: &Path) -> Result<Store, AppError> {
     if !data_dir.is_absolute() {
         return Err(AppError::DataDirectory);
     }
@@ -208,6 +332,7 @@ mod tests {
                 id: "probe".into(),
                 name: "Test Provider".into(),
                 base_url: "https://user:secret@example.invalid/v1?token=private".into(),
+                model_id: "test-model".into(),
                 credential_ref: Some("../invalid-secret-reference".into()),
             })
             .unwrap();
@@ -240,6 +365,39 @@ mod tests {
                 0o600
             );
         }
+        fs::remove_dir_all(path).unwrap();
+    }
+
+    #[test]
+    fn active_direct_switch_blocks_provider_mutation() {
+        let mut nonce = [0_u8; 8];
+        getrandom::fill(&mut nonce).unwrap();
+        let path = env::temp_dir().join(format!(
+            "switchx-active-provider-{}",
+            nonce
+                .iter()
+                .map(|byte| format!("{byte:02x}"))
+                .collect::<String>()
+        ));
+        fs::create_dir(&path).unwrap();
+        fs::write(path.join("direct-journal.json"), "synthetic journal").unwrap();
+        assert!(
+            save_provider(
+                &path,
+                None,
+                "Mock",
+                "https://example.invalid/v1",
+                "mock",
+                "key".into()
+            )
+            .unwrap_err()
+            .contains("先恢复")
+        );
+        assert!(
+            delete_provider(&path, "any")
+                .unwrap_err()
+                .contains("先恢复")
+        );
         fs::remove_dir_all(path).unwrap();
     }
 }

@@ -1,7 +1,10 @@
 pub mod app;
 pub mod catalog;
+pub mod client;
 pub mod config;
 pub mod config_transaction;
 pub mod credentials;
+pub mod direct;
+pub mod direct_config;
 pub mod routing;
 pub mod storage;
