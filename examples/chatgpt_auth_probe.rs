@@ -74,7 +74,7 @@ struct ProbeState {
 
 #[derive(Debug, PartialEq, Eq)]
 enum ProbeEvent {
-    Accepted { account_header_present: bool },
+    Accepted { x_openai_account_id_present: bool },
     Rejected(&'static str),
     UnexpectedPath(&'static str),
 }
@@ -153,7 +153,7 @@ async fn capture_request(
         return StatusCode::BAD_REQUEST.into_response();
     }
     let _ = state.observed.try_send(ProbeEvent::Accepted {
-        account_header_present: headers.contains_key("x-openai-account-id"),
+        x_openai_account_id_present: headers.contains_key("x-openai-account-id"),
     });
 
     let item = json!({
@@ -325,13 +325,13 @@ async fn run_probe(home: &Path, synthetic: bool) -> Result<(), Box<dyn std::erro
         events.push(event);
     }
     server.abort();
-    let account_header_present = events.iter().find_map(|event| match event {
+    let x_openai_account_id_present = events.iter().find_map(|event| match event {
         ProbeEvent::Accepted {
-            account_header_present,
-        } => Some(*account_header_present),
+            x_openai_account_id_present,
+        } => Some(*x_openai_account_id_present),
         _ => None,
     });
-    let Some(account_header_present) = account_header_present else {
+    let Some(x_openai_account_id_present) = x_openai_account_id_present else {
         let local_result = events.iter().find_map(|event| match event {
             ProbeEvent::Rejected(reason) => Some(format!("local mock rejected request: {reason}")),
             ProbeEvent::UnexpectedPath(path) => {
@@ -365,7 +365,7 @@ async fn run_probe(home: &Path, synthetic: bool) -> Result<(), Box<dyn std::erro
         .into());
     }
     println!(
-        "{} reached the local probe with separate local authentication; account header present: {account_header_present}. The local mock forwarded no model request.",
+        "{} reached the local probe with separate local authentication; x-openai-account-id present: {x_openai_account_id_present}. The local mock forwarded no model request.",
         if synthetic {
             "Synthetic API key"
         } else {
