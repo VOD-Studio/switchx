@@ -32,4 +32,6 @@ M1 原生界面已提供设计 token、可通过键盘操作的按钮、基础�
 
 `cargo run --example deepseek_live_probe` 会在终端隐藏输入地读取测试 Key，调用 DeepSeek 模型发现，并通过 SwitchX 路由发送一次真实 Responses 请求，再让隔离的 Codex CLI 0.156.1 发送一次真实请求；这两次模型调用可能计费。Key 只保存在测试进程内存中，临时 `CODEX_HOME` 结束后删除。2026-09-24 实测：模型发现返回 `deepseek-flash`、`deepseek-v4-pro`；路由请求返回 HTTP 200、`completed` 和 `SWITCHX_OK`；Codex CLI 返回 `SWITCHX_CODEX_OK`。此探针仍使用合成目录元数据，未验证真实文件工具调用、取消、Desktop/IDE 或 ChatGPT 订阅认证。
 
-`cargo run --example chatgpt_auth_probe -- --synthetic` 在独立临时 `CODEX_HOME` 中用合成 API Key 验证 CLI 0.156.1 的 `requires_openai_auth` 与独立 `x-switchx-local-token` 请求头能同时抵达本地 mock；本地 mock 不转发模型请求。2026-09-24 本机已通过；另以无效的合成 ChatGPT 形状凭据测试，也观察到 CLI 把请求送到本地 `/v1/responses`，但不代表真实账号可用。去掉 `--synthetic` 后，探针会要求在该临时目录完成一次官方 ChatGPT 浏览器登录，随后把一次合成模型请求送到本地 mock，并只报告账号头是否出现，不输出认证值；正常结束时删除临时登录数据。首次真实登录实测显示登录成功，但旧版探针在等待本地请求记录时超时，尚不能证明账号认证经过本地路由。探针已改为报告本地拒绝、意外路径、CLI 退出状态及事件类型；需要重新运行才能定位该次失败。即使传输探针通过，也不证明真实官方上游、续期或失效处理。路由器现接受独立本地校验头；假上游测试确认选中 DeepSeek 时不会转发客户端的官方认证或账号头。
+`cargo run --example chatgpt_auth_probe -- --synthetic` 在独立临时 `CODEX_HOME` 中用合成 API Key 验证 CLI 0.156.1 的 `requires_openai_auth` 与独立 `x-switchx-local-token` 请求头能同时抵达本地 mock；本地 mock 不转发模型请求。2026-09-24 本机已通过；另以无效的合成 ChatGPT 形状凭据测试，也观察到 CLI 把请求送到本地 `/v1/responses`，但不代表真实账号可用。
+
+去掉 `--synthetic` 后，探针会要求在临时目录完成一次官方 ChatGPT 浏览器登录，随后把合成模型请求送到本地 mock；正常结束时删除临时登录数据。真实账号实测已证明登录、独立本地校验头和 Bearer 头抵达本地 mock，但该请求体不能直接当 JSON 解析。Codex CLI 0.156.1 支持将 ChatGPT 请求体压成 zstd；探针现仅在自己的临时配置中关闭请求压缩，并在收到压缩体时明确报错。修订后的完整请求与回复尚待复验；即使通过，也不证明真实官方上游、续期或失效处理。产品路由器仍需单独支持或协商压缩请求。假上游测试确认选中 DeepSeek 时不会转发客户端的官方认证或账号头。
