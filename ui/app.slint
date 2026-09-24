@@ -1,0 +1,117 @@
+import { Button } from "std-widgets.slint";
+
+export component AppWindow inherits Window {
+    title: "switchx";
+    preferred-width: 1120px;
+    preferred-height: 760px;
+    min-width: 1040px;
+    min-height: 680px;
+    background: #101113;
+
+    in-out property <string> probe-status: "尚未连接 Codex 或上游";
+    callback probe();
+
+    HorizontalLayout {
+        spacing: 0px;
+
+        Rectangle {
+            width: 208px;
+            background: #17191d;
+
+            VerticalLayout {
+                padding: 24px;
+                spacing: 18px;
+
+                Text {
+                    text: "switchx";
+                    color: #f1f0f4;
+                    font-size: 27px;
+                    font-weight: 700;
+                }
+
+                Text {
+                    text: "CODEX CONTROL";
+                    color: #a1a3af;
+                    font-size: 11px;
+                }
+
+                Rectangle {
+                    height: 1px;
+                    background: #2b2e35;
+                }
+
+                Text {
+                    text: "总览";
+                    color: #b3a0ff;
+                    font-size: 15px;
+                }
+
+                Text { text: "上游供应商"; color: #a1a3af; font-size: 15px; }
+                Text { text: "模型路由"; color: #a1a3af; font-size: 15px; }
+                Text { text: "请求与用量"; color: #a1a3af; font-size: 15px; }
+
+                Rectangle { vertical-stretch: 1; }
+
+                Text {
+                    text: "M0 · 可行性验证";
+                    color: #a1a3af;
+                    font-size: 12px;
+                }
+            }
+        }
+
+        VerticalLayout {
+            padding: 40px;
+            spacing: 24px;
+
+            Text {
+                text: "模型，各就各位。";
+                color: #f1f0f4;
+                font-size: 30px;
+                font-weight: 700;
+            }
+
+            Text {
+                text: "先验证目录、认证与路由，再启用真实连接。";
+                color: #a1a3af;
+                font-size: 14px;
+            }
+
+            Rectangle {
+                height: 180px;
+                border-radius: 18px;
+                border-width: 1px;
+                border-color: #2b2e35;
+                background: #17191d;
+
+                VerticalLayout {
+                    padding: 24px;
+                    spacing: 16px;
+
+                    Text {
+                        text: "当前状态";
+                        color: #f1f0f4;
+                        font-size: 17px;
+                        font-weight: 600;
+                    }
+
+                    Text {
+                        text: root.probe-status;
+                        color: #a1a3af;
+                        font-size: 14px;
+                    }
+
+                    Button {
+                        text: "检查后台通道";
+                        clicked => {
+                            root.probe-status = "后台任务运行中…";
+                            root.probe();
+                        }
+                    }
+                }
+            }
+
+            Rectangle { vertical-stretch: 1; }
+        }
+    }
+}
