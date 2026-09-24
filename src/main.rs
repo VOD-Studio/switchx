@@ -1,10 +1,22 @@
 slint::include_modules!();
 
+use slint::ComponentHandle;
+
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let runtime = tokio::runtime::Builder::new_multi_thread()
         .enable_all()
         .build()?;
     let app = AppWindow::new()?;
+    let tray = SwitchXTray::new()?;
+    let window = app.as_weak();
+    tray.on_show_app(move || {
+        if let Some(app) = window.upgrade() {
+            let _ = app.show();
+        }
+    });
+    tray.on_quit_app(|| {
+        let _ = slint::quit_event_loop();
+    });
     let weak = app.as_weak();
     let handle = runtime.handle().clone();
 
@@ -19,5 +31,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     });
 
     app.run()?;
+    drop(tray);
     Ok(())
 }

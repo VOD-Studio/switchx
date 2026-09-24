@@ -15,3 +15,5 @@ CODEX_HOME="$(mktemp -d)" npx -y @openai/codex@0.156.1 \
 在 2026-09-24 的 macOS 本机测试中，Codex CLI 0.156.1 的 `debug models` 与 app-server `model/list` 均返回 `sx-ds-flash`、`sx-oai-coding`。这证明该版本能读取夹具目录，尚未证明真实 `/model` 交互、真实模型请求、Desktop 或 IDE 兼容。
 
 `cargo test --test router` 用两个本地假上游验证精确映射、SSE 首事件直达、认证头隔离、未知模型和本地鉴权。它不使用真实供应商凭据，不证明实际工具对话、故障切换或 ChatGPT 订阅认证。
+
+macOS 可运行 `sh scripts/bundle-macos.sh` 生成仅供本机交互检查的 `target/debug/SwitchX.app`。主窗口关闭后应驻留菜单栏，可从菜单栏重新打开或退出。此调试 bundle 未签名、未公证，不能作为发布包。
