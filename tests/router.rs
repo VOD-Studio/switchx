@@ -12,7 +12,7 @@ use futures_util::stream;
 use serde_json::{Value, json};
 use switchx::{
     catalog::{Selection, publish},
-    routing::{RouterState, Upstream, serve},
+    routing::{LOCAL_TOKEN_HEADER, RouterState, Upstream, serve},
 };
 use tokio::{
     net::TcpListener,
@@ -210,6 +210,49 @@ async fn exact_routes_stream_and_keep_credentials_isolated() {
         .unwrap()
         .unwrap();
     assert!(String::from_utf8_lossy(&second).contains("response.completed"));
+
+    let official_auth = "synthetic-chatgpt-access-token";
+    let with_official_auth = client
+        .post(format!("{base}/v1/responses"))
+        .bearer_auth(official_auth)
+        .header(LOCAL_TOKEN_HEADER, token)
+        .header("x-openai-account-id", "synthetic-chatgpt-account")
+        .header(header::COOKIE, "private=do-not-forward")
+        .header(header::CONTENT_TYPE, "application/json")
+        .body(json!({ "model": "sx-ds-flash", "input": "hello" }).to_string())
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(with_official_auth.status(), StatusCode::OK);
+    let captured = deepseek_rx.recv().await.unwrap();
+    assert_eq!(
+        captured.authorization.as_deref(),
+        Some("Bearer deepseek-only-key")
+    );
+    assert_eq!(captured.account, None);
+    assert_eq!(captured.cookie, None);
+    assert!(openai_rx.try_recv().is_err());
+
+    let missing_local_header = client
+        .post(format!("{base}/v1/responses"))
+        .bearer_auth(official_auth)
+        .header(header::CONTENT_TYPE, "application/json")
+        .body(json!({ "model": "sx-ds-flash", "input": "hello" }).to_string())
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(missing_local_header.status(), StatusCode::UNAUTHORIZED);
+    let wrong_local_header = client
+        .post(format!("{base}/v1/responses"))
+        .bearer_auth(token)
+        .header(LOCAL_TOKEN_HEADER, "wrong")
+        .header(header::CONTENT_TYPE, "application/json")
+        .body(json!({ "model": "sx-ds-flash", "input": "hello" }).to_string())
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(wrong_local_header.status(), StatusCode::UNAUTHORIZED);
+    assert!(deepseek_rx.try_recv().is_err());
 
     let response = client
         .post(format!("{base}/v1/responses"))
