@@ -12,6 +12,7 @@ lint:
 	cargo clippy --locked --all-targets -- -D warnings
 
 format: require-slint-lsp
+	cargo fix --allow-dirty
 	cargo fmt --all
 	$(SLINT_LSP) format -i $(SLINT_FILES)
 
