@@ -55,7 +55,7 @@ cargo build --locked --bin switchx
 cargo run --locked --example direct_live_probe -- /absolute/switchx-data PROVIDER_ID
 ```
 
-它检查真实 `/models`，在新建的临时 `CODEX_HOME` 中通过生产直连事务写入 helper 配置，再让 Codex CLI 0.156.1 完成短回答和“读合成文件 → 回传工具结果 → 第二轮回答”。这些真实模型调用可能计费。探针不读取用户的 Codex 配置或登录文件，不输出 Key；正常结束（包括请求检查失败）会恢复临时配置并清理临时目录，恢复有冲突时保留目录供检查。原有上游记录与钥匙串条目由 SwitchX 管理，探针不删除。自动化测试不会执行真实请求。
+它只读打开已升级到 v5 的源数据库，检查真实 `/models`，在新建的临时 `CODEX_HOME` 中通过生产直连事务写入 helper 配置，再让本机 Codex CLI 完成短回答和“读合成文件 → 回传工具结果 → 第二轮回答”。可用 `SWITCHX_CODEX_CLI` 指定 CLI，与路由目录检查使用同一选择规则。这些真实模型调用可能计费。探针不读取用户的 Codex 配置或登录文件，不输出 Key；正常结束（包括请求检查失败）会恢复临时配置并清理临时目录，恢复有冲突时保留目录供检查。原有上游记录与钥匙串条目由 SwitchX 管理，探针不删除。自动化测试不会执行真实请求。
 
 2026-09-28 的 M2 验收已在 macOS 27.0 arm64、Codex CLI 0.156.1、DeepSeek `deepseek-flash` 上通过：真实模型发现、helper 直连短回答、真实文件工具与第二轮回答、原生页面写出的配置实际请求、原生上游编辑/删除、托盘重新打开/恢复/退出及中文拼音预编辑/候选上屏。中文输入法与托盘点击由用户实际操作确认；配置恢复、外部注释保留、journal 清除、进程退出与验收凭据清理由程序核对。首轮托盘组合操作未完成落盘恢复，单独补验恢复后通过，完整经过与覆盖边界见 [M2 验收记录](docs/acceptance/M2-2026-09-28.md)。本轮测试 Key 的保存副本和临时目录已清理；OpenAI 官方 API、ChatGPT 官方上游及认证生命周期、Desktop/IDE、取消和其他平台仍未在本轮验收。
 
@@ -85,6 +85,32 @@ cargo run --locked --example routed_cli_probe -- --desktop
 `routed_cli_probe` 使用本机 CLI、两个本地假上游、临时配置和独立的合成钥匙串条目，检查目录兼容性、同名模型映射、helper 鉴权、文件工具轮次及恢复冲突，结束后恢复并清理；恢复失败则保留目录。2026-09-28 已通过 Codex CLI 0.156.1 的探针与原生页面配置的实际 CLI 请求，详见 [M3 首批验收记录](docs/acceptance/M3-2026-09-28.md)。本轮没有真实上游调用。
 
 当前仍是 **API 路由预览版**：每个连接一个模型，修改目录需恢复后重新发布；已支持下述单个显式备用上游，不提供热更新、多候选链、熔断或费用统计。ChatGPT 订阅认证路由、DeepSeek ↔ 官方真实路由切换、同会话跨上游工具历史、远端压缩、Desktop/IDE 与其他平台仍待验收，M3 尚未完整完成。
+
+### 真实路由验收探针
+
+`routed_live_probe` 从已有 SwitchX 数据目录中明确选择一或两个**公开模型 ID**；原目录须先由 SwitchX 升级到当前 v5。模型的能力与指令模板取自已保存资料，真实运行不使用仓库的合成模板。
+
+```sh
+cargo build --locked --bin switchx --example routed_live_probe
+cargo run --locked --example routed_live_probe -- /absolute/switchx-data PUBLIC_MODEL_ID
+# 两个明确选定的 API 上游
+cargo run --locked --example routed_live_probe -- /absolute/switchx-data FIRST_PUBLIC_ID SECOND_PUBLIC_ID
+```
+
+源数据库只读打开。选定记录与凭据引用复制到权限受限的临时数据目录，使用已有系统钥匙串条目，并在独立临时 `CODEX_HOME` 中通过生产 `RouteSession` 预览、检查 `/models`、发布目录和启用 helper 路由。只在临时副本中启用选定模型并清除备用设置，避免验收请求进入未选定的上游；原有选择与备用设置保留。
+
+每个模型由本机 Codex CLI 完成精确短回答和“读取随机标记文件 → 工具结果 → 第二轮回答”。回答与工具检查和 `direct_live_probe` 共用；请求记录另外核对短回答至少一条、工具轮次至少两条正常完成记录，以及公开 ID、provider ID、实际模型、目录版本、HTTP 状态和首事件计时。清除继承的 API Key、base URL 与本地令牌环境变量；不读取用户配置或登录文件，不输出 Key、原始 CLI 错误或对话正文。这些真实模型调用可能计费。
+
+成功、请求检查失败和 Ctrl-C 均执行恢复：核对临时配置字节一致、journal 消失、本地令牌删除与端口释放，再删除临时目录。Ctrl-C 在配置事务完成后取消请求，单次 CLI 最多等待 180 秒。恢复失败或有冲突时保留目录并以失败退出；强杀无法执行清理。原有上游凭据不删除。
+
+无需真实账户的复跑使用现有假上游探针：
+
+```sh
+cargo build --locked --bin switchx --example routed_live_probe
+cargo run --locked --example routed_cli_probe -- --live-probe
+```
+
+它运行同一个真实路由探针，检查两条同名模型映射、文件工具轮次、错误回答与 Ctrl-C 清理，并逐字节核对源数据库及原凭据保留。此项使用合成凭据和本地假上游，不提供真实 DeepSeek 或官方 API 验收证据；单模型通过也不代表双上游或同会话跨上游验收完成。
 
 ## 显式备用上游
 
