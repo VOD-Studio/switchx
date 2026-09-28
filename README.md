@@ -1,6 +1,6 @@
 # switchx
 
-Rust + Slint 原生桌面应用。M2 直连已完成 macOS / DeepSeek 验收，当前推进 M3 的模型目录与 API 路由预览版；完整范围见 `docs/SWITCHX-PLAN.md`。
+Rust + Slint 原生桌面应用。M2 直连已完成 macOS / DeepSeek 验收，M3 已实现模型目录、API 与 ChatGPT 订阅账号路由；目前仍为模型路由预览版，真实官方上游和认证生命周期尚待验收。完整范围见 `docs/SWITCHX-PLAN.md`。
 
 原生界面现可管理上游、直连配置、模型资料与 loopback 路由。SQLite 保存元数据和凭据引用，系统凭据存储保存上游 Key 与独立的本地路由令牌。仓库中的**合成目录夹具**仅用于测试，不能作为真实模型能力或发布模板；`catalog_probe` 仍只输出夹具，不读取账号、凭据或现有 Codex 配置。
 
@@ -14,7 +14,7 @@ CODEX_HOME="$(mktemp -d)" npx -y @openai/codex@0.156.1 \
 
 在 2026-09-24 的 macOS 本机测试中，Codex CLI 0.156.1 的 `debug models` 与 app-server `model/list` 均返回 `sx-ds-flash`、`sx-oai-coding`。这证明该版本能读取夹具目录，尚未证明真实 `/model` 交互、真实模型请求、Desktop 或 IDE 兼容。
 
-`cargo test --test router` 用两个本地假上游验证精确映射、SSE 首事件直达、认证头隔离、未知模型和本地鉴权。它不使用真实供应商凭据，不证明实际工具对话、故障切换或 ChatGPT 订阅认证。
+`cargo test --test router` 用本地假上游验证精确映射、SSE 首事件直达、认证头隔离、未知模型、本地鉴权，以及订阅账号的工作区绑定、401/403、续期后请求和 compact。它不使用真实供应商凭据，不证明真实上游或真实订阅账号可用。
 
 macOS 可运行 `sh scripts/bundle-macos.sh` 生成仅供本机交互检查的 `target/debug/SwitchX.app`。主窗口关闭后应驻留菜单栏，可从菜单栏重新打开或退出。此调试 bundle 未签名、未公证，不能作为发布包。
 
@@ -28,7 +28,7 @@ M1 收口检查（2026-09-24，macOS 调试 bundle，隔离的 `SWITCHX_DATA_DIR
 
 `cargo run --example config_probe -- /tmp/switchx-models.json` 只把合成 `config.toml` 差异预览输出到 stdout。预览保留其他 provider、MCP、项目、安全设置和注释；它不写用户配置。生成的 `env_key = "SWITCHX_LOCAL_TOKEN"` 仅在启动 Codex 的环境已提供本地令牌时才可用于请求。
 
-`config_transaction::PreparedSwitch` 检查目标文件未变化，先写不可变目录和恢复 journal，再原子替换 `config.toml`。`restore` 按受管字段做三方比较，保留外部新增设置；同一字段发生冲突时保留外部值和 journal。直连和路由共用目标文件锁，防止 SwitchX 实例并发写入。原生路由通过 `auth.command` 取得本地令牌；较早的 `config_probe`、`codex_cli_probe` 和 `deepseek_live_probe` 仍使用显式提供 `SWITCHX_LOCAL_TOKEN` 的隔离探针流程。
+`config_transaction::PreparedSwitch` 检查目标文件未变化，先写不可变目录和恢复 journal，再原子替换 `config.toml`。`restore` 按受管字段做三方比较，保留外部新增设置；同一字段发生冲突时保留外部值和 journal。直连和路由共用目标文件锁，防止 SwitchX 实例并发写入。仅含 API 模型的原生路由通过 `auth.command` 取得本地令牌；含订阅模型的路由使用 `requires_openai_auth` 和独立本地请求头，详见下文。较早的 `config_probe`、`codex_cli_probe` 和 `deepseek_live_probe` 仍使用显式提供 `SWITCHX_LOCAL_TOKEN` 的隔离探针流程。
 
 `cargo run --example codex_cli_probe` 会通过 npm 执行 Codex CLI 0.156.1，在独立临时 `CODEX_HOME` 中启动同一个 SwitchX 路由入口和两个本地假上游。实测两个别名分别到达对应假上游，且 `sx-ds-flash` 完成一次读取临时文件、回传工具结果、第二轮回答。运行结束会删除该临时目录；无真实 API Key、登录态或模型调用。
 
@@ -87,10 +87,10 @@ cargo run --locked --example direct_live_probe -- /absolute/switchx-data PROVIDE
 1. 保存 Responses 上游及 API Key，在“模型路由 → 添加模型映射”手动填写参数，或导入包含实际模型 ID 的 `models.json`。映射编辑器也提供“获取模型列表”。可参考供应商提供的目录，例如 [DeepSeek 的 Codex 接入文档](https://api-docs.deepseek.com/quick_start/agent_integrations/codex)。`/models` 的 ID 列表不包含完整能力资料。
 2. 选择要发布的模型和默认模型，在“配置与恢复”指定目标 Codex 配置目录。
 3. 点击“预览发布”。SwitchX 预留所选 loopback 端口，并让本机 Codex CLI 在独立临时目录实际解析完整目录。可用 `SWITCHX_CODEX_CLI` 指定 CLI 程序。
-4. 点击“开启路由”。再次核对 CLI、模型与上游资料，每个上游只读取一次凭据和 `/models`，逐个核对所选映射与备用实际模型，验证本地路由后发布目录和配置。重启目标 Codex，在模型菜单或 `-m` 参数选择公开 ID。
+4. 点击“开启路由”。再次核对 CLI、模型与上游资料；API 上游按连接读取凭据和 `/models`，订阅连接核对目标 Codex 的登录、工作区与 CLI 内置模型。验证本地路由后发布目录和配置。重启目标 Codex，在模型菜单或 `-m` 参数选择公开 ID。
 5. 点击“恢复并停止”，或从托盘恢复、退出。macOS Command-Q 也会先恢复路由配置；冲突时保留恢复记录和仍在运行的路由，并阻止退出。活动请求最多等待 5 秒后取消。强杀后的下次启动显示待恢复目标，不自动重启路由。
 
-原生路由使用独立 `auth.command` helper 获取本地令牌，无需手工设置终端环境变量。上游 Key 不进入 Codex 配置、SQLite 或恢复记录；出站请求只使用映射上游的 Key。原生 SSE 透传，取消不重放请求；暂时拒绝服务器状态引用、加密推理与压缩状态续接。应用运行中或有恢复记录时禁止修改上游、模型和绑定。成功的 `/models` 检查和目录解析不代表真实工具能力已验证。[Codex 配置约定](https://learn.chatgpt.com/docs/config-file/config-reference)
+仅含 API 模型的原生路由使用独立 `auth.command` helper 获取本地令牌，无需手工设置终端环境变量。上游 Key 不进入 Codex 配置、SQLite 或恢复记录；API 出站请求只使用映射上游的 Key。原生 SSE 透传，取消不重放请求；服务器状态引用始终拒绝，API 模型另拒绝加密推理与压缩状态续接。应用运行中或有恢复记录时禁止修改上游、模型和绑定。成功的 `/models` 检查和目录解析不代表真实工具能力已验证。[Codex 配置约定](https://learn.chatgpt.com/docs/config-file/config-reference)
 
 可复跑的隔离验收：
 
@@ -103,7 +103,7 @@ cargo run --locked --example routed_cli_probe -- --desktop
 
 `routed_cli_probe` 使用本机 CLI、两个本地假上游、临时配置和独立的合成钥匙串条目，检查目录兼容性、同名模型映射、helper 鉴权、文件工具轮次及恢复冲突，结束后恢复并清理；恢复失败则保留目录。2026-09-28 已通过 Codex CLI 0.156.1 的探针与原生页面配置的实际 CLI 请求，详见 [M3 首批验收记录](docs/acceptance/M3-2026-09-28.md)。本轮没有真实上游调用。
 
-当前仍是 **API 路由预览版**：一个连接可映射多个模型，修改目录需恢复后重新发布；已支持下述单个显式备用上游，不提供热更新、多候选链、熔断或费用统计。ChatGPT 订阅认证路由、DeepSeek ↔ 官方真实路由切换、同会话跨上游工具历史、远端压缩、Desktop/IDE 与其他平台仍待验收，M3 尚未完整完成。
+当前仍是 **模型路由预览版**：一个连接可映射多个模型，修改目录需恢复后重新发布；已支持下述单个显式 API 备用上游，不提供热更新、多候选链、熔断或费用统计。订阅路由实现与隔离测试见下文；真实官方请求、实际认证续期与失效恢复、DeepSeek ↔ 官方真实切换、同会话跨上游工具历史、远端压缩、Desktop/IDE 与其他平台仍待验收，M3 尚未完整完成。
 
 模型探测与多模型映射的隔离验收使用本地假上游和合成凭据，不调用真实供应商：
 
@@ -116,9 +116,38 @@ cargo run --locked --example routed_cli_probe -- --desktop-models
 
 2026-09-28 的自动检查、原生映射增删改、模拟 CLI 请求及最终复跑的钥匙串授权限制见 [模型探测与映射验收记录](docs/acceptance/M3-model-mappings-2026-09-28.md)。
 
+### ChatGPT 订阅账号路由
+
+在“上游供应商”点击“添加 ChatGPT 订阅”，SwitchX 从所选本机 Codex CLI 读取完整的内置模型资料，保存独立的订阅连接与映射。只默认选择一个模型，其余可自行发布。内置模型资料包含指令和工具配置，发布时使用普通 Responses SSE；这份列表不代表账号已开通的模型权益，权限以实际官方请求为准。
+
+再次添加会保留已有映射和选择。自动生成的公开 ID 与已有映射或本批模型冲突时，整批拒绝保存，避免覆盖用户修改。
+
+1. 在“配置与恢复”指定目标 `CODEX_HOME`，点击“登录 ChatGPT”。存在受管配置时先恢复并停止路由，再由 Codex app-server 打开官方登录页。登录可取消，等待期间锁定配置目录；取消不清除已有登录。
+2. 点击“检查并续期”，由 Codex 查询账号并请求续期。SwitchX 不读取或复制 access/refresh token，不另设刷新轮询器；登录凭据保留在 Codex 自己的存储中。该检查成功不能证明 token 实际发生了轮换。
+3. 选择订阅模型后“预览发布 → 开启路由”。新版本 CLI 提供的工作区、官方 HTTPS 目的地和区域约束在预览与启用时核对，并绑定到路由；旧版本未返回工作区资料时，固定到全球官方端点并在首个请求绑定工作区。工作区变化要求恢复后重新发布。
+4. 官方 401/403 的状态和响应正文原样返回 Codex，由 Codex 执行自己的认证恢复；界面显示失效、权限不足或工作区变化的提示。SwitchX 不重放请求，不把订阅连接用于自动备用切换。仍失败时可“恢复并重新登录”。
+5. 点击“切回 API 预览”会先恢复原配置，再取消订阅映射的发布选择，生成仅含已选 API 模型的预览。确认后点击“开启路由”，不要求订阅登录。跨官方与第三方上游时须新建会话。
+
+含订阅模型的配置使用 `requires_openai_auth = true`，通过独立 `x-switchx-local-token` 请求头校验本地访问。该本地令牌写入仅当前用户可读的配置与恢复 journal；macOS 上两者权限为 `0600`，不会转发到上游。官方模型只向已验证的 ChatGPT 目的地发送该次请求的 Bearer、工作区和允许的 Codex 协议头；API 模型丢弃这些信息并注入自己的 Key。Cookie 和任意客户端头均不复制到上游。
+
+官方路径支持 `/responses/compact` 与加密推理/compaction 输入；API 路径分别返回 501/422，要求新建会话。两条路径都拒绝 `previous_response_id` 与 `conversation` 等服务器状态引用。请求记录只保存安全的状态和错误分类，不保存官方认证、工作区 ID、正文或加密内容。
+
+实现参考 CC Switch `da193d4` 的 [官方 provider 判断](https://github.com/farion1231/cc-switch/blob/da193d4f7a6ce3710623c312245c752376c0d036/src-tauri/src/proxy/providers/codex.rs) 与 [认证透传](https://github.com/farion1231/cc-switch/blob/da193d4f7a6ce3710623c312245c752376c0d036/src-tauri/src/proxy/forwarder.rs)。本版复用 Codex 原生登录和续期，一套 `CODEX_HOME` 使用其原生账号；没有新增多账号 OAuth 凭据管理器。[Codex 认证](https://learn.chatgpt.com/docs/auth)、[app-server 账号接口](https://learn.chatgpt.com/docs/app-server)
+
+可复跑的隔离验证：
+
+```sh
+cargo run --locked --example chatgpt_route_probe
+# 可选：检查合成登录状态、恢复和 API 预览；不启用真实账号
+sh scripts/bundle-macos.sh
+cargo run --locked --example chatgpt_route_probe -- --desktop
+```
+
+探针使用合成 ChatGPT 形状凭据、本地工作区发现服务与两个本地假上游，核对原生 CLI 的订阅/API 文件工具轮次、四条完成记录，以及配置恢复后原生登录文件保留。桌面夹具的 API 连接没有 Key，只用于恢复与预览检查。2026-09-28 已通过 CLI `0.158.0-alpha.2.1` 的隔离探针；测试范围、界面截图与未完成的真实账户验收见 [订阅路由记录](docs/acceptance/M3-subscription-2026-09-28.md)。
+
 ### 真实路由验收探针
 
-`routed_live_probe` 从已有 SwitchX 数据目录中明确选择一或两个**公开模型 ID**；原目录须先由 SwitchX 升级到当前 v6。模型的能力与指令模板取自已保存资料，真实运行不使用仓库的合成模板。
+`routed_live_probe` 从已有 SwitchX 数据目录中明确选择一或两个 **API 模型的公开 ID**；原目录须先由 SwitchX 升级到当前 v6。模型的能力与指令模板取自已保存资料，真实运行不使用仓库的合成模板。此探针创建未登录的临时 `CODEX_HOME`，不用于订阅账号验收。
 
 ```sh
 cargo build --locked --bin switchx --example routed_live_probe
@@ -151,7 +180,7 @@ cargo run --locked --example routed_cli_probe -- --live-probe
 - 只在 HTTP 请求发送前建立连接失败时尝试备用。未配置备用时保持原行为；主备均连接失败返回 `no_eligible_upstream`。
 - 任何超时、请求已发出后的无响应/断线、HTTP 错误（包括 400、401、403、429、5xx）、SSE 中断、客户端取消和停止路由均不会触发切换。保留上游的 `Retry-After`，关闭 HTTP 客户端的默认协议重试，两次尝试共用 120 秒总预算。后续由 Codex 自己发起的重试属于另一个请求。
 - 主备必须使用相同的实际模型 ID，完整能力资料和指令模板一致；仅允许显示名、说明、排序和可见性不同。不同模型自动替换、能力降级或能力交集计算尚未提供；同名不代表真实能力已验证。
-- 不跟随备用模型自己的备用设置。每个新请求仍先尝试主上游；不进行并行竞速、后台探测或会话绑定。服务器状态引用、加密内容与压缩续接仍被拒绝。
+- 不跟随备用模型自己的备用设置。每个新请求仍先尝试主上游；不进行并行竞速、后台探测或会话绑定。此策略仅用于 API 连接，服务器状态引用、加密内容与压缩续接仍被拒绝；订阅连接不能作为主上游或备用上游参与自动切换。
 - 开启路由前，主备都要通过已有的凭据和 `/models` 检查。此功能处理路由开启之后的连接故障，不跳过启动时的验证。预览后任一站点或模型资料发生变化，必须重新预览。
 
 SQLite 自动升级到 v6（备用字段在 v5 引入），默认不设置备用。请求记录保存原主上游 ID、实际尝试的备用上游和固定切换原因，不保存地址、Key 或正文。独立 CLI 验收使用生产 `RouteSession` 和两个本地假上游，包含备用站点上的文件工具轮次：
@@ -171,7 +200,7 @@ cargo run --locked --example routed_cli_probe -- --desktop-fallback
 
 | 状态 | 判定 |
 | --- | --- |
-| 正常完成 | 收到完整的 `response.completed` SSE 事件，或非流式 JSON 的 `status: completed`；HTTP 200、正文中提及完成或单独的 `[DONE]` 均不足以证明完成 |
+| 正常完成 | 收到完整的 `response.completed` SSE 事件，或非流式 JSON 的 `status: completed`；官方 compact 则须收到完整、有效且包含压缩结果的 `response.compaction` JSON。HTTP 200、正文中提及完成或单独的 `[DONE]` 均不足以证明完成 |
 | 请求失败 | 上游连接失败、非成功 HTTP、`response.failed`、`response.incomplete`、SSE `error`、非流式错误或本地校验失败 |
 | 流中断 | 完成前上游读取失败/超时、缺失终态的 EOF、路由停止，或无法安全解析的响应 |
 | 用户取消 / 客户端断开 | 完成前客户端连接被释放；代理无法进一步区别主动取消和下游网络断开 |

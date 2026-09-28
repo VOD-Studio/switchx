@@ -8,18 +8,22 @@ use std::path::{Path, PathBuf};
 use slint::{ComponentHandle, Model, ModelRc, VecModel};
 use switchx::{
     app::{self, AppError, Snapshot, data_directory, load_snapshot},
-    catalog, client, config_transaction,
+    catalog, chatgpt, client, config_transaction,
     credentials::{CredentialStore, PROVIDER_KEY_SERVICE, ROUTER_TOKEN_SERVICE, Secret},
     direct,
     direct_config::{self, PreparedDirectSwitch},
     routed::RouteSession,
     storage::ProviderRecord,
 };
-use tokio::sync::mpsc::{self, error::TrySendError};
+use tokio::sync::{
+    mpsc::{self, error::TrySendError},
+    watch,
+};
 
 enum Command {
     Refresh(bool),
     RefreshRequests,
+    PollRouteStatus,
     Save {
         id: String,
         name: String,
@@ -28,13 +32,14 @@ enum Command {
         key: String,
     },
     Delete(String),
-    Check(String),
+    Check(String, String),
     FetchModels {
         scope: i32,
         generation: i32,
         provider: String,
         url: String,
         key: Secret,
+        home: String,
     },
     InspectDirect {
         id: String,
@@ -45,6 +50,11 @@ enum Command {
     InspectConfig(String),
     ImportCurrent(String),
     CheckLogin(String),
+    Subscription {
+        action: i32,
+        home: String,
+        port: String,
+    },
     SaveModel {
         provider: String,
         original_id: String,
@@ -248,6 +258,25 @@ fn home(text: &str) -> Result<PathBuf, String> {
     Ok(path)
 }
 
+async fn restore_connections(
+    session: &mut RouteSession,
+    data_dir: &Path,
+    target: &Path,
+) -> Result<(), String> {
+    if config_transaction::recovery(data_dir)?.is_some() {
+        session.restore(data_dir, target).await?;
+    } else if direct_config::active_target(data_dir)?.is_some() {
+        let result = direct_config::restore(&client::config_path(target)?, data_dir)?;
+        if !result.conflicts.is_empty() {
+            return Err(format!(
+                "配置恢复有冲突：{}；登录操作未开始",
+                result.conflicts.join("、")
+            ));
+        }
+    }
+    Ok(())
+}
+
 fn credential(provider: &ProviderRecord) -> Result<switchx::credentials::Secret, String> {
     app::provider_credential(provider)
 }
@@ -369,8 +398,10 @@ async fn worker(
 ) -> Result<(), String> {
     let mut prepared: Option<(PreparedDirectSwitch, ProviderRecord)> = None;
     let mut route_session = RouteSession::default();
+    let mut pending_login: Option<(watch::Sender<bool>, tokio::task::JoinHandle<()>)> = None;
     while let Some(command) = receiver.recv().await {
         match command {
+            Command::PollRouteStatus => {}
             Command::RefreshRequests => {
                 let result = directory
                     .as_ref()
@@ -482,22 +513,29 @@ async fn worker(
                     show_action(&app, result.map(|()| "上游已删除".into()));
                 });
             }
-            Command::Check(id) => {
+            Command::Check(id, target) => {
                 let result = directory
                     .as_ref()
                     .map_err(|error| error.message().to_owned())
                     .and_then(|path| app::load_provider(path, &id));
-                let result = match result
-                    .and_then(|provider| credential(&provider).map(|token| (provider, token)))
-                {
-                    Ok((provider, token)) => direct::check_models(&provider, token.expose())
-                        .await
-                        .map(|()| {
-                            format!(
-                                "{}：/models 已连通，目录包含 {}；Responses 工具调用尚未验证",
-                                provider.name, provider.model_id
-                            )
-                        }),
+                let result = match result {
+                    Ok(provider) if provider.id == chatgpt::PROVIDER_ID => match home(&target) {
+                        Ok(target) => chatgpt::account(&target, false)
+                            .await
+                            .map(|status| status.label().into()),
+                        Err(error) => Err(error),
+                    },
+                    Ok(provider) => match credential(&provider) {
+                        Ok(token) => direct::check_models(&provider, token.expose()).await.map(
+                            |()| {
+                                format!(
+                                    "{}：/models 已连通，目录包含 {}；Responses 工具调用尚未验证",
+                                    provider.name, provider.model_id
+                                )
+                            },
+                        ),
+                        Err(error) => Err(error),
+                    },
                     Err(error) => Err(error),
                 };
                 let _ = weak.upgrade_in_event_loop(move |app| show_action(&app, result));
@@ -508,8 +546,17 @@ async fn worker(
                 provider,
                 url,
                 key,
+                home: target,
             } => {
                 let result = async {
+                    if provider == chatgpt::PROVIDER_ID {
+                        chatgpt::require_login(&home(&target)?).await?;
+                        return Ok(chatgpt::catalog()
+                            .await?
+                            .iter()
+                            .filter_map(|model| model["slug"].as_str().map(str::to_owned))
+                            .collect::<Vec<_>>());
+                    }
                     let token = if key.expose().is_empty() {
                         let data_dir = directory.as_ref().map_err(|error| error.message())?;
                         if provider.is_empty() {
@@ -537,7 +584,15 @@ async fn worker(
                             app.set_discovery_message(if models.is_empty() {
                                 "上游返回空列表，可手动填写模型 ID".into()
                             } else {
-                                format!("已获取 {} 个模型，可从列表选择", models.len()).into()
+                                if provider == chatgpt::PROVIDER_ID {
+                                    format!(
+                                        "已读取 CLI 内置的 {} 个官方模型；账号权限以实际请求为准",
+                                        models.len()
+                                    )
+                                    .into()
+                                } else {
+                                    format!("已获取 {} 个模型，可从列表选择", models.len()).into()
+                                }
                             });
                             app.set_fetched_models(ModelRc::new(VecModel::from(
                                 models
@@ -744,6 +799,162 @@ async fn worker(
                     Err(error) => show_action(&app, Err(error)),
                 });
             }
+            Command::Subscription {
+                action,
+                home: target,
+                port,
+            } => {
+                let result: Result<String, String> = async {
+                    let target_home = home(&target)?;
+                    let data_dir = directory.as_ref().map_err(|error| error.message())?;
+                    if pending_login
+                        .as_ref()
+                        .is_some_and(|(_, task)| !task.is_finished())
+                        && action != 3
+                    {
+                        return Err("登录仍在进行；可先完成或取消登录".into());
+                    }
+                    match action {
+                        0 => {
+                            let models = chatgpt::catalog().await?;
+                            chatgpt::save_connection(data_dir, &models)?;
+                            route_session.discard_preview();
+                            let snapshot =
+                                load_snapshot(data_dir, false).map_err(|error| error.message())?;
+                            let _ = weak.upgrade_in_event_loop(move |app| {
+                                show_result(&app, Ok(snapshot));
+                                app.set_route_preview_ready(false);
+                                app.set_active_page(5);
+                            });
+                            Ok("已添加订阅连接与 CLI 内置模型资料；请登录后预览发布".to_owned())
+                        }
+                        1 => {
+                            // Reauthentication is an explicit restore-then-login operation.
+                            restore_connections(&mut route_session, data_dir, &target_home).await?;
+                            prepared = None;
+                            route_session.discard_preview();
+                            let _ = weak.upgrade_in_event_loop(move |app| {
+                                app.set_direct_preview_ready(false);
+                                app.set_route_preview_ready(false);
+                            });
+                            let login =
+                                chatgpt::Session::start(&target_home).await?.login().await?;
+                            open_provider_link(&login.url)?;
+                            let (cancel, receiver) = watch::channel(false);
+                            let id = app::new_id()?;
+                            let login_id = id.clone();
+                            let _ = weak.upgrade_in_event_loop(move |app| {
+                                app.set_chatgpt_login_id(id.into());
+                                app.set_chatgpt_login_pending(true);
+                                app.set_auth_status("正在等待官方浏览器登录…".into());
+                                app.set_direct_preview_ready(false);
+                                app.set_route_preview_ready(false);
+                            });
+                            let window = weak.clone();
+                            let task = tokio::spawn(async move {
+                                let result = login.finish(receiver).await;
+                                let _ = window.upgrade_in_event_loop(move |app| {
+                                    if app.get_chatgpt_login_id() != login_id.as_str() {
+                                        return;
+                                    }
+                                    app.set_chatgpt_login_pending(false);
+                                    match result {
+                                        Ok(status) => {
+                                            app.set_auth_status(status.label().into());
+                                            app.set_action_message(
+                                                "ChatGPT 登录已完成；可重新预览并开启路由".into(),
+                                            );
+                                        }
+                                        Err(error) => {
+                                            app.set_auth_status(error.clone().into());
+                                            app.set_action_message(error.into());
+                                        }
+                                    }
+                                });
+                            });
+                            pending_login = Some((cancel, task));
+                            Ok("已打开官方登录页；原配置已恢复，可在此取消登录".to_owned())
+                        }
+                        2 => {
+                            let status = chatgpt::account(&target_home, true).await?;
+                            let _ = weak.upgrade_in_event_loop(move |app| {
+                                app.set_auth_status(status.label().into())
+                            });
+                            status.require_chatgpt()?;
+                            Ok(
+                                "Codex 已检查订阅登录并请求续期；活跃会话的自动续期由 Codex 管理"
+                                    .to_owned(),
+                            )
+                        }
+                        3 => {
+                            if let Some((cancel, _)) = &pending_login {
+                                cancel.send_replace(true);
+                            }
+                            Ok("已请求取消官方登录".to_owned())
+                        }
+                        4 => {
+                            let port = route_port(&port)?;
+                            let helper =
+                                std::env::current_exe().map_err(|_| "无法定位 SwitchX 程序")?;
+                            let snapshot =
+                                load_snapshot(data_dir, false).map_err(|error| error.message())?;
+                            let model = snapshot
+                                .models
+                                .iter()
+                                .find(|model| {
+                                    model.enabled && model.provider_id != chatgpt::PROVIDER_ID
+                                })
+                                .ok_or("请先保存并选择至少一个 API 模型；当前路由与配置已保留")?
+                                .public_id
+                                .clone();
+                            restore_connections(&mut route_session, data_dir, &target_home).await?;
+                            prepared = None;
+                            route_session.discard_preview();
+                            let _ = weak.upgrade_in_event_loop(move |app| {
+                                app.set_direct_preview_ready(false);
+                                app.set_route_preview_ready(false);
+                            });
+                            chatgpt::deselect_models(data_dir)?;
+                            let summary = route_session
+                                .prepare(data_dir, &target_home, port, &model, &helper)
+                                .await;
+                            let snapshot =
+                                load_snapshot(data_dir, false).map_err(|error| error.message())?;
+                            let ready = summary.is_ok();
+                            let preview = summary.as_ref().ok().cloned().unwrap_or_default();
+                            let _ = weak.upgrade_in_event_loop(move |app| {
+                                app.set_route_preview_model(model.as_str().into());
+                                show_result(&app, Ok(snapshot));
+                                app.set_default_model(model.into());
+                                app.set_route_preview(preview.into());
+                                app.set_route_preview_ready(ready);
+                                app.set_active_page(2);
+                            });
+                            summary?;
+                            Ok("已准备 API 路由预览；点击“开启路由”，无需订阅登录".to_owned())
+                        }
+                        _ => Err("未知订阅操作".into()),
+                    }
+                }
+                .await;
+                let status = home(&target).ok().and_then(|path| {
+                    directory
+                        .as_ref()
+                        .ok()
+                        .and_then(|data_dir| client::inspect(&path, data_dir).ok())
+                });
+                let _ = weak.upgrade_in_event_loop(move |app| {
+                    if let Some(status) = status {
+                        show_config_status(&app, status);
+                    }
+                    if matches!(action, 1 | 2)
+                        && let Err(error) = &result
+                    {
+                        app.set_auth_status(error.as_str().into());
+                    }
+                    show_action(&app, result);
+                });
+            }
             Command::SaveModel {
                 provider,
                 original_id,
@@ -755,31 +966,33 @@ async fn worker(
                 levels,
                 default_reasoning,
             } => {
-                let result = directory
-                    .as_ref()
-                    .map_err(|error| error.message().to_owned())
-                    .and_then(|directory| {
-                        let keep_imported_reasoning =
-                            !path.trim().is_empty() && levels.trim().is_empty();
-                        app::save_mapping(
-                            directory,
-                            app::ModelInput {
-                                provider_id: &provider,
-                                original_id: &original_id,
-                                public_id: &public_id,
-                                display_name: &name,
-                                upstream_model: &upstream_model,
-                                catalog_path: &path,
-                                settings: Some(catalog::MappingSettings {
-                                    context_window: &context,
-                                    reasoning_levels: (!keep_imported_reasoning)
-                                        .then_some(levels.as_str()),
-                                    default_reasoning: (!keep_imported_reasoning)
-                                        .then_some(default_reasoning.as_str()),
-                                }),
-                            },
-                        )
-                    });
+                let result = async {
+                    let directory = directory
+                        .as_ref()
+                        .map_err(|error| error.message().to_owned())?;
+                    let keep_imported_reasoning =
+                        !path.trim().is_empty() && levels.trim().is_empty();
+                    let input = app::ModelInput {
+                        provider_id: &provider,
+                        original_id: &original_id,
+                        public_id: &public_id,
+                        display_name: &name,
+                        upstream_model: &upstream_model,
+                        catalog_path: &path,
+                        settings: Some(catalog::MappingSettings {
+                            context_window: &context,
+                            reasoning_levels: (!keep_imported_reasoning).then_some(levels.as_str()),
+                            default_reasoning: (!keep_imported_reasoning)
+                                .then_some(default_reasoning.as_str()),
+                        }),
+                    };
+                    if provider == chatgpt::PROVIDER_ID {
+                        chatgpt::save_mapping(directory, input).await
+                    } else {
+                        app::save_mapping(directory, input)
+                    }
+                }
+                .await;
                 if result.is_ok() {
                     route_session.discard_preview();
                 }
@@ -892,6 +1105,7 @@ async fn worker(
                 .await;
                 let _ = weak.upgrade_in_event_loop(move |app| {
                     app.set_direct_preview_ready(false);
+                    app.set_route_preview_model(model.as_str().into());
                     app.set_route_preview_ready(result.is_ok());
                     match result {
                         Ok(summary) => {
@@ -926,7 +1140,7 @@ async fn worker(
                     show_action(
                         &app,
                         result.map(|()| {
-                            "API 路由已开启，目录和配置已发布；请重启目标 Codex 后选择模型".into()
+                            "模型路由已开启，目录和配置已发布；请重启目标 Codex 后选择模型".into()
                         }),
                     );
                 });
@@ -940,6 +1154,10 @@ async fn worker(
                 });
             }
             Command::Quit => {
+                if let Some((cancel, task)) = pending_login.take() {
+                    cancel.send_replace(true);
+                    let _ = task.await;
+                }
                 let result = async {
                     if let Ok(directory) = &directory
                         && let Some(recovery) = config_transaction::recovery(directory)?
@@ -965,6 +1183,7 @@ async fn worker(
         }
         let running = route_session.is_running();
         let recording_failed = route_session.recording_failed();
+        let chatgpt_error = route_session.chatgpt_error();
         let address = route_session
             .address()
             .map(|address| format!("http://{address}/v1"))
@@ -978,6 +1197,7 @@ async fn worker(
                 .is_ok_and(|path| path.join("direct-journal.json").exists());
         let _ = weak.upgrade_in_event_loop(move |app| {
             app.set_route_running(running);
+            app.set_route_auth_error(chatgpt_error.unwrap_or("").into());
             if recording_failed {
                 app.set_request_error("部分请求记录写入失败；请检查数据库权限和磁盘空间".into());
             }
@@ -985,7 +1205,12 @@ async fn worker(
             app.set_config_managed(managed);
             app.set_route_status(
                 if running {
-                    format!("正在路由 · {address}")
+                    format!(
+                        "正在路由 · {address}{}",
+                        chatgpt_error
+                            .map(|error| format!("\n{error}"))
+                            .unwrap_or_default()
+                    )
                 } else if route_managed {
                     "路由未运行 · 有配置待恢复".into()
                 } else {
@@ -994,6 +1219,10 @@ async fn worker(
                 .into(),
             );
         });
+    }
+    if let Some((cancel, task)) = pending_login {
+        cancel.send_replace(true);
+        let _ = task.await;
     }
     // Also recover when the platform exits the event loop without using our tray.
     if let Ok(directory) = &directory
@@ -1205,7 +1434,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let weak = app.as_weak();
     app.on_check_provider(move |id| {
         if let Some(app) = weak.upgrade() {
-            queue(&app, &callback_sender, Command::Check(id.into()));
+            queue(
+                &app,
+                &callback_sender,
+                Command::Check(id.into(), app.get_config_home().into()),
+            );
         }
     });
     let callback_sender = sender.clone();
@@ -1246,6 +1479,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 provider,
                 url,
                 key,
+                home: app.get_config_home().into(),
             },
         );
         app.set_fetching_models(app.get_busy());
@@ -1301,6 +1535,30 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     app.on_check_login(move |home| {
         if let Some(app) = weak.upgrade() {
             queue(&app, &callback_sender, Command::CheckLogin(home.into()));
+        }
+    });
+    let callback_sender = sender.clone();
+    let weak = app.as_weak();
+    app.on_subscription_action(move |action| {
+        if let Some(app) = weak.upgrade() {
+            queue(
+                &app,
+                &callback_sender,
+                Command::Subscription {
+                    action,
+                    home: app.get_config_home().into(),
+                    port: app.get_route_port().into(),
+                },
+            );
+        }
+    });
+    let callback_sender = sender.clone();
+    let weak = app.as_weak();
+    app.on_poll_route_status(move || {
+        if let Some(app) = weak.upgrade()
+            && !app.get_busy()
+        {
+            let _ = callback_sender.try_send(Command::PollRouteStatus);
         }
     });
     let callback_sender = sender.clone();
@@ -1392,12 +1650,20 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         let Some(primary) = models.iter().find(|model| model.public_id == public_id) else {
             return;
         };
+        if primary.provider_id == chatgpt::PROVIDER_ID {
+            show_action(
+                &app,
+                Err("订阅账号不参与自动备用；请恢复后明确切换账号或 API 上游".into()),
+            );
+            return;
+        }
         let providers = app.get_providers();
         let mut ids = vec![slint::SharedString::default()];
         let mut labels = vec![slint::SharedString::from("不使用备用上游")];
         let mut selected = 0;
         for model in models.iter().filter(|model| {
             model.ready
+                && model.provider_id != chatgpt::PROVIDER_ID
                 && model.provider_id != primary.provider_id
                 && model.upstream_model == primary.upstream_model
         }) {

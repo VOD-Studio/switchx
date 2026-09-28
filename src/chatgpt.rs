@@ -501,6 +501,27 @@ pub async fn require_login(home: &Path) -> Result<(), String> {
     workspace(home).await.map(|_| ())
 }
 
+pub fn deselect_models(data_dir: &Path) -> Result<(), String> {
+    app::ensure_editable(data_dir)?;
+    let store = app::open_store(data_dir).map_err(|error| error.message())?;
+    let Some(provider) = store
+        .provider(PROVIDER_ID)
+        .map_err(|_| "无法读取订阅连接")?
+    else {
+        return Ok(());
+    };
+    validate_provider(&provider)?;
+    let mut models = store.models().map_err(|_| "无法读取订阅模型")?;
+    models.retain(|model| model.provider_id == PROVIDER_ID && model.enabled);
+    for model in &mut models {
+        model.enabled = false;
+    }
+    // Preserve every API mapping and update all subscription choices in one transaction.
+    store
+        .put_provider_with_models(&provider, &models)
+        .map_err(|_| "无法取消订阅模型选择；本批未保存".into())
+}
+
 pub async fn workspace(home: &Path) -> Result<Option<Workspace>, String> {
     let (status, workspace) = Session::start(home).await?.read_account(false).await?;
     status.require_chatgpt()?;
@@ -786,6 +807,59 @@ done
         let store = app::open_store(&path).unwrap();
         assert!(store.models().unwrap().is_empty());
         assert!(store.provider(PROVIDER_ID).unwrap().is_none());
+        drop(store);
+        std::fs::remove_dir_all(path).unwrap();
+    }
+
+    #[test]
+    fn api_return_deselects_all_subscription_models_and_preserves_api_mappings() {
+        let path = std::env::temp_dir().join(format!(
+            "switchx-subscription-selection-test-{}",
+            app::new_id().unwrap()
+        ));
+        let fixture: Value =
+            serde_json::from_str(include_str!("../tests/fixtures/synthetic-models.json")).unwrap();
+        save_connection(&path, fixture["models"].as_array().unwrap()).unwrap();
+        let store = app::open_store(&path).unwrap();
+        let provider = store.provider(PROVIDER_ID).unwrap().unwrap();
+        let official = store.models().unwrap();
+        for model in &official {
+            app::select_model(&path, &model.public_id, true).unwrap();
+        }
+        let api_provider = ProviderRecord {
+            id: "fixture-api".into(),
+            name: "Fixture API".into(),
+            base_url: "https://example.invalid/v1".into(),
+            model_id: official[0].upstream_model.clone(),
+            credential_ref: None,
+        };
+        let api = ModelRecord {
+            provider_id: api_provider.id.clone(),
+            public_id: "sx-fixture-api".into(),
+            enabled: true,
+            ..official[0].clone()
+        };
+        store
+            .put_provider_with_models(&api_provider, std::slice::from_ref(&api))
+            .unwrap();
+        deselect_models(&path).unwrap();
+        let saved = store.models().unwrap();
+        assert_eq!(saved.len(), official.len() + 1);
+        assert_eq!(
+            saved
+                .iter()
+                .find(|model| model.provider_id == api_provider.id),
+            Some(&api)
+        );
+        for model in official {
+            assert!(saved.contains(&ModelRecord {
+                enabled: false,
+                ..model
+            }));
+        }
+        assert_eq!(store.provider(PROVIDER_ID).unwrap(), Some(provider));
+        deselect_models(&path).unwrap();
+        assert_eq!(store.models().unwrap(), saved);
         drop(store);
         std::fs::remove_dir_all(path).unwrap();
     }

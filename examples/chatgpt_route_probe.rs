@@ -416,6 +416,15 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 && std::fs::read_to_string(home.join("auth.json"))? == AUTH,
             "desktop changed original config or native auth",
         )?;
+        let enabled = store
+            .models()?
+            .into_iter()
+            .filter(|model| model.enabled)
+            .collect::<Vec<_>>();
+        check(
+            enabled.len() == 1 && enabled[0].public_id == "sx-api",
+            "desktop API return did not retain only the selected API model",
+        )?;
     }
     discovery_task.abort();
     println!(
