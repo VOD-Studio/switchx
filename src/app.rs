@@ -412,6 +412,12 @@ fn request_error_message(code: &str) -> &'static str {
         "invalid_upstream_event" | "invalid_upstream_response" => "上游响应格式无效",
         "upstream_event_too_large" | "upstream_body_too_large" => "上游响应超过读取上限",
         "unknown_model" => "模型未发布",
+        "chatgpt_unauthorized" => "官方认证被拒绝；Codex 会尝试续期，仍失败时请恢复并重新登录",
+        "chatgpt_forbidden" => "官方账号没有此模型或工作区权限，请检查订阅与模型选择",
+        "chatgpt_account_changed" => "工作区已变化，请恢复并重新发布路由",
+        "chatgpt_auth_required" | "chatgpt_account_required" => {
+            "缺少订阅认证或工作区，请在目标 Codex 中完成 ChatGPT 登录"
+        }
         "unsupported_capability" => "请求包含暂不支持的会话状态",
         _ => "本地请求校验或转发失败",
     }
@@ -572,15 +578,19 @@ fn provider_view(
     credentials: &CredentialStore,
     check_credentials: bool,
 ) -> ProviderView {
-    let credential_status = match provider.credential_ref.as_deref() {
-        None => "未配置凭据",
-        Some(_) if !check_credentials => "凭据未检查",
-        Some(reference) => match credentials.get(reference) {
-            Ok(_) => "凭据可读取",
-            Err(CredentialError::Missing) => "凭据缺失",
-            Err(CredentialError::InvalidReference) => "凭据引用无效",
-            Err(CredentialError::Unavailable) => "系统凭据不可用",
-        },
+    let credential_status = if provider.id == crate::chatgpt::PROVIDER_ID {
+        "登录与续期由目标 Codex 管理"
+    } else {
+        match provider.credential_ref.as_deref() {
+            None => "未配置凭据",
+            Some(_) if !check_credentials => "凭据未检查",
+            Some(reference) => match credentials.get(reference) {
+                Ok(_) => "凭据可读取",
+                Err(CredentialError::Missing) => "凭据缺失",
+                Err(CredentialError::InvalidReference) => "凭据引用无效",
+                Err(CredentialError::Unavailable) => "系统凭据不可用",
+            },
+        }
     };
     let preset_id = provider_preset(&provider.base_url)
         .map(|preset| preset.id)
@@ -611,6 +621,9 @@ pub fn save_provider(
     key: String,
 ) -> Result<(), String> {
     ensure_editable(data_dir)?;
+    if id == Some(crate::chatgpt::PROVIDER_ID) {
+        return Err("订阅连接由 Codex 管理；不能改为 API Key 或第三方地址".into());
+    }
     let url = validate_provider(name, base_url, model_id)?;
     let store = open_store(data_dir).map_err(|error| error.message())?;
     let old = match id {
@@ -745,6 +758,14 @@ pub struct ModelInput<'a> {
 }
 
 pub fn save_mapping(data_dir: &Path, input: ModelInput<'_>) -> Result<(), String> {
+    save_mapping_from(data_dir, input, None)
+}
+
+pub(crate) fn save_mapping_from(
+    data_dir: &Path,
+    input: ModelInput<'_>,
+    source: Option<serde_json::Value>,
+) -> Result<(), String> {
     ensure_editable(data_dir)?;
     let store = open_store(data_dir).map_err(|error| error.message())?;
     let provider = store
@@ -778,7 +799,9 @@ pub fn save_mapping(data_dir: &Path, input: ModelInput<'_>) -> Result<(), String
     }) {
         return Err("此上游已有该实际模型的映射，请编辑已有条目".into());
     }
-    let source = if input.catalog_path.trim().is_empty() {
+    let source = if source.is_some() {
+        source
+    } else if input.catalog_path.trim().is_empty() {
         old.filter(|model| model.upstream_model == input.upstream_model)
             .map(|model| serde_json::from_str(&model.metadata).map_err(|_| "已保存的模型资料损坏"))
             .transpose()?
@@ -868,6 +891,12 @@ pub fn save_fallback(
         .find(|model| model.public_id == public_id)
         .ok_or("请先导入主上游模型资料")?
         .clone();
+    if fallback_id.is_some()
+        && (model.provider_id == crate::chatgpt::PROVIDER_ID
+            || fallback_id == Some(crate::chatgpt::PROVIDER_ID))
+    {
+        return Err("订阅账号不参与自动备用切换，请主动选择目标模型".into());
+    }
     model.fallback_provider_id = fallback_id.map(str::to_owned);
     catalog::validate_fallback(&model, &models)?;
     if let Some(fallback_id) = fallback_id {
@@ -905,6 +934,9 @@ pub fn delete_model(data_dir: &Path, public_id: &str) -> Result<(), String> {
 }
 
 pub fn provider_credential(provider: &ProviderRecord) -> Result<Secret, String> {
+    if provider.id == crate::chatgpt::PROVIDER_ID {
+        return Err("订阅凭据由目标 Codex 管理，请使用官方登录".into());
+    }
     let reference = provider
         .credential_ref
         .as_deref()
@@ -914,7 +946,7 @@ pub fn provider_credential(provider: &ProviderRecord) -> Result<Secret, String> 
         .map_err(|_| "无法读取上游 API Key".into())
 }
 
-fn ensure_editable(data_dir: &Path) -> Result<(), String> {
+pub(crate) fn ensure_editable(data_dir: &Path) -> Result<(), String> {
     if data_dir.join("direct-journal.json").exists()
         || data_dir.join("switch-journal.json").exists()
     {

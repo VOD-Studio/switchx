@@ -217,6 +217,321 @@ async fn records_real_terminal_signals_and_safe_errors_without_changing_stream_b
 
 const RECORD_TOKEN: &str = "synthetic-local-token-for-request-records-12345";
 
+const OFFICIAL_SSE: &str = "event: response.output_item.done\ndata: {\"type\":\"response.output_item.done\",\"item\":{\"type\":\"function_call\",\"name\":\"exec_command\",\"call_id\":\"fixture-call\",\"arguments\":\"{}\"}}\n\nevent: response.completed\ndata: {\"type\":\"response.completed\",\"response\":{\"id\":\"fixture-response\",\"status\":\"completed\"}}\n\n";
+
+async fn official_mock(
+    State(captured): State<mpsc::Sender<(HeaderMap, Value, String)>>,
+    uri: axum::http::Uri,
+    headers: HeaderMap,
+    Json(body): Json<Value>,
+) -> Response {
+    captured
+        .send((headers, body.clone(), uri.path().into()))
+        .await
+        .unwrap();
+    match body["input"].as_str() {
+        Some("expire") => (StatusCode::UNAUTHORIZED, Json(json!({"error":{"message":"synthetic-expired-body"}}))).into_response(),
+        Some("denied") => (StatusCode::FORBIDDEN, Json(json!({"error":{"message":"synthetic-denied-body"}}))).into_response(),
+        _ if uri.path().ends_with("/compact") => Json(json!({"object":"response.compaction","output":[{"type":"compaction","encrypted_content":"synthetic-compact-content"}]})).into_response(),
+        _ => Response::builder().header(header::CONTENT_TYPE, "text/event-stream")
+            .header("x-codex-turn-state", "synthetic-turn-state")
+            .body(Body::from(OFFICIAL_SSE)).unwrap(),
+    }
+}
+
+#[tokio::test]
+async fn subscription_forwarding_refresh_failure_workspace_pin_and_api_switch_are_isolated() {
+    let mock_listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let mock_address = mock_listener.local_addr().unwrap();
+    let (captured, mut official_seen) = mpsc::channel(16);
+    let mock = Router::new()
+        .route("/responses", post(official_mock))
+        .route("/responses/compact", post(official_mock))
+        .with_state(captured);
+    let official_task =
+        tokio::spawn(async move { axum::serve(mock_listener, mock).await.unwrap() });
+    let (api_address, mut api_seen, _, api_task) = spawn_mock("/responses", false).await;
+    let templates = serde_json::from_str(include_str!("fixtures/synthetic-models.json")).unwrap();
+    let publication = publish(
+        &templates,
+        &[
+            Selection {
+                public_id: "sx-account",
+                display_name: "Account",
+                provider_id: "official",
+                upstream_model: "gpt-5.5",
+            },
+            Selection {
+                public_id: "sx-api",
+                display_name: "API",
+                provider_id: "api",
+                upstream_model: "gpt-5.5",
+            },
+        ],
+    )
+    .unwrap();
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let records = RequestDatabase::new();
+    let state = RouterState::new(
+        address,
+        RECORD_TOKEN.into(),
+        publication,
+        HashMap::from([
+            (
+                "official".into(),
+                Upstream::chatgpt_mock(mock_address).unwrap(),
+            ),
+            (
+                "api".into(),
+                Upstream::new(
+                    &format!("http://{api_address}"),
+                    "synthetic-api-only-key".into(),
+                )
+                .unwrap(),
+            ),
+        ]),
+    )
+    .unwrap()
+    .with_request_log(records.store(), "subscription-fixture".into());
+    let running = RunningRouter::start(listener, state).unwrap();
+    let client = reqwest::Client::builder().no_proxy().build().unwrap();
+    let url = format!("http://{address}/v1/responses");
+    let authorized = |model: &str, input: Value, bearer: &str, workspace: &str| {
+        client
+            .post(&url)
+            .header(LOCAL_TOKEN_HEADER, RECORD_TOKEN)
+            .bearer_auth(bearer)
+            .header("chatgpt-account-id", workspace)
+            .header(header::CONTENT_TYPE, "application/json")
+            .body(json!({"model":model,"input":input}).to_string())
+    };
+
+    let missing_local = request(&client, address, json!({"model":"sx-account"}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(missing_local.status(), StatusCode::UNAUTHORIZED);
+    let invalid = authorized(
+        "sx-account",
+        json!("invalid"),
+        "PROXY_MANAGED",
+        "fixture-workspace",
+    )
+    .send()
+    .await
+    .unwrap();
+    assert_eq!(invalid.status(), StatusCode::UNAUTHORIZED);
+    assert!(official_seen.try_recv().is_err());
+
+    for (input, status, code) in [
+        ("expire", StatusCode::UNAUTHORIZED, "chatgpt_unauthorized"),
+        ("denied", StatusCode::FORBIDDEN, "chatgpt_forbidden"),
+    ] {
+        let response = authorized(
+            "sx-account",
+            json!(input),
+            "synthetic-native-old-access",
+            "fixture-workspace",
+        )
+        .send()
+        .await
+        .unwrap();
+        assert_eq!(response.status(), status);
+        let id = response.headers()[REQUEST_ID_HEADER]
+            .to_str()
+            .unwrap()
+            .to_owned();
+        let expected = if input == "expire" {
+            "synthetic-expired-body"
+        } else {
+            "synthetic-denied-body"
+        };
+        assert!(response.text().await.unwrap().contains(expected));
+        assert_eq!(
+            records.wait_for(&id).await.error_code.as_deref(),
+            Some(code)
+        );
+        assert!(running.chatgpt_error().is_some());
+        let (headers, body, _) = official_seen.recv().await.unwrap();
+        assert_eq!(
+            headers[header::AUTHORIZATION],
+            "Bearer synthetic-native-old-access"
+        );
+        assert_eq!(body["model"], "gpt-5.5");
+        assert!(api_seen.try_recv().is_err());
+    }
+
+    let input = json!([
+        {"type":"reasoning","encrypted_content":"synthetic-encrypted-reasoning"},
+        {"type":"function_call_output","call_id":"fixture-call","output":"synthetic-tool-result"},
+    ]);
+    let body = json!({"model":"sx-account","input":input,"tools":[{"type":"function","name":"exec_command","parameters":{"type":"object"}}],"stream":true});
+    let compressed = zstd::stream::encode_all(body.to_string().as_bytes(), 1).unwrap();
+    let response = client
+        .post(&url)
+        .header(LOCAL_TOKEN_HEADER, RECORD_TOKEN)
+        .bearer_auth("synthetic-native-renewed-access")
+        .header("chatgpt-account-id", "fixture-workspace")
+        .header(header::CONTENT_TYPE, "application/json")
+        .header(header::CONTENT_ENCODING, "zstd")
+        .header("session_id", "fixture-session")
+        .header("x-codex-turn-state", "synthetic-prior-turn")
+        .header("originator", "codex_cli_rs")
+        .header("x-openai-account-routing-override", "NO_CONSTRAINT")
+        .header("x-codex-routing-hint", "synthetic-routing-hint")
+        .header(header::COOKIE, "synthetic-cookie-secret")
+        .header(header::PROXY_AUTHORIZATION, "synthetic-proxy-secret")
+        .header("x-arbitrary-secret", "synthetic-header-secret")
+        .body(compressed)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(
+        response.headers()["x-codex-turn-state"],
+        "synthetic-turn-state"
+    );
+    let id = response.headers()[REQUEST_ID_HEADER]
+        .to_str()
+        .unwrap()
+        .to_owned();
+    assert_eq!(response.text().await.unwrap(), OFFICIAL_SSE);
+    assert_eq!(records.wait_for(&id).await.status, RequestStatus::Completed);
+    assert!(running.chatgpt_error().is_none());
+    let (headers, forwarded, path) = official_seen.recv().await.unwrap();
+    let mut expected = body;
+    expected["model"] = "gpt-5.5".into();
+    assert_eq!(forwarded, expected);
+    assert_eq!(path, "/responses");
+    assert_eq!(
+        headers[header::AUTHORIZATION],
+        "Bearer synthetic-native-renewed-access"
+    );
+    assert_eq!(headers["chatgpt-account-id"], "fixture-workspace");
+    assert_eq!(headers["session_id"], "fixture-session");
+    assert_eq!(headers["x-codex-turn-state"], "synthetic-prior-turn");
+    assert_eq!(
+        headers["x-openai-account-routing-override"],
+        "NO_CONSTRAINT"
+    );
+    assert_eq!(headers["x-codex-routing-hint"], "synthetic-routing-hint");
+    for name in [
+        LOCAL_TOKEN_HEADER,
+        "cookie",
+        "proxy-authorization",
+        "x-arbitrary-secret",
+        "content-encoding",
+    ] {
+        assert!(!headers.contains_key(name));
+    }
+
+    let response = authorized(
+        "sx-account",
+        json!("changed-account"),
+        "synthetic-native-other-access",
+        "other-workspace",
+    )
+    .send()
+    .await
+    .unwrap();
+    assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+    assert_eq!(
+        serde_json::from_slice::<Value>(&response.bytes().await.unwrap()).unwrap()["error"]["code"],
+        "chatgpt_account_changed"
+    );
+    assert!(official_seen.try_recv().is_err());
+    assert!(running.chatgpt_error().unwrap().contains("变化"));
+
+    let response = authorized(
+        "sx-api",
+        json!("new-api-session"),
+        "synthetic-native-renewed-access",
+        "fixture-workspace",
+    )
+    .header("session_id", "fixture-session")
+    .header("x-openai-account-routing-override", "NO_CONSTRAINT")
+    .header("x-codex-routing-hint", "synthetic-routing-hint")
+    .send()
+    .await
+    .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    response.bytes().await.unwrap();
+    let captured = api_seen.recv().await.unwrap();
+    assert_eq!(
+        captured.authorization.as_deref(),
+        Some("Bearer synthetic-api-only-key")
+    );
+    assert!(
+        captured.chatgpt_account.is_none()
+            && captured.account.is_none()
+            && captured.local_token.is_none()
+            && captured.routing_override.is_none()
+            && captured.routing_hint.is_none()
+    );
+    let response = authorized(
+        "sx-api",
+        input,
+        "synthetic-native-renewed-access",
+        "fixture-workspace",
+    )
+    .send()
+    .await
+    .unwrap();
+    assert_eq!(response.status(), StatusCode::UNPROCESSABLE_ENTITY);
+    assert!(api_seen.try_recv().is_err());
+
+    let response = client
+        .post(format!("{url}/compact"))
+        .header(LOCAL_TOKEN_HEADER, RECORD_TOKEN)
+        .bearer_auth("synthetic-native-renewed-access")
+        .header("chatgpt-account-id", "fixture-workspace")
+        .header(header::CONTENT_TYPE, "application/json")
+        .body(json!({"model":"sx-account","input":[]}).to_string())
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let id = response.headers()[REQUEST_ID_HEADER]
+        .to_str()
+        .unwrap()
+        .to_owned();
+    assert_eq!(
+        serde_json::from_slice::<Value>(&response.bytes().await.unwrap()).unwrap()["object"],
+        "response.compaction"
+    );
+    assert_eq!(records.wait_for(&id).await.status, RequestStatus::Completed);
+    let (_, body, path) = official_seen.recv().await.unwrap();
+    assert_eq!(path, "/responses/compact");
+    assert_eq!(body["model"], "gpt-5.5");
+    let response = client
+        .post(format!("{url}/compact"))
+        .header(LOCAL_TOKEN_HEADER, RECORD_TOKEN)
+        .header(header::CONTENT_TYPE, "application/json")
+        .body(json!({"model":"sx-api","input":[]}).to_string())
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::NOT_IMPLEMENTED);
+    assert!(api_seen.try_recv().is_err());
+
+    running.stop().await;
+    let database = String::from_utf8_lossy(&std::fs::read(&records.0).unwrap()).into_owned();
+    for secret in [
+        "synthetic-native-old-access",
+        "synthetic-native-renewed-access",
+        "fixture-workspace",
+        "synthetic-encrypted-reasoning",
+        "synthetic-cookie-secret",
+        "synthetic-compact-content",
+        RECORD_TOKEN,
+    ] {
+        assert!(!database.contains(secret));
+    }
+    official_task.abort();
+    api_task.abort();
+}
+
 fn request(
     client: &reqwest::Client,
     address: std::net::SocketAddr,
@@ -571,6 +886,8 @@ struct Captured {
     account: Option<String>,
     chatgpt_account: Option<String>,
     local_token: Option<String>,
+    routing_override: Option<String>,
+    routing_hint: Option<String>,
     model: String,
 }
 
@@ -604,6 +921,12 @@ async fn mock_upstream(
                 .map(|v| v.to_str().unwrap().to_owned()),
             local_token: headers
                 .get(LOCAL_TOKEN_HEADER)
+                .map(|v| v.to_str().unwrap().to_owned()),
+            routing_override: headers
+                .get("x-openai-account-routing-override")
+                .map(|v| v.to_str().unwrap().to_owned()),
+            routing_hint: headers
+                .get("x-codex-routing-hint")
                 .map(|v| v.to_str().unwrap().to_owned()),
             model: model.clone(),
         })

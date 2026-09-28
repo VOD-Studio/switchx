@@ -3,8 +3,8 @@ use std::{
     io::Read,
     net::{IpAddr, Ipv4Addr, SocketAddr},
     sync::{
-        Arc,
-        atomic::{AtomicBool, Ordering},
+        Arc, Mutex,
+        atomic::{AtomicBool, AtomicU8, Ordering},
     },
     time::{Duration, Instant},
 };
@@ -13,7 +13,7 @@ use axum::{
     Json, Router,
     body::{Body, Bytes},
     extract::{DefaultBodyLimit, State},
-    http::{HeaderMap, StatusCode, header},
+    http::{HeaderMap, HeaderValue, StatusCode, header},
     response::{IntoResponse, Response},
     routing::{get, post},
 };
@@ -39,7 +39,15 @@ const MAX_BODY_BYTES: usize = 2 * 1024 * 1024;
 
 pub struct Upstream {
     responses_url: Url,
-    api_key: Secret,
+    auth: UpstreamAuth,
+}
+
+enum UpstreamAuth {
+    ApiKey(Secret),
+    Chatgpt {
+        account: Mutex<Option<HeaderValue>>,
+        routing_override: Option<HeaderValue>,
+    },
 }
 
 impl Upstream {
@@ -68,8 +76,155 @@ impl Upstream {
         url.set_path(&path);
         Ok(Self {
             responses_url: url,
-            api_key,
+            auth: UpstreamAuth::ApiKey(api_key),
         })
+    }
+
+    pub fn chatgpt() -> Self {
+        Self {
+            responses_url: Url::parse(&format!("{}/responses", crate::chatgpt::BASE_URL)).unwrap(),
+            auth: UpstreamAuth::Chatgpt {
+                account: Mutex::new(None),
+                routing_override: None,
+            },
+        }
+    }
+
+    pub fn chatgpt_for_workspace(workspace: &crate::chatgpt::Workspace) -> Result<Self, String> {
+        workspace.validate()?;
+        Ok(Self {
+            responses_url: Url::parse(&format!(
+                "{}/backend-api/codex/responses",
+                workspace.backend_origin
+            ))
+            .map_err(|_| "invalid official workspace origin")?,
+            auth: UpstreamAuth::Chatgpt {
+                account: Mutex::new(Some(
+                    HeaderValue::from_str(&workspace.account_id)
+                        .map_err(|_| "invalid official workspace")?,
+                )),
+                routing_override: Some(
+                    HeaderValue::from_str(&workspace.routing_override)
+                        .map_err(|_| "invalid official workspace routing")?,
+                ),
+            },
+        })
+    }
+
+    /// Synthetic probes only. The product uses a validated official HTTPS destination.
+    pub fn chatgpt_mock(address: SocketAddr) -> Result<Self, String> {
+        if address.ip() != IpAddr::V4(Ipv4Addr::LOCALHOST) {
+            return Err("mock must use IPv4 loopback".into());
+        }
+        let mut upstream = Self::chatgpt();
+        upstream.responses_url = Url::parse(&format!("http://{address}/responses")).unwrap();
+        Ok(upstream)
+    }
+
+    fn is_chatgpt(&self) -> bool {
+        matches!(self.auth, UpstreamAuth::Chatgpt { .. })
+    }
+
+    fn outbound_headers(
+        &self,
+        headers: &HeaderMap,
+        local_token: &Secret,
+    ) -> Result<HeaderMap, &'static str> {
+        let mut output = HeaderMap::new();
+        match &self.auth {
+            UpstreamAuth::ApiKey(key) => {
+                let mut bearer = HeaderValue::from_str(&format!("Bearer {}", key.expose()))
+                    .map_err(|_| "invalid_upstream_credential")?;
+                bearer.set_sensitive(true);
+                output.insert(header::AUTHORIZATION, bearer);
+            }
+            UpstreamAuth::Chatgpt {
+                account,
+                routing_override,
+            } => {
+                let mut values = headers.get_all(header::AUTHORIZATION).iter();
+                let bearer = values
+                    .next()
+                    .filter(|_| values.next().is_none())
+                    .ok_or("chatgpt_auth_required")?;
+                if bearer
+                    .to_str()
+                    .ok()
+                    .and_then(|value| value.strip_prefix("Bearer "))
+                    .is_none_or(|value| {
+                        value.is_empty()
+                            || value.len() > 16384
+                            || value.contains(char::is_whitespace)
+                            || value.starts_with("sk-")
+                            || value.contains("PROXY_MANAGED")
+                            || value == local_token.expose()
+                    })
+                {
+                    return Err("chatgpt_auth_required");
+                }
+                let mut values = headers.get_all(crate::chatgpt::ACCOUNT_HEADER).iter();
+                let supplied = values
+                    .next()
+                    .filter(|_| values.next().is_none())
+                    .ok_or("chatgpt_account_required")?;
+                if !supplied.to_str().is_ok_and(|value| {
+                    !value.is_empty()
+                        && value.len() <= 256
+                        && value
+                            .bytes()
+                            .all(|byte| byte.is_ascii_alphanumeric() || b"-_".contains(&byte))
+                }) {
+                    return Err("chatgpt_account_required");
+                }
+                let mut pinned = account.lock().map_err(|_| "chatgpt_account_unavailable")?;
+                if pinned.as_ref().is_some_and(|account| account != supplied) {
+                    return Err("chatgpt_account_changed");
+                }
+                if pinned.is_none() {
+                    *pinned = Some(supplied.clone());
+                }
+                let mut overrides = headers.get_all("x-openai-account-routing-override").iter();
+                let supplied_override = overrides.next();
+                if overrides.next().is_some()
+                    || supplied_override.is_some_and(|value| {
+                        !matches!(value.to_str(), Ok("NO_CONSTRAINT" | "us" | "us_cr"))
+                            || routing_override
+                                .as_ref()
+                                .is_some_and(|expected| expected != value)
+                    })
+                {
+                    return Err("chatgpt_account_changed");
+                }
+                if let Some(value) = routing_override.as_ref().or(supplied_override) {
+                    output.insert("x-openai-account-routing-override", value.clone());
+                }
+                let mut bearer = bearer.clone();
+                bearer.set_sensitive(true);
+                output.insert(header::AUTHORIZATION, bearer);
+                // No cookies, local credentials, proxy auth or arbitrary client headers.
+                for name in [
+                    crate::chatgpt::ACCOUNT_HEADER,
+                    "accept",
+                    "user-agent",
+                    "openai-beta",
+                    "originator",
+                    "version",
+                    "session_id",
+                    "x-client-request-id",
+                    "x-codex-turn-metadata",
+                    "x-codex-turn-state",
+                    "x-codex-routing-hint",
+                    "x-codex-beta-features",
+                    "x-codex-session-id",
+                    "x-codex-turn-id",
+                ] {
+                    if let Some(value) = headers.get(name) {
+                        output.insert(axum::http::HeaderName::from_static(name), value.clone());
+                    }
+                }
+            }
+        }
+        Ok(output)
     }
 }
 
@@ -83,6 +238,8 @@ pub struct RouterState {
     accepting: Arc<AtomicBool>,
     cancel: watch::Sender<bool>,
     request_log: Option<Arc<RequestLog>>,
+    chatgpt_error: Arc<AtomicU8>,
+    uses_chatgpt: bool,
 }
 
 impl RouterState {
@@ -110,7 +267,13 @@ impl RouterState {
                     binding.provider_id
                 ));
             }
+            if binding.fallback_provider_id.as_ref().is_some_and(|id| {
+                upstreams[&binding.provider_id].is_chatgpt() || upstreams[id].is_chatgpt()
+            }) {
+                return Err("ChatGPT accounts cannot participate in automatic fallback".into());
+            }
         }
+        let uses_chatgpt = upstreams.values().any(Upstream::is_chatgpt);
         let client = Client::builder()
             .redirect(Policy::none())
             .no_proxy()
@@ -128,6 +291,8 @@ impl RouterState {
             accepting: Arc::new(AtomicBool::new(true)),
             cancel: watch::channel(false).0,
             request_log: None,
+            chatgpt_error: Arc::new(AtomicU8::new(0)),
+            uses_chatgpt,
         })
     }
 
@@ -143,6 +308,7 @@ pub struct RunningRouter {
     shutdown: Option<oneshot::Sender<()>>,
     task: JoinHandle<()>,
     request_log: Option<Arc<RequestLog>>,
+    chatgpt_error: Arc<AtomicU8>,
 }
 
 impl RunningRouter {
@@ -158,6 +324,7 @@ impl RunningRouter {
         let accepting = state.accepting.clone();
         let cancel = state.cancel.clone();
         let request_log = state.request_log.clone();
+        let chatgpt_error = state.chatgpt_error.clone();
         let (shutdown, stopped) = oneshot::channel();
         let task = tokio::spawn(async move {
             let _ = axum::serve(listener, router(state))
@@ -172,6 +339,7 @@ impl RunningRouter {
             shutdown: Some(shutdown),
             task,
             request_log,
+            chatgpt_error,
         })
     }
 
@@ -187,6 +355,15 @@ impl RunningRouter {
 
     pub fn pause(&self) {
         self.accepting.store(false, Ordering::SeqCst);
+    }
+
+    pub fn chatgpt_error(&self) -> Option<&'static str> {
+        match self.chatgpt_error.load(Ordering::Relaxed) {
+            1 => Some("官方认证被拒绝；Codex 会尝试续期，仍失败时请恢复并重新登录"),
+            2 => Some("官方账号没有此模型或工作区权限，请检查订阅与模型选择"),
+            3 => Some("官方工作区已变化，请恢复并重新发布路由"),
+            _ => None,
+        }
     }
 
     pub fn resume(&self) {
@@ -283,11 +460,13 @@ fn authorize(headers: &HeaderMap, state: &RouterState) -> Option<Response> {
         } else {
             value.to_str().ok()
         }
-    } else {
+    } else if !state.uses_chatgpt {
         headers
             .get(header::AUTHORIZATION)
             .and_then(|v| v.to_str().ok())
             .and_then(|v| v.strip_prefix("Bearer "))
+    } else {
+        None
     };
     let valid = presented
         .map(|token| {
@@ -329,21 +508,27 @@ async fn models(State(state): State<Arc<RouterState>>, headers: HeaderMap) -> Re
     Json(json!({ "object": "list", "data": data })).into_response()
 }
 
-async fn compact(State(state): State<Arc<RouterState>>, headers: HeaderMap) -> Response {
-    if let Some(response) = authorize(&headers, &state) {
-        return response;
-    }
-    error(
-        StatusCode::NOT_IMPLEMENTED,
-        "unsupported_endpoint",
-        "responses/compact is not implemented",
-    )
+async fn compact(
+    State(state): State<Arc<RouterState>>,
+    headers: HeaderMap,
+    body: Bytes,
+) -> Response {
+    forward(state, headers, body, true).await
 }
 
 async fn responses(
     State(state): State<Arc<RouterState>>,
     headers: HeaderMap,
     body: Bytes,
+) -> Response {
+    forward(state, headers, body, false).await
+}
+
+async fn forward(
+    state: Arc<RouterState>,
+    headers: HeaderMap,
+    body: Bytes,
+    compact: bool,
 ) -> Response {
     if let Some(response) = authorize(&headers, &state) {
         return response;
@@ -459,20 +644,53 @@ async fn responses(
     };
     tracker.record.provider_id = Some(binding.provider_id.clone());
     tracker.record.upstream_model = Some(binding.upstream_model.clone());
+    let official = state.upstreams[&binding.provider_id].is_chatgpt();
+    if compact && !official {
+        return request_error(
+            &mut tracker,
+            StatusCode::NOT_IMPLEMENTED,
+            "unsupported_endpoint",
+            "compact is only available for the official subscription route",
+        );
+    }
+    let outbound_headers = match state.upstreams[&binding.provider_id]
+        .outbound_headers(&headers, &state.local_token)
+    {
+        Ok(headers) => headers,
+        Err(code) => {
+            if official {
+                state.chatgpt_error.store(
+                    if code == "chatgpt_account_changed" {
+                        3
+                    } else {
+                        1
+                    },
+                    Ordering::Relaxed,
+                );
+            }
+            return request_error(
+                &mut tracker,
+                StatusCode::UNAUTHORIZED,
+                code,
+                "ChatGPT authentication is missing or the account changed; restore and sign in with Codex",
+            );
+        }
+    };
     if object
         .get("previous_response_id")
         .is_some_and(|v| !v.is_null())
         || object.get("conversation").is_some_and(|v| !v.is_null())
-        || object
-            .get("input")
-            .and_then(Value::as_array)
-            .is_some_and(|items| {
-                items.iter().any(|item| {
-                    item.get("encrypted_content")
-                        .is_some_and(|value| !value.is_null())
-                        || item["type"] == "compaction"
-                })
-            })
+        || (!official
+            && object
+                .get("input")
+                .and_then(Value::as_array)
+                .is_some_and(|items| {
+                    items.iter().any(|item| {
+                        item.get("encrypted_content")
+                            .is_some_and(|value| !value.is_null())
+                            || item["type"] == "compaction"
+                    })
+                }))
     {
         return request_error(
             &mut tracker,
@@ -507,11 +725,29 @@ async fn responses(
             );
         }
         let upstream = &state.upstreams[provider_id];
+        let mut destination = upstream.responses_url.clone();
+        if compact {
+            destination.set_path(&format!("{}/compact", destination.path()));
+        }
         let outbound = state
             .client
-            .post(upstream.responses_url.clone())
+            .post(destination)
             .header(header::CONTENT_TYPE, "application/json")
-            .bearer_auth(upstream.api_key.expose())
+            .headers(if provider_id == &binding.provider_id {
+                outbound_headers.clone()
+            } else {
+                match upstream.outbound_headers(&headers, &state.local_token) {
+                    Ok(headers) => headers,
+                    Err(code) => {
+                        return request_error(
+                            &mut tracker,
+                            StatusCode::BAD_GATEWAY,
+                            code,
+                            "upstream credentials are invalid",
+                        );
+                    }
+                }
+            })
             .timeout(remaining)
             .body(outbound_body.clone())
             .send();
@@ -559,7 +795,18 @@ async fn responses(
     tracker.record.http_status = Some(status.as_u16());
     tracker.record.headers_ms = Some(tracker.elapsed_ms());
     if !status.is_success() {
-        tracker.finish(RequestStatus::Failed, Some("upstream_http_error"));
+        let code = if official && status == StatusCode::UNAUTHORIZED {
+            state.chatgpt_error.store(1, Ordering::Relaxed);
+            "chatgpt_unauthorized"
+        } else if official && status == StatusCode::FORBIDDEN {
+            state.chatgpt_error.store(2, Ordering::Relaxed);
+            "chatgpt_forbidden"
+        } else {
+            "upstream_http_error"
+        };
+        tracker.finish(RequestStatus::Failed, Some(code));
+    } else if official {
+        state.chatgpt_error.store(0, Ordering::Relaxed);
     }
     let content_type = upstream_response
         .headers()
@@ -570,7 +817,7 @@ async fn responses(
         .and_then(|value| value.to_str().ok())
         .and_then(|value| value.split(';').next())
         .is_some_and(|value| value.trim().eq_ignore_ascii_case("text/event-stream"));
-    let observer = ResponseObserver::new(sse, status.is_success());
+    let observer = ResponseObserver::new(sse, status.is_success()).with_compaction(compact);
     let mut response = Response::builder()
         .status(status)
         .header(REQUEST_ID_HEADER, &tracker.record.id);
@@ -579,6 +826,13 @@ async fn responses(
     }
     if let Some(content_type) = content_type {
         response = response.header(header::CONTENT_TYPE, content_type);
+    }
+    if official {
+        for name in ["x-codex-turn-state", "x-codex-routing-hint", "x-request-id"] {
+            if let Some(value) = upstream_response.headers().get(name) {
+                response = response.header(name, value);
+            }
+        }
     }
     // The tracker lives in the response body, including before its first poll.
     // Dropping a downstream body drops the upstream immediately and records cancellation.
@@ -637,6 +891,143 @@ mod tests {
     use super::*;
     use crate::catalog::{Selection, publish};
     use std::sync::atomic::AtomicUsize;
+
+    #[test]
+    fn official_auth_rejects_placeholder_api_key_local_token_and_ambiguous_headers() {
+        let upstream = Upstream::chatgpt();
+        let local = Secret::new("synthetic-local-only".into());
+        for token in [
+            "PROXY_MANAGED",
+            "sk-synthetic-api-key",
+            "synthetic-local-only",
+            "invalid token",
+            "",
+        ] {
+            let headers = HeaderMap::from_iter([
+                (
+                    header::AUTHORIZATION,
+                    HeaderValue::from_str(&format!("Bearer {token}")).unwrap(),
+                ),
+                (
+                    axum::http::HeaderName::from_static(crate::chatgpt::ACCOUNT_HEADER),
+                    "fixture-workspace".parse().unwrap(),
+                ),
+            ]);
+            assert!(upstream.outbound_headers(&headers, &local).is_err());
+        }
+        let mut headers = HeaderMap::from_iter([
+            (
+                header::AUTHORIZATION,
+                "Bearer synthetic-native-access".parse().unwrap(),
+            ),
+            (
+                axum::http::HeaderName::from_static(crate::chatgpt::ACCOUNT_HEADER),
+                "fixture-workspace".parse().unwrap(),
+            ),
+        ]);
+        headers.append(
+            header::AUTHORIZATION,
+            "Bearer second-native-access".parse().unwrap(),
+        );
+        assert!(upstream.outbound_headers(&headers, &local).is_err());
+        headers.remove(header::AUTHORIZATION);
+        headers.insert(
+            header::AUTHORIZATION,
+            "Bearer synthetic-native-access".parse().unwrap(),
+        );
+        headers.append(
+            crate::chatgpt::ACCOUNT_HEADER,
+            "other-workspace".parse().unwrap(),
+        );
+        assert!(upstream.outbound_headers(&headers, &local).is_err());
+        assert!(Upstream::chatgpt_mock("192.0.2.1:1234".parse().unwrap()).is_err());
+        assert_eq!(
+            upstream.responses_url.as_str(),
+            "https://chatgpt.com/backend-api/codex/responses"
+        );
+    }
+
+    #[test]
+    fn official_workspace_is_pinned_before_first_request_and_region_header_is_enforced() {
+        let workspace = crate::chatgpt::Workspace {
+            account_id: "fixture-workspace".into(),
+            backend_origin: "https://us.chatgpt.com".into(),
+            routing_override: "us".into(),
+        };
+        let upstream = Upstream::chatgpt_for_workspace(&workspace).unwrap();
+        assert_eq!(
+            upstream.responses_url.as_str(),
+            "https://us.chatgpt.com/backend-api/codex/responses"
+        );
+        let token = Secret::new("synthetic-local-only".into());
+        let mut headers = HeaderMap::from_iter([
+            (
+                header::AUTHORIZATION,
+                "Bearer synthetic-native-access".parse().unwrap(),
+            ),
+            (
+                axum::http::HeaderName::from_static(crate::chatgpt::ACCOUNT_HEADER),
+                "other-workspace".parse().unwrap(),
+            ),
+        ]);
+        assert_eq!(
+            upstream.outbound_headers(&headers, &token).unwrap_err(),
+            "chatgpt_account_changed"
+        );
+        headers.insert(
+            crate::chatgpt::ACCOUNT_HEADER,
+            "fixture-workspace".parse().unwrap(),
+        );
+        assert_eq!(
+            upstream.outbound_headers(&headers, &token).unwrap()["x-openai-account-routing-override"],
+            "us"
+        );
+        headers.insert(
+            "x-openai-account-routing-override",
+            "us_cr".parse().unwrap(),
+        );
+        assert_eq!(
+            upstream.outbound_headers(&headers, &token).unwrap_err(),
+            "chatgpt_account_changed"
+        );
+    }
+
+    #[test]
+    fn official_and_api_connections_cannot_automatically_fallback_to_each_other() {
+        let templates =
+            serde_json::from_str(include_str!("../tests/fixtures/synthetic-models.json")).unwrap();
+        for primary_is_official in [true, false] {
+            let mut publication = publish(
+                &templates,
+                &[Selection {
+                    public_id: "sx-account",
+                    display_name: "Account",
+                    provider_id: "primary",
+                    upstream_model: "gpt-5.5",
+                }],
+            )
+            .unwrap();
+            publication
+                .routes
+                .get_mut("sx-account")
+                .unwrap()
+                .fallback_provider_id = Some("backup".into());
+            let api = Upstream::new("http://127.0.0.1:1234", "synthetic-api-key".into()).unwrap();
+            let official = Upstream::chatgpt();
+            let (primary, backup) = if primary_is_official {
+                (official, api)
+            } else {
+                (api, official)
+            };
+            let result = RouterState::new(
+                "127.0.0.1:18731".parse().unwrap(),
+                "synthetic-local-token-at-least-32-bytes".into(),
+                publication,
+                HashMap::from([("primary".into(), primary), ("backup".into(), backup)]),
+            );
+            assert!(result.is_err());
+        }
+    }
 
     #[tokio::test]
     async fn timeout_after_sending_does_not_try_explicit_backup() {

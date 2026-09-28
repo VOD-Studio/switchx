@@ -231,6 +231,7 @@ pub(crate) struct ResponseObserver {
     sse: Option<SseObserver>,
     json: Vec<u8>,
     inspect: bool,
+    compaction: bool,
 }
 
 impl ResponseObserver {
@@ -242,7 +243,13 @@ impl ResponseObserver {
             }),
             json: Vec::new(),
             inspect,
+            compaction: false,
         }
+    }
+
+    pub fn with_compaction(mut self, compaction: bool) -> Self {
+        self.compaction = compaction;
+        self
     }
 
     pub fn feed(&mut self, bytes: &[u8], tracker: &mut RequestTracker) -> Result<(), &'static str> {
@@ -271,6 +278,18 @@ impl ResponseObserver {
             Ok(value) => {
                 if value.get("error").is_some_and(|error| !error.is_null()) {
                     tracker.finish(RequestStatus::Failed, Some("upstream_response_failed"));
+                } else if self.compaction
+                    && value["object"] == "response.compaction"
+                    && value["output"].as_array().is_some_and(|items| {
+                        items.iter().any(|item| {
+                            item["type"] == "compaction"
+                                && item["encrypted_content"]
+                                    .as_str()
+                                    .is_some_and(|content| !content.is_empty())
+                        })
+                    })
+                {
+                    tracker.finish(RequestStatus::Completed, None);
                 } else {
                     match value["status"].as_str() {
                         Some("completed") => tracker.finish(RequestStatus::Completed, None),
