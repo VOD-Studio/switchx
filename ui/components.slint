@@ -40,6 +40,7 @@ export component QuietButton inherits Rectangle {
     horizontal-stretch: 1;
     vertical-stretch: 0;
     border-radius: 9px;
+    opacity: root.enabled ? 1 : 0.45;
     border-width: 1px;
     border-color: selected ? Theme.brand : Theme.border;
     background: primary ? Theme.brand : selected ? Theme.brand-surface : hit-area.has-hover ? Theme.raised : Theme.panel;
@@ -48,7 +49,7 @@ export component QuietButton inherits Rectangle {
     accessible-role: button;
     accessible-enabled: root.enabled;
     accessible-label: root.text;
-    accessible-action-default => { hit-area.clicked(); }
+    accessible-action-default => { if (root.enabled) { root.clicked(); } }
 
     Text {
         x: 12px;
@@ -63,7 +64,7 @@ export component QuietButton inherits Rectangle {
     }
 
     hit-area := TouchArea {
-        clicked => { root.clicked(); }
+        clicked => { if (root.enabled) { root.clicked(); } }
     }
 
     key-focus := FocusScope {

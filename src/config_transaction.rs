@@ -9,11 +9,12 @@ use std::{
 };
 
 use serde::{Deserialize, Serialize};
-use toml_edit::{DocumentMut, Table, Value};
+use toml_edit::{Array, DocumentMut, Item, Table, Value, table, value};
 
 use crate::{
     catalog::Publication,
     config::{PROVIDER_ID, Preview, preview_route},
+    direct::helper_is_usable,
 };
 
 const JOURNAL_NAME: &str = "switch-journal.json";
@@ -58,8 +59,15 @@ struct Journal {
     fields: [FieldChange; 3],
     applied_provider: String,
     applied_provider_header: HeaderDecor,
-    applied_parent_header: HeaderDecor,
+    applied_parent_header: Option<HeaderDecor>,
     before_providers_table: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    local_token_reference: Option<String>,
+}
+
+pub struct Recovery {
+    pub config_path: PathBuf,
+    pub local_token_reference: Option<String>,
 }
 
 pub struct PreparedSwitch {
@@ -152,10 +160,10 @@ impl PreparedSwitch {
             applied_provider_header: HeaderDecor::from_table(
                 applied["model_providers"][PROVIDER_ID].as_table().unwrap(),
             ),
-            applied_parent_header: HeaderDecor::from_table(
-                applied["model_providers"].as_table().unwrap(),
-            ),
+            applied_parent_header: (!before.as_table().contains_key("model_providers"))
+                .then(|| HeaderDecor::from_table(applied["model_providers"].as_table().unwrap())),
             before_providers_table: before.as_table().contains_key("model_providers"),
+            local_token_reference: None,
         };
         let catalog = serde_json::to_vec_pretty(&publication.catalog)
             .map_err(|_| "could not serialize model catalog")?;
@@ -174,7 +182,60 @@ impl PreparedSwitch {
         &self.catalog_path
     }
 
+    pub fn with_credential_helper(
+        mut self,
+        helper_path: &Path,
+        reference: &str,
+    ) -> Result<Self, String> {
+        if !helper_is_usable(helper_path) || !valid_token_reference(reference) {
+            return Err("SwitchX local token helper is unavailable or invalid".into());
+        }
+        let mut document: DocumentMut = self
+            .preview
+            .proposed
+            .parse()
+            .map_err(|_| "invalid generated config")?;
+        let provider = document["model_providers"][PROVIDER_ID]
+            .as_table_mut()
+            .unwrap();
+        provider.remove("env_key");
+        provider.remove("requires_openai_auth");
+        provider.insert("auth", table());
+        let auth = provider["auth"].as_table_mut().unwrap();
+        auth.insert(
+            "command",
+            value(helper_path.to_str().ok_or("helper path must be UTF-8")?),
+        );
+        let mut args = Array::new();
+        args.push("local-token");
+        args.push(reference);
+        auth.insert("args", Item::Value(Value::Array(args)));
+        self.preview.proposed = document.to_string();
+        self.preview.required_environment_variable = None;
+        let serialized: DocumentMut = self
+            .preview
+            .proposed
+            .parse()
+            .map_err(|_| "invalid generated config")?;
+        let provider = &serialized["model_providers"][PROVIDER_ID];
+        self.journal.applied_provider = provider.to_string();
+        self.journal.applied_provider_header =
+            HeaderDecor::from_table(provider.as_table().unwrap());
+        self.journal.local_token_reference = Some(reference.into());
+        Ok(self)
+    }
+
     pub fn apply(self) -> Result<PathBuf, String> {
+        let _lock = lock_config(&self.config_path)?;
+        if self
+            .journal_path
+            .parent()
+            .unwrap()
+            .join("direct-journal.json")
+            .exists()
+        {
+            return Err("a SwitchX direct switch is active; restore it first".into());
+        }
         if read_config(&self.config_path)? != self.original {
             return Err("Codex config changed since inspection".into());
         }
@@ -204,7 +265,39 @@ impl PreparedSwitch {
     }
 }
 
+pub fn recovery(state_dir: &Path) -> Result<Option<Recovery>, String> {
+    let Some(bytes) = read_config(&state_dir.join(JOURNAL_NAME))? else {
+        return Ok(None);
+    };
+    let journal: Journal =
+        serde_json::from_slice(&bytes).map_err(|_| "SwitchX route journal is invalid")?;
+    if journal.version != 1
+        || !journal.config_path.is_absolute()
+        || journal
+            .config_path
+            .file_name()
+            .is_none_or(|name| name != "config.toml")
+        || journal
+            .local_token_reference
+            .as_deref()
+            .is_some_and(|reference| !valid_token_reference(reference))
+    {
+        return Err("SwitchX route journal has an invalid version or target".into());
+    }
+    Ok(Some(Recovery {
+        config_path: journal.config_path,
+        local_token_reference: journal.local_token_reference,
+    }))
+}
+
+fn valid_token_reference(reference: &str) -> bool {
+    reference
+        .strip_prefix("router-")
+        .is_some_and(|id| id.len() == 32 && id.bytes().all(|byte| byte.is_ascii_hexdigit()))
+}
+
 pub fn restore(config_path: &Path, state_dir: &Path) -> Result<RestoreResult, String> {
+    let _lock = lock_config(config_path)?;
     let journal_path = state_dir.join(JOURNAL_NAME);
     let journal: Journal = serde_json::from_slice(&fs::read(&journal_path).map_err(io_error)?)
         .map_err(|_| "SwitchX journal is invalid; inspect it before recovery")?;
@@ -219,14 +312,32 @@ pub fn restore(config_path: &Path, state_dir: &Path) -> Result<RestoreResult, St
     {
         return Err("SwitchX journal has invalid managed fields".into());
     }
-    let original =
-        read_config(config_path)?.ok_or("Codex config is missing; inspect before recovery")?;
+    let original = match read_config(config_path)? {
+        Some(original) => original,
+        None if !journal.config_existed => {
+            fs::remove_file(&journal_path).map_err(io_error)?;
+            sync_parent(&journal_path)?;
+            return Ok(RestoreResult {
+                conflicts: Vec::new(),
+                changed: false,
+            });
+        }
+        None => return Err("Codex config is missing; inspect before recovery".into()),
+    };
     let current = std::str::from_utf8(&original).map_err(|_| "Codex config is not UTF-8")?;
     let mut document: DocumentMut = current.parse().map_err(|_| "invalid Codex TOML")?;
     let mut conflicts = Vec::new();
     let mut changed = false;
 
     for field in journal.fields {
+        if document
+            .as_table()
+            .get(&field.name)
+            .is_some_and(|item| item.as_str().is_none())
+        {
+            conflicts.push(field.name);
+            continue;
+        }
         let found = document
             .as_table()
             .get(&field.name)
@@ -275,7 +386,8 @@ pub fn restore(config_path: &Path, state_dir: &Path) -> Result<RestoreResult, St
             .get("model_providers")
             .and_then(|item| item.as_table())
             .is_some_and(|table| {
-                table.is_empty() && HeaderDecor::from_table(table) == journal.applied_parent_header
+                table.is_empty()
+                    && Some(HeaderDecor::from_table(table)) == journal.applied_parent_header
             })
     {
         document.as_table_mut().remove("model_providers");
@@ -316,6 +428,26 @@ pub(crate) fn read_config(path: &Path) -> Result<Option<Vec<u8>>, String> {
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
         Err(error) => Err(io_error(error)),
     }
+}
+
+pub(crate) fn lock_config(config_path: &Path) -> Result<File, String> {
+    let path = config_path.with_file_name(".switchx-config.lock");
+    if let Ok(metadata) = fs::symlink_metadata(&path)
+        && (!metadata.is_file() || metadata.file_type().is_symlink())
+    {
+        return Err("SwitchX 配置锁必须是普通文件".into());
+    }
+    let mut options = OpenOptions::new();
+    options.read(true).write(true).create(true).truncate(false);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.mode(0o600);
+    }
+    let file = options.open(path).map_err(io_error)?;
+    file.try_lock()
+        .map_err(|_| "另一个 SwitchX 实例正在修改此 Codex 配置，请稍后重试")?;
+    Ok(file)
 }
 
 fn write_new(path: &Path, bytes: &[u8]) -> Result<(), String> {
@@ -590,5 +722,122 @@ mod tests {
                 .contains("[model_providers.switchx_router] # user note")
         );
         assert!(home.state().join(JOURNAL_NAME).exists());
+    }
+
+    #[test]
+    fn helper_route_restores_nested_auth_and_records_only_local_token_reference() {
+        let home = TestHome::new();
+        let original = "model = \"old\" # private field comment\n\n[model_providers] # private parent comment\n";
+        fs::write(home.config(), original).unwrap();
+        let reference = format!("router-{}", crate::app::new_id().unwrap());
+        let helper = std::env::current_exe().unwrap();
+        let prepared = inspect(&home)
+            .with_credential_helper(&helper, &reference)
+            .unwrap();
+        assert!(prepared.preview.required_environment_variable.is_none());
+        let config: DocumentMut = prepared.preview.proposed.parse().unwrap();
+        let provider = config["model_providers"][PROVIDER_ID].as_table().unwrap();
+        assert!(!provider.contains_key("env_key"));
+        assert!(!provider.contains_key("requires_openai_auth"));
+        assert_eq!(
+            provider["auth"]["args"]
+                .as_array()
+                .unwrap()
+                .get(0)
+                .unwrap()
+                .as_str(),
+            Some("local-token")
+        );
+        prepared.apply().unwrap();
+        let recovery = recovery(&home.state()).unwrap().unwrap();
+        assert_eq!(recovery.config_path, home.config());
+        assert_eq!(
+            recovery.local_token_reference.as_deref(),
+            Some(reference.as_str())
+        );
+        let journal = fs::read_to_string(home.state().join(JOURNAL_NAME)).unwrap();
+        assert!(!journal.contains("private"));
+        assert!(!journal.contains("api_key"));
+        assert!(
+            restore(&home.config(), &home.state())
+                .unwrap()
+                .conflicts
+                .is_empty()
+        );
+        assert_eq!(fs::read_to_string(home.config()).unwrap(), original);
+    }
+
+    #[test]
+    fn route_recovery_handles_precommit_without_config_and_preserves_changed_field_types() {
+        let home = TestHome::new();
+        let prepared = inspect(&home);
+        fs::create_dir_all(home.state()).unwrap();
+        write_exclusive_atomic(
+            &home.state().join(JOURNAL_NAME),
+            &serde_json::to_vec(&prepared.journal).unwrap(),
+        )
+        .unwrap();
+        assert!(!restore(&home.config(), &home.state()).unwrap().changed);
+        assert!(!home.config().exists());
+        inspect(&home).apply().unwrap();
+        let current = fs::read_to_string(home.config()).unwrap();
+        fs::write(
+            home.config(),
+            current.replace("model = \"sx-ds-flash\"", "model = 42"),
+        )
+        .unwrap();
+        assert_eq!(
+            restore(&home.config(), &home.state()).unwrap().conflicts,
+            ["model"]
+        );
+        assert!(
+            fs::read_to_string(home.config())
+                .unwrap()
+                .contains("model = 42")
+        );
+    }
+
+    #[test]
+    fn switches_share_a_target_lock_and_reject_another_data_directory_owner() {
+        let home = TestHome::new();
+        let prepared = inspect(&home);
+        let lock = lock_config(&home.config()).unwrap();
+        assert!(prepared.apply().unwrap_err().contains("另一个"));
+        assert!(!home.state().join(JOURNAL_NAME).exists());
+        drop(lock);
+        let other_state = home.0.join("other-state");
+        let other = PreparedSwitch::inspect(
+            &home.config(),
+            &other_state,
+            &publication(),
+            "127.0.0.1:18732".parse().unwrap(),
+            "sx-ds-flash",
+        )
+        .unwrap();
+        inspect(&home).apply().unwrap();
+        assert!(other.apply().unwrap_err().contains("changed"));
+        assert!(!other_state.join(JOURNAL_NAME).exists());
+        let provider = crate::storage::ProviderRecord {
+            id: "fixture".into(),
+            name: "Fixture".into(),
+            base_url: "https://example.invalid/v1".into(),
+            model_id: "fixture".into(),
+            credential_ref: Some("fixture".into()),
+        };
+        assert!(
+            crate::direct_config::PreparedDirectSwitch::inspect(
+                &home.config(),
+                &other_state,
+                &provider,
+                &std::env::current_exe().unwrap()
+            )
+            .is_err()
+        );
+        assert!(
+            restore(&home.config(), &home.state())
+                .unwrap()
+                .conflicts
+                .is_empty()
+        );
     }
 }

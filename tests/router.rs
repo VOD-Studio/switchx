@@ -12,7 +12,7 @@ use futures_util::stream;
 use serde_json::{Value, json};
 use switchx::{
     catalog::{Selection, publish},
-    routing::{LOCAL_TOKEN_HEADER, RouterState, Upstream, serve},
+    routing::{LOCAL_TOKEN_HEADER, RouterState, RunningRouter, Upstream, serve},
 };
 use tokio::{
     net::TcpListener,
@@ -26,6 +26,7 @@ struct Captured {
     cookie: Option<String>,
     account: Option<String>,
     chatgpt_account: Option<String>,
+    local_token: Option<String>,
     model: String,
 }
 
@@ -56,6 +57,9 @@ async fn mock_upstream(
                 .map(|v| v.to_str().unwrap().to_owned()),
             chatgpt_account: headers
                 .get("chatgpt-account-id")
+                .map(|v| v.to_str().unwrap().to_owned()),
+            local_token: headers
+                .get(LOCAL_TOKEN_HEADER)
                 .map(|v| v.to_str().unwrap().to_owned()),
             model: model.clone(),
         })
@@ -207,6 +211,7 @@ async fn exact_routes_stream_and_keep_credentials_isolated() {
     assert_eq!(captured.cookie, None);
     assert_eq!(captured.account, None);
     assert_eq!(captured.chatgpt_account, None);
+    assert_eq!(captured.local_token, None);
     assert!(openai_rx.try_recv().is_err());
     release.notify_one();
     let second = timeout(Duration::from_secs(3), response.chunk())
@@ -238,6 +243,7 @@ async fn exact_routes_stream_and_keep_credentials_isolated() {
     assert_eq!(captured.account, None);
     assert_eq!(captured.chatgpt_account, None);
     assert_eq!(captured.cookie, None);
+    assert_eq!(captured.local_token, None);
     assert!(openai_rx.try_recv().is_err());
 
     let compressed = zstd::stream::encode_all(
@@ -391,8 +397,134 @@ async fn exact_routes_stream_and_keep_credentials_isolated() {
         .await
         .unwrap();
     assert_eq!(continuation.status(), StatusCode::UNPROCESSABLE_ENTITY);
+    for input in [
+        json!([{"type":"reasoning", "encrypted_content":"private-state"}]),
+        json!([{"type":"compaction"}]),
+    ] {
+        let response = client
+            .post(format!("{base}/v1/responses"))
+            .bearer_auth(token)
+            .header(header::CONTENT_TYPE, "application/json")
+            .body(json!({"model":"sx-ds-flash", "input": input}).to_string())
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::UNPROCESSABLE_ENTITY);
+    }
+    assert!(deepseek_rx.try_recv().is_err());
 
     router_task.abort();
     deepseek_task.abort();
     openai_task.abort();
+}
+
+#[tokio::test]
+async fn disconnect_and_bounded_shutdown_cancel_upstream_without_replay() {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    struct Dropped(Arc<Notify>);
+    impl Drop for Dropped {
+        fn drop(&mut self) {
+            self.0.notify_one();
+        }
+    }
+    let closed = Arc::new(Notify::new());
+    let calls = Arc::new(AtomicUsize::new(0));
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let upstream_address = listener.local_addr().unwrap();
+    let mock = Router::new().route(
+        "/custom/responses",
+        post({
+            let closed = closed.clone();
+            let calls = calls.clone();
+            move || {
+                let guard = Dropped(closed.clone());
+                calls.fetch_add(1, Ordering::SeqCst);
+                async move {
+                    let stream = stream::unfold((false, guard), |(sent, guard)| async move {
+                        if sent {
+                            std::future::pending::<()>().await;
+                        }
+                        Some((
+                            Ok::<_, io::Error>(Bytes::from_static(b"data: first\n\n")),
+                            (true, guard),
+                        ))
+                    });
+                    Response::builder()
+                        .header(header::CONTENT_TYPE, "text/event-stream")
+                        .body(Body::from_stream(stream))
+                        .unwrap()
+                }
+            }
+        }),
+    );
+    let upstream = tokio::spawn(async move {
+        axum::serve(listener, mock).await.unwrap();
+    });
+    let templates = serde_json::from_str(include_str!("fixtures/synthetic-models.json")).unwrap();
+    let publication = publish(
+        &templates,
+        &[Selection {
+            public_id: "sx-one",
+            display_name: "One",
+            provider_id: "one",
+            upstream_model: "deepseek-flash",
+        }],
+    )
+    .unwrap();
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let token = "synthetic-shutdown-local-token-123456789";
+    let state = RouterState::new(
+        address,
+        token.into(),
+        publication,
+        HashMap::from([(
+            "one".into(),
+            Upstream::new(
+                &format!("http://{upstream_address}/custom"),
+                "synthetic-key".into(),
+            )
+            .unwrap(),
+        )]),
+    )
+    .unwrap();
+    let running = RunningRouter::start(listener, state).unwrap();
+    let client = reqwest::Client::builder().no_proxy().build().unwrap();
+    let request = || {
+        client
+            .post(format!("http://{address}/v1/responses"))
+            .bearer_auth(token)
+            .header(header::CONTENT_TYPE, "application/json")
+            .body(json!({"model":"sx-one", "input":"synthetic", "stream":true}).to_string())
+    };
+    let mut first = request().send().await.unwrap();
+    assert!(first.chunk().await.unwrap().is_some());
+    drop(first);
+    timeout(Duration::from_secs(3), closed.notified())
+        .await
+        .expect("upstream should see client cancellation");
+    assert_eq!(calls.load(Ordering::SeqCst), 1);
+    running.pause();
+    assert_eq!(
+        request().send().await.unwrap().status(),
+        StatusCode::SERVICE_UNAVAILABLE
+    );
+    assert_eq!(calls.load(Ordering::SeqCst), 1);
+    running.resume();
+    let mut second = request().send().await.unwrap();
+    assert!(second.chunk().await.unwrap().is_some());
+    timeout(Duration::from_secs(8), running.stop())
+        .await
+        .unwrap();
+    timeout(Duration::from_secs(3), closed.notified())
+        .await
+        .expect("shutdown should cancel the upstream");
+    assert_eq!(calls.load(Ordering::SeqCst), 2);
+    let ended = timeout(Duration::from_secs(3), second.chunk())
+        .await
+        .unwrap();
+    assert!(ended.is_err() || ended.unwrap().is_none());
+    let rebound = TcpListener::bind(address).await.unwrap();
+    drop(rebound);
+    upstream.abort();
 }
