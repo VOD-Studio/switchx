@@ -12,13 +12,367 @@ use futures_util::stream;
 use serde_json::{Value, json};
 use switchx::{
     catalog::{Selection, publish},
+    requests::REQUEST_ID_HEADER,
     routing::{LOCAL_TOKEN_HEADER, RouterState, RunningRouter, Upstream, serve},
+    storage::{RequestRecord, RequestStatus, Store},
 };
 use tokio::{
     net::TcpListener,
     sync::{Notify, mpsc},
     time::timeout,
 };
+
+struct RequestDatabase(std::path::PathBuf);
+
+impl RequestDatabase {
+    fn new() -> Self {
+        let path = std::env::temp_dir().join(format!(
+            "switchx-request-test-{}-{}.sqlite",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        Self(path)
+    }
+
+    fn store(&self) -> Store {
+        Store::open(&self.0).unwrap()
+    }
+
+    async fn wait_for(&self, id: &str) -> RequestRecord {
+        timeout(Duration::from_secs(3), async {
+            loop {
+                if let Some(record) = self
+                    .store()
+                    .requests(100)
+                    .unwrap()
+                    .into_iter()
+                    .find(|record| record.id == id)
+                {
+                    return record;
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("request must reach a persisted terminal state")
+    }
+}
+
+impl Drop for RequestDatabase {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_file(&self.0);
+    }
+}
+
+#[tokio::test]
+async fn records_real_terminal_signals_and_safe_errors_without_changing_stream_bytes() {
+    let cases = [
+        (
+            "complete",
+            "text/event-stream; charset=utf-8",
+            200,
+            "\u{feff}: keepalive\r\n\r\ndata: {\"type\":\"response.output_text.delta\",\"delta\":\"私密正文\"}\r\n\r\nevent: response.completed\r\ndata: {\"type\":\"response.completed\",\r\ndata: \"response\":{\"status\":\"completed\"}}\r\n\r\n",
+            RequestStatus::Completed,
+            None,
+        ),
+        (
+            "failed",
+            "text/event-stream",
+            200,
+            "data: {\"type\":\"response.failed\",\"response\":{\"error\":{\"message\":\"private-output-secret\"}}}\n\n",
+            RequestStatus::Failed,
+            Some("upstream_response_failed"),
+        ),
+        (
+            "incomplete",
+            "text/event-stream",
+            200,
+            "data: {\"type\":\"response.incomplete\"}\n\n",
+            RequestStatus::Failed,
+            Some("upstream_response_incomplete"),
+        ),
+        (
+            "error",
+            "text/event-stream",
+            200,
+            "event: error\ndata: {\"message\":\"private-output-secret\"}\n\n",
+            RequestStatus::Failed,
+            Some("upstream_stream_error"),
+        ),
+        (
+            "eof",
+            "text/event-stream",
+            200,
+            "data: {\"type\":\"response.output_text.delta\",\"delta\":\"response.completed\"}\n\ndata: [DONE]\n\n",
+            RequestStatus::Interrupted,
+            Some("missing_completion"),
+        ),
+        (
+            "json",
+            "application/json",
+            200,
+            "{\"status\":\"completed\",\"output\":[]}",
+            RequestStatus::Completed,
+            None,
+        ),
+        (
+            "json-failed",
+            "application/json",
+            200,
+            "{\"status\":\"failed\",\"error\":{\"message\":\"private-output-secret\"}}",
+            RequestStatus::Failed,
+            Some("upstream_response_failed"),
+        ),
+        (
+            "http-error",
+            "application/json",
+            429,
+            "{\"error\":{\"message\":\"private-output-secret\"}}",
+            RequestStatus::Failed,
+            Some("upstream_http_error"),
+        ),
+    ];
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let upstream_address = listener.local_addr().unwrap();
+    let mock = Router::new().route(
+        "/responses",
+        post(move |Json(body): Json<Value>| async move {
+            let case = cases
+                .iter()
+                .find(|case| body["input"]["case"] == case.0)
+                .unwrap();
+            let chunks = case
+                .3
+                .as_bytes()
+                .chunks(7)
+                .map(Bytes::copy_from_slice)
+                .collect::<Vec<_>>();
+            Response::builder()
+                .status(case.2)
+                .header(header::CONTENT_TYPE, case.1)
+                .body(Body::from_stream(stream::iter(
+                    chunks.into_iter().map(Ok::<_, io::Error>),
+                )))
+                .unwrap()
+        }),
+    );
+    let upstream = tokio::spawn(async move { axum::serve(listener, mock).await.unwrap() });
+    let records = RequestDatabase::new();
+    let (running, address) = recording_router(upstream_address, &records).await;
+    let client = reqwest::Client::builder().no_proxy().build().unwrap();
+    for (index, case) in cases.iter().enumerate() {
+        let response = request(&client, address, json!({"model":"sx-one", "input":{"case":case.0,"text":"private-prompt-secret"}, "stream":true}))
+            .header(header::COOKIE, "private-cookie-secret")
+            .send().await.unwrap();
+        let id = response.headers()[REQUEST_ID_HEADER]
+            .to_str()
+            .unwrap()
+            .to_owned();
+        assert_eq!(response.status().as_u16(), case.2);
+        assert_eq!(response.bytes().await.unwrap().as_ref(), case.3.as_bytes());
+        let record = records.wait_for(&id).await;
+        assert_eq!(record.status, case.4, "{}", case.0);
+        assert_eq!(record.error_code.as_deref(), case.5);
+        assert_eq!(record.public_model.as_deref(), Some("sx-one"));
+        assert_eq!(record.provider_id.as_deref(), Some("one"));
+        assert_eq!(record.upstream_model.as_deref(), Some("deepseek-flash"));
+        assert_eq!(record.generation, "test-generation");
+        assert_eq!(record.http_status, Some(case.2));
+        assert!(record.headers_ms.unwrap() <= record.duration_ms);
+        assert_eq!(
+            record.first_event_ms.is_some(),
+            case.1.starts_with("text/event-stream")
+        );
+        assert_eq!(records.store().requests(100).unwrap().len(), index + 1);
+    }
+    let rejected = request(&client, address, json!({"model":"sx-unknown"}))
+        .send()
+        .await
+        .unwrap();
+    let id = rejected.headers()[REQUEST_ID_HEADER]
+        .to_str()
+        .unwrap()
+        .to_owned();
+    assert_eq!(rejected.status(), StatusCode::NOT_FOUND);
+    let record = records.wait_for(&id).await;
+    assert_eq!(record.error_code.as_deref(), Some("unknown_model"));
+    assert!(record.provider_id.is_none());
+    assert!(record.http_status.is_none());
+    running.stop().await;
+    let bytes = std::fs::read(&records.0).unwrap();
+    let database = String::from_utf8_lossy(&bytes);
+    for secret in [
+        "private-prompt-secret",
+        "private-output-secret",
+        "private-cookie-secret",
+        "synthetic-upstream-key",
+        "synthetic-local-token",
+        "私密正文",
+    ] {
+        assert!(
+            !database.contains(secret),
+            "metadata must not include {secret}"
+        );
+    }
+    upstream.abort();
+}
+
+const RECORD_TOKEN: &str = "synthetic-local-token-for-request-records-12345";
+
+fn request(
+    client: &reqwest::Client,
+    address: std::net::SocketAddr,
+    body: Value,
+) -> reqwest::RequestBuilder {
+    client
+        .post(format!("http://{address}/v1/responses"))
+        .bearer_auth(RECORD_TOKEN)
+        .header(header::CONTENT_TYPE, "application/json")
+        .body(body.to_string())
+}
+
+async fn recording_router(
+    upstream_address: std::net::SocketAddr,
+    records: &RequestDatabase,
+) -> (RunningRouter, std::net::SocketAddr) {
+    let templates = serde_json::from_str(include_str!("fixtures/synthetic-models.json")).unwrap();
+    let publication = publish(
+        &templates,
+        &[Selection {
+            public_id: "sx-one",
+            display_name: "One",
+            provider_id: "one",
+            upstream_model: "deepseek-flash",
+        }],
+    )
+    .unwrap();
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let state = RouterState::new(
+        address,
+        RECORD_TOKEN.into(),
+        publication,
+        HashMap::from([(
+            "one".into(),
+            Upstream::new(
+                &format!("http://{upstream_address}"),
+                "synthetic-upstream-key".into(),
+            )
+            .unwrap(),
+        )]),
+    )
+    .unwrap()
+    .with_request_log(records.store(), "test-generation".into());
+    (RunningRouter::start(listener, state).unwrap(), address)
+}
+
+#[tokio::test]
+async fn transport_errors_and_cancellation_before_headers_have_distinct_records() {
+    let entered = Arc::new(Notify::new());
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let upstream_address = listener.local_addr().unwrap();
+    let mock = Router::new().route(
+        "/responses",
+        post({
+            let entered = entered.clone();
+            move |Json(body): Json<Value>| {
+                let entered = entered.clone();
+                async move {
+                    if body["input"] == "wait-for-cancel" {
+                        entered.notify_one();
+                        std::future::pending::<()>().await;
+                    }
+                    Response::builder()
+                        .header(header::CONTENT_TYPE, "text/event-stream")
+                        .body(Body::from_stream(stream::unfold(0, |step| async move {
+                            if step == 0 {
+                                Some((
+                                    Ok::<_, io::Error>(Bytes::from_static(
+                                        b"data: {\"type\":\"response.created\"}\n\n",
+                                    )),
+                                    1,
+                                ))
+                            } else {
+                                tokio::time::sleep(Duration::from_millis(50)).await;
+                                Some((Err(io::Error::other("synthetic stream failure")), 2))
+                            }
+                        })))
+                        .unwrap()
+                }
+            }
+        }),
+    );
+    let upstream = tokio::spawn(async move { axum::serve(listener, mock).await.unwrap() });
+    let records = RequestDatabase::new();
+    let (running, address) = recording_router(upstream_address, &records).await;
+    let client = reqwest::Client::builder().no_proxy().build().unwrap();
+    let response = request(
+        &client,
+        address,
+        json!({"model":"sx-one","input":"read-error"}),
+    )
+    .send()
+    .await
+    .unwrap();
+    let id = response.headers()[REQUEST_ID_HEADER]
+        .to_str()
+        .unwrap()
+        .to_owned();
+    assert!(response.bytes().await.is_err());
+    let record = records.wait_for(&id).await;
+    assert_eq!(record.status, RequestStatus::Interrupted);
+    assert_eq!(record.error_code.as_deref(), Some("upstream_read_error"));
+    assert!(record.first_event_ms.is_some());
+
+    let pending = request(
+        &client,
+        address,
+        json!({"model":"sx-one","input":"wait-for-cancel"}),
+    );
+    let pending = tokio::spawn(async move { pending.send().await });
+    timeout(Duration::from_secs(3), entered.notified())
+        .await
+        .unwrap();
+    pending.abort();
+    let _ = pending.await;
+    let cancelled = timeout(Duration::from_secs(3), async {
+        loop {
+            let rows = records.store().requests(10).unwrap();
+            if rows.len() == 2 {
+                break rows[0].clone();
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("disconnect before headers must also be recorded");
+    assert_eq!(cancelled.status, RequestStatus::Cancelled);
+    assert!(cancelled.http_status.is_none());
+    assert!(cancelled.first_event_ms.is_none());
+    running.stop().await;
+    upstream.abort();
+
+    // A closed loopback port gives a deterministic connection refusal, not a live request.
+    let unused = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let unavailable = unused.local_addr().unwrap();
+    drop(unused);
+    let (running, address) = recording_router(unavailable, &records).await;
+    let response = request(&client, address, json!({"model":"sx-one"}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::BAD_GATEWAY);
+    let record = records
+        .wait_for(response.headers()[REQUEST_ID_HEADER].to_str().unwrap())
+        .await;
+    assert_eq!(record.status, RequestStatus::Failed);
+    assert_eq!(record.error_code.as_deref(), Some("upstream_unavailable"));
+    assert!(record.http_status.is_none());
+    running.stop().await;
+}
 
 #[derive(Debug)]
 struct Captured {
@@ -66,7 +420,8 @@ async fn mock_upstream(
         .await
         .unwrap();
     if !state.streaming {
-        return Json(json!({ "model": model, "output": [] })).into_response();
+        return Json(json!({ "model": model, "status": "completed", "output": [] }))
+            .into_response();
     }
     let body = stream::unfold((0, state.release), |(step, release)| async move {
         match step {
@@ -78,7 +433,7 @@ async fn mock_upstream(
                 release.notified().await;
                 Some((
                     Ok(Bytes::from_static(
-                        b"event: response.completed\ndata: {}\n\n",
+                        b"event: response.completed\ndata: {\"response\":{\"status\":\"completed\"}}\n\n",
                     )),
                     (2, release),
                 ))
@@ -445,7 +800,9 @@ async fn disconnect_and_bounded_shutdown_cancel_upstream_without_replay() {
                             std::future::pending::<()>().await;
                         }
                         Some((
-                            Ok::<_, io::Error>(Bytes::from_static(b"data: first\n\n")),
+                            Ok::<_, io::Error>(Bytes::from_static(
+                                b"data: {\"type\":\"response.created\"}\n\n",
+                            )),
                             (true, guard),
                         ))
                     });
@@ -474,6 +831,7 @@ async fn disconnect_and_bounded_shutdown_cancel_upstream_without_replay() {
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let address = listener.local_addr().unwrap();
     let token = "synthetic-shutdown-local-token-123456789";
+    let records = RequestDatabase::new();
     let state = RouterState::new(
         address,
         token.into(),
@@ -487,7 +845,8 @@ async fn disconnect_and_bounded_shutdown_cancel_upstream_without_replay() {
             .unwrap(),
         )]),
     )
-    .unwrap();
+    .unwrap()
+    .with_request_log(records.store(), "shutdown-generation".into());
     let running = RunningRouter::start(listener, state).unwrap();
     let client = reqwest::Client::builder().no_proxy().build().unwrap();
     let request = || {
@@ -499,11 +858,18 @@ async fn disconnect_and_bounded_shutdown_cancel_upstream_without_replay() {
     };
     let mut first = request().send().await.unwrap();
     assert!(first.chunk().await.unwrap().is_some());
+    let first_id = first.headers()[REQUEST_ID_HEADER]
+        .to_str()
+        .unwrap()
+        .to_owned();
     drop(first);
     timeout(Duration::from_secs(3), closed.notified())
         .await
         .expect("upstream should see client cancellation");
     assert_eq!(calls.load(Ordering::SeqCst), 1);
+    let cancelled = records.wait_for(&first_id).await;
+    assert_eq!(cancelled.status, RequestStatus::Cancelled);
+    assert_eq!(cancelled.error_code.as_deref(), Some("client_disconnected"));
     running.pause();
     assert_eq!(
         request().send().await.unwrap().status(),
@@ -513,6 +879,10 @@ async fn disconnect_and_bounded_shutdown_cancel_upstream_without_replay() {
     running.resume();
     let mut second = request().send().await.unwrap();
     assert!(second.chunk().await.unwrap().is_some());
+    let second_id = second.headers()[REQUEST_ID_HEADER]
+        .to_str()
+        .unwrap()
+        .to_owned();
     timeout(Duration::from_secs(8), running.stop())
         .await
         .unwrap();
@@ -524,6 +894,10 @@ async fn disconnect_and_bounded_shutdown_cancel_upstream_without_replay() {
         .await
         .unwrap();
     assert!(ended.is_err() || ended.unwrap().is_none());
+    let interrupted = records.wait_for(&second_id).await;
+    assert_eq!(interrupted.status, RequestStatus::Interrupted);
+    assert_eq!(interrupted.error_code.as_deref(), Some("router_stopping"));
+    assert_eq!(records.store().requests(10).unwrap().len(), 2);
     let rebound = TcpListener::bind(address).await.unwrap();
     drop(rebound);
     upstream.abort();

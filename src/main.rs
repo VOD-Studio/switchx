@@ -19,6 +19,7 @@ use tokio::sync::mpsc::{self, error::TrySendError};
 
 enum Command {
     Refresh(bool),
+    RefreshRequests,
     Save {
         id: String,
         name: String,
@@ -211,6 +212,40 @@ async fn worker(
     let mut route_session = RouteSession::default();
     while let Some(command) = receiver.recv().await {
         match command {
+            Command::RefreshRequests => {
+                let result = directory
+                    .as_ref()
+                    .map_err(|error| *error)
+                    .and_then(|path| app::load_requests(path));
+                let _ = weak.upgrade_in_event_loop(move |app| {
+                    app.set_busy(false);
+                    match result {
+                        Ok(records) => {
+                            app.set_requests(ModelRc::new(VecModel::from(
+                                records
+                                    .into_iter()
+                                    .map(|record| RequestRow {
+                                        time: record.time.into(),
+                                        route: record.route.into(),
+                                        timing: record.timing.into(),
+                                        detail: record.detail.into(),
+                                        status: record.status.label().into(),
+                                        completed: record.status
+                                            == switchx::storage::RequestStatus::Completed,
+                                        cancelled: record.status
+                                            == switchx::storage::RequestStatus::Cancelled,
+                                        error: record.error.into(),
+                                    })
+                                    .collect::<Vec<_>>(),
+                            )));
+                            app.set_request_error("".into());
+                        }
+                        Err(error) => app.set_request_error(
+                            format!("请求记录读取失败：{}；保留上次列表", error.message()).into(),
+                        ),
+                    }
+                });
+            }
             Command::Refresh(check_credentials) => {
                 let result = directory
                     .as_ref()
@@ -646,6 +681,7 @@ async fn worker(
             }
         }
         let running = route_session.is_running();
+        let recording_failed = route_session.recording_failed();
         let address = route_session
             .address()
             .map(|address| format!("http://{address}/v1"))
@@ -659,6 +695,9 @@ async fn worker(
                 .is_ok_and(|path| path.join("direct-journal.json").exists());
         let _ = weak.upgrade_in_event_loop(move |app| {
             app.set_route_running(running);
+            if recording_failed {
+                app.set_request_error("部分请求记录写入失败；请检查数据库权限和磁盘空间".into());
+            }
             app.set_route_managed(route_managed);
             app.set_config_managed(managed);
             app.set_route_status(
@@ -776,6 +815,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         if let Some(app) = weak.upgrade() {
             app.set_loading(true);
             queue(&app, &refresh_sender, Command::Refresh(check_credentials));
+        }
+    });
+    let weak = app.as_weak();
+    let request_sender = sender.clone();
+    app.on_refresh_requests(move || {
+        if let Some(app) = weak.upgrade() {
+            queue(&app, &request_sender, Command::RefreshRequests);
         }
     });
     let weak = app.as_weak();

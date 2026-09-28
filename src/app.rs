@@ -7,7 +7,7 @@ use crate::{
     catalog,
     credentials::{CredentialError, CredentialStore, PROVIDER_KEY_SERVICE, Secret},
     direct::validate_provider,
-    storage::{ModelRecord, ProviderRecord, Store},
+    storage::{ModelRecord, ProviderRecord, RequestStatus, Store},
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -33,7 +33,7 @@ impl AppError {
     pub fn message(self) -> &'static str {
         match self {
             Self::DataDirectory => "无法访问 SwitchX 本地数据目录",
-            Self::Database => "无法读取 SwitchX 上游资料",
+            Self::Database => "无法读取 SwitchX 本地资料",
             Self::CredentialStore => "无法初始化系统凭据存储",
             Self::Busy => "本地状态检查仍在运行",
             Self::WorkerStopped => "后台状态通道已停止",
@@ -78,6 +78,90 @@ pub struct ModelView {
     pub detail: String,
     pub ready: bool,
     pub enabled: bool,
+}
+
+pub struct RequestView {
+    pub time: String,
+    pub route: String,
+    pub timing: String,
+    pub detail: String,
+    pub status: RequestStatus,
+    pub error: String,
+}
+
+pub fn load_requests(data_dir: &Path) -> Result<Vec<RequestView>, AppError> {
+    let store = open_store(data_dir)?;
+    let providers = store.providers().map_err(|_| AppError::Database)?;
+    store
+        .requests(100)
+        .map_err(|_| AppError::Database)?
+        .into_iter()
+        .map(|record| {
+            let provider = record
+                .provider_id
+                .as_ref()
+                .map(|id| {
+                    providers
+                        .iter()
+                        .find(|provider| &provider.id == id)
+                        .map(|provider| provider.name.as_str())
+                        .unwrap_or(id)
+                })
+                .unwrap_or("未选择上游");
+            let millis = |value: Option<i64>| {
+                value
+                    .map(|ms| format!("{ms} ms"))
+                    .unwrap_or_else(|| "—".into())
+            };
+            Ok(RequestView {
+                time: store
+                    .request_time(record.started_at_ms)
+                    .map_err(|_| AppError::Database)?,
+                route: format!(
+                    "{} → {} / {}",
+                    record.public_model.as_deref().unwrap_or("未指定模型"),
+                    provider,
+                    record.upstream_model.as_deref().unwrap_or("—")
+                ),
+                timing: format!(
+                    "总耗时 {} ms · 响应头 {} · 首事件 {} · 上游 HTTP {}",
+                    record.duration_ms,
+                    millis(record.headers_ms),
+                    millis(record.first_event_ms),
+                    record
+                        .http_status
+                        .map(|status| status.to_string())
+                        .unwrap_or_else(|| "—".into())
+                ),
+                detail: format!("请求 {} · 路由版本 {}", record.id, record.generation),
+                status: record.status,
+                error: record
+                    .error_code
+                    .map(|code| format!("{} · {code}", request_error_message(&code)))
+                    .unwrap_or_default(),
+            })
+        })
+        .collect()
+}
+
+fn request_error_message(code: &str) -> &'static str {
+    match code {
+        "client_disconnected" => "完成前客户端断开；可能是用户取消或连接丢失",
+        "router_stopping" => "路由停止，未收到完成信号",
+        "missing_completion" => "响应结束，但未收到正常完成信号",
+        "upstream_timeout" => "上游请求超时",
+        "upstream_unavailable" => "无法连接上游",
+        "upstream_read_error" => "读取上游时连接中断",
+        "upstream_http_error" => "上游返回非成功 HTTP 状态",
+        "upstream_response_failed" | "upstream_stream_error" => "上游报告请求失败",
+        "upstream_response_incomplete" => "上游报告响应未完成",
+        "upstream_response_cancelled" => "上游报告响应已取消",
+        "invalid_upstream_event" | "invalid_upstream_response" => "上游响应格式无效",
+        "upstream_event_too_large" | "upstream_body_too_large" => "上游响应超过读取上限",
+        "unknown_model" => "模型未发布",
+        "unsupported_capability" => "请求包含暂不支持的会话状态",
+        _ => "本地请求校验或转发失败",
+    }
 }
 
 pub fn data_directory() -> Result<PathBuf, AppError> {

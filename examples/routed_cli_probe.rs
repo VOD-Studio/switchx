@@ -282,6 +282,40 @@ async fn headless(
     println!(
         "Both aliases reached their own upstream; the first completed a file-tool round trip."
     );
+    let records = store.requests(100)?;
+    check(
+        records.len() == 3
+            && records.iter().all(|record| {
+                record.status == switchx::storage::RequestStatus::Completed
+                    && record.http_status == Some(200)
+                    && record.first_event_ms.is_some()
+                    && record.error_code.is_none()
+                    && record.generation.starts_with("catalog-")
+            }),
+        "CLI requests did not produce three completed metadata records",
+    )?;
+    for (public_id, expected) in [("sx-mock-alpha", 2), ("sx-mock-beta", 1)] {
+        let model = store
+            .models()?
+            .into_iter()
+            .find(|model| model.public_id == public_id)
+            .unwrap();
+        check(
+            records
+                .iter()
+                .filter(|record| {
+                    record.public_model.as_deref() == Some(public_id)
+                        && record.provider_id.as_deref() == Some(model.provider_id.as_str())
+                        && record.upstream_model.as_deref() == Some("shared-model")
+                })
+                .count()
+                == expected,
+            "request record used the wrong model or provider",
+        )?;
+    }
+    println!(
+        "Three CLI requests recorded completion, timings, model/provider mappings and catalog generation."
+    );
 
     std::fs::write(
         home.join("config.toml"),
