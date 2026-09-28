@@ -1,6 +1,6 @@
 use std::path::Path;
 
-use rusqlite::{Connection, Result, params};
+use rusqlite::{Connection, OpenFlags, Result, params};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ProviderRecord {
@@ -74,6 +74,16 @@ pub struct Store {
 }
 
 impl Store {
+    /// Inspect current metadata without creating, migrating or writing the source database.
+    pub fn open_read_only(path: &Path) -> Result<Self> {
+        let connection = Connection::open_with_flags(path, OpenFlags::SQLITE_OPEN_READ_ONLY)?;
+        let version: i64 = connection.query_row("PRAGMA user_version", [], |row| row.get(0))?;
+        if version != 5 {
+            return Err(rusqlite::Error::InvalidQuery);
+        }
+        Ok(Self { connection })
+    }
+
     pub fn open(path: &Path) -> Result<Self> {
         let connection = Connection::open(path)?;
         let version: i64 = connection.query_row("PRAGMA user_version", [], |row| row.get(0))?;
@@ -323,6 +333,41 @@ impl Store {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn read_only_inspection_cannot_write_create_or_migrate() {
+        let path = std::env::temp_dir().join(format!(
+            "switchx-read-only-{}.sqlite",
+            crate::app::new_id().unwrap()
+        ));
+        assert!(Store::open_read_only(&path).is_err());
+        assert!(!path.exists());
+        let store = Store::open(&path).unwrap();
+        let provider = ProviderRecord {
+            id: "read-only".into(),
+            name: "Read only".into(),
+            base_url: "https://example.invalid".into(),
+            model_id: "model".into(),
+            credential_ref: None,
+        };
+        store.put_provider(&provider).unwrap();
+        drop(store);
+        let original = std::fs::read(&path).unwrap();
+        let store = Store::open_read_only(&path).unwrap();
+        assert_eq!(store.providers().unwrap(), std::slice::from_ref(&provider));
+        assert!(store.put_provider(&provider).is_err());
+        assert!(store.delete_provider(&provider.id).is_err());
+        drop(store);
+        assert_eq!(std::fs::read(&path).unwrap(), original);
+        Connection::open(&path)
+            .unwrap()
+            .execute_batch("PRAGMA user_version = 4;")
+            .unwrap();
+        let old = std::fs::read(&path).unwrap();
+        assert!(Store::open_read_only(&path).is_err());
+        assert_eq!(std::fs::read(&path).unwrap(), old);
+        std::fs::remove_file(path).unwrap();
+    }
 
     #[test]
     fn v4_migration_preserves_rows_and_fallback_references_clear_on_deletion() {

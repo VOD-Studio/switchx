@@ -3,13 +3,14 @@
 //! `--desktop-recovery` starts with a journal to check recovery on native Command-Q.
 //! `--fallback` verifies one explicit backup after disconnecting the primary.
 //! `--desktop-fallback` uses compatible templates for editing the backup in the UI.
+//! `--live-probe` checks the real-route probe against these synthetic upstreams.
 
 use std::{
     path::{Path, PathBuf},
     process::Stdio,
     sync::{
         Arc,
-        atomic::{AtomicBool, Ordering},
+        atomic::{AtomicBool, AtomicU8, Ordering},
     },
     time::Duration,
 };
@@ -31,6 +32,8 @@ struct Mock {
     key: &'static str,
     tool: Arc<AtomicBool>,
     seen: mpsc::Sender<Value>,
+    live_probe: bool,
+    live_mode: Arc<AtomicU8>,
 }
 
 async fn models(State(state): State<Mock>, headers: HeaderMap) -> Result<Json<Value>, StatusCode> {
@@ -58,24 +61,67 @@ async fn responses(
     Json(request): Json<Value>,
 ) -> Result<([(header::HeaderName, &'static str); 1], String), StatusCode> {
     authorize(&state, &headers)?;
+    let item = if state.live_probe {
+        live_item(&request)?
+    } else if state.tool.swap(false, Ordering::SeqCst) {
+        json!({"type":"function_call","name":"exec_command","call_id":"call_route_probe","arguments":"{\"cmd\":\"cat probe.txt\",\"login\":false}"})
+    } else {
+        json!({"id":"msg_route_probe","type":"message","role":"assistant","content":[{"type":"output_text","text":"SWITCHX_ROUTED_OK","annotations":[]}]})
+    };
     state
         .seen
         .send(request)
         .await
         .map_err(|_| StatusCode::SERVICE_UNAVAILABLE)?;
-    let item = if state.tool.swap(false, Ordering::SeqCst) {
-        json!({"type":"function_call","name":"exec_command","call_id":"call_route_probe","arguments":"{\"cmd\":\"cat probe.txt\",\"login\":false}"})
-    } else {
-        json!({"id":"msg_route_probe","type":"message","role":"assistant","content":[{"type":"output_text","text":"SWITCHX_ROUTED_OK","annotations":[]}]})
-    };
+    if state.live_probe {
+        match state.live_mode.load(Ordering::SeqCst) {
+            1 => {
+                return Ok(sse_item(
+                    json!({"type":"message","role":"assistant","content":[{"type":"output_text","text":"unexpected-answer","annotations":[]}]}),
+                ));
+            }
+            2 => std::future::pending::<()>().await,
+            _ => {}
+        }
+    }
+    Ok(sse_item(item))
+}
+
+fn sse_item(item: Value) -> ([(header::HeaderName, &'static str); 1], String) {
     let done = json!({"type":"response.output_item.done","item":item});
     let complete = json!({"type":"response.completed","response":{"id":"resp_route_probe","usage":{"input_tokens":1,"output_tokens":1,"total_tokens":2}}});
-    Ok((
+    (
         [(header::CONTENT_TYPE, "text/event-stream")],
         format!(
             "event: response.output_item.done\ndata: {done}\n\nevent: response.completed\ndata: {complete}\n\n"
         ),
-    ))
+    )
+}
+
+fn live_item(request: &Value) -> Result<Value, StatusCode> {
+    let input = request["input"].to_string();
+    if let Some(marker) = ["SWITCHX_TOOL_", "SWITCHX_ANSWER_"]
+        .into_iter()
+        .find_map(|prefix| {
+            let start = input.find(prefix)?;
+            Some(
+                input[start..]
+                    .chars()
+                    .take_while(|character| character.is_ascii_alphanumeric() || *character == '_')
+                    .collect::<String>(),
+            )
+        })
+    {
+        return Ok(
+            json!({"id":"msg_live_fixture","type":"message","role":"assistant","content":[{"type":"output_text","text":marker,"annotations":[]}]}),
+        );
+    }
+    if input.contains("Read acceptance.txt") {
+        return Ok(
+            json!({"type":"function_call","name":"exec_command","call_id":"call_live_fixture","arguments":"{\"cmd\":\"cat acceptance.txt\",\"login\":false}"}),
+        );
+    }
+    Err(StatusCode::BAD_REQUEST)
 }
 
 #[tokio::main]
@@ -86,6 +132,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         Some("--desktop" | "--desktop-recovery" | "--desktop-fallback")
     );
     let fallback = matches!(mode.as_deref(), Some("--fallback" | "--desktop-fallback"));
+    let live_probe = mode.as_deref() == Some("--live-probe");
+    let live_mode = Arc::new(AtomicU8::new(0));
     let root = std::env::temp_dir().join(format!(
         "switchx-routed-probe-{}-{}",
         std::process::id(),
@@ -112,7 +160,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             let (sender, receiver) = mpsc::channel(16);
             seen.push(receiver);
             let upstream = Router::new().route("/v1/models", get(models)).route("/v1/responses", post(responses))
-                .with_state(Mock { key, tool: Arc::new(AtomicBool::new(index == 0 || fallback)), seen: sender });
+                .with_state(Mock { key, tool: Arc::new(AtomicBool::new(index == 0 || fallback)), seen: sender, live_probe, live_mode: live_mode.clone() });
             tasks.push(tokio::spawn(async move { axum::serve(listener, upstream).await.unwrap(); }));
             app::save_provider(&data, None, name, &format!("http://{address}/v1"), "shared-model", key.into())?;
             let provider = Store::open(&data.join("switchx.sqlite"))?.providers()?.into_iter().find(|provider| provider.name == name).unwrap();
@@ -141,6 +189,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             check(config_transaction::recovery(&data)?.is_none(), "desktop exited before restoring its route configuration")?;
             check(std::fs::read_to_string(home.join("config.toml"))? == ORIGINAL, "desktop exit changed the original configuration")?;
             println!("Desktop exit left the original configuration restored and no route journal.");
+        } else if live_probe {
+            live_probe_fixture(&data, &helper, &mut seen, &live_mode).await?;
         } else if fallback {
             fallback_probe(&data, &home, &helper, &mut seen, &mut tasks[0]).await?;
         } else {
@@ -173,6 +223,122 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     outcome?;
     println!("Synthetic route fixture, configuration and credentials cleaned up.");
     Ok(())
+}
+
+async fn live_probe_fixture(
+    data: &Path,
+    helper: &Path,
+    seen: &mut [mpsc::Receiver<Value>],
+    live_mode: &AtomicU8,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let binary = helper.parent().unwrap().join("examples/routed_live_probe");
+    check(binary.is_file(), "build --example routed_live_probe first")?;
+    let source = Store::open(&data.join("switchx.sqlite"))?;
+    let mut models = source.models()?;
+    let beta = models
+        .iter()
+        .find(|model| model.public_id == "sx-mock-beta")
+        .ok_or("beta fixture was not saved")?
+        .provider_id
+        .clone();
+    for model in &mut models {
+        model.enabled = false;
+        if model.public_id == "sx-mock-alpha" {
+            model.fallback_provider_id = Some(beta.clone());
+        }
+        source.put_model(model)?;
+    }
+    drop(source);
+    let original = std::fs::read(data.join("switchx.sqlite"))?;
+    for failed in [false, true] {
+        live_mode.store(u8::from(failed), Ordering::SeqCst);
+        let output = Command::new(&binary)
+            .args([data.to_str().unwrap(), "sx-mock-alpha", "sx-mock-beta"])
+            .stdin(Stdio::null())
+            .kill_on_drop(true)
+            .output()
+            .await?;
+        check(
+            output.status.success() != failed,
+            "live probe did not propagate its acceptance result",
+        )?;
+        verify_live_cleanup(&output.stdout)?;
+        println!("{}", String::from_utf8(output.stdout)?);
+        check(
+            std::fs::read(data.join("switchx.sqlite"))? == original,
+            "live probe changed its source database",
+        )?;
+    }
+    for receiver in seen.iter_mut() {
+        while receiver.try_recv().is_ok() {}
+    }
+    #[cfg(unix)]
+    {
+        live_mode.store(2, Ordering::SeqCst);
+        let mut child = Command::new(&binary)
+            .args([data.to_str().unwrap(), "sx-mock-alpha"])
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .kill_on_drop(true)
+            .spawn()?;
+        let pid = child.id().ok_or("live probe child has no PID")?;
+        tokio::select! {
+            request = timeout(Duration::from_secs(40), seen[0].recv()) => { request?.ok_or("interruption fixture was not called")?; }
+            status = child.wait() => {
+                status?;
+                let output = child.wait_with_output().await?;
+                eprintln!("{}{}", String::from_utf8_lossy(&output.stdout), String::from_utf8_lossy(&output.stderr));
+                return Err("interruption fixture exited before sending its request".into());
+            }
+        }
+        let status = Command::new("/bin/kill")
+            .args(["-INT", &pid.to_string()])
+            .status()
+            .await?;
+        check(
+            status.success(),
+            "could not interrupt the isolated live probe",
+        )?;
+        let output = timeout(Duration::from_secs(15), child.wait_with_output()).await??;
+        check(
+            !output.status.success(),
+            "interrupted live probe reported success",
+        )?;
+        verify_live_cleanup(&output.stdout)?;
+        check(
+            std::fs::read(data.join("switchx.sqlite"))? == original,
+            "interrupted live probe changed its source database",
+        )?;
+    }
+    for provider in Store::open_read_only(&data.join("switchx.sqlite"))?.providers()? {
+        let secret = app::provider_credential(&provider)?;
+        let expected = if provider.name == "Mock Alpha" {
+            "synthetic-alpha-key"
+        } else {
+            "synthetic-beta-key"
+        };
+        check(
+            secret.expose() == expected,
+            "live probe changed or removed the source credential",
+        )?;
+    }
+    println!(
+        "Live probe passed synthetic success, failed-answer and Ctrl-C cleanup checks; source database and credentials retained."
+    );
+    Ok(())
+}
+
+fn verify_live_cleanup(stdout: &[u8]) -> Result<(), Box<dyn std::error::Error>> {
+    let stdout = std::str::from_utf8(stdout)?;
+    let root = stdout
+        .lines()
+        .find_map(|line| line.strip_prefix("Isolated workspace: "))
+        .ok_or("live probe did not report its isolated workspace")?;
+    check(
+        stdout.contains("Original isolated config restored exactly") && !Path::new(root).exists(),
+        "live probe did not restore and remove its temporary workspace",
+    )
 }
 
 async fn fallback_probe(
