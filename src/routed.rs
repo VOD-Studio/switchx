@@ -125,7 +125,7 @@ impl RouteSession {
                         format!(
                             "\n  备用 → {} / {}；仅主连接建立失败时尝试，费用与数据接收方可能变化",
                             destination(provider),
-                            provider.model_id
+                            model.upstream_model
                         )
                     })
                     .unwrap_or_default();
@@ -186,9 +186,20 @@ impl RouteSession {
         let mut upstreams = HashMap::new();
         for provider in &providers {
             let token = app::provider_credential(provider)?;
-            direct::check_models(provider, token.expose())
+            let available = direct::fetch_models(&provider.base_url, token.expose())
                 .await
                 .map_err(|error| format!("{}：{error}", provider.name))?;
+            for model in models
+                .iter()
+                .filter(|model| model.provider_id == provider.id)
+            {
+                if !available.contains(&model.upstream_model) {
+                    return Err(format!(
+                        "{} 的目录中没有映射模型 {}",
+                        provider.name, model.upstream_model
+                    ));
+                }
+            }
             upstreams.insert(
                 provider.id.clone(),
                 Upstream::with_secret(&provider.base_url, token)?,
@@ -318,24 +329,113 @@ fn selected_inputs(state_dir: &Path) -> Result<(Vec<ModelRecord>, Vec<ProviderRe
             std::iter::once(model.provider_id.clone()).chain(model.fallback_provider_id.clone())
         })
         .collect();
-    models.retain(|model| required.contains(&model.provider_id));
-    let mut providers = Vec::with_capacity(models.len());
+    let selected: Vec<_> = models
+        .iter()
+        .filter(|model| model.enabled)
+        .cloned()
+        .collect();
+    models.retain(|model| {
+        model.enabled
+            || selected.iter().any(|primary| {
+                primary.fallback_provider_id.as_deref() == Some(&model.provider_id)
+                    && primary.upstream_model == model.upstream_model
+            })
+    });
+    let providers: Vec<_> = store
+        .providers()
+        .map_err(|_| "无法读取上游资料")?
+        .into_iter()
+        .filter(|provider| required.contains(&provider.id))
+        .collect();
     for model in &models {
-        let provider = store
-            .provider(&model.provider_id)
-            .map_err(|_| "无法读取上游资料")?
+        let provider = providers
+            .iter()
+            .find(|provider| provider.id == model.provider_id)
             .ok_or("所选模型的上游已不存在")?;
-        if provider.model_id != model.upstream_model {
-            return Err(format!(
-                "{} 的上游模型已变化，请重新导入模型资料",
-                model.public_id
-            ));
-        }
-        direct::validate_provider(&provider.name, &provider.base_url, &provider.model_id)?;
+        direct::validate_provider(&provider.name, &provider.base_url, &model.upstream_model)?;
         if provider.credential_ref.as_deref() != Some(provider.id.as_str()) {
             return Err(format!("{} 的凭据引用无效，请重新保存上游", provider.name));
         }
-        providers.push(provider);
     }
     Ok((models, providers))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn selects_each_provider_once_and_only_the_matching_backup_model() {
+        let path = std::env::temp_dir().join(format!(
+            "switchx-selected-models-{}",
+            app::new_id().unwrap()
+        ));
+        let store = app::open_store(&path).unwrap();
+        for id in ["primary", "backup"] {
+            store
+                .put_provider(&ProviderRecord {
+                    id: id.into(),
+                    name: id.into(),
+                    base_url: "https://example.invalid/v1".into(),
+                    model_id: "unrelated-default".into(),
+                    credential_ref: Some(id.into()),
+                })
+                .unwrap();
+        }
+        let metadata = catalog::mapping_metadata(
+            "model-a",
+            "Model A",
+            &catalog::MappingSettings {
+                context_window: "128000",
+                reasoning_levels: Some(""),
+                default_reasoning: Some(""),
+            },
+            None,
+        )
+        .unwrap();
+        let first = ModelRecord {
+            provider_id: "primary".into(),
+            public_id: "sx-first".into(),
+            display_name: "First".into(),
+            upstream_model: "model-a".into(),
+            metadata: metadata.to_string(),
+            enabled: true,
+            fallback_provider_id: Some("backup".into()),
+        };
+        store.put_model(&first).unwrap();
+        let mut second = first.clone();
+        second.public_id = "sx-second".into();
+        second.upstream_model = "model-b".into();
+        second.fallback_provider_id = None;
+        let mut metadata = metadata;
+        metadata["slug"] = "model-b".into();
+        second.metadata = metadata.to_string();
+        store.put_model(&second).unwrap();
+        store
+            .put_model(&ModelRecord {
+                provider_id: "backup".into(),
+                public_id: "sx-backup".into(),
+                enabled: false,
+                fallback_provider_id: None,
+                ..first
+            })
+            .unwrap();
+        store
+            .put_model(&ModelRecord {
+                provider_id: "backup".into(),
+                public_id: "sx-unused".into(),
+                upstream_model: "unused-model".into(),
+                metadata: "invalid but unpublished".into(),
+                enabled: false,
+                ..second
+            })
+            .unwrap();
+        let (models, providers) = selected_inputs(&path).unwrap();
+        assert_eq!(providers.len(), 2);
+        assert_eq!(models.len(), 3);
+        assert!(models.iter().all(|model| model.public_id != "sx-unused"));
+        assert_eq!(catalog::publish_saved(&models).unwrap().routes.len(), 2);
+        drop(store);
+        std::fs::remove_dir_all(path).unwrap();
+    }
 }
