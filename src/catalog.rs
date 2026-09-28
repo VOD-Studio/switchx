@@ -10,6 +10,7 @@ pub const MAX_CATALOG_BYTES: usize = 2 * 1024 * 1024;
 pub struct RouteBinding {
     pub provider_id: String,
     pub upstream_model: String,
+    pub fallback_provider_id: Option<String>,
 }
 
 #[derive(Clone, Copy)]
@@ -135,6 +136,7 @@ pub fn publish_saved(records: &[ModelRecord]) -> Result<Publication, String> {
         routes: HashMap::new(),
     };
     for record in records.iter().filter(|record| record.enabled) {
+        validate_fallback(record, records)?;
         let metadata: Value =
             serde_json::from_str(&record.metadata).map_err(|_| "已保存的模型资料损坏")?;
         let selected = publish(
@@ -146,7 +148,8 @@ pub fn publish_saved(records: &[ModelRecord]) -> Result<Publication, String> {
                 upstream_model: &record.upstream_model,
             }],
         )?;
-        for (id, binding) in selected.routes {
+        for (id, mut binding) in selected.routes {
+            binding.fallback_provider_id = record.fallback_provider_id.clone();
             if publication.routes.insert(id.clone(), binding).is_some() {
                 return Err(format!("公开模型 ID 重复：{id}"));
             }
@@ -173,6 +176,40 @@ pub fn publish_saved(records: &[ModelRecord]) -> Result<Publication, String> {
         return Err("发布目录超过 2 MiB，请减少所选模型".into());
     }
     Ok(publication)
+}
+
+pub fn validate_fallback(model: &ModelRecord, records: &[ModelRecord]) -> Result<(), String> {
+    let Some(id) = &model.fallback_provider_id else {
+        return Ok(());
+    };
+    if id == &model.provider_id {
+        return Err("备用上游不能与主上游相同".into());
+    }
+    let fallback = records
+        .iter()
+        .find(|record| &record.provider_id == id)
+        .ok_or("备用上游尚未导入模型资料")?;
+    if model.upstream_model != fallback.upstream_model {
+        return Err("备用上游必须使用相同的实际模型 ID；暂不支持自动换模型".into());
+    }
+    let comparable = |record: &ModelRecord| -> Result<Value, String> {
+        let mut metadata: Value =
+            serde_json::from_str(&record.metadata).map_err(|_| "已保存的模型资料损坏")?;
+        validate_metadata(&metadata)?;
+        if metadata["slug"] != record.upstream_model {
+            return Err("模型 ID 与导入资料不一致，请重新导入".into());
+        }
+        // Compare every capability and instruction field, including unknown fields.
+        // Only catalog presentation is allowed to differ.
+        for key in ["display_name", "description", "priority", "visibility"] {
+            metadata.as_object_mut().unwrap().remove(key);
+        }
+        Ok(metadata)
+    };
+    if comparable(model)? != comparable(fallback)? {
+        return Err("主备模型的能力或指令模板不同，不能设为备用".into());
+    }
+    Ok(())
 }
 
 pub fn publish(templates: &Value, selections: &[Selection<'_>]) -> Result<Publication, String> {
@@ -227,6 +264,7 @@ pub fn publish(templates: &Value, selections: &[Selection<'_>]) -> Result<Public
             RouteBinding {
                 provider_id: selection.provider_id.to_owned(),
                 upstream_model: selection.upstream_model.to_owned(),
+                fallback_provider_id: None,
             },
         );
     }
@@ -243,6 +281,66 @@ mod tests {
 
     fn templates() -> Value {
         serde_json::from_str(include_str!("../tests/fixtures/synthetic-models.json")).unwrap()
+    }
+
+    #[test]
+    fn fallback_requires_explicit_matching_model_and_complete_capabilities() {
+        let primary = ModelRecord {
+            provider_id: "primary".into(),
+            public_id: "sx-primary".into(),
+            display_name: "Primary".into(),
+            upstream_model: "deepseek-flash".into(),
+            metadata: templates()["models"][0].to_string(),
+            enabled: true,
+            fallback_provider_id: Some("backup".into()),
+        };
+        let mut backup = ModelRecord {
+            provider_id: "backup".into(),
+            public_id: "sx-backup".into(),
+            enabled: false,
+            fallback_provider_id: Some("primary".into()),
+            ..primary.clone()
+        };
+        let publication = publish_saved(&[primary.clone(), backup.clone()]).unwrap();
+        assert_eq!(publication.routes.len(), 1);
+        assert_eq!(
+            publication.routes["sx-primary"]
+                .fallback_provider_id
+                .as_deref(),
+            Some("backup")
+        );
+        assert!(publish_saved(std::slice::from_ref(&primary)).is_err());
+        assert!(
+            publish_saved(&[ModelRecord {
+                fallback_provider_id: Some("primary".into()),
+                ..primary.clone()
+            }])
+            .is_err()
+        );
+        backup.upstream_model = "different-model".into();
+        assert!(publish_saved(&[primary.clone(), backup.clone()]).is_err());
+        backup.upstream_model = primary.upstream_model.clone();
+        for (key, value) in [
+            ("context_window", json!(64000)),
+            ("shell_type", json!("shell_command")),
+            (
+                "model_messages",
+                json!({"instructions_template":"incompatible"}),
+            ),
+            ("unknown_future_capability", json!(true)),
+        ] {
+            let mut metadata: Value = serde_json::from_str(&primary.metadata).unwrap();
+            metadata[key] = value;
+            backup.metadata = metadata.to_string();
+            assert!(
+                publish_saved(&[primary.clone(), backup.clone()]).is_err(),
+                "{key}"
+            );
+        }
+        let mut metadata: Value = serde_json::from_str(&primary.metadata).unwrap();
+        metadata["description"] = "Another display description".into();
+        backup.metadata = metadata.to_string();
+        assert!(publish_saved(&[primary, backup]).is_ok());
     }
 
     #[test]
@@ -336,6 +434,7 @@ mod tests {
             upstream_model: "deepseek-flash".into(),
             metadata: template.to_string(),
             enabled: true,
+            fallback_provider_id: None,
         };
         let mut second_template = template.clone();
         second_template["context_window"] = 64000.into();

@@ -68,6 +68,7 @@ impl RequestTracker {
                 duration_ms: 0,
                 status: RequestStatus::Cancelled,
                 error_code: None,
+                fallback_from: None,
             },
             start: Instant::now(),
             log,

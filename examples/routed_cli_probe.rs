@@ -1,6 +1,8 @@
 //! Isolated native-route acceptance with synthetic credentials and two local upstreams.
 //! `--desktop` leaves the same fixture open for native UI checks until the app exits.
 //! `--desktop-recovery` starts with a journal to check recovery on native Command-Q.
+//! `--fallback` verifies one explicit backup after disconnecting the primary.
+//! `--desktop-fallback` uses compatible templates for editing the backup in the UI.
 
 use std::{
     path::{Path, PathBuf},
@@ -79,7 +81,11 @@ async fn responses(
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mode = std::env::args().nth(1);
-    let desktop = matches!(mode.as_deref(), Some("--desktop" | "--desktop-recovery"));
+    let desktop = matches!(
+        mode.as_deref(),
+        Some("--desktop" | "--desktop-recovery" | "--desktop-fallback")
+    );
+    let fallback = matches!(mode.as_deref(), Some("--fallback" | "--desktop-fallback"));
     let root = std::env::temp_dir().join(format!(
         "switchx-routed-probe-{}-{}",
         std::process::id(),
@@ -106,11 +112,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             let (sender, receiver) = mpsc::channel(16);
             seen.push(receiver);
             let upstream = Router::new().route("/v1/models", get(models)).route("/v1/responses", post(responses))
-                .with_state(Mock { key, tool: Arc::new(AtomicBool::new(index == 0)), seen: sender });
+                .with_state(Mock { key, tool: Arc::new(AtomicBool::new(index == 0 || fallback)), seen: sender });
             tasks.push(tokio::spawn(async move { axum::serve(listener, upstream).await.unwrap(); }));
             app::save_provider(&data, None, name, &format!("http://{address}/v1"), "shared-model", key.into())?;
             let provider = Store::open(&data.join("switchx.sqlite"))?.providers()?.into_iter().find(|provider| provider.name == name).unwrap();
-            let mut metadata = templates["models"][index].clone();
+            let mut metadata = templates["models"][if fallback { 0 } else { index }].clone();
             metadata["slug"] = "shared-model".into();
             let source = root.join(format!("model-{index}.json"));
             std::fs::write(&source, json!({"models":[metadata]}).to_string())?;
@@ -135,6 +141,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             check(config_transaction::recovery(&data)?.is_none(), "desktop exited before restoring its route configuration")?;
             check(std::fs::read_to_string(home.join("config.toml"))? == ORIGINAL, "desktop exit changed the original configuration")?;
             println!("Desktop exit left the original configuration restored and no route journal.");
+        } else if fallback {
+            fallback_probe(&data, &home, &helper, &mut seen, &mut tasks[0]).await?;
         } else {
             headless(&data, &home, &helper, &mut seen).await?;
         }
@@ -164,6 +172,86 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     std::fs::remove_dir_all(&root)?;
     outcome?;
     println!("Synthetic route fixture, configuration and credentials cleaned up.");
+    Ok(())
+}
+
+async fn fallback_probe(
+    data: &Path,
+    home: &Path,
+    helper: &Path,
+    seen: &mut [mpsc::Receiver<Value>],
+    primary_task: &mut tokio::task::JoinHandle<()>,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let store = Store::open(&data.join("switchx.sqlite"))?;
+    let providers = store.providers()?;
+    let primary = &providers[0];
+    let backup = &providers[1];
+    app::save_fallback(data, &primary.id, Some(&backup.id))?;
+    app::select_model(data, &backup.id, false)?;
+    let mut session = RouteSession::default();
+    let preview = session
+        .prepare(data, home, 0, "sx-mock-alpha", helper)
+        .await?;
+    check(
+        preview.contains("备用") && preview.contains(&backup.name),
+        "preview omitted the backup destination",
+    )?;
+    let mut changed = backup.clone();
+    changed.base_url = "http://127.0.0.1:1/v1".into();
+    store.put_provider(&changed)?;
+    check(
+        session.apply(data, home, 0, "sx-mock-alpha").await.is_err(),
+        "changed backup bypassed stale preview check",
+    )?;
+    check(
+        std::fs::read_to_string(home.join("config.toml"))? == ORIGINAL,
+        "stale backup preview changed config",
+    )?;
+    store.put_provider(backup)?;
+    session
+        .prepare(data, home, 0, "sx-mock-alpha", helper)
+        .await?;
+    session.apply(data, home, 0, "sx-mock-alpha").await?;
+    check(
+        app::save_fallback(data, &primary.id, None).is_err(),
+        "active route allowed candidate edits",
+    )?;
+    primary_task.abort();
+    let _ = primary_task.await;
+    run_cli(home, "sx-mock-alpha").await?;
+    let first = timeout(Duration::from_secs(3), seen[1].recv())
+        .await?
+        .ok_or("backup was not called")?;
+    let second = timeout(Duration::from_secs(3), seen[1].recv())
+        .await?
+        .ok_or("backup tool result was not forwarded")?;
+    check(
+        first["model"] == "shared-model"
+            && second["model"] == "shared-model"
+            && second["input"].to_string().contains("synthetic-tool-file")
+            && seen[0].try_recv().is_err(),
+        "fallback did not complete the isolated tool round trip",
+    )?;
+    let records = store.requests(100)?;
+    check(
+        records.len() == 2
+            && records.iter().all(|record| {
+                record.status == switchx::storage::RequestStatus::Completed
+                    && record.public_model.as_deref() == Some("sx-mock-alpha")
+                    && record.provider_id.as_deref() == Some(backup.id.as_str())
+                    && record.fallback_from.as_deref() == Some(primary.id.as_str())
+            }),
+        "fallback records did not capture both tool rounds and destinations",
+    )?;
+    session.restore(data, home).await?;
+    check(
+        std::fs::read_to_string(home.join("config.toml"))? == ORIGINAL
+            && config_transaction::recovery(data)?.is_none(),
+        "fallback route did not restore original configuration",
+    )?;
+    println!(
+        "Explicit backup completed an isolated CLI file-tool round trip after primary disconnect; both requests recorded, stale backup preview rejected, configuration restored."
+    );
     Ok(())
 }
 

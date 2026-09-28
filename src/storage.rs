@@ -19,6 +19,7 @@ pub struct ModelRecord {
     pub upstream_model: String,
     pub metadata: String,
     pub enabled: bool,
+    pub fallback_provider_id: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -64,6 +65,8 @@ pub struct RequestRecord {
     pub status: RequestStatus,
     // Only SwitchX-owned error codes, never upstream messages or response bodies.
     pub error_code: Option<String>,
+    // Set only when a connect error before sending caused one explicit fallback.
+    pub fallback_from: Option<String>,
 }
 
 pub struct Store {
@@ -74,7 +77,7 @@ impl Store {
     pub fn open(path: &Path) -> Result<Self> {
         let connection = Connection::open(path)?;
         let version: i64 = connection.query_row("PRAGMA user_version", [], |row| row.get(0))?;
-        if version > 4 {
+        if version > 5 {
             return Err(rusqlite::Error::InvalidQuery);
         }
         if version == 0 {
@@ -136,6 +139,17 @@ impl Store {
                  COMMIT;",
             )?;
         }
+        if version < 5 {
+            connection.execute_batch(
+                "BEGIN IMMEDIATE;
+                 ALTER TABLE published_models ADD COLUMN fallback_provider_id TEXT
+                    REFERENCES providers(id) ON DELETE SET NULL
+                    CHECK (fallback_provider_id != provider_id);
+                 ALTER TABLE request_records ADD COLUMN fallback_from TEXT;
+                 PRAGMA user_version = 5;
+                 COMMIT;",
+            )?;
+        }
         Ok(Self { connection })
     }
 
@@ -143,8 +157,8 @@ impl Store {
         self.connection.execute(
             "INSERT INTO request_records
              (id, started_at_ms, public_model, provider_id, upstream_model, generation,
-              http_status, headers_ms, first_event_ms, duration_ms, status, error_code)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)",
+              http_status, headers_ms, first_event_ms, duration_ms, status, error_code, fallback_from)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)",
             params![
                 record.id,
                 record.started_at_ms,
@@ -157,7 +171,8 @@ impl Store {
                 record.first_event_ms,
                 record.duration_ms,
                 record.status.as_str(),
-                record.error_code
+                record.error_code,
+                record.fallback_from
             ],
         )?;
         Ok(())
@@ -166,7 +181,7 @@ impl Store {
     pub fn requests(&self, limit: usize) -> Result<Vec<RequestRecord>> {
         let mut statement = self.connection.prepare(
             "SELECT id, started_at_ms, public_model, provider_id, upstream_model, generation,
-                    http_status, headers_ms, first_event_ms, duration_ms, status, error_code
+                    http_status, headers_ms, first_event_ms, duration_ms, status, error_code, fallback_from
              FROM request_records ORDER BY started_at_ms DESC, rowid DESC LIMIT ?1",
         )?;
         statement
@@ -191,6 +206,7 @@ impl Store {
                         _ => return Err(rusqlite::Error::InvalidQuery),
                     },
                     error_code: row.get(11)?,
+                    fallback_from: row.get(12)?,
                 })
             })?
             .collect()
@@ -269,22 +285,23 @@ impl Store {
 
     pub fn put_model(&self, model: &ModelRecord) -> Result<()> {
         self.connection.execute(
-            "INSERT INTO published_models (provider_id, public_id, display_name, upstream_model, metadata, enabled)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6)
+            "INSERT INTO published_models (provider_id, public_id, display_name, upstream_model, metadata, enabled, fallback_provider_id)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
              ON CONFLICT(provider_id) DO UPDATE SET
                 public_id = excluded.public_id,
                 display_name = excluded.display_name,
                 upstream_model = excluded.upstream_model,
                 metadata = excluded.metadata,
-                enabled = excluded.enabled",
-            params![model.provider_id, model.public_id, model.display_name, model.upstream_model, model.metadata, model.enabled],
+                enabled = excluded.enabled,
+                fallback_provider_id = excluded.fallback_provider_id",
+            params![model.provider_id, model.public_id, model.display_name, model.upstream_model, model.metadata, model.enabled, model.fallback_provider_id],
         )?;
         Ok(())
     }
 
     pub fn models(&self) -> Result<Vec<ModelRecord>> {
         let mut statement = self.connection.prepare(
-            "SELECT provider_id, public_id, display_name, upstream_model, metadata, enabled
+            "SELECT provider_id, public_id, display_name, upstream_model, metadata, enabled, fallback_provider_id
              FROM published_models ORDER BY public_id",
         )?;
         statement
@@ -296,6 +313,7 @@ impl Store {
                     upstream_model: row.get(3)?,
                     metadata: row.get(4)?,
                     enabled: row.get(5)?,
+                    fallback_provider_id: row.get(6)?,
                 })
             })?
             .collect()
@@ -307,6 +325,66 @@ mod tests {
     use super::*;
 
     #[test]
+    fn v4_migration_preserves_rows_and_fallback_references_clear_on_deletion() {
+        let path = std::env::temp_dir().join(format!(
+            "switchx-fallback-{}.sqlite",
+            crate::app::new_id().unwrap()
+        ));
+        let store = Store::open(&path).unwrap();
+        for id in ["primary", "backup"] {
+            store
+                .put_provider(&ProviderRecord {
+                    id: id.into(),
+                    name: id.into(),
+                    base_url: "https://example.invalid".into(),
+                    model_id: "shared".into(),
+                    credential_ref: None,
+                })
+                .unwrap();
+        }
+        let mut model = ModelRecord {
+            provider_id: "primary".into(),
+            public_id: "sx-primary".into(),
+            display_name: "Primary".into(),
+            upstream_model: "shared".into(),
+            metadata: "{}".into(),
+            enabled: true,
+            fallback_provider_id: None,
+        };
+        store.put_model(&model).unwrap();
+        store
+            .connection
+            .execute_batch(
+                "INSERT INTO request_records (id, started_at_ms, generation, duration_ms, status)
+                    VALUES ('v4-request', 1, 'old-generation', 3, 'completed');
+                 ALTER TABLE published_models DROP COLUMN fallback_provider_id;
+            ALTER TABLE request_records DROP COLUMN fallback_from; PRAGMA user_version = 4;",
+            )
+            .unwrap();
+        drop(store);
+        let store = Store::open(&path).unwrap();
+        assert_eq!(store.models().unwrap(), [model.clone()]);
+        let old_request = store.requests(1).unwrap().remove(0);
+        assert_eq!(old_request.id, "v4-request");
+        assert_eq!(old_request.status, RequestStatus::Completed);
+        assert!(old_request.fallback_from.is_none());
+        model.fallback_provider_id = Some("primary".into());
+        assert!(store.put_model(&model).is_err());
+        model.fallback_provider_id = Some("missing".into());
+        assert!(store.put_model(&model).is_err());
+        model.fallback_provider_id = Some("backup".into());
+        store.put_model(&model).unwrap();
+        drop(store);
+        let store = Store::open(&path).unwrap();
+        assert_eq!(store.models().unwrap(), [model.clone()]);
+        store.delete_provider("backup").unwrap();
+        model.fallback_provider_id = None;
+        assert_eq!(store.models().unwrap(), [model]);
+        drop(store);
+        std::fs::remove_file(path).unwrap();
+    }
+
+    #[test]
     fn v3_migration_keeps_history_after_reopen_and_provider_deletion() {
         let path = std::env::temp_dir().join(format!(
             "switchx-requests-{}.sqlite",
@@ -315,7 +393,7 @@ mod tests {
         let store = Store::open(&path).unwrap();
         store
             .connection
-            .execute_batch("DROP TABLE request_records; PRAGMA user_version = 3;")
+            .execute_batch("DROP TABLE request_records; ALTER TABLE published_models DROP COLUMN fallback_provider_id; PRAGMA user_version = 3;")
             .unwrap();
         drop(store);
         let store = Store::open(&path).unwrap();
@@ -340,6 +418,7 @@ mod tests {
             duration_ms: 50,
             status: RequestStatus::Completed,
             error_code: None,
+            fallback_from: None,
         };
         store.put_request(&record).unwrap();
         record.id = "second".into();
@@ -459,6 +538,7 @@ mod tests {
             upstream_model: "same-model".into(),
             metadata: "{}".into(),
             enabled: true,
+            fallback_provider_id: None,
         };
         store.put_model(&model).unwrap();
         assert!(

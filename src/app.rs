@@ -78,6 +78,8 @@ pub struct ModelView {
     pub detail: String,
     pub ready: bool,
     pub enabled: bool,
+    pub fallback_provider_id: String,
+    pub fallback_label: String,
 }
 
 pub struct RequestView {
@@ -87,6 +89,7 @@ pub struct RequestView {
     pub detail: String,
     pub status: RequestStatus,
     pub error: String,
+    pub fallback: String,
 }
 
 pub fn load_requests(data_dir: &Path) -> Result<Vec<RequestView>, AppError> {
@@ -139,6 +142,18 @@ pub fn load_requests(data_dir: &Path) -> Result<Vec<RequestView>, AppError> {
                     .error_code
                     .map(|code| format!("{} · {code}", request_error_message(&code)))
                     .unwrap_or_default(),
+                fallback: record
+                    .fallback_from
+                    .as_ref()
+                    .map(|id| {
+                        let primary = providers
+                            .iter()
+                            .find(|provider| &provider.id == id)
+                            .map(|provider| provider.name.as_str())
+                            .unwrap_or(id);
+                        format!("{primary} 建立连接失败（请求未发送）→ 尝试备用 {provider}")
+                    })
+                    .unwrap_or_default(),
             })
         })
         .collect()
@@ -151,6 +166,7 @@ fn request_error_message(code: &str) -> &'static str {
         "missing_completion" => "响应结束，但未收到正常完成信号",
         "upstream_timeout" => "上游请求超时",
         "upstream_unavailable" => "无法连接上游",
+        "no_eligible_upstream" => "主备上游均无法建立连接",
         "upstream_read_error" => "读取上游时连接中断",
         "upstream_http_error" => "上游返回非成功 HTTP 状态",
         "upstream_response_failed" | "upstream_stream_error" => "上游报告请求失败",
@@ -247,6 +263,21 @@ pub fn load_snapshot(data_dir: &Path, check_credentials: bool) -> Result<Snapsho
                     detail,
                     ready,
                     enabled: ready && model.is_some_and(|model| model.enabled),
+                    fallback_provider_id: model
+                        .and_then(|model| model.fallback_provider_id.clone())
+                        .unwrap_or_default(),
+                    fallback_label: model
+                        .and_then(|model| model.fallback_provider_id.as_ref())
+                        .map(|id| {
+                            let fallback = providers.iter().find(|provider| &provider.id == id);
+                            format!(
+                                "备用：{} · 仅连接建立失败时尝试",
+                                fallback
+                                    .map(|provider| provider.name.as_str())
+                                    .unwrap_or(id)
+                            )
+                        })
+                        .unwrap_or_else(|| "备用：未设置".into()),
                 }
             })
             .collect(),
@@ -422,9 +453,11 @@ pub fn save_model(
         upstream_model: provider.model_id,
         metadata,
         enabled: true,
+        fallback_provider_id: None,
     };
     catalog::publish_saved(std::slice::from_ref(&model))?;
     model.enabled = old.is_none_or(|model| model.enabled);
+    model.fallback_provider_id = old.and_then(|model| model.fallback_provider_id.clone());
     store
         .put_model(&model)
         .map_err(|_| "无法保存模型资料".into())
@@ -433,12 +466,12 @@ pub fn save_model(
 pub fn select_model(data_dir: &Path, provider_id: &str, enabled: bool) -> Result<(), String> {
     ensure_editable(data_dir)?;
     let store = open_store(data_dir).map_err(|error| error.message())?;
-    let mut model = store
-        .models()
-        .map_err(|_| "无法读取模型资料")?
-        .into_iter()
+    let models = store.models().map_err(|_| "无法读取模型资料")?;
+    let mut model = models
+        .iter()
         .find(|model| model.provider_id == provider_id)
-        .ok_or("请先导入模型资料")?;
+        .ok_or("请先导入模型资料")?
+        .clone();
     if enabled {
         let provider = store
             .provider(provider_id)
@@ -448,12 +481,47 @@ pub fn select_model(data_dir: &Path, provider_id: &str, enabled: bool) -> Result
             return Err("上游模型已变化，请重新导入资料".into());
         }
         model.enabled = true;
-        catalog::publish_saved(std::slice::from_ref(&model))?;
+        catalog::validate_fallback(&model, &models)?;
+        let mut validation = model.clone();
+        validation.fallback_provider_id = None;
+        catalog::publish_saved(&[validation])?;
     }
     model.enabled = enabled;
     store
         .put_model(&model)
         .map_err(|_| "无法保存模型选择".into())
+}
+
+pub fn save_fallback(
+    data_dir: &Path,
+    provider_id: &str,
+    fallback_id: Option<&str>,
+) -> Result<(), String> {
+    ensure_editable(data_dir)?;
+    let store = open_store(data_dir).map_err(|error| error.message())?;
+    let models = store.models().map_err(|_| "无法读取模型资料")?;
+    let mut model = models
+        .iter()
+        .find(|model| model.provider_id == provider_id)
+        .ok_or("请先导入主上游模型资料")?
+        .clone();
+    model.fallback_provider_id = fallback_id.map(str::to_owned);
+    catalog::validate_fallback(&model, &models)?;
+    if let Some(fallback_id) = fallback_id {
+        for id in [provider_id, fallback_id] {
+            let provider = store
+                .provider(id)
+                .map_err(|_| "无法读取上游资料")?
+                .ok_or("上游不存在")?;
+            if provider.model_id != model.upstream_model {
+                return Err("主备上游模型已变化，请重新导入资料".into());
+            }
+            validate_provider(&provider.name, &provider.base_url, &provider.model_id)?;
+        }
+    }
+    store
+        .put_model(&model)
+        .map_err(|_| "无法保存备用上游".into())
 }
 
 pub fn provider_credential(provider: &ProviderRecord) -> Result<Secret, String> {
@@ -647,6 +715,39 @@ mod tests {
         let saved = store.models().unwrap();
         assert_eq!(saved.len(), 1);
         assert!(load_snapshot(&path, false).unwrap().models[0].ready);
+        store
+            .put_provider(&ProviderRecord {
+                id: "backup".into(),
+                name: "Backup".into(),
+                base_url: "https://backup.invalid/v1".into(),
+                model_id: "deepseek-flash".into(),
+                credential_ref: None,
+            })
+            .unwrap();
+        save_model(
+            &path,
+            "backup",
+            "sx-backup",
+            "Backup",
+            source.to_str().unwrap(),
+        )
+        .unwrap();
+        select_model(&path, "backup", false).unwrap();
+        save_fallback(&path, "mock", Some("backup")).unwrap();
+        assert!(save_fallback(&path, "mock", Some("mock")).is_err());
+        assert!(save_fallback(&path, "mock", Some("missing")).is_err());
+        save_model(&path, "mock", "sx-mock", "Mock", "").unwrap();
+        select_model(&path, "mock", true).unwrap();
+        let saved = store.models().unwrap();
+        assert_eq!(
+            saved
+                .iter()
+                .find(|model| model.provider_id == "mock")
+                .unwrap()
+                .fallback_provider_id
+                .as_deref(),
+            Some("backup")
+        );
         fs::write(&source, r#"{"models":[{"slug":"deepseek-flash"}]}"#).unwrap();
         assert!(save_model(&path, "mock", "sx-mock", "Broken", source.to_str().unwrap()).is_err());
         assert_eq!(store.models().unwrap(), saved);
@@ -660,6 +761,7 @@ mod tests {
         );
         assert!(save_model(&path, "mock", "sx-changed", "Changed", "").is_err());
         assert!(delete_provider(&path, "mock").is_err());
+        assert!(save_fallback(&path, "mock", None).is_err());
         drop(store);
         fs::remove_dir_all(path).unwrap();
     }

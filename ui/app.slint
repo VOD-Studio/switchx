@@ -1,4 +1,11 @@
-import { LineEdit, ListView, Palette, ScrollView } from "std-widgets.slint";
+import {
+    CheckBox,
+    ComboBox,
+    LineEdit,
+    ListView,
+    Palette,
+    ScrollView,
+} from "std-widgets.slint";
 import { Theme } from "tokens.slint";
 import { QuietButton, SurfaceCard, StatusPill } from "components.slint";
 
@@ -20,6 +27,8 @@ export struct ModelRow {
     detail: string,
     ready: bool,
     included: bool,
+    fallback-provider-id: string,
+    fallback-label: string,
 }
 
 export struct RequestRow {
@@ -31,6 +40,7 @@ export struct RequestRow {
     completed: bool,
     cancelled: bool,
     error: string,
+    fallback: string,
 }
 
 export component AppWindow inherits Window {
@@ -87,6 +97,13 @@ export component AppWindow inherits Window {
     in-out property <string> model-public-id: "";
     in-out property <string> model-display-name: "";
     in-out property <string> model-source-path: "";
+    in-out property <bool> fallback-editor-open: false;
+    in-out property <string> fallback-primary-id;
+    in-out property <string> fallback-primary-label;
+    in-out property <[string]> fallback-ids;
+    in-out property <[string]> fallback-options;
+    in-out property <int> fallback-choice: 0;
+    in-out property <bool> fallback-consent: false;
     changed config-home => { root.route-preview-ready = false; root.direct-preview-ready = false; }
     changed route-port => { root.route-preview-ready = false; }
     changed default-model => { root.route-preview-ready = false; }
@@ -104,6 +121,8 @@ export component AppWindow inherits Window {
     callback check-login(string);
     callback save-model(string, string, string, string);
     callback select-model(string, bool);
+    callback edit-fallback(string);
+    callback save-fallback();
     callback inspect-route();
     callback apply-route();
     callback cancel-route-preview();
@@ -938,6 +957,63 @@ export component AppWindow inherits Window {
                             }
                         }
                     }
+                    if root.fallback-editor-open: SurfaceCard {
+                        height: 282px;
+                        VerticalLayout {
+                            padding: 18px;
+                            spacing: 10px;
+                            Text {
+                                text: "备用上游 · " + root.fallback-primary-label;
+                                color: Theme.primary-text;
+                                font-size: 16px;
+                                font-weight: 600;
+                                overflow: elide;
+                            }
+
+                            ComboBox {
+                                model: root.fallback-options;
+                                current-index <=> root.fallback-choice;
+                                accessible-label: "选择备用上游";
+                                enabled: !root.busy && !root.config-managed;
+                                selected(value) => { root.fallback-consent = false; }
+                            }
+
+                            Text {
+                                text: "主上游 → 一个备用上游。仅在连接建立失败且请求尚未发送时尝试一次；超时、HTTP 错误和响应中断均不切换。主备实际模型 ID、能力和指令模板须一致。";
+                                color: Theme.muted-text;
+                                font-size: 12px;
+                                wrap: word-wrap;
+                            }
+
+                            Text {
+                                text: "选择备用后，请确认该站点的数据区域与隐私要求适用；费用可能变化。备用模型无需单独发布。";
+                                color: Theme.muted-text;
+                                font-size: 12px;
+                                wrap: word-wrap;
+                            }
+
+                            CheckBox {
+                                text: "允许在上述条件下把完整请求发送到所选备用站点";
+                                checked <=> root.fallback-consent;
+                                enabled: root.fallback-choice > 0 && !root.busy && !root.config-managed;
+                            }
+
+                            HorizontalLayout {
+                                spacing: 8px;
+                                QuietButton {
+                                    text: "保存备用策略";
+                                    primary: true;
+                                    enabled: !root.busy && !root.config-managed && (root.fallback-choice == 0 || root.fallback-consent);
+                                    clicked => { root.save-fallback(); }
+                                }
+
+                                QuietButton {
+                                    text: "取消";
+                                    clicked => { root.fallback-editor-open = false; }
+                                }
+                            }
+                        }
+                    }
                     if root.model-editor-open: SurfaceCard {
                         height: 292px;
                         VerticalLayout {
@@ -1044,7 +1120,7 @@ export component AppWindow inherits Window {
                         }
                     }
                     for model in root.models: SurfaceCard {
-                        height: 130px;
+                        height: 154px;
                         HorizontalLayout {
                             padding: 16px;
                             spacing: 10px;
@@ -1071,6 +1147,13 @@ export component AppWindow inherits Window {
                                     font-size: 12px;
                                     overflow: elide;
                                 }
+
+                                Text {
+                                    text: model.fallback-label;
+                                    color: Theme.muted-text;
+                                    font-size: 12px;
+                                    overflow: elide;
+                                }
                             }
 
                             QuietButton {
@@ -1085,7 +1168,15 @@ export component AppWindow inherits Window {
                                     root.model-display-name = model.display-name;
                                     root.model-source-path = "";
                                     root.model-editor-open = true;
+                                    root.fallback-editor-open = false;
                                 }
+                            }
+
+                            QuietButton {
+                                width: 62px;
+                                text: "备用";
+                                enabled: model.ready && !root.busy && !root.config-managed;
+                                clicked => { root.edit-fallback(model.provider-id); }
                             }
 
                             QuietButton {
@@ -1146,7 +1237,7 @@ export component AppWindow inherits Window {
                 ListView {
                     vertical-stretch: 1;
                     for request in root.requests: SurfaceCard {
-                        height: request.error == "" ? 132px : 160px;
+                        height: (request.error == "" ? 132px : 160px) + (request.fallback == "" ? 0px : 28px);
                         VerticalLayout {
                             padding: 14px;
                             spacing: 6px;
@@ -1169,6 +1260,13 @@ export component AppWindow inherits Window {
                                 text: request.route;
                                 color: Theme.primary-text;
                                 font-size: 14px;
+                                overflow: elide;
+                            }
+
+                            if request.fallback != "": Text {
+                                text: request.fallback;
+                                color: Theme.muted-text;
+                                font-size: 12px;
                                 overflow: elide;
                             }
 
