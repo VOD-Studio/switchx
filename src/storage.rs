@@ -2,6 +2,8 @@ use std::path::Path;
 
 use rusqlite::{Connection, OpenFlags, Result, params};
 
+const SCHEMA_VERSION: i64 = 6;
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ProviderRecord {
     pub id: String,
@@ -78,7 +80,7 @@ impl Store {
     pub fn open_read_only(path: &Path) -> Result<Self> {
         let connection = Connection::open_with_flags(path, OpenFlags::SQLITE_OPEN_READ_ONLY)?;
         let version: i64 = connection.query_row("PRAGMA user_version", [], |row| row.get(0))?;
-        if version != 5 {
+        if version != SCHEMA_VERSION {
             return Err(rusqlite::Error::InvalidQuery);
         }
         Ok(Self { connection })
@@ -87,7 +89,7 @@ impl Store {
     pub fn open(path: &Path) -> Result<Self> {
         let connection = Connection::open(path)?;
         let version: i64 = connection.query_row("PRAGMA user_version", [], |row| row.get(0))?;
-        if version > 5 {
+        if version > SCHEMA_VERSION {
             return Err(rusqlite::Error::InvalidQuery);
         }
         if version == 0 {
@@ -157,6 +159,29 @@ impl Store {
                     CHECK (fallback_provider_id != provider_id);
                  ALTER TABLE request_records ADD COLUMN fallback_from TEXT;
                  PRAGMA user_version = 5;
+                 COMMIT;",
+            )?;
+        }
+        if version < 6 {
+            connection.execute_batch(
+                "BEGIN IMMEDIATE;
+                 CREATE TABLE model_mappings (
+                    public_id TEXT PRIMARY KEY NOT NULL,
+                    provider_id TEXT NOT NULL REFERENCES providers(id) ON DELETE CASCADE,
+                    display_name TEXT NOT NULL,
+                    upstream_model TEXT NOT NULL,
+                    metadata TEXT NOT NULL,
+                    enabled INTEGER NOT NULL CHECK (enabled IN (0, 1)),
+                    fallback_provider_id TEXT REFERENCES providers(id) ON DELETE SET NULL
+                        CHECK (fallback_provider_id != provider_id),
+                    UNIQUE (provider_id, upstream_model)
+                 );
+                 INSERT INTO model_mappings
+                    SELECT public_id, provider_id, display_name, upstream_model, metadata,
+                           enabled, fallback_provider_id FROM published_models;
+                 DROP TABLE published_models;
+                 ALTER TABLE model_mappings RENAME TO published_models;
+                 PRAGMA user_version = 6;
                  COMMIT;",
             )?;
         }
@@ -294,19 +319,66 @@ impl Store {
     }
 
     pub fn put_model(&self, model: &ModelRecord) -> Result<()> {
-        self.connection.execute(
+        Self::write_model(&self.connection, model)
+    }
+
+    fn write_model(connection: &Connection, model: &ModelRecord) -> Result<()> {
+        let changed = connection.execute(
             "INSERT INTO published_models (provider_id, public_id, display_name, upstream_model, metadata, enabled, fallback_provider_id)
              VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
-             ON CONFLICT(provider_id) DO UPDATE SET
-                public_id = excluded.public_id,
+             ON CONFLICT(public_id) DO UPDATE SET
                 display_name = excluded.display_name,
                 upstream_model = excluded.upstream_model,
                 metadata = excluded.metadata,
                 enabled = excluded.enabled,
-                fallback_provider_id = excluded.fallback_provider_id",
+                fallback_provider_id = excluded.fallback_provider_id
+             WHERE published_models.provider_id = excluded.provider_id",
             params![model.provider_id, model.public_id, model.display_name, model.upstream_model, model.metadata, model.enabled, model.fallback_provider_id],
         )?;
-        Ok(())
+        if changed == 0 {
+            Err(rusqlite::Error::InvalidQuery)
+        } else {
+            Ok(())
+        }
+    }
+
+    pub fn replace_model(&self, original_id: Option<&str>, model: &ModelRecord) -> Result<()> {
+        let transaction = self.connection.unchecked_transaction()?;
+        if original_id != Some(model.public_id.as_str()) {
+            let exists: bool = transaction.query_row(
+                "SELECT EXISTS(SELECT 1 FROM published_models WHERE public_id = ?1)",
+                [&model.public_id],
+                |row| row.get(0),
+            )?;
+            if exists {
+                return Err(rusqlite::Error::InvalidQuery);
+            }
+        }
+        if let Some(original_id) = original_id {
+            let owner: String = transaction.query_row(
+                "SELECT provider_id FROM published_models WHERE public_id = ?1",
+                [original_id],
+                |row| row.get(0),
+            )?;
+            if owner != model.provider_id {
+                return Err(rusqlite::Error::InvalidQuery);
+            }
+            if original_id != model.public_id {
+                transaction.execute(
+                    "DELETE FROM published_models WHERE public_id = ?1",
+                    [original_id],
+                )?;
+            }
+        }
+        Self::write_model(&transaction, model)?;
+        transaction.commit()
+    }
+
+    pub fn delete_model(&self, public_id: &str) -> Result<bool> {
+        Ok(self.connection.execute(
+            "DELETE FROM published_models WHERE public_id = ?1",
+            [public_id],
+        )? != 0)
     }
 
     pub fn models(&self) -> Result<Vec<ModelRecord>> {
@@ -333,6 +405,96 @@ impl Store {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn v5_migration_preserves_data_and_supports_atomic_independent_mappings() {
+        let path = std::env::temp_dir().join(format!(
+            "switchx-multi-model-{}.sqlite",
+            crate::app::new_id().unwrap()
+        ));
+        let store = Store::open(&path).unwrap();
+        for id in ["primary", "backup"] {
+            store
+                .put_provider(&ProviderRecord {
+                    id: id.into(),
+                    name: id.into(),
+                    base_url: "https://example.invalid/v1".into(),
+                    model_id: "first-model".into(),
+                    credential_ref: Some(id.into()),
+                })
+                .unwrap();
+        }
+        let first = ModelRecord {
+            provider_id: "primary".into(),
+            public_id: "sx-first".into(),
+            display_name: "First".into(),
+            upstream_model: "first-model".into(),
+            metadata: "retained metadata".into(),
+            enabled: false,
+            fallback_provider_id: Some("backup".into()),
+        };
+        store.put_model(&first).unwrap();
+        store.connection.execute_batch(
+            "INSERT INTO request_records (id, started_at_ms, generation, duration_ms, status) VALUES ('old-request', 1, 'old-version', 10, 'completed');
+             CREATE TABLE old_models (
+                provider_id TEXT PRIMARY KEY NOT NULL REFERENCES providers(id) ON DELETE CASCADE,
+                public_id TEXT UNIQUE NOT NULL, display_name TEXT NOT NULL, upstream_model TEXT NOT NULL,
+                metadata TEXT NOT NULL, enabled INTEGER NOT NULL,
+                fallback_provider_id TEXT REFERENCES providers(id) ON DELETE SET NULL CHECK (fallback_provider_id != provider_id));
+             INSERT INTO old_models SELECT provider_id, public_id, display_name, upstream_model, metadata, enabled, fallback_provider_id FROM published_models;
+             DROP TABLE published_models;
+             ALTER TABLE old_models RENAME TO published_models;
+             PRAGMA user_version = 5;"
+        ).unwrap();
+        drop(store);
+        let store = Store::open(&path).unwrap();
+        assert_eq!(store.models().unwrap(), std::slice::from_ref(&first));
+        assert_eq!(store.requests(1).unwrap()[0].id, "old-request");
+        assert_eq!(
+            store.providers().unwrap()[1].credential_ref.as_deref(),
+            Some("primary")
+        );
+        let second = ModelRecord {
+            public_id: "sx-second".into(),
+            upstream_model: "second-model".into(),
+            enabled: true,
+            fallback_provider_id: None,
+            ..first.clone()
+        };
+        store.put_model(&second).unwrap();
+        let before = store.models().unwrap();
+        assert!(
+            store
+                .replace_model(
+                    Some("sx-first"),
+                    &ModelRecord {
+                        public_id: "sx-second".into(),
+                        ..first.clone()
+                    }
+                )
+                .is_err()
+        );
+        assert_eq!(store.models().unwrap(), before);
+        let renamed = ModelRecord {
+            public_id: "sx-renamed".into(),
+            ..first.clone()
+        };
+        store.replace_model(Some("sx-first"), &renamed).unwrap();
+        assert_eq!(store.models().unwrap(), [renamed, second]);
+        store.delete_provider("backup").unwrap();
+        assert!(
+            store
+                .models()
+                .unwrap()
+                .iter()
+                .all(|model| model.fallback_provider_id.is_none())
+        );
+        store.delete_provider("primary").unwrap();
+        assert!(store.models().unwrap().is_empty());
+        assert_eq!(store.requests(1).unwrap()[0].id, "old-request");
+        drop(store);
+        std::fs::remove_file(path).unwrap();
+    }
 
     #[test]
     fn read_only_inspection_cannot_write_create_or_migrate() {

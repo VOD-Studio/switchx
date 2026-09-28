@@ -76,6 +76,10 @@ pub struct ModelView {
     pub public_id: String,
     pub display_name: String,
     pub detail: String,
+    pub context_window: String,
+    pub reasoning_levels: String,
+    pub default_reasoning: String,
+    pub saved: bool,
     pub ready: bool,
     pub enabled: bool,
     pub fallback_provider_id: String,
@@ -226,67 +230,108 @@ pub fn load_snapshot(data_dir: &Path, check_credentials: bool) -> Result<Snapsho
     let models = store.models().map_err(|_| AppError::Database)?;
     let credentials =
         CredentialStore::new(PROVIDER_KEY_SERVICE).map_err(|_| AppError::CredentialStore)?;
-    Ok(Snapshot {
-        models: providers
+    let mut views = Vec::new();
+    for provider in &providers {
+        let mappings: Vec<_> = models
             .iter()
-            .map(|provider| {
-                let model = models.iter().find(|model| model.provider_id == provider.id);
-                let metadata = model.and_then(|model| {
-                    serde_json::from_str::<serde_json::Value>(&model.metadata).ok()
-                });
-                let ready = model.is_some_and(|model| model.upstream_model == provider.model_id)
-                    && metadata.as_ref().is_some_and(|metadata| {
-                        metadata["slug"] == provider.model_id
-                            && catalog::validate_metadata(metadata).is_ok()
-                    });
-                let detail = if ready {
-                    let metadata = metadata.as_ref().unwrap();
-                    format!(
-                        "上下文 {} · 资料已导入 · 实际能力待验证",
-                        metadata["context_window"]
-                    )
-                } else if model.is_some() {
-                    "模型已变化或资料无效，请重新导入".into()
-                } else {
-                    "待导入模型资料".into()
-                };
-                ModelView {
-                    provider_id: provider.id.clone(),
-                    provider_name: provider.name.clone(),
-                    upstream_model: provider.model_id.clone(),
-                    public_id: model
-                        .map(|model| model.public_id.clone())
-                        .unwrap_or_else(|| format!("sx-{}", provider.id)),
-                    display_name: model
-                        .map(|model| model.display_name.clone())
-                        .unwrap_or_else(|| format!("{} · {}", provider.name, provider.model_id)),
-                    detail,
-                    ready,
-                    enabled: ready && model.is_some_and(|model| model.enabled),
-                    fallback_provider_id: model
-                        .and_then(|model| model.fallback_provider_id.clone())
-                        .unwrap_or_default(),
-                    fallback_label: model
-                        .and_then(|model| model.fallback_provider_id.as_ref())
-                        .map(|id| {
-                            let fallback = providers.iter().find(|provider| &provider.id == id);
-                            format!(
-                                "备用：{} · 仅连接建立失败时尝试",
-                                fallback
-                                    .map(|provider| provider.name.as_str())
-                                    .unwrap_or(id)
-                            )
-                        })
-                        .unwrap_or_else(|| "备用：未设置".into()),
-                }
-            })
-            .collect(),
+            .filter(|model| model.provider_id == provider.id)
+            .collect();
+        if mappings.is_empty() {
+            views.push(model_view(provider, None, &providers));
+        } else {
+            views.extend(
+                mappings
+                    .into_iter()
+                    .map(|model| model_view(provider, Some(model), &providers)),
+            );
+        }
+    }
+    Ok(Snapshot {
+        models: views,
         providers: providers
             .into_iter()
             .map(|provider| provider_view(provider, &credentials, check_credentials))
             .collect(),
         credentials_checked: check_credentials,
     })
+}
+
+fn model_view(
+    provider: &ProviderRecord,
+    model: Option<&ModelRecord>,
+    providers: &[ProviderRecord],
+) -> ModelView {
+    let metadata =
+        model.and_then(|model| serde_json::from_str::<serde_json::Value>(&model.metadata).ok());
+    let ready = model.is_some_and(|model| {
+        metadata.as_ref().is_some_and(|metadata| {
+            metadata["slug"] == model.upstream_model && catalog::validate_metadata(metadata).is_ok()
+        })
+    });
+    let detail = if ready {
+        let metadata = metadata.as_ref().unwrap();
+        format!(
+            "上下文 {} · 资料已保存 · 实际能力待验证",
+            metadata["context_window"]
+        )
+    } else if model.is_some() {
+        "模型资料无效，请编辑或重新导入".into()
+    } else {
+        "尚未添加模型映射".into()
+    };
+    ModelView {
+        provider_id: provider.id.clone(),
+        provider_name: provider.name.clone(),
+        upstream_model: model
+            .map(|model| model.upstream_model.clone())
+            .unwrap_or_else(|| provider.model_id.clone()),
+        public_id: model
+            .map(|model| model.public_id.clone())
+            .unwrap_or_else(|| format!("sx-{}", provider.id)),
+        display_name: model
+            .map(|model| model.display_name.clone())
+            .unwrap_or_else(|| format!("{} · {}", provider.name, provider.model_id)),
+        detail,
+        context_window: metadata
+            .as_ref()
+            .and_then(|value| value["context_window"].as_i64())
+            .map(|value| value.to_string())
+            .unwrap_or_default(),
+        reasoning_levels: metadata
+            .as_ref()
+            .and_then(|value| value["supported_reasoning_levels"].as_array())
+            .map(|levels| {
+                levels
+                    .iter()
+                    .filter_map(|level| level["effort"].as_str())
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            })
+            .unwrap_or_default(),
+        default_reasoning: metadata
+            .as_ref()
+            .and_then(|value| value["default_reasoning_level"].as_str())
+            .unwrap_or("")
+            .into(),
+        saved: model.is_some(),
+        ready,
+        enabled: ready && model.is_some_and(|model| model.enabled),
+        fallback_provider_id: model
+            .and_then(|model| model.fallback_provider_id.clone())
+            .unwrap_or_default(),
+        fallback_label: model
+            .and_then(|model| model.fallback_provider_id.as_ref())
+            .map(|id| {
+                let fallback = providers.iter().find(|provider| &provider.id == id);
+                format!(
+                    "备用：{} · 仅连接建立失败时尝试",
+                    fallback
+                        .map(|provider| provider.name.as_str())
+                        .unwrap_or(id)
+                )
+            })
+            .unwrap_or_else(|| "备用：未设置".into()),
+    }
 }
 
 fn provider_view(
@@ -431,55 +476,134 @@ pub fn save_model(
         .map_err(|_| "无法读取上游资料")?
         .ok_or("上游不存在")?;
     let models = store.models().map_err(|_| "无法读取模型资料")?;
-    let old = models.iter().find(|model| model.provider_id == provider_id);
+    let original_id = models
+        .iter()
+        .find(|model| model.provider_id == provider_id && model.upstream_model == provider.model_id)
+        .map(|model| model.public_id.as_str())
+        .unwrap_or("");
+    save_mapping(
+        data_dir,
+        ModelInput {
+            provider_id,
+            original_id,
+            public_id,
+            display_name,
+            upstream_model: &provider.model_id,
+            catalog_path,
+            settings: None,
+        },
+    )
+}
+
+pub struct ModelInput<'a> {
+    pub provider_id: &'a str,
+    pub original_id: &'a str,
+    pub public_id: &'a str,
+    pub display_name: &'a str,
+    pub upstream_model: &'a str,
+    pub catalog_path: &'a str,
+    pub settings: Option<catalog::MappingSettings<'a>>,
+}
+
+pub fn save_mapping(data_dir: &Path, input: ModelInput<'_>) -> Result<(), String> {
+    ensure_editable(data_dir)?;
+    let store = open_store(data_dir).map_err(|error| error.message())?;
+    let provider = store
+        .provider(input.provider_id)
+        .map_err(|_| "无法读取上游资料")?
+        .ok_or("上游不存在")?;
+    let models = store.models().map_err(|_| "无法读取模型资料")?;
+    validate_provider(&provider.name, &provider.base_url, input.upstream_model)?;
+    let old = if input.original_id.is_empty() {
+        None
+    } else {
+        Some(
+            models
+                .iter()
+                .find(|model| {
+                    model.public_id == input.original_id && model.provider_id == input.provider_id
+                })
+                .ok_or("原模型映射不存在，请刷新后重试")?,
+        )
+    };
     if models
         .iter()
-        .any(|model| model.public_id == public_id && model.provider_id != provider_id)
+        .any(|model| model.public_id == input.public_id && model.public_id != input.original_id)
     {
-        return Err("公开模型 ID 已由另一上游使用".into());
+        return Err("公开模型 ID 已被使用".into());
     }
-    let metadata = if catalog_path.trim().is_empty() {
-        old.filter(|model| model.upstream_model == provider.model_id)
-            .ok_or("请输入包含此模型的 Codex 目录 JSON 文件路径")?
-            .metadata
-            .clone()
+    if models.iter().any(|model| {
+        model.provider_id == input.provider_id
+            && model.upstream_model == input.upstream_model
+            && model.public_id != input.original_id
+    }) {
+        return Err("此上游已有该实际模型的映射，请编辑已有条目".into());
+    }
+    let source = if input.catalog_path.trim().is_empty() {
+        old.filter(|model| model.upstream_model == input.upstream_model)
+            .map(|model| serde_json::from_str(&model.metadata).map_err(|_| "已保存的模型资料损坏"))
+            .transpose()?
     } else {
-        catalog::read_template(Path::new(catalog_path.trim()), &provider.model_id)?.to_string()
+        Some(catalog::read_template(
+            Path::new(input.catalog_path.trim()),
+            input.upstream_model,
+        )?)
+    };
+    let metadata = if let Some(settings) = &input.settings {
+        catalog::mapping_metadata(
+            input.upstream_model,
+            input.display_name.trim(),
+            settings,
+            source,
+        )?
+    } else {
+        source.ok_or("请输入包含此模型的 Codex 目录 JSON 文件路径")?
     };
     let mut model = ModelRecord {
-        provider_id: provider_id.into(),
-        public_id: public_id.into(),
-        display_name: display_name.trim().into(),
-        upstream_model: provider.model_id,
-        metadata,
+        provider_id: input.provider_id.into(),
+        public_id: input.public_id.into(),
+        display_name: input.display_name.trim().into(),
+        upstream_model: input.upstream_model.into(),
+        metadata: metadata.to_string(),
         enabled: true,
         fallback_provider_id: None,
     };
     catalog::publish_saved(std::slice::from_ref(&model))?;
     model.enabled = old.is_none_or(|model| model.enabled);
-    model.fallback_provider_id = old.and_then(|model| model.fallback_provider_id.clone());
+    model.fallback_provider_id = old
+        .filter(|old| old.upstream_model == input.upstream_model)
+        .and_then(|model| model.fallback_provider_id.clone());
+    let mut updated: Vec<_> = models
+        .into_iter()
+        .filter(|model| model.public_id != input.original_id)
+        .collect();
+    updated.push(model.clone());
+    for model in &updated {
+        catalog::validate_fallback(model, &updated)?;
+    }
     store
-        .put_model(&model)
+        .replace_model(
+            (!input.original_id.is_empty()).then_some(input.original_id),
+            &model,
+        )
         .map_err(|_| "无法保存模型资料".into())
 }
 
-pub fn select_model(data_dir: &Path, provider_id: &str, enabled: bool) -> Result<(), String> {
+pub fn select_model(data_dir: &Path, public_id: &str, enabled: bool) -> Result<(), String> {
     ensure_editable(data_dir)?;
     let store = open_store(data_dir).map_err(|error| error.message())?;
     let models = store.models().map_err(|_| "无法读取模型资料")?;
     let mut model = models
         .iter()
-        .find(|model| model.provider_id == provider_id)
+        .find(|model| model.public_id == public_id)
         .ok_or("请先导入模型资料")?
         .clone();
     if enabled {
         let provider = store
-            .provider(provider_id)
+            .provider(&model.provider_id)
             .map_err(|_| "无法读取上游资料")?
             .ok_or("上游不存在")?;
-        if model.upstream_model != provider.model_id {
-            return Err("上游模型已变化，请重新导入资料".into());
-        }
+        validate_provider(&provider.name, &provider.base_url, &model.upstream_model)?;
         model.enabled = true;
         catalog::validate_fallback(&model, &models)?;
         let mut validation = model.clone();
@@ -494,7 +618,7 @@ pub fn select_model(data_dir: &Path, provider_id: &str, enabled: bool) -> Result
 
 pub fn save_fallback(
     data_dir: &Path,
-    provider_id: &str,
+    public_id: &str,
     fallback_id: Option<&str>,
 ) -> Result<(), String> {
     ensure_editable(data_dir)?;
@@ -502,26 +626,43 @@ pub fn save_fallback(
     let models = store.models().map_err(|_| "无法读取模型资料")?;
     let mut model = models
         .iter()
-        .find(|model| model.provider_id == provider_id)
+        .find(|model| model.public_id == public_id)
         .ok_or("请先导入主上游模型资料")?
         .clone();
     model.fallback_provider_id = fallback_id.map(str::to_owned);
     catalog::validate_fallback(&model, &models)?;
     if let Some(fallback_id) = fallback_id {
-        for id in [provider_id, fallback_id] {
+        for id in [model.provider_id.as_str(), fallback_id] {
             let provider = store
                 .provider(id)
                 .map_err(|_| "无法读取上游资料")?
                 .ok_or("上游不存在")?;
-            if provider.model_id != model.upstream_model {
-                return Err("主备上游模型已变化，请重新导入资料".into());
-            }
-            validate_provider(&provider.name, &provider.base_url, &provider.model_id)?;
+            validate_provider(&provider.name, &provider.base_url, &model.upstream_model)?;
         }
     }
     store
         .put_model(&model)
         .map_err(|_| "无法保存备用上游".into())
+}
+
+pub fn delete_model(data_dir: &Path, public_id: &str) -> Result<(), String> {
+    ensure_editable(data_dir)?;
+    let store = open_store(data_dir).map_err(|error| error.message())?;
+    let models = store.models().map_err(|_| "无法读取模型资料")?;
+    let model = models
+        .iter()
+        .find(|model| model.public_id == public_id)
+        .ok_or("模型映射不存在")?;
+    if models.iter().any(|primary| {
+        primary.fallback_provider_id.as_deref() == Some(&model.provider_id)
+            && primary.upstream_model == model.upstream_model
+    }) {
+        return Err("此模型被用作备用，请先清除对应的备用策略".into());
+    }
+    store
+        .delete_model(public_id)
+        .map_err(|_| "无法删除模型映射")?;
+    Ok(())
 }
 
 pub fn provider_credential(provider: &ProviderRecord) -> Result<Secret, String> {
@@ -551,7 +692,7 @@ pub fn load_provider(data_dir: &Path, id: &str) -> Result<ProviderRecord, String
         .ok_or_else(|| "上游不存在，请刷新后重试".into())
 }
 
-pub(crate) fn new_id() -> Result<String, String> {
+pub fn new_id() -> Result<String, String> {
     let mut bytes = [0_u8; 16];
     getrandom::fill(&mut bytes).map_err(|_| "无法生成上游 ID")?;
     Ok(bytes.iter().map(|byte| format!("{byte:02x}")).collect())
@@ -607,6 +748,74 @@ pub(crate) fn open_store(data_dir: &Path) -> Result<Store, AppError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn mappings_can_be_added_edited_selected_and_deleted_independently() {
+        let path = env::temp_dir().join(format!("switchx-mapping-edit-{}", new_id().unwrap()));
+        let store = open_store(&path).unwrap();
+        store
+            .put_provider(&ProviderRecord {
+                id: "mock".into(),
+                name: "Mock".into(),
+                base_url: "https://example.invalid/v1".into(),
+                model_id: "default-model".into(),
+                credential_ref: None,
+            })
+            .unwrap();
+        let save = |original_id, public_id, upstream_model, context_window| {
+            save_mapping(
+                &path,
+                ModelInput {
+                    provider_id: "mock",
+                    original_id,
+                    public_id,
+                    display_name: "Mapped model",
+                    upstream_model,
+                    catalog_path: "",
+                    settings: Some(catalog::MappingSettings {
+                        context_window,
+                        reasoning_levels: Some("low, high"),
+                        default_reasoning: Some("high"),
+                    }),
+                },
+            )
+        };
+        save("", "sx-first", "first-model", "128000").unwrap();
+        save("", "sx-second", "second-model", "256000").unwrap();
+        let snapshot = load_snapshot(&path, false).unwrap();
+        assert_eq!(snapshot.models.len(), 2);
+        assert!(
+            snapshot
+                .models
+                .iter()
+                .all(|model| model.ready && model.saved)
+        );
+        assert_eq!(snapshot.models[1].context_window, "256000");
+        select_model(&path, "sx-second", false).unwrap();
+        assert!(store.models().unwrap()[0].enabled);
+        assert!(!store.models().unwrap()[1].enabled);
+        let before = store.models().unwrap();
+        assert!(save("sx-first", "sx-second", "first-model", "128000").is_err());
+        assert!(save("sx-first", "sx-first", "first-model", "0").is_err());
+        assert!(save("", "sx-duplicate", "first-model", "128000").is_err());
+        assert_eq!(store.models().unwrap(), before);
+        save("sx-first", "sx-renamed", "renamed-model", "192000").unwrap();
+        let published = catalog::publish_saved(&store.models().unwrap()).unwrap();
+        assert_eq!(published.routes.len(), 1);
+        assert_eq!(
+            published.routes["sx-renamed"].upstream_model,
+            "renamed-model"
+        );
+        assert_eq!(published.catalog["models"][0]["context_window"], 192000);
+        delete_model(&path, "sx-renamed").unwrap();
+        assert_eq!(store.models().unwrap().len(), 1);
+        assert_eq!(store.models().unwrap()[0].public_id, "sx-second");
+        fs::write(path.join("switch-journal.json"), "synthetic journal").unwrap();
+        assert!(save("", "sx-blocked", "new-model", "").is_err());
+        assert!(delete_model(&path, "sx-second").is_err());
+        drop(store);
+        fs::remove_dir_all(path).unwrap();
+    }
 
     #[test]
     fn snapshot_reads_metadata_and_redacts_credential_reference() {
@@ -732,12 +941,12 @@ mod tests {
             source.to_str().unwrap(),
         )
         .unwrap();
-        select_model(&path, "backup", false).unwrap();
-        save_fallback(&path, "mock", Some("backup")).unwrap();
-        assert!(save_fallback(&path, "mock", Some("mock")).is_err());
-        assert!(save_fallback(&path, "mock", Some("missing")).is_err());
+        select_model(&path, "sx-backup", false).unwrap();
+        save_fallback(&path, "sx-mock", Some("backup")).unwrap();
+        assert!(save_fallback(&path, "sx-mock", Some("mock")).is_err());
+        assert!(save_fallback(&path, "sx-mock", Some("missing")).is_err());
         save_model(&path, "mock", "sx-mock", "Mock", "").unwrap();
-        select_model(&path, "mock", true).unwrap();
+        select_model(&path, "sx-mock", true).unwrap();
         let saved = store.models().unwrap();
         assert_eq!(
             saved
@@ -751,17 +960,17 @@ mod tests {
         fs::write(&source, r#"{"models":[{"slug":"deepseek-flash"}]}"#).unwrap();
         assert!(save_model(&path, "mock", "sx-mock", "Broken", source.to_str().unwrap()).is_err());
         assert_eq!(store.models().unwrap(), saved);
-        select_model(&path, "mock", false).unwrap();
+        select_model(&path, "sx-mock", false).unwrap();
         assert!(!store.models().unwrap()[0].enabled);
         fs::write(path.join("switch-journal.json"), "synthetic journal").unwrap();
         assert!(
-            select_model(&path, "mock", true)
+            select_model(&path, "sx-mock", true)
                 .unwrap_err()
                 .contains("先恢复")
         );
         assert!(save_model(&path, "mock", "sx-changed", "Changed", "").is_err());
         assert!(delete_provider(&path, "mock").is_err());
-        assert!(save_fallback(&path, "mock", None).is_err());
+        assert!(save_fallback(&path, "sx-mock", None).is_err());
         drop(store);
         fs::remove_dir_all(path).unwrap();
     }

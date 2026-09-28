@@ -8,8 +8,8 @@ use std::path::{Path, PathBuf};
 use slint::{ComponentHandle, Model, ModelRc, VecModel};
 use switchx::{
     app::{self, AppError, Snapshot, data_directory, load_snapshot},
-    client, config_transaction,
-    credentials::{CredentialStore, PROVIDER_KEY_SERVICE, ROUTER_TOKEN_SERVICE},
+    catalog, client, config_transaction,
+    credentials::{CredentialStore, PROVIDER_KEY_SERVICE, ROUTER_TOKEN_SERVICE, Secret},
     direct,
     direct_config::{self, PreparedDirectSwitch},
     routed::RouteSession,
@@ -29,6 +29,13 @@ enum Command {
     },
     Delete(String),
     Check(String),
+    FetchModels {
+        scope: i32,
+        generation: i32,
+        provider: String,
+        url: String,
+        key: Secret,
+    },
     InspectDirect {
         id: String,
         home: String,
@@ -40,10 +47,16 @@ enum Command {
     CheckLogin(String),
     SaveModel {
         provider: String,
+        original_id: String,
         public_id: String,
         name: String,
+        upstream_model: String,
         path: String,
+        context: String,
+        levels: String,
+        default_reasoning: String,
     },
+    DeleteModel(String),
     SelectModel(String, bool),
     SaveFallback(String, Option<String>),
     InspectRoute {
@@ -106,6 +119,10 @@ fn show_result(app: &AppWindow, result: Result<Snapshot, AppError>) {
                         public_id: model.public_id.into(),
                         display_name: model.display_name.into(),
                         detail: model.detail.into(),
+                        context_window: model.context_window.into(),
+                        reasoning_levels: model.reasoning_levels.into(),
+                        default_reasoning: model.default_reasoning.into(),
+                        saved: model.saved,
                         ready: model.ready,
                         included: model.enabled,
                         fallback_provider_id: model.fallback_provider_id.into(),
@@ -114,6 +131,20 @@ fn show_result(app: &AppWindow, result: Result<Snapshot, AppError>) {
                     .collect::<Vec<_>>(),
             )));
             let count = snapshot.providers.len();
+            app.set_model_provider_ids(ModelRc::new(VecModel::from(
+                snapshot
+                    .providers
+                    .iter()
+                    .map(|provider| provider.id.clone().into())
+                    .collect::<Vec<slint::SharedString>>(),
+            )));
+            app.set_model_provider_options(ModelRc::new(VecModel::from(
+                snapshot
+                    .providers
+                    .iter()
+                    .map(|provider| provider.name.clone().into())
+                    .collect::<Vec<slint::SharedString>>(),
+            )));
             let rows = snapshot
                 .providers
                 .into_iter()
@@ -204,6 +235,86 @@ fn show_config_status(app: &AppWindow, status: client::ConfigStatus) {
     app.set_config_status(
         format!("{} · {} · {}", status.mode, status.provider, status.model).into(),
     );
+}
+
+fn open_model_editor(app: &AppWindow, provider_id: &str, original_id: &str) -> Result<(), String> {
+    let provider = app
+        .get_providers()
+        .iter()
+        .find(|provider| provider.id == provider_id)
+        .ok_or("上游不存在，请刷新后重试")?;
+    let model = if original_id.is_empty() {
+        None
+    } else {
+        Some(
+            app.get_models()
+                .iter()
+                .find(|model| {
+                    model.public_id == original_id
+                        && model.saved
+                        && model.provider_id == provider_id
+                })
+                .ok_or("模型映射不存在，请刷新后重试")?,
+        )
+    };
+    app.set_model_provider_id(provider.id.clone());
+    app.set_model_provider_name(provider.name);
+    app.set_model_original_id(original_id.into());
+    app.set_model_upstream_id(
+        model
+            .as_ref()
+            .map(|model| model.upstream_model.clone())
+            .unwrap_or(provider.model_id),
+    );
+    app.set_model_public_id(match &model {
+        Some(model) => model.public_id.clone(),
+        None => format!("sx-{}", app::new_id()?).into(),
+    });
+    app.set_model_display_name(
+        model
+            .as_ref()
+            .map(|model| model.display_name.clone())
+            .unwrap_or_else(|| app.get_model_upstream_id()),
+    );
+    app.set_model_context_window(
+        model
+            .as_ref()
+            .map(|model| model.context_window.clone())
+            .unwrap_or_default(),
+    );
+    app.set_model_reasoning_levels(
+        model
+            .as_ref()
+            .map(|model| model.reasoning_levels.clone())
+            .unwrap_or_default(),
+    );
+    app.set_model_default_reasoning(
+        model
+            .as_ref()
+            .map(|model| model.default_reasoning.clone())
+            .filter(|value| !value.is_empty())
+            .unwrap_or_else(|| "未设置".into()),
+    );
+    app.set_model_source_path("".into());
+    app.set_model_delete_confirm(false);
+    app.set_model_editor_open(true);
+    app.set_fallback_editor_open(false);
+    app.set_editor_open(false);
+    app.set_edit_key("".into());
+    app.set_active_page(2);
+    update_reasoning_options(app);
+    Ok(())
+}
+
+fn update_reasoning_options(app: &AppWindow) {
+    let text = app.get_model_reasoning_levels();
+    let levels = catalog::reasoning_levels(&text).unwrap_or_default();
+    let mut options = vec![slint::SharedString::from("未设置")];
+    options.extend(levels.into_iter().map(slint::SharedString::from));
+    if !options.contains(&app.get_model_default_reasoning()) {
+        app.set_model_default_reasoning("未设置".into());
+    }
+    app.set_model_reasoning_options(ModelRc::new(VecModel::from(options)));
 }
 
 async fn worker(
@@ -345,6 +456,54 @@ async fn worker(
                     Err(error) => Err(error),
                 };
                 let _ = weak.upgrade_in_event_loop(move |app| show_action(&app, result));
+            }
+            Command::FetchModels {
+                scope,
+                generation,
+                provider,
+                url,
+                key,
+            } => {
+                let result = async {
+                    let token = if key.expose().is_empty() {
+                        let data_dir = directory.as_ref().map_err(|error| error.message())?;
+                        if provider.is_empty() {
+                            return Err("请先填写 API 地址和 API Key".into());
+                        }
+                        credential(&app::load_provider(data_dir, &provider)?)?
+                    } else {
+                        key
+                    };
+                    direct::fetch_models(&url, token.expose()).await
+                }
+                .await;
+                let _ = weak.upgrade_in_event_loop(move |app| {
+                    app.set_busy(false);
+                    if generation != app.get_discovery_generation()
+                        || scope != app.get_discovery_scope()
+                        || (scope == 0 && !app.get_editor_open())
+                        || (scope == 1 && !app.get_model_editor_open())
+                    {
+                        return;
+                    }
+                    app.set_fetching_models(false);
+                    match result {
+                        Ok(models) => {
+                            app.set_discovery_message(if models.is_empty() {
+                                "上游返回空列表，可手动填写模型 ID".into()
+                            } else {
+                                format!("已获取 {} 个模型，可从列表选择", models.len()).into()
+                            });
+                            app.set_fetched_models(ModelRc::new(VecModel::from(
+                                models
+                                    .into_iter()
+                                    .map(slint::SharedString::from)
+                                    .collect::<Vec<_>>(),
+                            )));
+                        }
+                        Err(error) => app.set_discovery_message(error.into()),
+                    }
+                });
             }
             Command::InspectDirect { id, home: target } => {
                 route_session.discard_preview();
@@ -540,15 +699,39 @@ async fn worker(
             }
             Command::SaveModel {
                 provider,
+                original_id,
                 public_id,
                 name,
+                upstream_model,
                 path,
+                context,
+                levels,
+                default_reasoning,
             } => {
                 let result = directory
                     .as_ref()
                     .map_err(|error| error.message().to_owned())
                     .and_then(|directory| {
-                        app::save_model(directory, &provider, &public_id, &name, &path)
+                        let keep_imported_reasoning =
+                            !path.trim().is_empty() && levels.trim().is_empty();
+                        app::save_mapping(
+                            directory,
+                            app::ModelInput {
+                                provider_id: &provider,
+                                original_id: &original_id,
+                                public_id: &public_id,
+                                display_name: &name,
+                                upstream_model: &upstream_model,
+                                catalog_path: &path,
+                                settings: Some(catalog::MappingSettings {
+                                    context_window: &context,
+                                    reasoning_levels: (!keep_imported_reasoning)
+                                        .then_some(levels.as_str()),
+                                    default_reasoning: (!keep_imported_reasoning)
+                                        .then_some(default_reasoning.as_str()),
+                                }),
+                            },
+                        )
                     });
                 if result.is_ok() {
                     route_session.discard_preview();
@@ -567,9 +750,31 @@ async fn worker(
                     show_action(
                         &app,
                         result.map(|()| {
-                            "模型资料已保存；开启路由前会检查 Codex 兼容性和上游目录".into()
+                            "模型映射已保存；预览发布后可开启路由并刷新 Codex 模型菜单".into()
                         }),
                     );
+                });
+            }
+            Command::DeleteModel(public_id) => {
+                let result = directory
+                    .as_ref()
+                    .map_err(|error| error.message().to_owned())
+                    .and_then(|directory| app::delete_model(directory, &public_id));
+                if result.is_ok() {
+                    route_session.discard_preview();
+                }
+                let snapshot = result
+                    .as_ref()
+                    .ok()
+                    .and_then(|_| directory.as_ref().ok())
+                    .map(|path| load_snapshot(path, false));
+                let _ = weak.upgrade_in_event_loop(move |app| {
+                    if let Some(snapshot) = snapshot {
+                        show_result(&app, snapshot);
+                        app.set_model_editor_open(false);
+                        app.set_route_preview_ready(false);
+                    }
+                    show_action(&app, result.map(|()| "模型映射已删除".into()));
                 });
             }
             Command::SaveFallback(provider, fallback) => {
@@ -894,6 +1099,48 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     });
     let callback_sender = sender.clone();
     let weak = app.as_weak();
+    app.on_fetch_models(move |scope| {
+        let Some(app) = weak.upgrade() else {
+            return;
+        };
+        let (provider, url, key) = if scope == 0 {
+            (
+                app.get_edit_id().to_string(),
+                app.get_edit_url().to_string(),
+                Secret::new(app.get_edit_key().into()),
+            )
+        } else {
+            let Some(provider) = app
+                .get_providers()
+                .iter()
+                .find(|provider| provider.id == app.get_model_provider_id())
+            else {
+                show_action(&app, Err("请先保存上游连接".into()));
+                return;
+            };
+            (
+                provider.id.to_string(),
+                provider.base_url.to_string(),
+                Secret::new(String::new()),
+            )
+        };
+        app.set_discovery_scope(scope);
+        app.set_discovery_message("正在获取模型列表…".into());
+        queue(
+            &app,
+            &callback_sender,
+            Command::FetchModels {
+                scope,
+                generation: app.get_discovery_generation(),
+                provider,
+                url,
+                key,
+            },
+        );
+        app.set_fetching_models(app.get_busy());
+    });
+    let callback_sender = sender.clone();
+    let weak = app.as_weak();
     app.on_inspect_direct(move |id, home| {
         if let Some(app) = weak.upgrade() {
             queue(
@@ -947,17 +1194,64 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     });
     let callback_sender = sender.clone();
     let weak = app.as_weak();
-    app.on_save_model(move |provider, public_id, name, path| {
+    app.on_save_model(move || {
         if let Some(app) = weak.upgrade() {
             queue(
                 &app,
                 &callback_sender,
                 Command::SaveModel {
-                    provider: provider.into(),
-                    public_id: public_id.into(),
-                    name: name.into(),
-                    path: path.into(),
+                    provider: app.get_model_provider_id().into(),
+                    original_id: app.get_model_original_id().into(),
+                    public_id: app.get_model_public_id().into(),
+                    name: app.get_model_display_name().into(),
+                    upstream_model: app.get_model_upstream_id().into(),
+                    path: app.get_model_source_path().into(),
+                    context: app.get_model_context_window().into(),
+                    levels: app.get_model_reasoning_levels().into(),
+                    default_reasoning: if app.get_model_default_reasoning() == "未设置" {
+                        String::new()
+                    } else {
+                        app.get_model_default_reasoning().into()
+                    },
                 },
+            );
+        }
+    });
+    let weak = app.as_weak();
+    app.on_begin_model_editor(move |provider, original_id| {
+        if let Some(app) = weak.upgrade()
+            && let Err(error) = open_model_editor(&app, &provider, &original_id)
+        {
+            show_action(&app, Err(error));
+        }
+    });
+    let weak = app.as_weak();
+    app.on_add_selected_model(move || {
+        let Some(app) = weak.upgrade() else {
+            return;
+        };
+        if let Some(provider) = app
+            .get_model_provider_ids()
+            .row_data(app.get_model_provider_choice() as usize)
+            && let Err(error) = open_model_editor(&app, &provider, "")
+        {
+            show_action(&app, Err(error));
+        }
+    });
+    let weak = app.as_weak();
+    app.on_update_reasoning_options(move || {
+        if let Some(app) = weak.upgrade() {
+            update_reasoning_options(&app);
+        }
+    });
+    let callback_sender = sender.clone();
+    let weak = app.as_weak();
+    app.on_delete_model(move || {
+        if let Some(app) = weak.upgrade() {
+            queue(
+                &app,
+                &callback_sender,
+                Command::DeleteModel(app.get_model_original_id().into()),
             );
         }
     });
@@ -973,12 +1267,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
     });
     let weak = app.as_weak();
-    app.on_edit_fallback(move |provider_id| {
+    app.on_edit_fallback(move |public_id| {
         let Some(app) = weak.upgrade() else {
             return;
         };
         let models = app.get_models();
-        let Some(primary) = models.iter().find(|model| model.provider_id == provider_id) else {
+        let Some(primary) = models.iter().find(|model| model.public_id == public_id) else {
             return;
         };
         let providers = app.get_providers();
@@ -987,7 +1281,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         let mut selected = 0;
         for model in models.iter().filter(|model| {
             model.ready
-                && model.provider_id != provider_id
+                && model.provider_id != primary.provider_id
                 && model.upstream_model == primary.upstream_model
         }) {
             if model.provider_id == primary.fallback_provider_id {
@@ -1001,7 +1295,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             labels.push(format!("{} · {}", model.provider_name, endpoint).into());
             ids.push(model.provider_id);
         }
-        app.set_fallback_primary_id(provider_id);
+        app.set_fallback_primary_id(public_id);
         app.set_fallback_primary_label(
             format!("{} / {}", primary.provider_name, primary.upstream_model).into(),
         );

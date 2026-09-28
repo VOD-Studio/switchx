@@ -4,6 +4,8 @@
 //! `--fallback` verifies one explicit backup after disconnecting the primary.
 //! `--desktop-fallback` uses compatible templates for editing the backup in the UI.
 //! `--live-probe` checks the real-route probe against these synthetic upstreams.
+//! `--models` checks two distinct models on one provider, including a manual catalog.
+//! `--desktop-models` opens that fixture for discovery and mapping UI checks.
 
 use std::{
     path::{Path, PathBuf},
@@ -38,7 +40,9 @@ struct Mock {
 
 async fn models(State(state): State<Mock>, headers: HeaderMap) -> Result<Json<Value>, StatusCode> {
     authorize(&state, &headers)?;
-    Ok(Json(json!({"data":[{"id":"shared-model"}]})))
+    Ok(Json(
+        json!({"data":[{"id":"shared-model"}, {"id":"extra-model"}, {"id":"manual-model"}]}),
+    ))
 }
 
 fn authorize(state: &Mock, headers: &HeaderMap) -> Result<(), StatusCode> {
@@ -129,8 +133,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mode = std::env::args().nth(1);
     let desktop = matches!(
         mode.as_deref(),
-        Some("--desktop" | "--desktop-recovery" | "--desktop-fallback")
+        Some("--desktop" | "--desktop-recovery" | "--desktop-fallback" | "--desktop-models")
     );
+    let multiple = matches!(mode.as_deref(), Some("--models" | "--desktop-models"));
     let fallback = matches!(mode.as_deref(), Some("--fallback" | "--desktop-fallback"));
     let live_probe = mode.as_deref() == Some("--live-probe");
     let live_mode = Arc::new(AtomicU8::new(0));
@@ -169,6 +174,15 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             let source = root.join(format!("model-{index}.json"));
             std::fs::write(&source, json!({"models":[metadata]}).to_string())?;
             app::save_model(&data, &provider.id, public_id, name, source.to_str().unwrap())?;
+            if multiple && index == 0 {
+                app::save_mapping(&data, app::ModelInput {
+                    provider_id: &provider.id, original_id: "", public_id: "sx-mock-alpha-extra",
+                    display_name: "Alpha extra model", upstream_model: "extra-model", catalog_path: "",
+                    settings: Some(switchx::catalog::MappingSettings {
+                        context_window: "256000", reasoning_levels: Some("low, high"), default_reasoning: Some("high"),
+                    }),
+                })?;
+            }
         }
         let helper = std::env::current_exe()?.parent().unwrap().parent().unwrap().join("switchx");
         if !helper.is_file() { return Err("build the switchx binary before running this probe".into()); }
@@ -194,7 +208,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         } else if fallback {
             fallback_probe(&data, &home, &helper, &mut seen, &mut tasks[0]).await?;
         } else {
-            headless(&data, &home, &helper, &mut seen).await?;
+            headless(&data, &home, &helper, &mut seen, multiple).await?;
         }
         Ok::<_, Box<dyn std::error::Error>>(())
     }.await;
@@ -352,8 +366,8 @@ async fn fallback_probe(
     let providers = store.providers()?;
     let primary = &providers[0];
     let backup = &providers[1];
-    app::save_fallback(data, &primary.id, Some(&backup.id))?;
-    app::select_model(data, &backup.id, false)?;
+    app::save_fallback(data, "sx-mock-alpha", Some(&backup.id))?;
+    app::select_model(data, "sx-mock-beta", false)?;
     let mut session = RouteSession::default();
     let preview = session
         .prepare(data, home, 0, "sx-mock-alpha", helper)
@@ -379,7 +393,7 @@ async fn fallback_probe(
         .await?;
     session.apply(data, home, 0, "sx-mock-alpha").await?;
     check(
-        app::save_fallback(data, &primary.id, None).is_err(),
+        app::save_fallback(data, "sx-mock-alpha", None).is_err(),
         "active route allowed candidate edits",
     )?;
     primary_task.abort();
@@ -426,6 +440,7 @@ async fn headless(
     home: &Path,
     helper: &Path,
     seen: &mut [mpsc::Receiver<Value>],
+    multiple: bool,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let mut session = RouteSession::default();
     let occupied = TcpListener::bind("127.0.0.1:0").await?;
@@ -485,6 +500,33 @@ async fn headless(
     )?;
     store.put_provider(&original_provider)?;
 
+    if multiple {
+        let extra = store
+            .models()?
+            .into_iter()
+            .find(|model| model.public_id == "sx-mock-alpha-extra")
+            .unwrap();
+        let mut missing = extra.clone();
+        missing.upstream_model = "missing-model".into();
+        let mut metadata: Value = serde_json::from_str(&missing.metadata)?;
+        metadata["slug"] = "missing-model".into();
+        missing.metadata = metadata.to_string();
+        store.put_model(&missing)?;
+        session
+            .prepare(data, home, 0, "sx-mock-alpha", helper)
+            .await?;
+        check(
+            session.apply(data, home, 0, "sx-mock-alpha").await.is_err(),
+            "publication checked only the provider default and accepted a missing additional model",
+        )?;
+        check(
+            std::fs::read_to_string(home.join("config.toml"))? == ORIGINAL
+                && config_transaction::recovery(data)?.is_none(),
+            "missing model changed the target configuration",
+        )?;
+        store.put_model(&extra)?;
+    }
+
     println!(
         "{}",
         session
@@ -494,7 +536,7 @@ async fn headless(
     session.apply(data, home, 0, "sx-mock-alpha").await?;
     check(session.is_running(), "route failed to start")?;
     check(
-        app::select_model(data, &original_model.provider_id, false).is_err(),
+        app::select_model(data, &original_model.public_id, false).is_err(),
         "active route allowed model edits",
     )?;
     let active = std::fs::read_to_string(home.join("config.toml"))?;
@@ -536,9 +578,22 @@ async fn headless(
     println!(
         "Both aliases reached their own upstream; the first completed a file-tool round trip."
     );
+    if multiple {
+        run_cli(home, "sx-mock-alpha-extra").await?;
+        let request = timeout(Duration::from_secs(3), seen[0].recv())
+            .await?
+            .ok_or("extra model was not called")?;
+        check(
+            request["model"] == "extra-model" && seen[1].try_recv().is_err(),
+            "second model on one provider used the wrong actual model or credential",
+        )?;
+        println!(
+            "Manual catalog parsed by Codex; two models reached one provider with distinct actual model IDs."
+        );
+    }
     let records = store.requests(100)?;
     check(
-        records.len() == 3
+        records.len() == if multiple { 4 } else { 3 }
             && records.iter().all(|record| {
                 record.status == switchx::storage::RequestStatus::Completed
                     && record.http_status == Some(200)
@@ -546,7 +601,7 @@ async fn headless(
                     && record.error_code.is_none()
                     && record.generation.starts_with("catalog-")
             }),
-        "CLI requests did not produce three completed metadata records",
+        "CLI requests did not produce the expected completed metadata records",
     )?;
     for (public_id, expected) in [("sx-mock-alpha", 2), ("sx-mock-beta", 1)] {
         let model = store
@@ -567,8 +622,18 @@ async fn headless(
             "request record used the wrong model or provider",
         )?;
     }
+    if multiple {
+        check(
+            records.iter().any(|record| {
+                record.public_model.as_deref() == Some("sx-mock-alpha-extra")
+                    && record.provider_id.as_deref() == Some(original_provider.id.as_str())
+                    && record.upstream_model.as_deref() == Some("extra-model")
+            }),
+            "extra-model request metadata lost its mapping",
+        )?;
+    }
     println!(
-        "Three CLI requests recorded completion, timings, model/provider mappings and catalog generation."
+        "CLI requests recorded completion, timings, model/provider mappings and catalog generation."
     );
 
     std::fs::write(

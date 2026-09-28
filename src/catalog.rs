@@ -5,6 +5,117 @@ use serde_json::{Value, json};
 use crate::storage::ModelRecord;
 
 pub const MAX_CATALOG_BYTES: usize = 2 * 1024 * 1024;
+pub const REASONING_LEVELS: &[&str] = &[
+    "none", "minimal", "low", "medium", "high", "xhigh", "max", "ultra",
+];
+
+pub struct MappingSettings<'a> {
+    pub context_window: &'a str,
+    // None keeps imported values; an empty string explicitly removes reasoning.
+    pub reasoning_levels: Option<&'a str>,
+    pub default_reasoning: Option<&'a str>,
+}
+
+pub fn reasoning_levels(text: &str) -> Result<Vec<&str>, String> {
+    let supplied: Vec<&str> = text
+        .split(|ch: char| ch == ',' || ch == '，' || ch.is_whitespace())
+        .filter(|level| !level.is_empty())
+        .collect();
+    if supplied
+        .iter()
+        .any(|level| !REASONING_LEVELS.contains(level))
+    {
+        return Err("思考等级只能使用 none、minimal、low、medium、high、xhigh、max、ultra".into());
+    }
+    Ok(REASONING_LEVELS
+        .iter()
+        .copied()
+        .filter(|level| supplied.contains(level))
+        .collect())
+}
+
+pub fn mapping_metadata(
+    model_id: &str,
+    display_name: &str,
+    settings: &MappingSettings<'_>,
+    source: Option<Value>,
+) -> Result<Value, String> {
+    crate::direct::validate_model_id(model_id)?;
+    // This is a neutral, user-configured Responses profile, not inferred vendor capabilities.
+    // Imported catalogs keep their instructions, tools, modalities and unknown fields.
+    let mut model = source.unwrap_or_else(|| json!({
+        "description": "User-configured Responses model.",
+        "base_instructions": "You are a coding assistant. Collaborate with the user to complete their work and report what you have verified.",
+        "shell_type": "shell_command",
+        "visibility": "list",
+        "supported_in_api": true,
+        "priority": 0,
+        "support_verbosity": false,
+        "supports_reasoning_summaries": false,
+        "default_reasoning_summary": "none",
+        "supports_parallel_tool_calls": false,
+        "supports_image_detail_original": false,
+        "supports_search_tool": false,
+        "input_modalities": ["text"],
+        "experimental_supported_tools": [],
+        "truncation_policy": {"mode": "tokens", "limit": 10000},
+        "default_reasoning_level": null,
+        "supported_reasoning_levels": [],
+        "context_window": 128000,
+        "max_context_window": 128000,
+        "use_responses_lite": false
+    }));
+    if !model.is_object() {
+        return Err("模型资料不是对象".into());
+    }
+    model["slug"] = model_id.into();
+    model["display_name"] = display_name.into();
+    if !settings.context_window.trim().is_empty() {
+        let window = settings
+            .context_window
+            .trim()
+            .parse::<i64>()
+            .ok()
+            .filter(|value| *value > 0)
+            .ok_or("上下文窗口必须是正整数")?;
+        if model["context_window"].as_i64() != Some(window) {
+            model["context_window"] = window.into();
+            model["max_context_window"] = window.into();
+        }
+    }
+    if let Some(text) = settings.reasoning_levels {
+        let levels = reasoning_levels(text)?;
+        let current = model["supported_reasoning_levels"]
+            .as_array()
+            .cloned()
+            .unwrap_or_default();
+        if current.len() != levels.len()
+            || levels
+                .iter()
+                .any(|effort| !current.iter().any(|level| level["effort"] == *effort))
+        {
+            model["supported_reasoning_levels"] = json!(
+                levels
+                    .iter()
+                    .map(|effort| current
+                        .iter()
+                        .find(|level| level["effort"] == *effort)
+                        .cloned()
+                        .unwrap_or_else(|| json!({"effort": effort, "description": effort})))
+                    .collect::<Vec<_>>()
+            );
+        }
+    }
+    if let Some(default) = settings.default_reasoning {
+        model["default_reasoning_level"] = if default.is_empty() {
+            Value::Null
+        } else {
+            default.into()
+        };
+    }
+    validate_metadata(&model)?;
+    Ok(model)
+}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RouteBinding {
@@ -187,7 +298,7 @@ pub fn validate_fallback(model: &ModelRecord, records: &[ModelRecord]) -> Result
     }
     let fallback = records
         .iter()
-        .find(|record| &record.provider_id == id)
+        .find(|record| &record.provider_id == id && record.upstream_model == model.upstream_model)
         .ok_or("备用上游尚未导入模型资料")?;
     if model.upstream_model != fallback.upstream_model {
         return Err("备用上游必须使用相同的实际模型 ID；暂不支持自动换模型".into());
@@ -281,6 +392,78 @@ mod tests {
 
     fn templates() -> Value {
         serde_json::from_str(include_str!("../tests/fixtures/synthetic-models.json")).unwrap()
+    }
+
+    #[test]
+    fn manual_mapping_is_neutral_and_edits_preserve_imported_capabilities() {
+        let settings = MappingSettings {
+            context_window: "256000",
+            reasoning_levels: Some("high, low, high"),
+            default_reasoning: Some("high"),
+        };
+        let manual = mapping_metadata("custom-model", "Custom model", &settings, None).unwrap();
+        assert_eq!(manual["context_window"], 256000);
+        assert_eq!(manual["default_reasoning_level"], "high");
+        assert_eq!(manual["supported_reasoning_levels"][0]["effort"], "low");
+        assert_eq!(manual["input_modalities"], json!(["text"]));
+        assert_eq!(manual["shell_type"], "shell_command");
+        assert!(manual.get("apply_patch_tool_type").is_none());
+        let mut source = templates()["models"][0].clone();
+        source["vendor_extension"] = json!({"preserve": true});
+        source["max_context_window"] = json!(2097152);
+        let unchanged = mapping_metadata(
+            "deepseek-flash",
+            source["display_name"].as_str().unwrap(),
+            &MappingSettings {
+                context_window: "1048576",
+                reasoning_levels: Some("low, high, max"),
+                default_reasoning: Some("high"),
+            },
+            Some(source.clone()),
+        )
+        .unwrap();
+        assert_eq!(unchanged, source);
+        let edited =
+            mapping_metadata("deepseek-flash", "Edited", &settings, Some(source.clone())).unwrap();
+        for key in [
+            "model_messages",
+            "input_modalities",
+            "apply_patch_tool_type",
+            "vendor_extension",
+        ] {
+            assert_eq!(edited[key], source[key]);
+        }
+        let empty = MappingSettings {
+            context_window: "",
+            reasoning_levels: Some(""),
+            default_reasoning: Some(""),
+        };
+        let cleared = mapping_metadata("custom-model", "Custom", &empty, None).unwrap();
+        assert_eq!(cleared["context_window"], 128000);
+        assert_eq!(cleared["supported_reasoning_levels"], json!([]));
+        assert!(cleared["default_reasoning_level"].is_null());
+        for settings in [
+            MappingSettings {
+                context_window: "0",
+                ..empty
+            },
+            MappingSettings {
+                context_window: "-1",
+                ..empty
+            },
+            MappingSettings {
+                context_window: "",
+                reasoning_levels: Some("unknown"),
+                default_reasoning: Some(""),
+            },
+            MappingSettings {
+                context_window: "",
+                reasoning_levels: Some("low"),
+                default_reasoning: Some("high"),
+            },
+        ] {
+            assert!(mapping_metadata("custom-model", "Custom", &settings, None).is_err());
+        }
     }
 
     #[test]

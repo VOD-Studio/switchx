@@ -25,6 +25,10 @@ export struct ModelRow {
     public-id: string,
     display-name: string,
     detail: string,
+    context-window: string,
+    reasoning-levels: string,
+    default-reasoning: string,
+    saved: bool,
     ready: bool,
     included: bool,
     fallback-provider-id: string,
@@ -70,6 +74,11 @@ export component AppWindow inherits Window {
     in-out property <string> edit-url: "";
     in-out property <string> edit-model: "";
     in-out property <string> edit-key: "";
+    in-out property <[string]> fetched-models: [];
+    in-out property <bool> fetching-models: false;
+    in-out property <string> discovery-message: "";
+    in-out property <int> discovery-generation: 0;
+    in-out property <int> discovery-scope: 0;
     in-out property <string> config-home: "";
     in-out property <string> config-status: "尚未读取 Codex 配置";
     in-out property <bool> direct-active: false;
@@ -97,6 +106,16 @@ export component AppWindow inherits Window {
     in-out property <string> model-public-id: "";
     in-out property <string> model-display-name: "";
     in-out property <string> model-source-path: "";
+    in-out property <string> model-original-id: "";
+    in-out property <string> model-context-window: "";
+    in-out property <string> model-reasoning-levels: "";
+    in-out property <string> model-default-reasoning: "未设置";
+    in-out property <[string]> model-reasoning-options: ["未设置"];
+    in-out property <bool> model-delete-confirm: false;
+    in-out property <[string]> model-provider-ids: [];
+    in-out property <[string]> model-provider-options: [];
+    in-out property <int> model-provider-choice: 0;
+    in-out property <length> model-scroll-y: 0px;
     in-out property <bool> fallback-editor-open: false;
     in-out property <string> fallback-primary-id;
     in-out property <string> fallback-primary-label;
@@ -107,19 +126,41 @@ export component AppWindow inherits Window {
     changed config-home => { root.route-preview-ready = false; root.direct-preview-ready = false; }
     changed route-port => { root.route-preview-ready = false; }
     changed default-model => { root.route-preview-ready = false; }
+    function reset-model-discovery() {
+        root.discovery-generation += 1;
+        root.fetched-models = [];
+        root.fetching-models = false;
+        root.discovery-message = "";
+    }
+    changed edit-id => { root.reset-model-discovery(); }
+    changed edit-url => { root.reset-model-discovery(); }
+    changed edit-key => { root.reset-model-discovery(); }
+    changed editor-open => { root.reset-model-discovery(); }
+    changed model-provider-id => { root.reset-model-discovery(); }
+    changed model-original-id => { root.reset-model-discovery(); }
+    changed model-editor-open => {
+        root.reset-model-discovery();
+        if (root.model-editor-open) { root.model-scroll-y = 0px; }
+    }
+    changed model-reasoning-levels => { root.update-reasoning-options(); }
     callback refresh(bool);
     callback refresh-requests();
     callback filter-providers(string);
     callback save-provider(string, string, string, string, string);
     callback delete-provider(string);
     callback check-provider(string);
+    callback fetch-models(int);
     callback inspect-direct(string, string);
     callback apply-direct();
     callback restore-config(string);
     callback inspect-config(string);
     callback import-current(string);
     callback check-login(string);
-    callback save-model(string, string, string, string);
+    callback save-model();
+    callback delete-model();
+    callback begin-model-editor(string, string);
+    callback add-selected-model();
+    callback update-reasoning-options();
     callback select-model(string, bool);
     callback edit-fallback(string);
     callback save-fallback();
@@ -528,7 +569,7 @@ export component AppWindow inherits Window {
                                     }
 
                                     Text {
-                                        text: root.route-managed ? "新启动的 Codex CLI 将读取已发布目录。" : "为所选模型导入资料后，可预览并开启路由。";
+                                        text: root.route-managed ? "新启动的 Codex CLI 将读取已发布目录。" : "添加模型映射后，可预览并开启路由。";
                                         color: Theme.muted-text;
                                         font-size: 13px;
                                         wrap: word-wrap;
@@ -629,7 +670,7 @@ export component AppWindow inherits Window {
                     }
 
                     if root.editor-open: SurfaceCard {
-                        height: 302px;
+                        height: root.discovery-scope == 0 && (root.fetched-models.length > 0 || root.discovery-message != "") ? 370px : 302px;
                         VerticalLayout {
                             padding: 16px;
                             spacing: 7px;
@@ -686,6 +727,28 @@ export component AppWindow inherits Window {
                                     placeholder-text: "上游实际模型 ID";
                                     accessible-label: "上游模型 ID";
                                 }
+
+                                QuietButton {
+                                    width: 132px;
+                                    text: root.fetching-models && root.discovery-scope == 0 ? "获取中…" : "获取模型列表";
+                                    enabled: !root.busy && root.edit-url != "" && (root.edit-key != "" || root.edit-id != "");
+                                    clicked => { root.fetch-models(0); }
+                                }
+                            }
+
+                            if root.discovery-scope == 0 && root.fetched-models.length > 0: ComboBox {
+                                model: root.fetched-models;
+                                current-value: root.edit-model;
+                                accessible-label: "选择探测到的默认模型";
+                                enabled: !root.busy;
+                                selected(value) => { root.edit-model = value; }
+                            }
+
+                            if root.discovery-scope == 0 && root.discovery-message != "": Text {
+                                text: root.discovery-message;
+                                color: Theme.muted-text;
+                                font-size: 12px;
+                                wrap: word-wrap;
                             }
 
                             HorizontalLayout {
@@ -815,6 +878,13 @@ export component AppWindow inherits Window {
                             }
 
                             QuietButton {
+                                width: 88px;
+                                text: "模型映射";
+                                enabled: !root.busy && !root.config-managed;
+                                clicked => { root.begin-model-editor(provider.id, ""); }
+                            }
+
+                            QuietButton {
                                 width: 70px;
                                 text: "检查";
                                 enabled: !root.busy;
@@ -838,8 +908,214 @@ export component AppWindow inherits Window {
 
             if root.active-page == 2: ScrollView {
                 vertical-stretch: 1;
+                content-y <=> root.model-scroll-y;
                 VerticalLayout {
                     spacing: 14px;
+                    HorizontalLayout {
+                        spacing: 10px;
+                        Text {
+                            text: "模型映射 · 一个上游可添加多个模型";
+                            color: Theme.primary-text;
+                            font-size: 16px;
+                            font-weight: 600;
+                            vertical-alignment: center;
+                        }
+
+                        ComboBox {
+                            width: 180px;
+                            model: root.model-provider-options;
+                            current-index <=> root.model-provider-choice;
+                            accessible-label: "添加映射的上游";
+                            enabled: !root.busy && !root.config-managed;
+                        }
+
+                        QuietButton {
+                            width: 128px;
+                            text: "添加模型映射";
+                            enabled: !root.busy && !root.config-managed && root.providers.length > 0;
+                            clicked => { root.add-selected-model(); }
+                        }
+                    }
+
+                    if root.model-editor-open: SurfaceCard {
+                        height: root.discovery-scope == 1 && (root.fetched-models.length > 0 || root.discovery-message != "") ? 532px : 462px;
+                        VerticalLayout {
+                            padding: 18px;
+                            spacing: 9px;
+                            Text {
+                                text: (root.model-original-id == "" ? "添加模型映射 · " : "编辑模型映射 · ") + root.model-provider-name;
+                                color: Theme.primary-text;
+                                font-size: 16px;
+                                font-weight: 600;
+                            }
+
+                            HorizontalLayout {
+                                spacing: 10px;
+                                Text {
+                                    width: 96px;
+                                    text: "公开模型 ID";
+                                    color: Theme.muted-text;
+                                    vertical-alignment: center;
+                                }
+
+                                LineEdit {
+                                    text <=> root.model-public-id;
+                                    accessible-label: "公开模型 ID";
+                                }
+                            }
+
+                            HorizontalLayout {
+                                spacing: 10px;
+                                Text {
+                                    width: 96px;
+                                    text: "菜单显示名";
+                                    color: Theme.muted-text;
+                                    vertical-alignment: center;
+                                }
+
+                                LineEdit {
+                                    text <=> root.model-display-name;
+                                    accessible-label: "模型显示名称";
+                                }
+                            }
+
+                            HorizontalLayout {
+                                spacing: 10px;
+                                Text {
+                                    width: 96px;
+                                    text: "实际请求模型";
+                                    color: Theme.muted-text;
+                                    vertical-alignment: center;
+                                }
+
+                                LineEdit {
+                                    text <=> root.model-upstream-id;
+                                    placeholder-text: "上游实际模型 ID";
+                                    accessible-label: "映射实际请求模型";
+                                }
+
+                                QuietButton {
+                                    width: 132px;
+                                    text: root.fetching-models && root.discovery-scope == 1 ? "获取中…" : "获取模型列表";
+                                    enabled: !root.busy && !root.config-managed;
+                                    clicked => { root.fetch-models(1); }
+                                }
+                            }
+
+                            if root.discovery-scope == 1 && root.fetched-models.length > 0: ComboBox {
+                                model: root.fetched-models;
+                                current-value: root.model-upstream-id;
+                                accessible-label: "选择探测到的映射模型";
+                                enabled: !root.busy;
+                                selected(value) => {
+                                    if (root.model-display-name == "" || root.model-display-name == root.model-upstream-id) {
+                                        root.model-display-name = value;
+                                    }
+                                    root.model-upstream-id = value;
+                                }
+                            }
+
+                            if root.discovery-scope == 1 && root.discovery-message != "": Text {
+                                text: root.discovery-message;
+                                color: Theme.muted-text;
+                                font-size: 12px;
+                                wrap: word-wrap;
+                            }
+
+                            HorizontalLayout {
+                                spacing: 10px;
+                                Text {
+                                    width: 96px;
+                                    text: "上下文窗口";
+                                    color: Theme.muted-text;
+                                    vertical-alignment: center;
+                                }
+
+                                LineEdit {
+                                    text <=> root.model-context-window;
+                                    placeholder-text: "留空使用 128000；导入时保留原值";
+                                    accessible-label: "模型上下文窗口";
+                                }
+                            }
+
+                            HorizontalLayout {
+                                spacing: 10px;
+                                Text {
+                                    width: 96px;
+                                    text: "思考等级";
+                                    color: Theme.muted-text;
+                                    vertical-alignment: center;
+                                }
+
+                                LineEdit {
+                                    text <=> root.model-reasoning-levels;
+                                    placeholder-text: "例如 low, medium, high；留空不设置";
+                                    accessible-label: "模型支持的思考等级";
+                                }
+
+                                Text {
+                                    width: 56px;
+                                    text: "默认";
+                                    color: Theme.muted-text;
+                                    vertical-alignment: center;
+                                }
+
+                                ComboBox {
+                                    width: 124px;
+                                    model: root.model-reasoning-options;
+                                    current-value <=> root.model-default-reasoning;
+                                    accessible-label: "模型默认思考等级";
+                                }
+                            }
+
+                            HorizontalLayout {
+                                spacing: 10px;
+                                Text {
+                                    width: 96px;
+                                    text: "目录 JSON";
+                                    color: Theme.muted-text;
+                                    vertical-alignment: center;
+                                }
+
+                                LineEdit {
+                                    text <=> root.model-source-path;
+                                    placeholder-text: "可选：绝对路径，导入完整模型资料";
+                                    accessible-label: "模型资料 JSON 文件绝对路径";
+                                }
+                            }
+
+                            Text {
+                                text: "填写参数即可生成模型目录；也可导入 JSON 保留完整能力和指令。保存后预览发布，重启 Codex 刷新模型菜单。";
+                                color: Theme.muted-text;
+                                font-size: 12px;
+                                wrap: word-wrap;
+                            }
+
+                            HorizontalLayout {
+                                spacing: 8px;
+                                QuietButton {
+                                    text: "保存映射";
+                                    primary: true;
+                                    enabled: !root.busy && !root.config-managed;
+                                    clicked => { root.save-model(); }
+                                }
+
+                                QuietButton {
+                                    text: "取消";
+                                    clicked => { root.model-editor-open = false; }
+                                }
+
+                                if root.model-original-id != "": QuietButton {
+                                    text: root.model-delete-confirm ? "确认删除映射" : "删除映射";
+                                    enabled: !root.busy && !root.config-managed;
+                                    clicked => {
+                                        if (root.model-delete-confirm) { root.delete-model(); }
+                                        else { root.model-delete-confirm = true; }
+                                    }
+                                }
+                            }
+                        }
+                    }
                     SurfaceCard {
                         height: 242px;
                         VerticalLayout {
@@ -1014,101 +1290,13 @@ export component AppWindow inherits Window {
                             }
                         }
                     }
-                    if root.model-editor-open: SurfaceCard {
-                        height: 292px;
-                        VerticalLayout {
-                            padding: 18px;
-                            spacing: 9px;
-                            Text {
-                                text: root.model-provider-name + " / " + root.model-upstream-id;
-                                color: Theme.primary-text;
-                                font-size: 16px;
-                                font-weight: 600;
-                            }
-
-                            HorizontalLayout {
-                                spacing: 10px;
-                                Text {
-                                    width: 96px;
-                                    text: "公开模型 ID";
-                                    color: Theme.muted-text;
-                                    vertical-alignment: center;
-                                }
-
-                                LineEdit {
-                                    text <=> root.model-public-id;
-                                    accessible-label: "公开模型 ID";
-                                }
-                            }
-
-                            HorizontalLayout {
-                                spacing: 10px;
-                                Text {
-                                    width: 96px;
-                                    text: "显示名称";
-                                    color: Theme.muted-text;
-                                    vertical-alignment: center;
-                                }
-
-                                LineEdit {
-                                    text <=> root.model-display-name;
-                                    accessible-label: "模型显示名称";
-                                }
-                            }
-
-                            HorizontalLayout {
-                                spacing: 10px;
-                                Text {
-                                    width: 96px;
-                                    text: "目录 JSON";
-                                    color: Theme.muted-text;
-                                    vertical-alignment: center;
-                                }
-
-                                LineEdit {
-                                    text <=> root.model-source-path;
-                                    placeholder-text: "绝对路径；留空保留已导入资料";
-                                    accessible-label: "模型资料 JSON 文件绝对路径";
-                                }
-                            }
-
-                            Text {
-                                text: "导入包含此模型的 Codex 目录文件，保留其能力与指令模板。资料导入成功后，实际工具能力仍需验证。";
-                                color: Theme.muted-text;
-                                font-size: 12px;
-                                wrap: word-wrap;
-                            }
-
-                            HorizontalLayout {
-                                spacing: 8px;
-                                QuietButton {
-                                    text: "保存模型";
-                                    primary: true;
-                                    enabled: !root.busy && !root.config-managed;
-                                    clicked => { root.save-model(root.model-provider-id, root.model-public-id, root.model-display-name, root.model-source-path); }
-                                }
-
-                                QuietButton {
-                                    text: "取消";
-                                    clicked => { root.model-editor-open = false; }
-                                }
-                            }
-                        }
-                    }
-                    Text {
-                        text: "模型目录 · 每个上游连接对应一个模型";
-                        color: Theme.primary-text;
-                        font-size: 16px;
-                        font-weight: 600;
-                    }
-
                     if root.models.length == 0: SurfaceCard {
                         height: 108px;
                         VerticalLayout {
                             padding: 18px;
                             spacing: 10px;
                             Text {
-                                text: "添加上游后，可在这里导入模型资料并选择发布。";
+                                text: "添加上游后，可在这里添加模型映射并选择发布。";
                                 color: Theme.muted-text;
                                 font-size: 13px;
                             }
@@ -1158,17 +1346,10 @@ export component AppWindow inherits Window {
 
                             QuietButton {
                                 width: 84px;
-                                text: "模型资料";
+                                text: model.saved ? "编辑映射" : "添加映射";
                                 enabled: !root.busy && !root.config-managed;
                                 clicked => {
-                                    root.model-provider-id = model.provider-id;
-                                    root.model-provider-name = model.provider-name;
-                                    root.model-upstream-id = model.upstream-model;
-                                    root.model-public-id = model.public-id;
-                                    root.model-display-name = model.display-name;
-                                    root.model-source-path = "";
-                                    root.model-editor-open = true;
-                                    root.fallback-editor-open = false;
+                                    root.begin-model-editor(model.provider-id, model.saved ? model.public-id : "");
                                 }
                             }
 
@@ -1176,7 +1357,7 @@ export component AppWindow inherits Window {
                                 width: 62px;
                                 text: "备用";
                                 enabled: model.ready && !root.busy && !root.config-managed;
-                                clicked => { root.edit-fallback(model.provider-id); }
+                                clicked => { root.edit-fallback(model.public-id); }
                             }
 
                             QuietButton {
@@ -1184,7 +1365,7 @@ export component AppWindow inherits Window {
                                 text: model.included ? "已选择" : "选择";
                                 selected: model.included;
                                 enabled: model.ready && !root.busy && !root.config-managed;
-                                clicked => { root.select-model(model.provider-id, !model.included); }
+                                clicked => { root.select-model(model.public-id, !model.included); }
                             }
 
                             QuietButton {
