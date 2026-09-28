@@ -2,7 +2,10 @@ use std::{
     collections::HashMap,
     io::Read,
     net::{IpAddr, Ipv4Addr, SocketAddr},
-    sync::Arc,
+    sync::{
+        Arc,
+        atomic::{AtomicBool, Ordering},
+    },
     time::Duration,
 };
 
@@ -14,23 +17,32 @@ use axum::{
     response::{IntoResponse, Response},
     routing::{get, post},
 };
+use futures_util::StreamExt;
 use reqwest::{Client, Url, redirect::Policy};
 use serde_json::{Value, json};
 use subtle::ConstantTimeEq;
-use tokio::net::TcpListener;
+use tokio::{
+    net::TcpListener,
+    sync::{oneshot, watch},
+    task::JoinHandle,
+};
 
-use crate::catalog::Publication;
+use crate::{catalog::Publication, credentials::Secret};
 
 pub const LOCAL_TOKEN_HEADER: &str = "x-switchx-local-token";
 const MAX_BODY_BYTES: usize = 2 * 1024 * 1024;
 
 pub struct Upstream {
     responses_url: Url,
-    api_key: String,
+    api_key: Secret,
 }
 
 impl Upstream {
     pub fn new(base_url: &str, api_key: String) -> Result<Self, String> {
+        Self::with_secret(base_url, Secret::new(api_key))
+    }
+
+    pub fn with_secret(base_url: &str, api_key: Secret) -> Result<Self, String> {
         let mut url = Url::parse(base_url).map_err(|_| "invalid upstream URL")?;
         if !url.username().is_empty()
             || url.password().is_some()
@@ -44,15 +56,11 @@ impl Upstream {
             "http" if url.host_str() == Some("127.0.0.1") => {}
             _ => return Err("upstream must use HTTPS or IPv4 loopback HTTP".into()),
         }
-        if api_key.is_empty() {
+        if api_key.expose().is_empty() {
             return Err("upstream credential is missing".into());
         }
-        let path = match url.path().trim_end_matches('/') {
-            "" => "/responses",
-            "/v1" => "/v1/responses",
-            _ => return Err("upstream base URL must end at / or /v1".into()),
-        };
-        url.set_path(path);
+        let path = format!("{}/responses", url.path().trim_end_matches('/'));
+        url.set_path(&path);
         Ok(Self {
             responses_url: url,
             api_key,
@@ -62,10 +70,12 @@ impl Upstream {
 
 pub struct RouterState {
     expected_host: String,
-    local_token: String,
+    local_token: Secret,
     publication: Publication,
     upstreams: HashMap<String, Upstream>,
     client: Client,
+    accepting: Arc<AtomicBool>,
+    cancel: watch::Sender<bool>,
 }
 
 impl RouterState {
@@ -98,11 +108,85 @@ impl RouterState {
             .map_err(|_| "failed to create upstream client")?;
         Ok(Self {
             expected_host: address.to_string(),
-            local_token,
+            local_token: Secret::new(local_token),
             publication,
             upstreams,
             client,
+            accepting: Arc::new(AtomicBool::new(true)),
+            cancel: watch::channel(false).0,
         })
+    }
+}
+
+pub struct RunningRouter {
+    accepting: Arc<AtomicBool>,
+    cancel: watch::Sender<bool>,
+    shutdown: Option<oneshot::Sender<()>>,
+    task: JoinHandle<()>,
+}
+
+impl RunningRouter {
+    pub fn start(listener: TcpListener, state: RouterState) -> Result<Self, String> {
+        if listener
+            .local_addr()
+            .map_err(|_| "cannot read router address")?
+            .to_string()
+            != state.expected_host
+        {
+            return Err("listener does not match router address".into());
+        }
+        let accepting = state.accepting.clone();
+        let cancel = state.cancel.clone();
+        let (shutdown, stopped) = oneshot::channel();
+        let task = tokio::spawn(async move {
+            let _ = axum::serve(listener, router(state))
+                .with_graceful_shutdown(async {
+                    let _ = stopped.await;
+                })
+                .await;
+        });
+        Ok(Self {
+            accepting,
+            cancel,
+            shutdown: Some(shutdown),
+            task,
+        })
+    }
+
+    pub fn is_running(&self) -> bool {
+        !self.task.is_finished()
+    }
+
+    pub fn pause(&self) {
+        self.accepting.store(false, Ordering::SeqCst);
+    }
+
+    pub fn resume(&self) {
+        self.accepting.store(true, Ordering::SeqCst);
+    }
+
+    pub async fn stop(mut self) {
+        self.pause();
+        if let Some(shutdown) = self.shutdown.take() {
+            let _ = shutdown.send(());
+        }
+        // Connections get a bounded drain. Cancellation also reaches child
+        // connections spawned by Axum if the server task must be aborted.
+        if tokio::time::timeout(Duration::from_secs(5), &mut self.task)
+            .await
+            .is_err()
+        {
+            self.cancel.send_replace(true);
+            self.task.abort();
+            let _ = (&mut self.task).await;
+        }
+    }
+}
+
+impl Drop for RunningRouter {
+    fn drop(&mut self) {
+        self.cancel.send_replace(true);
+        self.task.abort();
     }
 }
 
@@ -167,7 +251,7 @@ fn authorize(headers: &HeaderMap, state: &RouterState) -> Option<Response> {
         .map(|token| {
             token
                 .as_bytes()
-                .ct_eq(state.local_token.as_bytes())
+                .ct_eq(state.local_token.expose().as_bytes())
                 .unwrap_u8()
                 == 1
         })
@@ -177,6 +261,13 @@ fn authorize(headers: &HeaderMap, state: &RouterState) -> Option<Response> {
             StatusCode::UNAUTHORIZED,
             "unauthorized",
             "local token is required",
+        ));
+    }
+    if !state.accepting.load(Ordering::SeqCst) {
+        return Some(error(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "router_stopping",
+            "router is stopping",
         ));
     }
     None
@@ -307,11 +398,21 @@ async fn responses(
         .get("previous_response_id")
         .is_some_and(|v| !v.is_null())
         || object.get("conversation").is_some_and(|v| !v.is_null())
+        || object
+            .get("input")
+            .and_then(Value::as_array)
+            .is_some_and(|items| {
+                items.iter().any(|item| {
+                    item.get("encrypted_content")
+                        .is_some_and(|value| !value.is_null())
+                        || item["type"] == "compaction"
+                })
+            })
     {
         return error(
             StatusCode::UNPROCESSABLE_ENTITY,
             "unsupported_capability",
-            "server-side state continuation is not available",
+            "server-side or encrypted state continuation is not available; start a new session",
         );
     }
     object.insert("model".into(), binding.upstream_model.clone().into());
@@ -330,14 +431,18 @@ async fn responses(
         );
     };
 
-    let result = state
+    let mut cancellation = state.cancel.subscribe();
+    let outbound = state
         .client
         .post(upstream.responses_url.clone())
         .header(header::CONTENT_TYPE, "application/json")
-        .bearer_auth(&upstream.api_key)
+        .bearer_auth(upstream.api_key.expose())
         .body(outbound_body)
-        .send()
-        .await;
+        .send();
+    let result = tokio::select! {
+        result = outbound => result,
+        _ = cancellation.wait_for(|cancel| *cancel) => return error(StatusCode::SERVICE_UNAVAILABLE, "router_stopping", "router is stopping"),
+    };
     let Ok(upstream_response) = result else {
         return error(
             StatusCode::BAD_GATEWAY,
@@ -356,6 +461,10 @@ async fn responses(
         response = response.header(header::CONTENT_TYPE, content_type);
     }
     response
-        .body(Body::from_stream(upstream_response.bytes_stream()))
+        .body(Body::from_stream(
+            upstream_response.bytes_stream().take_until(async move {
+                let _ = cancellation.wait_for(|cancel| *cancel).await;
+            }),
+        ))
         .expect("valid upstream response")
 }

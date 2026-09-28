@@ -31,7 +31,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     eprintln!("changed fields: {}", preview.changed_fields.join(", "));
     eprintln!(
         "requires environment variable: {}",
-        preview.required_environment_variable
+        preview.required_environment_variable.unwrap()
     );
     print!("{}", preview.proposed);
     Ok(())

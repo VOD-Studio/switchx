@@ -6,5 +6,6 @@ pub mod config_transaction;
 pub mod credentials;
 pub mod direct;
 pub mod direct_config;
+pub mod routed;
 pub mod routing;
 pub mod storage;

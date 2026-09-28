@@ -4,6 +4,7 @@ use keyring::{Entry, Error as KeyringError};
 use zeroize::Zeroize;
 
 pub const PROVIDER_KEY_SERVICE: &str = "dev.switchx.provider-key";
+pub const ROUTER_TOKEN_SERVICE: &str = "dev.switchx.local-token";
 
 pub struct Secret(String);
 

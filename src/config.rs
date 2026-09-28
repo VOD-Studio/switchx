@@ -14,7 +14,7 @@ pub(crate) const PROVIDER_ID: &str = "switchx_router";
 pub struct Preview {
     pub proposed: String,
     pub changed_fields: Vec<&'static str>,
-    pub required_environment_variable: &'static str,
+    pub required_environment_variable: Option<&'static str>,
 }
 
 pub fn preview_route(
@@ -36,6 +36,7 @@ pub fn preview_route(
     let mut document = current
         .parse::<DocumentMut>()
         .map_err(|_| "invalid Codex TOML")?;
+    ensure_unmanaged(&document)?;
     if let Some(providers) = document.as_table().get("model_providers") {
         let providers = providers
             .as_table()
@@ -56,6 +57,13 @@ pub fn preview_route(
     ];
     let mut changed_fields = Vec::new();
     for (key, new_value) in desired {
+        if document
+            .as_table()
+            .get(key)
+            .is_some_and(|item| item.as_str().is_none())
+        {
+            return Err(format!("managed Codex field {key} is not a string"));
+        }
         if document.as_table().get(key).and_then(|item| item.as_str()) != Some(new_value) {
             changed_fields.push(key);
             if let Some(item) = document.as_table_mut().get_mut(key) {
@@ -98,8 +106,20 @@ pub fn preview_route(
     Ok(Preview {
         proposed: document.to_string(),
         changed_fields,
-        required_environment_variable: LOCAL_TOKEN_ENV,
+        required_environment_variable: Some(LOCAL_TOKEN_ENV),
     })
+}
+
+pub(crate) fn ensure_unmanaged(document: &DocumentMut) -> Result<(), String> {
+    if document
+        .as_table()
+        .get("model_provider")
+        .and_then(|item| item.as_str())
+        .is_some_and(|provider| provider == PROVIDER_ID || provider.starts_with("switchx_direct_"))
+    {
+        return Err("Codex 配置已由 SwitchX 管理，请使用原数据目录恢复后再切换".into());
+    }
+    Ok(())
 }
 
 #[cfg(test)]

@@ -8,7 +8,8 @@ use toml_edit::{Array, DocumentMut, Item, Value, table, value};
 
 use crate::{
     config_transaction::{
-        HeaderDecor, RestoreResult, read_config, replace, sync_parent, write_exclusive_atomic,
+        HeaderDecor, RestoreResult, lock_config, read_config, replace, sync_parent,
+        write_exclusive_atomic,
     },
     direct::{helper_is_usable, validate_provider},
     storage::ProviderRecord,
@@ -91,6 +92,7 @@ impl PreparedDirectSwitch {
             .map_err(|_| "Codex config is not UTF-8")?
             .unwrap_or("");
         let mut document: DocumentMut = current.parse().map_err(|_| "invalid Codex TOML")?;
+        crate::config::ensure_unmanaged(&document)?;
         let provider_id = format!("switchx_direct_{}", provider.id);
         if document
             .as_table()
@@ -196,6 +198,16 @@ impl PreparedDirectSwitch {
     }
 
     pub fn apply(self) -> Result<(), String> {
+        let _lock = lock_config(&self.config_path)?;
+        if self
+            .journal_path
+            .parent()
+            .unwrap()
+            .join("switch-journal.json")
+            .exists()
+        {
+            return Err("a SwitchX route switch is active; restore it first".into());
+        }
         if read_config(&self.config_path)? != self.original {
             return Err("Codex config changed since inspection".into());
         }
@@ -223,6 +235,7 @@ impl PreparedDirectSwitch {
 }
 
 pub fn restore(config_path: &Path, state_dir: &Path) -> Result<RestoreResult, String> {
+    let _lock = lock_config(config_path)?;
     let journal_path = state_dir.join(JOURNAL_NAME);
     let journal: Journal =
         serde_json::from_slice(&fs::read(&journal_path).map_err(|error| error.to_string())?)

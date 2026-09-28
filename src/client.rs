@@ -1,5 +1,5 @@
 use std::{
-    env,
+    env, fs,
     path::{Path, PathBuf},
     time::Duration,
 };
@@ -7,13 +7,18 @@ use std::{
 use tokio::{process::Command, time::timeout};
 use toml_edit::{DocumentMut, Item};
 
-use crate::{config_transaction::read_config, direct::validate_provider, direct_config};
+use crate::{
+    config_transaction::{self, read_config},
+    direct::validate_provider,
+    direct_config,
+};
 
 pub struct ConfigStatus {
     pub mode: String,
     pub model: String,
     pub provider: String,
     pub direct_active: bool,
+    pub route_managed: bool,
     pub config_exists: bool,
 }
 
@@ -73,14 +78,21 @@ pub fn inspect(home: &Path, state_dir: &Path) -> Result<ConfigStatus, String> {
     let active_target = direct_config::active_target(state_dir)?;
     let journal_for_target = active_target.as_deref() == Some(path.as_path());
     let direct_active = journal_for_target && provider.starts_with("switchx_direct_");
+    let route = config_transaction::recovery(state_dir)?;
+    let route_managed = route.is_some();
     let mode = if direct_active {
         "SwitchX 直连已写入 · 新客户端启动后生效"
     } else if journal_for_target {
         "SwitchX 直连 journal 待恢复或处理冲突"
     } else if active_target.is_some() {
         "另一个 Codex 配置目录正在由 SwitchX 管理"
-    } else if state_dir.join("switch-journal.json").exists() {
-        "SwitchX 路由配置待恢复"
+    } else if route
+        .as_ref()
+        .is_some_and(|route| route.config_path == path)
+    {
+        "SwitchX 路由配置已写入 · 请核对本地路由状态"
+    } else if route_managed {
+        "另一个 Codex 配置目录有路由配置待恢复"
     } else if !config_exists {
         "config.toml 尚不存在 · Codex 默认官方连接"
     } else if provider == "openai" {
@@ -93,6 +105,7 @@ pub fn inspect(home: &Path, state_dir: &Path) -> Result<ConfigStatus, String> {
         model,
         provider,
         direct_active,
+        route_managed,
         config_exists,
     })
 }
@@ -146,19 +159,13 @@ pub fn import_candidate(home: &Path) -> Result<ImportCandidate, String> {
 
 pub async fn login_status(home: &Path) -> Result<String, String> {
     config_path(home)?;
-    let executable = env::var_os("SWITCHX_CODEX_CLI")
-        .map(PathBuf::from)
-        .or_else(|| {
-            let bundled = PathBuf::from("/Applications/ChatGPT.app/Contents/Resources/codex");
-            bundled.is_file().then_some(bundled)
-        })
-        .unwrap_or_else(|| PathBuf::from("codex"));
     let output = timeout(
         Duration::from_secs(12),
-        Command::new(executable)
+        Command::new(cli_executable())
             .arg("login")
             .arg("status")
             .env("CODEX_HOME", home)
+            .kill_on_drop(true)
             .output(),
     )
     .await
@@ -168,6 +175,100 @@ pub async fn login_status(home: &Path) -> Result<String, String> {
     let error = String::from_utf8_lossy(&output.stderr);
     let combined = format!("{text}\n{error}").to_ascii_lowercase();
     Ok(classify_login_output(output.status.success(), &combined).into())
+}
+
+pub fn cli_executable() -> PathBuf {
+    env::var_os("SWITCHX_CODEX_CLI")
+        .map(PathBuf::from)
+        .or_else(|| {
+            [
+                "/Applications/ChatGPT.app/Contents/Resources/codex-cli/CodexCLI.app/Contents/MacOS/codex",
+                "/Applications/ChatGPT.app/Contents/Resources/codex",
+            ].into_iter().map(PathBuf::from).find(|path| path.is_file())
+        })
+        .unwrap_or_else(|| PathBuf::from("codex"))
+}
+
+pub async fn check_catalog(catalog: &serde_json::Value) -> Result<String, String> {
+    struct CheckHome(PathBuf);
+    impl Drop for CheckHome {
+        fn drop(&mut self) {
+            let _ = fs::remove_dir_all(&self.0);
+        }
+    }
+    let path = env::temp_dir().join(format!("switchx-catalog-check-{}", crate::app::new_id()?));
+    let mut builder = fs::DirBuilder::new();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::DirBuilderExt;
+        builder.mode(0o700);
+    }
+    builder
+        .create(&path)
+        .map_err(|_| "无法创建隔离目录以检查 Codex 兼容性")?;
+    let home = CheckHome(path);
+    let catalog_path = home.0.join("catalog.json");
+    config_transaction::write_exclusive_atomic(
+        &catalog_path,
+        &serde_json::to_vec(catalog).map_err(|_| "无法生成目录")?,
+    )?;
+    let config = format!(
+        "model_catalog_json = {}\nmodel_provider = \"switchx_schema\"\n[model_providers.switchx_schema]\nname = \"Catalog check\"\nbase_url = \"http://127.0.0.1:1/v1\"\nwire_api = \"responses\"\n",
+        toml_edit::Value::from(catalog_path.to_str().ok_or("目录路径不是 UTF-8")?)
+    );
+    config_transaction::write_exclusive_atomic(&home.0.join("config.toml"), config.as_bytes())?;
+    let executable = cli_executable();
+    let mut command = Command::new(&executable);
+    command
+        .current_dir(&home.0)
+        .env("CODEX_HOME", &home.0)
+        .env_remove("OPENAI_API_KEY")
+        .env_remove("CODEX_API_KEY")
+        .env_remove("OPENAI_BASE_URL")
+        .kill_on_drop(true);
+    let version = timeout(Duration::from_secs(5), command.arg("--version").output())
+        .await
+        .map_err(|_| "Codex 版本检查超时")?
+        .map_err(|_| "无法启动 Codex CLI；可设置 SWITCHX_CODEX_CLI")?;
+    if !version.status.success() {
+        return Err("Codex CLI 版本检查失败".into());
+    }
+    let version = String::from_utf8(version.stdout).map_err(|_| "无法识别 Codex CLI 版本")?;
+    if !version.starts_with("codex-cli ") || version.trim().len() > 128 {
+        return Err("无法识别 Codex CLI 版本".into());
+    }
+    let mut command = Command::new(executable);
+    let output = timeout(
+        Duration::from_secs(12),
+        command
+            .args(["debug", "models"])
+            .current_dir(&home.0)
+            .env("CODEX_HOME", &home.0)
+            .env_remove("OPENAI_API_KEY")
+            .env_remove("CODEX_API_KEY")
+            .env_remove("OPENAI_BASE_URL")
+            .kill_on_drop(true)
+            .output(),
+    )
+    .await
+    .map_err(|_| "Codex 目录检查超时")?
+    .map_err(|_| "无法运行 Codex 目录检查")?;
+    if !output.status.success() {
+        return Err("目标 Codex CLI 无法解析模型目录；请检查完整模型资料及 CLI 版本".into());
+    }
+    let loaded: serde_json::Value =
+        serde_json::from_slice(&output.stdout).map_err(|_| "Codex 目录检查未返回有效结果")?;
+    let ids = |value: &serde_json::Value| -> Option<std::collections::BTreeSet<String>> {
+        value["models"]
+            .as_array()?
+            .iter()
+            .map(|model| model["slug"].as_str().map(str::to_owned))
+            .collect()
+    };
+    if ids(&loaded).is_none() || ids(&loaded) != ids(catalog) {
+        return Err("Codex 实际加载的模型与待发布目录不一致".into());
+    }
+    Ok(version.trim().into())
 }
 
 fn classify_login_output(success: bool, text: &str) -> &'static str {
