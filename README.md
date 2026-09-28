@@ -61,6 +61,17 @@ cargo run --locked --example direct_live_probe -- /absolute/switchx-data PROVIDE
 
 ## M3 首批交付：模型目录与 API 路由
 
+添加上游时可选择带品牌图标的官方 API 预设，自动填入名称、API 地址和默认模型，再填写自己的 API Key。预设提供官网和获取 Key 的入口，所有字段仍可编辑；切换预设或回到自定义配置会清空当前 Key 和旧的探测列表。已保存的官方连接也显示对应图标，按准确 API 地址识别。模型能力继续通过独立映射填写或导入。
+
+| 官方预设 | API 地址 | 默认模型 | 核对来源 |
+| --- | --- | --- | --- |
+| DeepSeek | `https://api.deepseek.com` | `deepseek-flash` | [官方 Codex 指南](https://api-docs.deepseek.com/quick_start/agent_integrations/codex/) |
+| Kimi | `https://api.moonshot.cn/v1` | `kimi-k3` | [官方 Codex 指南](https://platform.kimi.com/docs/guide/codex-kimi) |
+| MiniMax | `https://api.minimax.cn/v1` | `MiniMax-M3` | [官方 Codex 指南](https://platform.minimax.cn/docs/token-plan/codex) |
+| 小米 MiMo | `https://api.xiaomimimo.com/v1` | `mimo-v2.6-pro` | [官方 Codex 指南](https://mimo.mi.com/docs/zh-CN/tokenplan/integration/codex-configuration) |
+
+预设参考 `others/cc-switch/src/config/codexProviderPresets.ts`，图标复用其内置 SVG；来源与 MIT 许可见 [图标说明](assets/providers/NOTICE.md)。以上地址与默认模型于 2026-09-28 核对，运行时可使用“获取模型列表”确认自己的账号目录。
+
 “上游供应商”的添加和编辑表单提供“获取模型列表”，使用当前填写的 API 地址和 Key；编辑时 Key 留空则读取该上游已保存的系统凭据。无需先填写模型 ID 或保存上游。支持 `data[].id` 和 `models[].slug/id`，结果去重排序；修改地址、Key 或切换表单后清空旧列表并丢弃在途结果。探测只读取模型列表，不发送推理请求。接口未开放或返回空列表时仍可手动填写模型 ID。
 
 “模型路由”页面支持为同一个上游添加多个独立映射，也可从上游卡片的“模型映射”进入。每条映射保存公开 ID、菜单显示名、实际请求模型、上下文窗口、支持的思考等级和默认等级；可以独立编辑、删除、选择发布和设为默认。公开 ID 全局唯一，同一上游的实际模型不重复。上游表单的模型 ID 仅作为直连默认值，修改它不会替换其他映射。

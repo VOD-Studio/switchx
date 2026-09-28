@@ -16,6 +16,16 @@ export struct ProviderRow {
     base-url: string,
     model-id: string,
     credential-status: string,
+    preset-id: string,
+    icon: image,
+    monochrome: bool,
+}
+
+export struct ProviderPresetRow {
+    id: string,
+    name: string,
+    icon: image,
+    monochrome: bool,
 }
 
 export struct ModelRow {
@@ -74,6 +84,11 @@ export component AppWindow inherits Window {
     in-out property <string> edit-url: "";
     in-out property <string> edit-model: "";
     in-out property <string> edit-key: "";
+    in property <[ProviderPresetRow]> provider-presets;
+    in-out property <string> edit-preset-id: "";
+    in-out property <string> edit-preset-url: "";
+    in-out property <image> edit-preset-icon;
+    in-out property <bool> edit-preset-monochrome: false;
     in-out property <[string]> fetched-models: [];
     in-out property <bool> fetching-models: false;
     in-out property <string> discovery-message: "";
@@ -133,7 +148,12 @@ export component AppWindow inherits Window {
         root.discovery-message = "";
     }
     changed edit-id => { root.reset-model-discovery(); }
-    changed edit-url => { root.reset-model-discovery(); }
+    changed edit-url => {
+        root.reset-model-discovery();
+        if (root.edit-preset-id != "" && root.edit-url != root.edit-preset-url) {
+            root.edit-preset-id = "";
+        }
+    }
     changed edit-key => { root.reset-model-discovery(); }
     changed editor-open => { root.reset-model-discovery(); }
     changed model-provider-id => { root.reset-model-discovery(); }
@@ -149,6 +169,8 @@ export component AppWindow inherits Window {
     callback save-provider(string, string, string, string, string);
     callback delete-provider(string);
     callback check-provider(string);
+    callback apply-provider-preset(string);
+    callback open-provider-preset-link(bool);
     callback fetch-models(int);
     callback inspect-direct(string, string);
     callback apply-direct();
@@ -656,6 +678,8 @@ export component AppWindow inherits Window {
                                 root.edit-url = "";
                                 root.edit-model = "";
                                 root.edit-key = "";
+                                root.edit-preset-id = "";
+                                root.edit-preset-url = "";
                                 root.delete-confirm = false;
                                 root.editor-open = true;
                             }
@@ -670,7 +694,7 @@ export component AppWindow inherits Window {
                     }
 
                     if root.editor-open: SurfaceCard {
-                        height: root.discovery-scope == 0 && (root.fetched-models.length > 0 || root.discovery-message != "") ? 370px : 302px;
+                        height: 302px + (root.edit-id == "" ? 92px : 0px) + (root.edit-preset-id != "" ? 58px : 0px) + (root.discovery-scope == 0 && (root.fetched-models.length > 0 || root.discovery-message != "") ? 68px : 0px);
                         VerticalLayout {
                             padding: 16px;
                             spacing: 7px;
@@ -679,6 +703,73 @@ export component AppWindow inherits Window {
                                 color: Theme.primary-text;
                                 font-size: 17px;
                                 font-weight: 600;
+                            }
+
+                            if root.edit-id == "": Text {
+                                text: "官方 API 预设";
+                                color: Theme.muted-text;
+                                font-size: 12px;
+                            }
+
+                            if root.edit-id == "": HorizontalLayout {
+                                spacing: 8px;
+                                QuietButton {
+                                    text: "自定义配置";
+                                    selected: root.edit-preset-id == "";
+                                    enabled: !root.busy;
+                                    clicked => {
+                                        if (root.edit-preset-id != "") { root.apply-provider-preset(""); }
+                                    }
+                                }
+
+                                for preset in root.provider-presets: QuietButton {
+                                    text: preset.name;
+                                    icon: preset.icon;
+                                    icon-width: preset.id == "xiaomimimo" ? 64px : 18px;
+                                    min-width: preset.id == "xiaomimimo" ? 160px : 118px;
+                                    icon-color: preset.monochrome ? Theme.primary-text : transparent;
+                                    selected: root.edit-preset-id == preset.id;
+                                    enabled: !root.busy;
+                                    clicked => {
+                                        if (root.edit-preset-id != preset.id) { root.apply-provider-preset(preset.id); }
+                                    }
+                                }
+                            }
+
+                            if root.edit-preset-id != "": HorizontalLayout {
+                                spacing: 10px;
+                                Image {
+                                    width: root.edit-preset-id == "xiaomimimo" ? 96px : 36px;
+                                    height: 36px;
+                                    source: root.edit-preset-icon;
+                                    colorize: root.edit-preset-monochrome ? Theme.primary-text : transparent;
+                                    image-fit: contain;
+                                    accessible-role: none;
+                                }
+
+                                Text {
+                                    text: root.edit-id == "" ? "已预填官方地址和默认模型，填写 API Key 即可保存。" : "官方 API 连接";
+                                    color: Theme.muted-text;
+                                    font-size: 12px;
+                                    vertical-alignment: center;
+                                    wrap: word-wrap;
+                                }
+
+                                QuietButton {
+                                    width: 94px;
+                                    horizontal-stretch: 0;
+                                    text: "官方网站";
+                                    enabled: !root.busy;
+                                    clicked => { root.open-provider-preset-link(false); }
+                                }
+
+                                QuietButton {
+                                    width: 108px;
+                                    horizontal-stretch: 0;
+                                    text: "获取 API Key";
+                                    enabled: !root.busy;
+                                    clicked => { root.open-provider-preset-link(true); }
+                                }
                             }
 
                             HorizontalLayout {
@@ -830,6 +921,14 @@ export component AppWindow inherits Window {
                         HorizontalLayout {
                             padding: 20px;
                             spacing: 10px;
+                            if provider.preset-id != "": Image {
+                                width: provider.preset-id == "xiaomimimo" ? 84px : 32px;
+                                height: 32px;
+                                source: provider.icon;
+                                colorize: provider.monochrome ? Theme.primary-text : transparent;
+                                image-fit: contain;
+                                accessible-role: none;
+                            }
                             VerticalLayout {
                                 spacing: 7px;
                                 Text {
@@ -872,6 +971,10 @@ export component AppWindow inherits Window {
                                     root.edit-url = provider.base-url;
                                     root.edit-model = provider.model-id;
                                     root.edit-key = "";
+                                    root.edit-preset-id = provider.preset-id;
+                                    root.edit-preset-url = provider.base-url;
+                                    root.edit-preset-icon = provider.icon;
+                                    root.edit-preset-monochrome = provider.monochrome;
                                     root.delete-confirm = false;
                                     root.editor-open = true;
                                 }

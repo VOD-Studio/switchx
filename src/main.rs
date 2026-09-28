@@ -145,16 +145,26 @@ fn show_result(app: &AppWindow, result: Result<Snapshot, AppError>) {
                     .map(|provider| provider.name.clone().into())
                     .collect::<Vec<slint::SharedString>>(),
             )));
+            let presets = app.get_provider_presets();
             let rows = snapshot
                 .providers
                 .into_iter()
-                .map(|provider| ProviderRow {
-                    id: provider.id.into(),
-                    name: provider.name.into(),
-                    endpoint: provider.endpoint.into(),
-                    base_url: provider.base_url.into(),
-                    model_id: provider.model_id.into(),
-                    credential_status: provider.credential_status.into(),
+                .map(|provider| {
+                    let brand = presets
+                        .iter()
+                        .find(|preset| preset.id == provider.preset_id)
+                        .unwrap_or_default();
+                    ProviderRow {
+                        id: provider.id.into(),
+                        name: provider.name.into(),
+                        endpoint: provider.endpoint.into(),
+                        base_url: provider.base_url.into(),
+                        model_id: provider.model_id.into(),
+                        credential_status: provider.credential_status.into(),
+                        preset_id: brand.id,
+                        icon: brand.icon,
+                        monochrome: brand.monochrome,
+                    }
                 })
                 .collect::<Vec<_>>();
             app.set_providers(ModelRc::new(VecModel::from(rows)));
@@ -198,6 +208,26 @@ fn show_action(app: &AppWindow, result: Result<String, String>) {
             app.set_error_action("检查输入或刷新后重试；发生配置冲突时先检查目标文件。".into());
         }
     }
+}
+
+fn open_provider_link(url: &str) -> Result<(), String> {
+    #[cfg(target_os = "macos")]
+    let mut command = std::process::Command::new("open");
+    #[cfg(target_os = "windows")]
+    let mut command = {
+        let mut command = std::process::Command::new("rundll32.exe");
+        command.arg("url.dll,FileProtocolHandler");
+        command
+    };
+    #[cfg(not(any(target_os = "macos", target_os = "windows")))]
+    let mut command = std::process::Command::new("xdg-open");
+    command
+        .arg(url)
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+        .map(|_| ())
+        .map_err(|_| "无法打开系统浏览器，请检查默认浏览器设置".into())
 }
 
 fn queue(app: &AppWindow, sender: &mpsc::Sender<Command>, command: Command) {
@@ -664,6 +694,8 @@ async fn worker(
                 let _ = weak.upgrade_in_event_loop(move |app| match result {
                     Ok(candidate) => {
                         app.set_edit_id("".into());
+                        app.set_edit_preset_id("".into());
+                        app.set_edit_preset_url("".into());
                         app.set_edit_name(candidate.name.into());
                         app.set_edit_url(candidate.base_url.into());
                         app.set_edit_model(candidate.model_id.into());
@@ -993,6 +1025,18 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         .enable_all()
         .build()?;
     let app = AppWindow::new()?;
+    let presets = app::PROVIDER_PRESETS
+        .iter()
+        .map(|preset| {
+            slint::Image::load_from_svg_data(preset.icon).map(|icon| ProviderPresetRow {
+                id: preset.id.into(),
+                name: preset.name.into(),
+                icon,
+                monochrome: preset.monochrome,
+            })
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    app.set_provider_presets(ModelRc::new(VecModel::from(presets)));
     let tray = SwitchXTray::new()?;
     let window = app.as_weak();
     tray.on_show_app(move || {
@@ -1065,6 +1109,58 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         if let Some(app) = weak.upgrade() {
             filter_providers(&app, &query);
         }
+    });
+    let weak = app.as_weak();
+    app.on_apply_provider_preset(move |id| {
+        let Some(app) = weak.upgrade() else {
+            return;
+        };
+        if app.get_busy() || app.get_config_managed() || !app.get_edit_id().is_empty() {
+            return;
+        }
+        let preset = app::PROVIDER_PRESETS
+            .iter()
+            .find(|preset| preset.id == id.as_str());
+        if preset.is_none() && !id.is_empty() {
+            return;
+        }
+        let brand = app
+            .get_provider_presets()
+            .iter()
+            .find(|preset| preset.id == id)
+            .unwrap_or_default();
+        app.set_edit_key("".into());
+        app.set_edit_preset_url(preset.map_or("", |preset| preset.base_url).into());
+        app.set_edit_name(preset.map_or("", |preset| preset.name).into());
+        app.set_edit_url(preset.map_or("", |preset| preset.base_url).into());
+        app.set_edit_model(preset.map_or("", |preset| preset.model_id).into());
+        app.set_edit_preset_id(brand.id);
+        app.set_edit_preset_icon(brand.icon);
+        app.set_edit_preset_monochrome(brand.monochrome);
+    });
+    let weak = app.as_weak();
+    app.on_open_provider_preset_link(move |api_key| {
+        let Some(app) = weak.upgrade() else {
+            return;
+        };
+        if app.get_busy() {
+            return;
+        }
+        let Some(preset) = app::PROVIDER_PRESETS
+            .iter()
+            .find(|preset| preset.id == app.get_edit_preset_id().as_str())
+        else {
+            return;
+        };
+        let url = if api_key {
+            preset.api_key_url
+        } else {
+            preset.website_url
+        };
+        show_action(
+            &app,
+            open_provider_link(url).map(|()| "已在浏览器打开供应商页面".into()),
+        );
     });
     let callback_sender = sender.clone();
     let weak = app.as_weak();
@@ -1397,6 +1493,7 @@ mod tests {
                 base_url: "https://example.invalid/v1".into(),
                 model_id: "a".into(),
                 credential_status: "凭据未检查".into(),
+                ..ProviderRow::default()
             },
             ProviderRow {
                 id: "b".into(),
@@ -1405,11 +1502,21 @@ mod tests {
                 base_url: "https://backup.invalid/v1".into(),
                 model_id: "b".into(),
                 credential_status: "凭据未检查".into(),
+                ..ProviderRow::default()
             },
         ]));
         assert_eq!(matching_providers(&providers, "deep").len(), 1);
         assert_eq!(matching_providers(&providers, " 上游 ").len(), 1);
         assert_eq!(matching_providers(&providers, "  ").len(), 2);
         assert!(matching_providers(&providers, "missing").is_empty());
+    }
+
+    #[test]
+    fn embedded_provider_logos_decode() {
+        for preset in app::PROVIDER_PRESETS {
+            let image = slint::Image::load_from_svg_data(preset.icon).unwrap();
+            assert!(image.size().width > 0, "{}", preset.id);
+            assert!(image.size().height > 0, "{}", preset.id);
+        }
     }
 }
