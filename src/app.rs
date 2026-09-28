@@ -59,6 +59,72 @@ pub struct ProviderView {
     pub base_url: String,
     pub model_id: String,
     pub credential_status: &'static str,
+    pub preset_id: &'static str,
+}
+
+pub struct ProviderPreset {
+    pub id: &'static str,
+    pub name: &'static str,
+    pub base_url: &'static str,
+    pub model_id: &'static str,
+    pub website_url: &'static str,
+    pub api_key_url: &'static str,
+    pub icon: &'static [u8],
+    pub monochrome: bool,
+}
+
+// Native Responses presets from CC Switch, checked against the vendors' Codex docs.
+// These are connection defaults; model capabilities remain independently configurable.
+pub const PROVIDER_PRESETS: &[ProviderPreset] = &[
+    ProviderPreset {
+        id: "deepseek",
+        name: "DeepSeek",
+        base_url: "https://api.deepseek.com",
+        model_id: "deepseek-flash",
+        website_url: "https://platform.deepseek.com",
+        api_key_url: "https://platform.deepseek.com/api_keys",
+        icon: include_bytes!("../assets/providers/deepseek.svg"),
+        monochrome: false,
+    },
+    ProviderPreset {
+        id: "kimi",
+        name: "Kimi",
+        base_url: "https://api.moonshot.cn/v1",
+        model_id: "kimi-k3",
+        website_url: "https://platform.kimi.com",
+        api_key_url: "https://platform.kimi.com/console/api-keys",
+        icon: include_bytes!("../assets/providers/kimi.svg"),
+        monochrome: true,
+    },
+    ProviderPreset {
+        id: "minimax",
+        name: "MiniMax",
+        base_url: "https://api.minimax.cn/v1",
+        model_id: "MiniMax-M3",
+        website_url: "https://platform.minimax.cn",
+        api_key_url: "https://platform.minimax.cn/subscribe/token-plan",
+        icon: include_bytes!("../assets/providers/minimax.svg"),
+        monochrome: false,
+    },
+    ProviderPreset {
+        id: "xiaomimimo",
+        name: "小米 MiMo",
+        base_url: "https://api.xiaomimimo.com/v1",
+        model_id: "mimo-v2.6-pro",
+        website_url: "https://platform.xiaomimimo.com",
+        api_key_url: "https://platform.xiaomimimo.com/#/console/api-keys",
+        icon: include_bytes!("../assets/providers/xiaomimimo.svg"),
+        monochrome: true,
+    },
+];
+
+pub fn provider_preset(base_url: &str) -> Option<&'static ProviderPreset> {
+    let url = crate::direct::validate_base_url(base_url).ok()?;
+    PROVIDER_PRESETS.iter().find(|preset| {
+        let address = url.as_str().trim_end_matches('/');
+        address == preset.base_url
+            || (preset.id == "deepseek" && address == "https://api.deepseek.com/v1")
+    })
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -349,6 +415,9 @@ fn provider_view(
             Err(CredentialError::Unavailable) => "系统凭据不可用",
         },
     };
+    let preset_id = provider_preset(&provider.base_url)
+        .map(|preset| preset.id)
+        .unwrap_or("");
     ProviderView {
         id: provider.id,
         name: provider.name.clone(),
@@ -362,6 +431,7 @@ fn provider_view(
             .unwrap_or_default(),
         model_id: provider.model_id,
         credential_status,
+        preset_id,
     }
 }
 
@@ -748,6 +818,44 @@ pub(crate) fn open_store(data_dir: &Path) -> Result<Store, AppError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn official_presets_have_valid_defaults_and_match_only_their_endpoints() {
+        let mut ids = std::collections::HashSet::new();
+        for preset in PROVIDER_PRESETS {
+            assert!(ids.insert(preset.id));
+            validate_provider(preset.name, preset.base_url, preset.model_id).unwrap();
+            assert_eq!(provider_preset(preset.base_url).unwrap().id, preset.id);
+            assert_eq!(
+                provider_preset(&format!("{}/", preset.base_url))
+                    .unwrap()
+                    .id,
+                preset.id
+            );
+            for link in [preset.website_url, preset.api_key_url] {
+                let url = reqwest::Url::parse(link).unwrap();
+                assert_eq!(url.scheme(), "https");
+                assert!(url.host_str().is_some());
+                assert!(url.username().is_empty());
+                assert!(url.password().is_none());
+                assert!(url.query().is_none());
+            }
+        }
+        assert_eq!(
+            provider_preset("https://api.deepseek.com/v1/").unwrap().id,
+            "deepseek"
+        );
+        for custom in [
+            "http://api.deepseek.com",
+            "https://api.deepseek.com.example.invalid",
+            "https://api.deepseek.com/proxy",
+            "https://api.deepseek.com?key=synthetic",
+            "https://user:synthetic@api.deepseek.com",
+            "https://example.invalid/v1",
+        ] {
+            assert!(provider_preset(custom).is_none(), "{custom}");
+        }
+    }
 
     #[test]
     fn mappings_can_be_added_edited_selected_and_deleted_independently() {
