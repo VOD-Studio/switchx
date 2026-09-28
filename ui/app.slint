@@ -120,6 +120,7 @@ export component AppWindow inherits Window {
     in-out property <string> model-upstream-id: "";
     in-out property <string> model-public-id: "";
     in-out property <string> model-display-name: "";
+    in-out property <bool> model-display-name-custom: false;
     in-out property <string> model-source-path: "";
     in-out property <string> model-original-id: "";
     in-out property <string> model-context-window: "";
@@ -163,6 +164,7 @@ export component AppWindow inherits Window {
         if (root.model-editor-open) { root.model-scroll-y = 0px; }
     }
     changed model-reasoning-levels => { root.update-reasoning-options(); }
+    changed model-upstream-id => { root.update-model-display-name(); }
     callback refresh(bool);
     callback refresh-requests();
     callback filter-providers(string);
@@ -182,6 +184,7 @@ export component AppWindow inherits Window {
     callback delete-model();
     callback begin-model-editor(string, string);
     callback add-selected-model();
+    callback update-model-display-name();
     callback update-reasoning-options();
     callback select-model(string, bool);
     callback edit-fallback(string);
@@ -1079,6 +1082,7 @@ export component AppWindow inherits Window {
                                 LineEdit {
                                     text <=> root.model-display-name;
                                     accessible-label: "模型显示名称";
+                                    edited(text) => { root.model-display-name-custom = true; }
                                 }
                             }
 
@@ -1110,12 +1114,7 @@ export component AppWindow inherits Window {
                                 current-value: root.model-upstream-id;
                                 accessible-label: "选择探测到的映射模型";
                                 enabled: !root.busy;
-                                selected(value) => {
-                                    if (root.model-display-name == "" || root.model-display-name == root.model-upstream-id) {
-                                        root.model-display-name = value;
-                                    }
-                                    root.model-upstream-id = value;
-                                }
+                                selected(value) => { root.model-upstream-id = value; }
                             }
 
                             if root.discovery-scope == 1 && root.discovery-message != "": Text {
