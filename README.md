@@ -46,7 +46,7 @@ M1 收口检查（2026-09-24，macOS 调试 bundle，隔离的 `SWITCHX_DATA_DIR
 
 从上游列表点“直连”会预览受管字段。点“应用直连”时再检查钥匙串、`/models`、模型 ID 与目标配置文件是否变化，然后以 journal 和原子替换写入 `config.toml`。只管理 `model`、`model_provider`、`model_catalog_json` 和 SwitchX 新建的 provider 表；其他配置和注释保留。若待移除的 `model_catalog_json` 带注释，切换会拒绝并要求先手动移走注释，不把原始注释写进 journal。生成的 provider 使用 Codex `auth.command` 调用当前 SwitchX 程序，从系统钥匙串读取 Bearer token；配置与 SQLite 均不保存明文 Key。可从页面或托盘恢复，恢复时保留外部改动并报告冲突。直连不依赖 SwitchX 常驻，但移动或删除当前 SwitchX 程序会让已生成的 helper 路径失效。切换只对新启动的目标客户端生效。
 
-`cargo test` 使用临时目录和本地 mock 验证数据库迁移、目录检查、差异写入、恢复及冲突。隔离探针：先运行 `cargo build --bin switchx`，再运行 `cargo run --example direct_cli_probe`。它在临时 `CODEX_HOME`、合成钥匙串条目与本地假上游中启动 Codex CLI 0.156.1；2026-09-24 已验证 CLI 通过 helper 取凭据、发送直连 Responses 请求并完成合成回答，结束后恢复配置并删除测试凭据。该探针不使用真实供应商 Key，也不证明真实上游的 Responses 工具对话、取消或 Desktop/IDE 兼容；M2 真上游验收与托盘菜单的实际操作验证仍待完成。
+`cargo test` 使用临时目录和本地 mock 验证数据库迁移、目录检查、差异写入、恢复及冲突。隔离探针：先运行 `cargo build --bin switchx`，再运行 `cargo run --example direct_cli_probe`。它在临时 `CODEX_HOME`、合成钥匙串条目与本地假上游中启动 Codex CLI 0.156.1；2026-09-24 已验证 CLI 通过 helper 取凭据、发送直连 Responses 请求并完成合成回答，结束后恢复配置并删除测试凭据。该 mock 探针不使用真实供应商 Key，也不证明真实上游的 Responses 工具对话、取消或 Desktop/IDE 兼容。
 
 真实直连探针 `direct_live_probe` 使用已在 SwitchX 中保存的上游和系统钥匙串引用。先构建主程序，再指定绝对路径的数据目录和上游 ID：
 
@@ -56,3 +56,5 @@ cargo run --locked --example direct_live_probe -- /absolute/switchx-data PROVIDE
 ```
 
 它检查真实 `/models`，在新建的临时 `CODEX_HOME` 中通过生产直连事务写入 helper 配置，再让 Codex CLI 0.156.1 完成短回答和“读合成文件 → 回传工具结果 → 第二轮回答”。这些真实模型调用可能计费。探针不读取用户的 Codex 配置或登录文件，不输出 Key；正常结束（包括请求检查失败）会恢复临时配置并清理临时目录，恢复有冲突时保留目录供检查。原有上游记录与钥匙串条目由 SwitchX 管理，探针不删除。自动化测试不会执行真实请求。
+
+2026-09-28 的 M2 验收已在 macOS 27.0 arm64、Codex CLI 0.156.1、DeepSeek `deepseek-flash` 上通过：真实模型发现、helper 直连短回答、真实文件工具与第二轮回答、原生页面写出的配置实际请求、原生上游编辑/删除、托盘重新打开/恢复/退出及中文拼音预编辑/候选上屏。中文输入法与托盘点击由用户实际操作确认；配置恢复、外部注释保留、journal 清除、进程退出与验收凭据清理由程序核对。首轮托盘组合操作未完成落盘恢复，单独补验恢复后通过，完整经过与覆盖边界见 [M2 验收记录](docs/acceptance/M2-2026-09-28.md)。本轮测试 Key 的保存副本和临时目录已清理；OpenAI 官方 API、ChatGPT 官方上游及认证生命周期、Desktop/IDE、取消和其他平台仍未在本轮验收。
