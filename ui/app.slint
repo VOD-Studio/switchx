@@ -98,6 +98,9 @@ export component AppWindow inherits Window {
     in-out property <string> config-status: "尚未读取 Codex 配置";
     in-out property <bool> direct-active: false;
     in-out property <string> auth-status: "官方登录状态尚未检查";
+    in-out property <bool> chatgpt-login-pending: false;
+    in-out property <string> chatgpt-login-id: "";
+    in-out property <string> route-auth-error: "";
     in-out property <string> selected-provider-id: "";
     in-out property <string> direct-preview: "";
     in-out property <bool> direct-preview-ready: false;
@@ -114,6 +117,7 @@ export component AppWindow inherits Window {
     in-out property <string> default-model: "";
     in-out property <string> route-preview: "";
     in-out property <bool> route-preview-ready: false;
+    in-out property <string> route-preview-model: "";
     in-out property <bool> model-editor-open: false;
     in-out property <string> model-provider-id: "";
     in-out property <string> model-provider-name: "";
@@ -139,9 +143,15 @@ export component AppWindow inherits Window {
     in-out property <[string]> fallback-options;
     in-out property <int> fallback-choice: 0;
     in-out property <bool> fallback-consent: false;
-    changed config-home => { root.route-preview-ready = false; root.direct-preview-ready = false; }
+    changed config-home => {
+        root.route-preview-ready = false;
+        root.direct-preview-ready = false;
+        root.auth-status = "此目录的官方登录状态尚未检查";
+    }
     changed route-port => { root.route-preview-ready = false; }
-    changed default-model => { root.route-preview-ready = false; }
+    changed default-model => {
+        if root.default-model != root.route-preview-model { root.route-preview-ready = false; }
+    }
     function reset-model-discovery() {
         root.discovery-generation += 1;
         root.fetched-models = [];
@@ -180,6 +190,7 @@ export component AppWindow inherits Window {
     callback inspect-config(string);
     callback import-current(string);
     callback check-login(string);
+    callback subscription-action(int);
     callback save-model();
     callback delete-model();
     callback begin-model-editor(string, string);
@@ -192,6 +203,13 @@ export component AppWindow inherits Window {
     callback inspect-route();
     callback apply-route();
     callback cancel-route-preview();
+    callback poll-route-status();
+    Timer {
+        interval: 2s;
+        running: root.route-running;
+        triggered => { root.poll-route-status(); }
+    }
+
     changed drawer-open => {
         if (root.drawer-open) { drawer-keyboard.focus(); }
         else { status-button.focus(); }
@@ -314,7 +332,7 @@ export component AppWindow inherits Window {
                 }
 
                 Text {
-                    text: root.route-running ? "●  API 路由运行中" : root.route-managed ? "●  路由配置待恢复" : "●  路由未启用";
+                    text: root.route-running ? "●  模型路由运行中" : root.route-managed ? "●  路由配置待恢复" : "●  路由未启用";
                     color: root.route-running ? Theme.success : Theme.warning;
                     font-size: 12px;
                 }
@@ -425,7 +443,7 @@ export component AppWindow inherits Window {
                                 }
 
                                 StatusPill {
-                                    label: root.route-running ? "API 路由运行中" : root.direct-active ? "直连已配置" : root.route-managed ? "待恢复" : "未启用";
+                                    label: root.route-running ? "模型路由运行中" : root.direct-active ? "直连已配置" : root.route-managed ? "待恢复" : "未启用";
                                     ink: root.route-running || root.direct-active ? Theme.success : Theme.warning;
                                 }
 
@@ -689,11 +707,20 @@ export component AppWindow inherits Window {
                         }
                     }
 
-                    Text {
-                        height: 28px;
-                        text: "仅支持原生 Responses 上游；API Key 保存到系统凭据存储。";
-                        color: Theme.muted-text;
-                        font-size: 13px;
+                    HorizontalLayout {
+                        spacing: 12px;
+                        Text {
+                            text: "API Key 保存到系统凭据存储；订阅登录由目标 Codex 管理。";
+                            color: Theme.muted-text;
+                            font-size: 13px;
+                            vertical-alignment: center;
+                        }
+
+                        QuietButton {
+                            text: "添加 ChatGPT 订阅";
+                            enabled: !root.busy && !root.config-managed && !root.chatgpt-login-pending;
+                            clicked => { root.subscription-action(0); }
+                        }
                     }
 
                     if root.editor-open: SurfaceCard {
@@ -966,9 +993,13 @@ export component AppWindow inherits Window {
 
                             QuietButton {
                                 width: 62px;
-                                text: "编辑";
-                                enabled: !root.busy && !root.config-managed;
+                                text: provider.id == "switchx-chatgpt" ? "账号" : "编辑";
+                                enabled: !root.busy && (!root.config-managed || provider.id == "switchx-chatgpt");
                                 clicked => {
+                                    if provider.id == "switchx-chatgpt" {
+                                        root.active-page = 5;
+                                        return;
+                                    }
                                     root.edit-id = provider.id;
                                     root.edit-name = provider.name;
                                     root.edit-url = provider.base-url;
@@ -1000,7 +1031,7 @@ export component AppWindow inherits Window {
                             QuietButton {
                                 width: 70px;
                                 text: "直连";
-                                enabled: !root.busy && !root.config-managed;
+                                enabled: !root.busy && !root.config-managed && !root.chatgpt-login-pending && provider.id != "switchx-chatgpt";
                                 clicked => {
                                     root.selected-provider-id = provider.id;
                                     root.active-page = 5;
@@ -1225,7 +1256,7 @@ export component AppWindow inherits Window {
                             spacing: 10px;
                             HorizontalLayout {
                                 Text {
-                                    text: "API 路由预览版";
+                                    text: "模型路由预览版";
                                     color: Theme.primary-text;
                                     font-size: 18px;
                                     font-weight: 600;
@@ -1280,14 +1311,14 @@ export component AppWindow inherits Window {
                                 spacing: 8px;
                                 QuietButton {
                                     text: "预览发布";
-                                    enabled: !root.busy && !root.config-managed && root.selected-model-count > 0;
+                                    enabled: !root.busy && !root.config-managed && !root.chatgpt-login-pending && root.selected-model-count > 0;
                                     clicked => { root.inspect-route(); }
                                 }
 
                                 QuietButton {
                                     text: "开启路由";
                                     primary: true;
-                                    enabled: !root.busy && !root.config-managed && root.route-preview-ready;
+                                    enabled: !root.busy && !root.config-managed && !root.chatgpt-login-pending && root.route-preview-ready;
                                     clicked => { root.apply-route(); }
                                 }
 
@@ -1304,7 +1335,7 @@ export component AppWindow inherits Window {
                             }
 
                             Text {
-                                text: "使用已保存的 API Key；ChatGPT 订阅路由尚未接入。切换后请重启目标客户端。";
+                                text: "API 模型使用各自的 Key；订阅模型使用目标 Codex 的官方登录。跨上游切换请新建会话。";
                                 color: Theme.muted-text;
                                 font-size: 12px;
                                 wrap: word-wrap;
@@ -1458,7 +1489,7 @@ export component AppWindow inherits Window {
                             QuietButton {
                                 width: 62px;
                                 text: "备用";
-                                enabled: model.ready && !root.busy && !root.config-managed;
+                                enabled: model.ready && !root.busy && !root.config-managed && model.provider-id != "switchx-chatgpt";
                                 clicked => { root.edit-fallback(model.public-id); }
                             }
 
@@ -1624,7 +1655,7 @@ export component AppWindow inherits Window {
                             LineEdit {
                                 text <=> root.config-home;
                                 accessible-label: "Codex 配置目录绝对路径";
-                                enabled: !root.busy && !root.config-managed;
+                                enabled: !root.busy && !root.config-managed && !root.chatgpt-login-pending;
                             }
 
                             Text {
@@ -1657,6 +1688,69 @@ export component AppWindow inherits Window {
                     }
 
                     SurfaceCard {
+                        height: 216px;
+                        VerticalLayout {
+                            padding: 18px;
+                            spacing: 12px;
+                            Text {
+                                text: "ChatGPT 订阅账号";
+                                color: Theme.primary-text;
+                                font-size: 17px;
+                                font-weight: 600;
+                            }
+
+                            Text {
+                                text: root.route-auth-error == "" ? root.auth-status : root.route-auth-error;
+                                color: Theme.primary-text;
+                                font-size: 13px;
+                                wrap: word-wrap;
+                            }
+
+                            HorizontalLayout {
+                                spacing: 8px;
+                                QuietButton {
+                                    text: root.config-managed ? "恢复并重新登录" : "登录 ChatGPT";
+                                    primary: true;
+                                    enabled: !root.busy && !root.chatgpt-login-pending;
+                                    clicked => { root.subscription-action(1); }
+                                }
+
+                                QuietButton {
+                                    text: "取消登录";
+                                    enabled: !root.busy && root.chatgpt-login-pending;
+                                    clicked => { root.subscription-action(3); }
+                                }
+
+                                QuietButton {
+                                    text: "检查并续期";
+                                    enabled: !root.busy && !root.chatgpt-login-pending;
+                                    clicked => { root.subscription-action(2); }
+                                }
+
+                                QuietButton {
+                                    text: "切回 API 预览";
+                                    enabled: !root.busy && !root.chatgpt-login-pending;
+                                    clicked => { root.subscription-action(4); }
+                                }
+                            }
+
+                            Text {
+                                text: root.chatgpt-login-pending ? "在官方浏览器页面完成登录；可随时取消。此时配置目录已锁定。" : "登录写入上方 Codex 目录，认证及自动续期由 Codex 保管。更换账号前会恢复原配置并停止路由。";
+                                color: Theme.muted-text;
+                                font-size: 12px;
+                                wrap: word-wrap;
+                            }
+
+                            Text {
+                                text: "失效后可重新登录；切回 API 会先恢复，再生成只含 API 模型的发布预览。";
+                                color: Theme.muted-text;
+                                font-size: 12px;
+                                wrap: word-wrap;
+                            }
+                        }
+                    }
+
+                    SurfaceCard {
                         height: 154px;
                         VerticalLayout {
                             padding: 18px;
@@ -1669,7 +1763,7 @@ export component AppWindow inherits Window {
                             }
 
                             Text {
-                                text: root.auth-status;
+                                text: "凭据保持在 Codex 原有存储中，SwitchX 不复制官方登录凭据。";
                                 color: Theme.muted-text;
                                 font-size: 13px;
                                 wrap: word-wrap;
@@ -1715,7 +1809,7 @@ export component AppWindow inherits Window {
                                 QuietButton {
                                     text: "应用直连";
                                     primary: true;
-                                    enabled: root.direct-preview-ready && !root.busy;
+                                    enabled: root.direct-preview-ready && !root.busy && !root.chatgpt-login-pending;
                                     clicked => { root.apply-direct(); }
                                 }
 
@@ -1796,7 +1890,7 @@ export component AppWindow inherits Window {
             }
 
             StatusPill {
-                label: root.route-running ? "API 路由运行中" : root.route-managed ? "配置待恢复" : "未启用路由";
+                label: root.route-running ? "模型路由运行中" : root.route-managed ? "配置待恢复" : "未启用路由";
                 ink: root.route-running ? Theme.success : Theme.warning;
             }
 
