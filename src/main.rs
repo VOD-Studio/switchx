@@ -267,6 +267,19 @@ fn show_config_status(app: &AppWindow, status: client::ConfigStatus) {
     );
 }
 
+fn update_model_display_name(app: &AppWindow) {
+    if !app.get_model_display_name_custom() {
+        app.set_model_display_name(
+            format!(
+                "{}/{}",
+                app.get_model_upstream_id(),
+                app.get_model_provider_name()
+            )
+            .into(),
+        );
+    }
+}
+
 fn open_model_editor(app: &AppWindow, provider_id: &str, original_id: &str) -> Result<(), String> {
     let provider = app
         .get_providers()
@@ -290,6 +303,7 @@ fn open_model_editor(app: &AppWindow, provider_id: &str, original_id: &str) -> R
     app.set_model_provider_id(provider.id.clone());
     app.set_model_provider_name(provider.name);
     app.set_model_original_id(original_id.into());
+    app.set_model_display_name_custom(model.is_some());
     app.set_model_upstream_id(
         model
             .as_ref()
@@ -304,8 +318,9 @@ fn open_model_editor(app: &AppWindow, provider_id: &str, original_id: &str) -> R
         model
             .as_ref()
             .map(|model| model.display_name.clone())
-            .unwrap_or_else(|| app.get_model_upstream_id()),
+            .unwrap_or_default(),
     );
+    update_model_display_name(app);
     app.set_model_context_window(
         model
             .as_ref()
@@ -1332,6 +1347,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             && let Err(error) = open_model_editor(&app, &provider, "")
         {
             show_action(&app, Err(error));
+        }
+    });
+    let weak = app.as_weak();
+    app.on_update_model_display_name(move || {
+        if let Some(app) = weak.upgrade() {
+            update_model_display_name(&app);
         }
     });
     let weak = app.as_weak();
