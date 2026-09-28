@@ -21,6 +21,51 @@ pub struct ModelRecord {
     pub enabled: bool,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RequestStatus {
+    Completed,
+    Failed,
+    Interrupted,
+    Cancelled,
+}
+
+impl RequestStatus {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Completed => "completed",
+            Self::Failed => "failed",
+            Self::Interrupted => "interrupted",
+            Self::Cancelled => "cancelled",
+        }
+    }
+
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Completed => "正常完成",
+            Self::Failed => "请求失败",
+            Self::Interrupted => "流中断",
+            Self::Cancelled => "用户取消 / 客户端断开",
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RequestRecord {
+    pub id: String,
+    pub started_at_ms: i64,
+    pub public_model: Option<String>,
+    pub provider_id: Option<String>,
+    pub upstream_model: Option<String>,
+    pub generation: String,
+    pub http_status: Option<u16>,
+    pub headers_ms: Option<i64>,
+    pub first_event_ms: Option<i64>,
+    pub duration_ms: i64,
+    pub status: RequestStatus,
+    // Only SwitchX-owned error codes, never upstream messages or response bodies.
+    pub error_code: Option<String>,
+}
+
 pub struct Store {
     connection: Connection,
 }
@@ -29,7 +74,7 @@ impl Store {
     pub fn open(path: &Path) -> Result<Self> {
         let connection = Connection::open(path)?;
         let version: i64 = connection.query_row("PRAGMA user_version", [], |row| row.get(0))?;
-        if version > 3 {
+        if version > 4 {
             return Err(rusqlite::Error::InvalidQuery);
         }
         if version == 0 {
@@ -69,7 +114,94 @@ impl Store {
                  COMMIT;",
             )?;
         }
+        if version < 4 {
+            connection.execute_batch(
+                "BEGIN IMMEDIATE;
+                 CREATE TABLE request_records (
+                    id TEXT PRIMARY KEY NOT NULL,
+                    started_at_ms INTEGER NOT NULL,
+                    public_model TEXT,
+                    provider_id TEXT,
+                    upstream_model TEXT,
+                    generation TEXT NOT NULL,
+                    http_status INTEGER,
+                    headers_ms INTEGER,
+                    first_event_ms INTEGER,
+                    duration_ms INTEGER NOT NULL,
+                    status TEXT NOT NULL CHECK (status IN ('completed', 'failed', 'interrupted', 'cancelled')),
+                    error_code TEXT
+                 );
+                 CREATE INDEX request_records_recent ON request_records(started_at_ms DESC);
+                 PRAGMA user_version = 4;
+                 COMMIT;",
+            )?;
+        }
         Ok(Self { connection })
+    }
+
+    pub fn put_request(&self, record: &RequestRecord) -> Result<()> {
+        self.connection.execute(
+            "INSERT INTO request_records
+             (id, started_at_ms, public_model, provider_id, upstream_model, generation,
+              http_status, headers_ms, first_event_ms, duration_ms, status, error_code)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)",
+            params![
+                record.id,
+                record.started_at_ms,
+                record.public_model,
+                record.provider_id,
+                record.upstream_model,
+                record.generation,
+                record.http_status,
+                record.headers_ms,
+                record.first_event_ms,
+                record.duration_ms,
+                record.status.as_str(),
+                record.error_code
+            ],
+        )?;
+        Ok(())
+    }
+
+    pub fn requests(&self, limit: usize) -> Result<Vec<RequestRecord>> {
+        let mut statement = self.connection.prepare(
+            "SELECT id, started_at_ms, public_model, provider_id, upstream_model, generation,
+                    http_status, headers_ms, first_event_ms, duration_ms, status, error_code
+             FROM request_records ORDER BY started_at_ms DESC, rowid DESC LIMIT ?1",
+        )?;
+        statement
+            .query_map([limit.min(1000) as i64], |row| {
+                let status: String = row.get(10)?;
+                Ok(RequestRecord {
+                    id: row.get(0)?,
+                    started_at_ms: row.get(1)?,
+                    public_model: row.get(2)?,
+                    provider_id: row.get(3)?,
+                    upstream_model: row.get(4)?,
+                    generation: row.get(5)?,
+                    http_status: row.get(6)?,
+                    headers_ms: row.get(7)?,
+                    first_event_ms: row.get(8)?,
+                    duration_ms: row.get(9)?,
+                    status: match status.as_str() {
+                        "completed" => RequestStatus::Completed,
+                        "failed" => RequestStatus::Failed,
+                        "interrupted" => RequestStatus::Interrupted,
+                        "cancelled" => RequestStatus::Cancelled,
+                        _ => return Err(rusqlite::Error::InvalidQuery),
+                    },
+                    error_code: row.get(11)?,
+                })
+            })?
+            .collect()
+    }
+
+    pub fn request_time(&self, started_at_ms: i64) -> Result<String> {
+        self.connection.query_row(
+            "SELECT strftime('%Y-%m-%d %H:%M:%S', ?1 / 1000.0, 'unixepoch', 'localtime')",
+            [started_at_ms],
+            |row| row.get(0),
+        )
     }
 
     pub fn put_provider(&self, provider: &ProviderRecord) -> Result<()> {
@@ -173,6 +305,60 @@ impl Store {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn v3_migration_keeps_history_after_reopen_and_provider_deletion() {
+        let path = std::env::temp_dir().join(format!(
+            "switchx-requests-{}.sqlite",
+            crate::app::new_id().unwrap()
+        ));
+        let store = Store::open(&path).unwrap();
+        store
+            .connection
+            .execute_batch("DROP TABLE request_records; PRAGMA user_version = 3;")
+            .unwrap();
+        drop(store);
+        let store = Store::open(&path).unwrap();
+        let provider = ProviderRecord {
+            id: "one".into(),
+            name: "One".into(),
+            base_url: "https://example.invalid".into(),
+            model_id: "model".into(),
+            credential_ref: None,
+        };
+        store.put_provider(&provider).unwrap();
+        let mut record = RequestRecord {
+            id: "first".into(),
+            started_at_ms: 1_800_000_000_000,
+            public_model: Some("sx-one".into()),
+            provider_id: Some("one".into()),
+            upstream_model: Some("model".into()),
+            generation: "test-generation".into(),
+            http_status: Some(200),
+            headers_ms: Some(10),
+            first_event_ms: Some(20),
+            duration_ms: 50,
+            status: RequestStatus::Completed,
+            error_code: None,
+        };
+        store.put_request(&record).unwrap();
+        record.id = "second".into();
+        record.started_at_ms += 10;
+        record.status = RequestStatus::Interrupted;
+        record.error_code = Some("missing_completion".into());
+        store.put_request(&record).unwrap();
+        store.delete_provider("one").unwrap();
+        drop(store);
+        let store = Store::open(&path).unwrap();
+        assert_eq!(store.requests(1).unwrap(), [record]);
+        let rows = store.requests(100).unwrap();
+        assert_eq!(rows.len(), 2);
+        assert_eq!(rows[1].id, "first");
+        assert_eq!(store.request_time(rows[1].started_at_ms).unwrap().len(), 19);
+        assert!(store.requests(0).unwrap().is_empty());
+        drop(store);
+        std::fs::remove_file(path).unwrap();
+    }
 
     #[test]
     fn provider_metadata_survives_reopen_without_secret_columns() {

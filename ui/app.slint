@@ -1,4 +1,4 @@
-import { LineEdit, Palette, ScrollView } from "std-widgets.slint";
+import { LineEdit, ListView, Palette, ScrollView } from "std-widgets.slint";
 import { Theme } from "tokens.slint";
 import { QuietButton, SurfaceCard, StatusPill } from "components.slint";
 
@@ -20,6 +20,17 @@ export struct ModelRow {
     detail: string,
     ready: bool,
     included: bool,
+}
+
+export struct RequestRow {
+    time: string,
+    route: string,
+    timing: string,
+    detail: string,
+    status: string,
+    completed: bool,
+    cancelled: bool,
+    error: string,
 }
 
 export component AppWindow inherits Window {
@@ -58,6 +69,8 @@ export component AppWindow inherits Window {
     in-out property <bool> direct-preview-ready: false;
     in-out property <string> action-message: "";
     in-out property <[ModelRow]> models: [];
+    in-out property <[RequestRow]> requests: [];
+    in-out property <string> request-error: "";
     in-out property <int> selected-model-count: 0;
     in-out property <bool> config-managed: false;
     in-out property <bool> route-managed: false;
@@ -78,6 +91,7 @@ export component AppWindow inherits Window {
     changed route-port => { root.route-preview-ready = false; }
     changed default-model => { root.route-preview-ready = false; }
     callback refresh(bool);
+    callback refresh-requests();
     callback filter-providers(string);
     callback save-provider(string, string, string, string, string);
     callback delete-provider(string);
@@ -179,7 +193,8 @@ export component AppWindow inherits Window {
                     text: "请求与用量";
                     selected: root.active-page == 3;
                     left-aligned: true;
-                    clicked => { root.active-page = 3; }
+                    enabled: !root.busy;
+                    clicked => { root.active-page = 3; root.refresh-requests(); }
                 }
 
                 Text {
@@ -1093,20 +1108,115 @@ export component AppWindow inherits Window {
                 }
             }
 
-            if root.active-page >= 3 && root.active-page <= 4: SurfaceCard {
+            if root.active-page == 3: VerticalLayout {
+                spacing: 12px;
+                HorizontalLayout {
+                    Text {
+                        text: "最近 100 条已结束请求 · " + root.requests.length + " 条";
+                        color: Theme.primary-text;
+                        font-size: 17px;
+                        vertical-alignment: center;
+                    }
+
+                    QuietButton {
+                        width: 100px;
+                        text: "刷新记录";
+                        enabled: !root.busy;
+                        clicked => { root.refresh-requests(); }
+                    }
+                }
+
+                Text {
+                    text: "仅记录经过 SwitchX 路由的请求；正文与凭据不保存。手动刷新查看最新结果。";
+                    color: Theme.muted-text;
+                    font-size: 12px;
+                    wrap: word-wrap;
+                }
+
+                if root.request-error != "": Text {
+                    text: root.request-error;
+                    color: Theme.warning;
+                    wrap: word-wrap;
+                }
+                if root.requests.length == 0: Text {
+                    text: root.busy ? "正在读取请求记录…" : "暂无请求记录。开启模型路由并完成请求后，可在这里查看结果。";
+                    color: Theme.muted-text;
+                    wrap: word-wrap;
+                }
+                ListView {
+                    vertical-stretch: 1;
+                    for request in root.requests: SurfaceCard {
+                        height: request.error == "" ? 132px : 160px;
+                        VerticalLayout {
+                            padding: 14px;
+                            spacing: 6px;
+                            HorizontalLayout {
+                                Text {
+                                    text: request.time;
+                                    color: Theme.muted-text;
+                                    font-size: 12px;
+                                    vertical-alignment: center;
+                                }
+
+                                StatusPill {
+                                    width: request.cancelled ? 176px : 100px;
+                                    label: request.status;
+                                    ink: request.completed ? Theme.success : request.cancelled ? Theme.muted-text : Theme.warning;
+                                }
+                            }
+
+                            Text {
+                                text: request.route;
+                                color: Theme.primary-text;
+                                font-size: 14px;
+                                overflow: elide;
+                            }
+
+                            Text {
+                                text: request.timing;
+                                color: Theme.muted-text;
+                                font-size: 12px;
+                            }
+
+                            Text {
+                                text: request.detail;
+                                color: Theme.muted-text;
+                                font-size: 10px;
+                                overflow: elide;
+                            }
+
+                            if request.error != "": Text {
+                                text: request.error;
+                                color: request.cancelled ? Theme.muted-text : Theme.warning;
+                                font-size: 12px;
+                                overflow: elide;
+                            }
+                        }
+                    }
+                }
+
+                Text {
+                    text: "“正常完成”表示已收到上游完成信号；客户端断开无法判断是否由用户主动取消。用量与费用统计尚未接入。";
+                    color: Theme.muted-text;
+                    font-size: 12px;
+                    wrap: word-wrap;
+                }
+            }
+
+            if root.active-page == 4: SurfaceCard {
                 height: 200px;
                 VerticalLayout {
                     padding: 24px;
                     spacing: 14px;
                     Text {
-                        text: root.active-page == 3 ? "请求记录尚未接入" : "MCP 与 Skills 尚未接入";
+                        text: "MCP 与 Skills 尚未接入";
                         color: Theme.primary-text;
                         font-size: 19px;
                         font-weight: 600;
                     }
 
                     Text {
-                        text: root.active-page == 3 ? "当前版本可在模型路由页查看运行状态，请求记录与用量将在后续接入。" : "不会自动导入或执行外部命令。";
+                        text: "不会自动导入或执行外部命令。";
                         color: Theme.muted-text;
                         font-size: 13px;
                         wrap: word-wrap;

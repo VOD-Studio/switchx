@@ -59,6 +59,12 @@ impl RouteSession {
         self.active.as_ref().map(|active| active.address)
     }
 
+    pub fn recording_failed(&self) -> bool {
+        self.active
+            .as_ref()
+            .is_some_and(|active| active.server.recording_failed())
+    }
+
     pub fn discard_preview(&mut self) {
         self.prepared = None;
     }
@@ -164,12 +170,21 @@ impl RouteSession {
             return Err("检查期间上游或模型资料已变化，请重新预览".into());
         }
         let local_token = Secret::new(format!("{}{}", app::new_id()?, app::new_id()?));
+        let request_store = app::open_store(state_dir).map_err(|error| error.message())?;
+        let generation = prepared
+            .switch
+            .catalog_path()
+            .file_name()
+            .unwrap()
+            .to_string_lossy()
+            .into_owned();
         let state = RouterState::new(
             prepared.address,
             local_token.expose().into(),
             prepared.publication,
             upstreams,
-        )?;
+        )?
+        .with_request_log(request_store, generation);
         let server = RunningRouter::start(prepared.listener, state)?;
         let client = reqwest::Client::builder()
             .no_proxy()
