@@ -26,14 +26,9 @@ struct RequestDatabase(std::path::PathBuf);
 
 impl RequestDatabase {
     fn new() -> Self {
-        let path = std::env::temp_dir().join(format!(
-            "switchx-request-test-{}-{}.sqlite",
-            std::process::id(),
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap()
-                .as_nanos()
-        ));
+        let mut nonce = [0u8; 16];
+        getrandom::fill(&mut nonce).unwrap();
+        let path = std::env::temp_dir().join(format!("switchx-request-test-{nonce:02x?}.sqlite"));
         Self(path)
     }
 
@@ -238,8 +233,16 @@ async fn recording_router(
     upstream_address: std::net::SocketAddr,
     records: &RequestDatabase,
 ) -> (RunningRouter, std::net::SocketAddr) {
+    recording_router_with_fallback(upstream_address, None, records).await
+}
+
+async fn recording_router_with_fallback(
+    upstream_address: std::net::SocketAddr,
+    fallback: Option<std::net::SocketAddr>,
+    records: &RequestDatabase,
+) -> (RunningRouter, std::net::SocketAddr) {
     let templates = serde_json::from_str(include_str!("fixtures/synthetic-models.json")).unwrap();
-    let publication = publish(
+    let mut publication = publish(
         &templates,
         &[Selection {
             public_id: "sx-one",
@@ -251,22 +254,209 @@ async fn recording_router(
     .unwrap();
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let address = listener.local_addr().unwrap();
-    let state = RouterState::new(
-        address,
-        RECORD_TOKEN.into(),
-        publication,
-        HashMap::from([(
-            "one".into(),
-            Upstream::new(
-                &format!("http://{upstream_address}"),
-                "synthetic-upstream-key".into(),
-            )
-            .unwrap(),
-        )]),
-    )
-    .unwrap()
-    .with_request_log(records.store(), "test-generation".into());
+    let mut upstreams = HashMap::from([(
+        "one".into(),
+        Upstream::new(
+            &format!("http://{upstream_address}"),
+            "synthetic-upstream-key".into(),
+        )
+        .unwrap(),
+    )]);
+    if let Some(fallback) = fallback {
+        publication
+            .routes
+            .get_mut("sx-one")
+            .unwrap()
+            .fallback_provider_id = Some("backup".into());
+        upstreams.insert(
+            "backup".into(),
+            Upstream::new(&format!("http://{fallback}"), "synthetic-backup-key".into()).unwrap(),
+        );
+    }
+    let state = RouterState::new(address, RECORD_TOKEN.into(), publication, upstreams)
+        .unwrap()
+        .with_request_log(records.store(), "test-generation".into());
     (RunningRouter::start(listener, state).unwrap(), address)
+}
+
+#[tokio::test]
+async fn explicit_fallback_only_after_connect_failure_uses_own_key_and_records_destination() {
+    let unused = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let primary = unused.local_addr().unwrap();
+    drop(unused);
+    let (backup, mut seen, _, task) = spawn_mock("/responses", false).await;
+    let records = RequestDatabase::new();
+    let (running, address) = recording_router_with_fallback(primary, Some(backup), &records).await;
+    let client = reqwest::Client::builder().no_proxy().build().unwrap();
+    // State-bound requests are rejected before considering any candidate.
+    let rejected = request(
+        &client,
+        address,
+        json!({"model":"sx-one", "previous_response_id":"private"}),
+    )
+    .send()
+    .await
+    .unwrap();
+    assert_eq!(rejected.status(), StatusCode::UNPROCESSABLE_ENTITY);
+    let response = request(
+        &client,
+        address,
+        json!({"model":"sx-one", "input":"private-fallback-prompt"}),
+    )
+    .header(header::AUTHORIZATION, "Bearer private-client-key")
+    .header(LOCAL_TOKEN_HEADER, RECORD_TOKEN)
+    .header(header::COOKIE, "private-cookie")
+    .header("chatgpt-account-id", "private-account")
+    .header("x-openai-account-id", "private-account")
+    .send()
+    .await
+    .unwrap();
+    let id = response.headers()[REQUEST_ID_HEADER]
+        .to_str()
+        .unwrap()
+        .to_owned();
+    assert_eq!(response.status(), StatusCode::OK);
+    assert!(response.text().await.unwrap().contains("completed"));
+    let captured = timeout(Duration::from_secs(3), seen.recv())
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(captured.model, "deepseek-flash");
+    assert_eq!(
+        captured.authorization.as_deref(),
+        Some("Bearer synthetic-backup-key")
+    );
+    assert!(
+        captured.cookie.is_none()
+            && captured.account.is_none()
+            && captured.chatgpt_account.is_none()
+            && captured.local_token.is_none()
+    );
+    let record = records.wait_for(&id).await;
+    assert_eq!(record.status, RequestStatus::Completed);
+    assert_eq!(record.provider_id.as_deref(), Some("backup"));
+    assert_eq!(record.fallback_from.as_deref(), Some("one"));
+    assert!(seen.try_recv().is_err());
+    running.stop().await;
+    task.abort();
+    let _ = task.await;
+    // Exhaustion still means one primary and one backup, with no recursive fallback.
+    let (running, address) = recording_router_with_fallback(primary, Some(backup), &records).await;
+    let response = request(&client, address, json!({"model":"sx-one"}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::BAD_GATEWAY);
+    let record = records
+        .wait_for(response.headers()[REQUEST_ID_HEADER].to_str().unwrap())
+        .await;
+    assert_eq!(record.provider_id.as_deref(), Some("backup"));
+    assert_eq!(record.fallback_from.as_deref(), Some("one"));
+    assert_eq!(record.status, RequestStatus::Failed);
+    assert_eq!(record.error_code.as_deref(), Some("no_eligible_upstream"));
+    running.stop().await;
+    let database = String::from_utf8_lossy(&std::fs::read(&records.0).unwrap()).into_owned();
+    for secret in [
+        "synthetic-backup-key",
+        "private-client-key",
+        "private-cookie",
+        "private-account",
+        "private-fallback-prompt",
+    ] {
+        assert!(!database.contains(secret));
+    }
+}
+
+#[tokio::test]
+async fn fallback_never_replays_http_errors_partial_streams_or_ambiguous_sent_requests() {
+    let (backup, mut seen, _, task) = spawn_mock("/responses", false).await;
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let primary = listener.local_addr().unwrap();
+    let mock = Router::new().route(
+        "/responses",
+        post(|Json(body): Json<Value>| async move {
+            let status = body["input"].as_u64().unwrap() as u16;
+            if status == 200 {
+                return Response::builder()
+                    .header(header::CONTENT_TYPE, "text/event-stream")
+                    .body(Body::from("data: {\"type\":\"response.created\"}\n\n"))
+                    .unwrap();
+            }
+            Response::builder()
+                .status(status)
+                .header(header::CONTENT_TYPE, "application/json")
+                .header(header::RETRY_AFTER, "37")
+                .body(Body::from("{\"error\":{\"message\":\"private-error\"}}"))
+                .unwrap()
+        }),
+    );
+    let primary_task = tokio::spawn(async move {
+        axum::serve(listener, mock).await.unwrap();
+    });
+    let records = RequestDatabase::new();
+    let (running, address) = recording_router_with_fallback(primary, Some(backup), &records).await;
+    let client = reqwest::Client::builder().no_proxy().build().unwrap();
+    for status in [400, 401, 402, 403, 429, 503, 200] {
+        let response = request(&client, address, json!({"model":"sx-one", "input":status}))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(response.status().as_u16(), status);
+        if status == 429 {
+            assert_eq!(response.headers()[header::RETRY_AFTER], "37");
+        }
+        let id = response.headers()[REQUEST_ID_HEADER]
+            .to_str()
+            .unwrap()
+            .to_owned();
+        response.bytes().await.unwrap();
+        let record = records.wait_for(&id).await;
+        assert_eq!(record.provider_id.as_deref(), Some("one"));
+        assert!(record.fallback_from.is_none());
+        assert!(
+            seen.try_recv().is_err(),
+            "status {status} must never cause fallback"
+        );
+    }
+    running.stop().await;
+    primary_task.abort();
+    // Accept real request bytes, then disconnect before responding. It may have
+    // been executed upstream, so lack of response headers is not permission to retry.
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let primary = listener.local_addr().unwrap();
+    let sent = tokio::spawn(async move {
+        let (socket, _) = listener.accept().await.unwrap();
+        let mut bytes = [0_u8; 4096];
+        loop {
+            socket.readable().await.unwrap();
+            match socket.try_read(&mut bytes) {
+                Ok(count) => {
+                    assert!(count > 0);
+                    break;
+                }
+                Err(error) if error.kind() == io::ErrorKind::WouldBlock => continue,
+                Err(error) => panic!("{error}"),
+            }
+        }
+    });
+    let (running, address) = recording_router_with_fallback(primary, Some(backup), &records).await;
+    let response = timeout(
+        Duration::from_secs(3),
+        request(&client, address, json!({"model":"sx-one"})).send(),
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    sent.await.unwrap();
+    assert_eq!(response.status(), StatusCode::BAD_GATEWAY);
+    let record = records
+        .wait_for(response.headers()[REQUEST_ID_HEADER].to_str().unwrap())
+        .await;
+    assert_eq!(record.provider_id.as_deref(), Some("one"));
+    assert!(record.fallback_from.is_none());
+    assert!(seen.try_recv().is_err());
+    running.stop().await;
+    task.abort();
 }
 
 #[tokio::test]
@@ -817,8 +1007,9 @@ async fn disconnect_and_bounded_shutdown_cancel_upstream_without_replay() {
     let upstream = tokio::spawn(async move {
         axum::serve(listener, mock).await.unwrap();
     });
+    let (backup, mut backup_calls, _, backup_task) = spawn_mock("/responses", false).await;
     let templates = serde_json::from_str(include_str!("fixtures/synthetic-models.json")).unwrap();
-    let publication = publish(
+    let mut publication = publish(
         &templates,
         &[Selection {
             public_id: "sx-one",
@@ -828,6 +1019,11 @@ async fn disconnect_and_bounded_shutdown_cancel_upstream_without_replay() {
         }],
     )
     .unwrap();
+    publication
+        .routes
+        .get_mut("sx-one")
+        .unwrap()
+        .fallback_provider_id = Some("backup".into());
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let address = listener.local_addr().unwrap();
     let token = "synthetic-shutdown-local-token-123456789";
@@ -836,14 +1032,20 @@ async fn disconnect_and_bounded_shutdown_cancel_upstream_without_replay() {
         address,
         token.into(),
         publication,
-        HashMap::from([(
-            "one".into(),
-            Upstream::new(
-                &format!("http://{upstream_address}/custom"),
-                "synthetic-key".into(),
-            )
-            .unwrap(),
-        )]),
+        HashMap::from([
+            (
+                "one".into(),
+                Upstream::new(
+                    &format!("http://{upstream_address}/custom"),
+                    "synthetic-key".into(),
+                )
+                .unwrap(),
+            ),
+            (
+                "backup".into(),
+                Upstream::new(&format!("http://{backup}"), "backup-key".into()).unwrap(),
+            ),
+        ]),
     )
     .unwrap()
     .with_request_log(records.store(), "shutdown-generation".into());
@@ -898,7 +1100,17 @@ async fn disconnect_and_bounded_shutdown_cancel_upstream_without_replay() {
     assert_eq!(interrupted.status, RequestStatus::Interrupted);
     assert_eq!(interrupted.error_code.as_deref(), Some("router_stopping"));
     assert_eq!(records.store().requests(10).unwrap().len(), 2);
+    assert!(
+        records
+            .store()
+            .requests(10)
+            .unwrap()
+            .iter()
+            .all(|record| record.fallback_from.is_none())
+    );
+    assert!(backup_calls.try_recv().is_err());
     let rebound = TcpListener::bind(address).await.unwrap();
     drop(rebound);
     upstream.abort();
+    backup_task.abort();
 }

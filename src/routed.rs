@@ -1,7 +1,7 @@
 //! Native API route lifecycle. Provider keys never enter the generated Codex config.
 
 use std::{
-    collections::HashMap,
+    collections::{HashMap, HashSet},
     net::SocketAddr,
     path::{Path, PathBuf},
     time::Duration,
@@ -98,21 +98,49 @@ impl RouteSession {
         let client_version = client::check_catalog(&publication.catalog).await?;
         let mappings = models
             .iter()
+            .filter(|model| model.enabled)
             .map(|model| {
                 let provider = providers
                     .iter()
                     .find(|provider| provider.id == model.provider_id)
                     .unwrap();
+                let destination = |provider: &ProviderRecord| {
+                    format!(
+                        "{} ({})",
+                        provider.name,
+                        reqwest::Url::parse(&provider.base_url)
+                            .unwrap()
+                            .origin()
+                            .ascii_serialization()
+                    )
+                };
+                let fallback = model
+                    .fallback_provider_id
+                    .as_ref()
+                    .map(|id| {
+                        let provider = providers
+                            .iter()
+                            .find(|provider| &provider.id == id)
+                            .unwrap();
+                        format!(
+                            "\n  备用 → {} / {}；仅主连接建立失败时尝试，费用与数据接收方可能变化",
+                            destination(provider),
+                            provider.model_id
+                        )
+                    })
+                    .unwrap_or_default();
                 format!(
-                    "{} → {} / {}",
-                    model.public_id, provider.name, model.upstream_model
+                    "{} → {} / {}{fallback}",
+                    model.public_id,
+                    destination(provider),
+                    model.upstream_model
                 )
             })
             .collect::<Vec<_>>()
             .join("\n");
         let summary = format!(
             "{client_version} 已解析 {} 个模型 · http://{address}/v1\n目标：{}\n{mappings}\n受管变更：{}",
-            models.len(),
+            publication.routes.len(),
             target.display(),
             switch.preview.changed_fields.join("、")
         );
@@ -282,12 +310,15 @@ fn delete_local_token(reference: &str) -> Result<(), String> {
 
 fn selected_inputs(state_dir: &Path) -> Result<(Vec<ModelRecord>, Vec<ProviderRecord>), String> {
     let store = app::open_store(state_dir).map_err(|error| error.message())?;
-    let models: Vec<_> = store
-        .models()
-        .map_err(|_| "无法读取模型资料")?
-        .into_iter()
+    let mut models = store.models().map_err(|_| "无法读取模型资料")?;
+    let required: HashSet<String> = models
+        .iter()
         .filter(|model| model.enabled)
+        .flat_map(|model| {
+            std::iter::once(model.provider_id.clone()).chain(model.fallback_provider_id.clone())
+        })
         .collect();
+    models.retain(|model| required.contains(&model.provider_id));
     let mut providers = Vec::with_capacity(models.len());
     for model in &models {
         let provider = store

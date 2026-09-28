@@ -6,7 +6,7 @@ use std::{
         Arc,
         atomic::{AtomicBool, Ordering},
     },
-    time::Duration,
+    time::{Duration, Instant},
 };
 
 use axum::{
@@ -79,6 +79,7 @@ pub struct RouterState {
     publication: Publication,
     upstreams: HashMap<String, Upstream>,
     client: Client,
+    request_budget: Duration,
     accepting: Arc<AtomicBool>,
     cancel: watch::Sender<bool>,
     request_log: Option<Arc<RequestLog>>,
@@ -98,7 +99,12 @@ impl RouterState {
             return Err("local token must be at least 32 bytes".into());
         }
         for binding in publication.routes.values() {
-            if !upstreams.contains_key(&binding.provider_id) {
+            if !upstreams.contains_key(&binding.provider_id)
+                || binding
+                    .fallback_provider_id
+                    .as_ref()
+                    .is_some_and(|id| id == &binding.provider_id || !upstreams.contains_key(id))
+            {
                 return Err(format!(
                     "missing provider for route: {}",
                     binding.provider_id
@@ -108,8 +114,8 @@ impl RouterState {
         let client = Client::builder()
             .redirect(Policy::none())
             .no_proxy()
+            .retry(reqwest::retry::never())
             .connect_timeout(Duration::from_secs(10))
-            .timeout(Duration::from_secs(120))
             .build()
             .map_err(|_| "failed to create upstream client")?;
         Ok(Self {
@@ -118,6 +124,7 @@ impl RouterState {
             publication,
             upstreams,
             client,
+            request_budget: Duration::from_secs(120),
             accepting: Arc::new(AtomicBool::new(true)),
             cancel: watch::channel(false).0,
             request_log: None,
@@ -475,14 +482,6 @@ async fn responses(
         );
     }
     object.insert("model".into(), binding.upstream_model.clone().into());
-    let Some(upstream) = state.upstreams.get(&binding.provider_id) else {
-        return request_error(
-            &mut tracker,
-            StatusCode::SERVICE_UNAVAILABLE,
-            "no_eligible_upstream",
-            "provider is unavailable",
-        );
-    };
     let Ok(outbound_body) = serde_json::to_vec(&request) else {
         return request_error(
             &mut tracker,
@@ -493,34 +492,66 @@ async fn responses(
     };
 
     let mut cancellation = state.cancel.subscribe();
-    let outbound = state
-        .client
-        .post(upstream.responses_url.clone())
-        .header(header::CONTENT_TYPE, "application/json")
-        .bearer_auth(upstream.api_key.expose())
-        .body(outbound_body)
-        .send();
-    let result = tokio::select! {
-        result = outbound => result,
-        _ = cancellation.wait_for(|cancel| *cancel) => {
-            tracker.finish(RequestStatus::Interrupted, Some("router_stopping"));
-            return request_error(&mut tracker, StatusCode::SERVICE_UNAVAILABLE, "router_stopping", "router is stopping");
-        },
-    };
-    let upstream_response = match result {
-        Ok(response) => response,
-        Err(error) => {
-            let code = if error.is_timeout() {
-                "upstream_timeout"
-            } else {
-                "upstream_unavailable"
-            };
+    let deadline = Instant::now() + state.request_budget;
+    let outbound_body = Bytes::from(outbound_body);
+    let mut provider_id = &binding.provider_id;
+    let upstream_response = loop {
+        // Both attempts share one budget, including the final response body.
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        if remaining.is_zero() {
             return request_error(
                 &mut tracker,
                 StatusCode::BAD_GATEWAY,
-                code,
-                "upstream request failed",
+                "upstream_timeout",
+                "upstream request timed out",
             );
+        }
+        let upstream = &state.upstreams[provider_id];
+        let outbound = state
+            .client
+            .post(upstream.responses_url.clone())
+            .header(header::CONTENT_TYPE, "application/json")
+            .bearer_auth(upstream.api_key.expose())
+            .timeout(remaining)
+            .body(outbound_body.clone())
+            .send();
+        let result = tokio::select! {
+            biased;
+            _ = cancellation.wait_for(|cancel| *cancel) => {
+                tracker.finish(RequestStatus::Interrupted, Some("router_stopping"));
+                return request_error(&mut tracker, StatusCode::SERVICE_UNAVAILABLE, "router_stopping", "router is stopping");
+            }
+            result = outbound => result,
+        };
+        match result {
+            Ok(response) => break response,
+            Err(error) => {
+                // Connector errors happen before an HTTP request is sent. An
+                // ambiguous send/read failure or any timeout must never replay.
+                if error.is_connect()
+                    && !error.is_timeout()
+                    && tracker.record.fallback_from.is_none()
+                    && let Some(fallback_id) = &binding.fallback_provider_id
+                {
+                    tracker.record.fallback_from = Some(provider_id.clone());
+                    provider_id = fallback_id;
+                    tracker.record.provider_id = Some(provider_id.clone());
+                    continue;
+                }
+                let code = if error.is_timeout() {
+                    "upstream_timeout"
+                } else if error.is_connect() && tracker.record.fallback_from.is_some() {
+                    "no_eligible_upstream"
+                } else {
+                    "upstream_unavailable"
+                };
+                return request_error(
+                    &mut tracker,
+                    StatusCode::BAD_GATEWAY,
+                    code,
+                    "upstream request failed",
+                );
+            }
         }
     };
 
@@ -543,6 +574,9 @@ async fn responses(
     let mut response = Response::builder()
         .status(status)
         .header(REQUEST_ID_HEADER, &tracker.record.id);
+    if let Some(retry_after) = upstream_response.headers().get(header::RETRY_AFTER) {
+        response = response.header(header::RETRY_AFTER, retry_after);
+    }
     if let Some(content_type) = content_type {
         response = response.header(header::CONTENT_TYPE, content_type);
     }
@@ -596,4 +630,96 @@ async fn responses(
     response
         .body(Body::from_stream(stream))
         .expect("valid upstream response")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::catalog::{Selection, publish};
+    use std::sync::atomic::AtomicUsize;
+
+    #[tokio::test]
+    async fn timeout_after_sending_does_not_try_explicit_backup() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let primary = listener.local_addr().unwrap();
+        let called = Arc::new(AtomicUsize::new(0));
+        let calls = called.clone();
+        let mock = Router::new().route(
+            "/responses",
+            post(move || {
+                calls.fetch_add(1, Ordering::SeqCst);
+                std::future::pending::<String>()
+            }),
+        );
+        let server = tokio::spawn(async move {
+            axum::serve(listener, mock).await.unwrap();
+        });
+        let backup = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let template =
+            serde_json::from_str(include_str!("../tests/fixtures/synthetic-models.json")).unwrap();
+        let mut publication = publish(
+            &template,
+            &[Selection {
+                public_id: "sx-test",
+                display_name: "Test",
+                provider_id: "primary",
+                upstream_model: "deepseek-flash",
+            }],
+        )
+        .unwrap();
+        publication
+            .routes
+            .get_mut("sx-test")
+            .unwrap()
+            .fallback_provider_id = Some("backup".into());
+        let mut state = RouterState::new(
+            "127.0.0.1:18731".parse().unwrap(),
+            "synthetic-token-with-at-least-32-bytes".into(),
+            publication,
+            HashMap::from([
+                (
+                    "primary".into(),
+                    Upstream::new(&format!("http://{primary}"), "primary-key".into()).unwrap(),
+                ),
+                (
+                    "backup".into(),
+                    Upstream::new(
+                        &format!("http://{}", backup.local_addr().unwrap()),
+                        "backup-key".into(),
+                    )
+                    .unwrap(),
+                ),
+            ]),
+        )
+        .unwrap();
+        state.request_budget = Duration::from_millis(100);
+        let headers = HeaderMap::from_iter([
+            (header::HOST, "127.0.0.1:18731".parse().unwrap()),
+            (header::CONTENT_TYPE, "application/json".parse().unwrap()),
+            (
+                header::AUTHORIZATION,
+                "Bearer synthetic-token-with-at-least-32-bytes"
+                    .parse()
+                    .unwrap(),
+            ),
+        ]);
+        let response = responses(
+            State(Arc::new(state)),
+            headers,
+            Bytes::from_static(b"{\"model\":\"sx-test\"}"),
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::BAD_GATEWAY);
+        let body = axum::body::to_bytes(response.into_body(), 4096)
+            .await
+            .unwrap();
+        assert!(String::from_utf8_lossy(&body).contains("upstream_timeout"));
+        assert_eq!(called.load(Ordering::SeqCst), 1);
+        assert!(
+            tokio::time::timeout(Duration::from_millis(20), backup.accept())
+                .await
+                .is_err()
+        );
+        server.abort();
+    }
 }

@@ -45,6 +45,7 @@ enum Command {
         path: String,
     },
     SelectModel(String, bool),
+    SaveFallback(String, Option<String>),
     InspectRoute {
         home: String,
         port: String,
@@ -107,6 +108,8 @@ fn show_result(app: &AppWindow, result: Result<Snapshot, AppError>) {
                         detail: model.detail.into(),
                         ready: model.ready,
                         included: model.enabled,
+                        fallback_provider_id: model.fallback_provider_id.into(),
+                        fallback_label: model.fallback_label.into(),
                     })
                     .collect::<Vec<_>>(),
             )));
@@ -235,6 +238,7 @@ async fn worker(
                                         cancelled: record.status
                                             == switchx::storage::RequestStatus::Cancelled,
                                         error: record.error.into(),
+                                        fallback: record.fallback.into(),
                                     })
                                     .collect::<Vec<_>>(),
                             )));
@@ -565,6 +569,33 @@ async fn worker(
                         result.map(|()| {
                             "模型资料已保存；开启路由前会检查 Codex 兼容性和上游目录".into()
                         }),
+                    );
+                });
+            }
+            Command::SaveFallback(provider, fallback) => {
+                let result = directory
+                    .as_ref()
+                    .map_err(|error| error.message().to_owned())
+                    .and_then(|directory| {
+                        app::save_fallback(directory, &provider, fallback.as_deref())
+                    });
+                if result.is_ok() {
+                    route_session.discard_preview();
+                }
+                let snapshot = result
+                    .as_ref()
+                    .ok()
+                    .and_then(|_| directory.as_ref().ok())
+                    .map(|path| load_snapshot(path, false));
+                let _ = weak.upgrade_in_event_loop(move |app| {
+                    if let Some(snapshot) = snapshot {
+                        show_result(&app, snapshot);
+                        app.set_fallback_editor_open(false);
+                        app.set_route_preview_ready(false);
+                    }
+                    show_action(
+                        &app,
+                        result.map(|()| "备用策略已保存，请重新预览发布".into()),
                     );
                 });
             }
@@ -938,6 +969,69 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 &app,
                 &callback_sender,
                 Command::SelectModel(provider.into(), enabled),
+            );
+        }
+    });
+    let weak = app.as_weak();
+    app.on_edit_fallback(move |provider_id| {
+        let Some(app) = weak.upgrade() else {
+            return;
+        };
+        let models = app.get_models();
+        let Some(primary) = models.iter().find(|model| model.provider_id == provider_id) else {
+            return;
+        };
+        let providers = app.get_providers();
+        let mut ids = vec![slint::SharedString::default()];
+        let mut labels = vec![slint::SharedString::from("不使用备用上游")];
+        let mut selected = 0;
+        for model in models.iter().filter(|model| {
+            model.ready
+                && model.provider_id != provider_id
+                && model.upstream_model == primary.upstream_model
+        }) {
+            if model.provider_id == primary.fallback_provider_id {
+                selected = ids.len() as i32;
+            }
+            let endpoint = providers
+                .iter()
+                .find(|provider| provider.id == model.provider_id)
+                .map(|provider| provider.endpoint)
+                .unwrap_or_default();
+            labels.push(format!("{} · {}", model.provider_name, endpoint).into());
+            ids.push(model.provider_id);
+        }
+        app.set_fallback_primary_id(provider_id);
+        app.set_fallback_primary_label(
+            format!("{} / {}", primary.provider_name, primary.upstream_model).into(),
+        );
+        app.set_fallback_ids(ModelRc::new(VecModel::from(ids)));
+        app.set_fallback_options(ModelRc::new(VecModel::from(labels)));
+        app.set_fallback_choice(selected);
+        app.set_fallback_consent(false);
+        app.set_fallback_editor_open(true);
+        app.set_model_editor_open(false);
+    });
+    let callback_sender = sender.clone();
+    let weak = app.as_weak();
+    app.on_save_fallback(move || {
+        if let Some(app) = weak.upgrade() {
+            let Some(id) = app
+                .get_fallback_ids()
+                .row_data(app.get_fallback_choice() as usize)
+            else {
+                return;
+            };
+            if !id.is_empty() && !app.get_fallback_consent() {
+                return;
+            }
+            queue(
+                &app,
+                &callback_sender,
+                Command::SaveFallback(
+                    app.get_fallback_primary_id().into(),
+                    if id.is_empty() { None } else { Some(id.into()) },
+                ),
             );
         }
     });
