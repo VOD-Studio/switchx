@@ -107,7 +107,7 @@ cargo run --locked --example routed_cli_probe -- --fallback
 cargo run --locked --example routed_cli_probe -- --desktop-fallback
 ```
 
-2026-09-28 的 mock、隔离 CLI 和原生页面检查范围见 [备用策略验收记录](docs/acceptance/M3-fallback-2026-09-28.md)。本轮没有真实供应商调用；原生页面启用步骤受系统钥匙串确认限制，不能把 CLI 验收算作该步骤的 GUI 验收。
+2026-09-28 的 mock、隔离 CLI 和原生页面检查范围见 [备用策略验收记录](docs/acceptance/M3-fallback-2026-09-28.md)。本轮没有真实供应商调用。原生页面已启用路由，隔离 Codex CLI 从页面写出的配置完成文件工具轮次，请求页显示两条完成记录；页面恢复并退出后，原配置、journal 和临时资料均核对完成。
 
 ## 请求记录与完成状态
 
