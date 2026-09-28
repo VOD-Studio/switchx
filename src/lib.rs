@@ -1,5 +1,6 @@
 pub mod app;
 pub mod catalog;
+pub mod chatgpt;
 pub mod client;
 pub mod config;
 pub mod config_transaction;

@@ -182,6 +182,41 @@ impl PreparedSwitch {
         &self.catalog_path
     }
 
+    pub fn with_chatgpt_auth(mut self, token: &str, reference: &str) -> Result<Self, String> {
+        if token.len() != 64
+            || !token.bytes().all(|byte| byte.is_ascii_hexdigit())
+            || !valid_token_reference(reference)
+        {
+            return Err("invalid local ChatGPT route credential".into());
+        }
+        let mut document: DocumentMut = self
+            .preview
+            .proposed
+            .parse()
+            .map_err(|_| "invalid generated config")?;
+        let provider = document["model_providers"][PROVIDER_ID]
+            .as_table_mut()
+            .unwrap();
+        provider.remove("env_key");
+        provider.remove("auth");
+        provider.insert("requires_openai_auth", value(true));
+        provider.insert("http_headers", table());
+        provider["http_headers"][crate::routing::LOCAL_TOKEN_HEADER] = value(token);
+        self.preview.proposed = document.to_string();
+        self.preview.required_environment_variable = None;
+        let serialized: DocumentMut = self
+            .preview
+            .proposed
+            .parse()
+            .map_err(|_| "invalid generated config")?;
+        let provider = &serialized["model_providers"][PROVIDER_ID];
+        self.journal.applied_provider = provider.to_string();
+        self.journal.applied_provider_header =
+            HeaderDecor::from_table(provider.as_table().unwrap());
+        self.journal.local_token_reference = Some(reference.into());
+        Ok(self)
+    }
+
     pub fn with_credential_helper(
         mut self,
         helper_path: &Path,
@@ -254,6 +289,22 @@ impl PreparedSwitch {
         let permissions = match &self.original {
             Some(_) => Some(self.config_path.metadata().map_err(io_error)?.permissions()),
             None => None,
+        };
+        #[cfg(unix)]
+        let permissions = if self
+            .preview
+            .proposed
+            .parse::<DocumentMut>()
+            .map_err(|_| "invalid generated config")?["model_providers"][PROVIDER_ID]
+            .as_table()
+            .and_then(|provider| provider.get("requires_openai_auth"))
+            .and_then(Item::as_bool)
+            == Some(true)
+        {
+            use std::os::unix::fs::PermissionsExt;
+            Some(Permissions::from_mode(0o600))
+        } else {
+            permissions
         };
         replace(
             &self.config_path,
@@ -618,6 +669,54 @@ mod tests {
         assert!(!result.contains("[model_providers.switchx_router]"));
         assert!(!home.state().join(JOURNAL_NAME).exists());
         assert!(catalog_path.is_file());
+    }
+
+    #[test]
+    fn subscription_config_uses_independent_local_auth_and_preserves_renewed_native_auth() {
+        let home = TestHome::new();
+        let original = include_str!("../tests/fixtures/codex-user-config.toml");
+        fs::write(home.config(), original).unwrap();
+        let auth_path = home.0.join("auth.json");
+        fs::write(&auth_path, r#"{"synthetic_generation":"before"}"#).unwrap();
+        let local_token = "a".repeat(64);
+        let reference = format!("router-{}", "b".repeat(32));
+        let prepared = inspect(&home)
+            .with_chatgpt_auth(&local_token, &reference)
+            .unwrap();
+        assert!(prepared.preview.required_environment_variable.is_none());
+        let proposed: DocumentMut = prepared.preview.proposed.parse().unwrap();
+        let provider = &proposed["model_providers"][PROVIDER_ID];
+        assert_eq!(provider["requires_openai_auth"].as_bool(), Some(true));
+        assert!(provider.as_table().unwrap().get("auth").is_none());
+        assert!(provider.as_table().unwrap().get("env_key").is_none());
+        assert_eq!(
+            provider["http_headers"][crate::routing::LOCAL_TOKEN_HEADER].as_str(),
+            Some(local_token.as_str())
+        );
+        prepared.apply().unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            for path in [home.config(), home.state().join(JOURNAL_NAME)] {
+                assert_eq!(path.metadata().unwrap().permissions().mode() & 0o777, 0o600);
+            }
+        }
+        let renewed = r#"{"synthetic_generation":"renewed-by-codex"}"#;
+        fs::write(&auth_path, renewed).unwrap();
+        assert!(
+            restore(&home.config(), &home.state())
+                .unwrap()
+                .conflicts
+                .is_empty()
+        );
+        assert_eq!(fs::read_to_string(home.config()).unwrap(), original);
+        assert_eq!(fs::read_to_string(auth_path).unwrap(), renewed);
+        assert!(!home.state().join(JOURNAL_NAME).exists());
+        assert!(
+            inspect(&home)
+                .with_chatgpt_auth("PROXY_MANAGED", &reference)
+                .is_err()
+        );
     }
 
     #[test]

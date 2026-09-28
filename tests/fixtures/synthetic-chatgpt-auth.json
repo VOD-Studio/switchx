@@ -1,0 +1,11 @@
+{
+  "auth_mode": "chatgpt",
+  "OPENAI_API_KEY": null,
+  "tokens": {
+    "id_token": "eyJhbGciOiJub25lIiwidHlwIjoiSldUIn0.eyJzdWIiOiJzeW50aGV0aWMtdXNlciIsImVtYWlsIjoic3ludGhldGljQGV4YW1wbGUuaW52YWxpZCIsImh0dHBzOi8vYXBpLm9wZW5haS5jb20vYXV0aCI6eyJjaGF0Z3B0X2FjY291bnRfaWQiOiJzeW50aGV0aWMtd29ya3NwYWNlIiwiY2hhdGdwdF9wbGFuX3R5cGUiOiJwbHVzIiwidXNlcl9pZCI6InN5bnRoZXRpYy11c2VyIn0sImV4cCI6NDEwMjQ0NDgwMH0.synthetic-signature",
+    "access_token": "eyJhbGciOiJub25lIiwidHlwIjoiSldUIn0.eyJzdWIiOiJzeW50aGV0aWMtdXNlciIsImVtYWlsIjoic3ludGhldGljQGV4YW1wbGUuaW52YWxpZCIsImh0dHBzOi8vYXBpLm9wZW5haS5jb20vYXV0aCI6eyJjaGF0Z3B0X2FjY291bnRfaWQiOiJzeW50aGV0aWMtd29ya3NwYWNlIiwiY2hhdGdwdF9wbGFuX3R5cGUiOiJwbHVzIiwidXNlcl9pZCI6InN5bnRoZXRpYy11c2VyIn0sImV4cCI6NDEwMjQ0NDgwMH0.synthetic-signature",
+    "refresh_token": "synthetic-unused-refresh-token",
+    "account_id": "synthetic-workspace"
+  },
+  "last_refresh": "2099-01-01T00:00:00Z"
+}

@@ -1,4 +1,4 @@
-//! Native API route lifecycle. Provider keys never enter the generated Codex config.
+//! Native model route lifecycle. Provider keys never enter the generated Codex config.
 
 use std::{
     collections::{HashMap, HashSet},
@@ -12,7 +12,7 @@ use tokio::net::TcpListener;
 use crate::{
     app,
     catalog::{self, Publication},
-    client,
+    chatgpt, client,
     config_transaction::{self, PreparedSwitch},
     credentials::{CredentialError, CredentialStore, ROUTER_TOKEN_SERVICE, Secret},
     direct,
@@ -30,6 +30,8 @@ struct PreparedRoute {
     default_model: String,
     client_version: String,
     token_reference: String,
+    local_token: Secret,
+    chatgpt_workspace: Option<chatgpt::Workspace>,
     publication: Publication,
     models: Vec<ModelRecord>,
     providers: Vec<ProviderRecord>,
@@ -65,6 +67,12 @@ impl RouteSession {
             .is_some_and(|active| active.server.recording_failed())
     }
 
+    pub fn chatgpt_error(&self) -> Option<&'static str> {
+        self.active
+            .as_ref()
+            .and_then(|active| active.server.chatgpt_error())
+    }
+
     pub fn discard_preview(&mut self) {
         self.prepared = None;
     }
@@ -92,9 +100,22 @@ impl RouteSession {
             .map_err(|_| "本地端口无法使用；请检查端口占用或选择其他端口")?;
         let address = listener.local_addr().map_err(|_| "无法读取本地路由地址")?;
         let token_reference = format!("router-{}", app::new_id()?);
+        let local_token = Secret::new(format!("{}{}", app::new_id()?, app::new_id()?));
+        let uses_chatgpt = providers
+            .iter()
+            .any(|provider| provider.id == chatgpt::PROVIDER_ID);
+        let chatgpt_workspace = if uses_chatgpt {
+            chatgpt::workspace(config_home).await?
+        } else {
+            None
+        };
         let switch =
-            PreparedSwitch::inspect(&target, state_dir, &publication, address, default_model)?
-                .with_credential_helper(helper, &token_reference)?;
+            PreparedSwitch::inspect(&target, state_dir, &publication, address, default_model)?;
+        let switch = if uses_chatgpt {
+            switch.with_chatgpt_auth(local_token.expose(), &token_reference)?
+        } else {
+            switch.with_credential_helper(helper, &token_reference)?
+        };
         let client_version = client::check_catalog(&publication.catalog).await?;
         let mappings = models
             .iter()
@@ -139,11 +160,24 @@ impl RouteSession {
             .collect::<Vec<_>>()
             .join("\n");
         let summary = format!(
-            "{client_version} 已解析 {} 个模型 · http://{address}/v1\n目标：{}\n{mappings}\n受管变更：{}",
+            "{client_version} 已解析 {} 个模型 · http://{address}/v1\n目标：{}\n{mappings}\n受管变更：{}{}",
             publication.routes.len(),
             target.display(),
-            switch.preview.changed_fields.join("、")
+            switch.preview.changed_fields.join("、"),
+            if uses_chatgpt {
+                "\n订阅认证由目标 Codex 管理；仅官方模型传递认证。独立本地令牌会写入仅当前用户可读的配置及恢复记录。切换工作区请先恢复；切到第三方时请新建会话。"
+            } else {
+                ""
+            }
         );
+        let summary = if let Some(workspace) = &chatgpt_workspace {
+            format!(
+                "{summary}\n已选工作区的官方目的地：{}；区域约束：{}",
+                workspace.backend_origin, workspace.routing_override
+            )
+        } else {
+            summary
+        };
         self.prepared = Some(PreparedRoute {
             switch,
             listener,
@@ -154,6 +188,8 @@ impl RouteSession {
             default_model: default_model.into(),
             client_version,
             token_reference,
+            local_token,
+            chatgpt_workspace,
             publication,
             models,
             providers,
@@ -185,6 +221,36 @@ impl RouteSession {
         }
         let mut upstreams = HashMap::new();
         for provider in &providers {
+            if provider.id == chatgpt::PROVIDER_ID {
+                chatgpt::validate_provider(provider)?;
+                let workspace = chatgpt::workspace(config_home).await?;
+                if workspace != prepared.chatgpt_workspace {
+                    return Err("订阅工作区或官方区域路由已变化，请重新预览发布".into());
+                }
+                let catalog = chatgpt::catalog().await?;
+                for model in models
+                    .iter()
+                    .filter(|model| model.provider_id == provider.id)
+                {
+                    if !catalog
+                        .iter()
+                        .any(|entry| entry["slug"] == model.upstream_model)
+                    {
+                        return Err(format!(
+                            "目标 Codex 的内置官方目录没有 {}；请更新官方模型资料",
+                            model.upstream_model
+                        ));
+                    }
+                }
+                upstreams.insert(
+                    provider.id.clone(),
+                    match workspace {
+                        Some(workspace) => Upstream::chatgpt_for_workspace(&workspace)?,
+                        None => Upstream::chatgpt(),
+                    },
+                );
+                continue;
+            }
             let token = app::provider_credential(provider)?;
             let available = direct::fetch_models(&provider.base_url, token.expose())
                 .await
@@ -208,7 +274,7 @@ impl RouteSession {
         if selected_inputs(state_dir)? != (models, providers) {
             return Err("检查期间上游或模型资料已变化，请重新预览".into());
         }
-        let local_token = Secret::new(format!("{}{}", app::new_id()?, app::new_id()?));
+        let local_token = prepared.local_token;
         let request_store = app::open_store(state_dir).map_err(|error| error.message())?;
         let generation = prepared
             .switch
@@ -233,7 +299,7 @@ impl RouteSession {
             .map_err(|_| "无法创建本地检查客户端")?;
         let health = client
             .get(format!("http://{}/v1/models", prepared.address))
-            .bearer_auth(local_token.expose())
+            .header(crate::routing::LOCAL_TOKEN_HEADER, local_token.expose())
             .send()
             .await
             .map_err(|_| "本地路由验证失败")?;
@@ -353,7 +419,16 @@ fn selected_inputs(state_dir: &Path) -> Result<(Vec<ModelRecord>, Vec<ProviderRe
             .find(|provider| provider.id == model.provider_id)
             .ok_or("所选模型的上游已不存在")?;
         direct::validate_provider(&provider.name, &provider.base_url, &model.upstream_model)?;
-        if provider.credential_ref.as_deref() != Some(provider.id.as_str()) {
+        if provider.id == chatgpt::PROVIDER_ID {
+            chatgpt::validate_provider(provider)?;
+            if model.fallback_provider_id.is_some()
+                || models.iter().any(|model| {
+                    model.fallback_provider_id.as_deref() == Some(chatgpt::PROVIDER_ID)
+                })
+            {
+                return Err("订阅账号不参与自动备用切换".into());
+            }
+        } else if provider.credential_ref.as_deref() != Some(provider.id.as_str()) {
             return Err(format!("{} 的凭据引用无效，请重新保存上游", provider.name));
         }
     }
