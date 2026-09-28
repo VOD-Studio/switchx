@@ -256,7 +256,16 @@ impl Store {
     }
 
     pub fn put_provider(&self, provider: &ProviderRecord) -> Result<()> {
-        self.connection.execute(
+        self.put_provider_with_models(provider, &[])
+    }
+
+    pub fn put_provider_with_models(
+        &self,
+        provider: &ProviderRecord,
+        models: &[ModelRecord],
+    ) -> Result<()> {
+        let transaction = self.connection.unchecked_transaction()?;
+        transaction.execute(
             "INSERT INTO providers (id, name, base_url, model_id, credential_ref)
              VALUES (?1, ?2, ?3, ?4, ?5)
              ON CONFLICT(id) DO UPDATE SET
@@ -272,7 +281,13 @@ impl Store {
                 provider.credential_ref
             ],
         )?;
-        Ok(())
+        for model in models {
+            if model.provider_id != provider.id {
+                return Err(rusqlite::Error::InvalidQuery);
+            }
+            Self::write_model(&transaction, model)?;
+        }
+        transaction.commit()
     }
 
     pub fn providers(&self) -> Result<Vec<ProviderRecord>> {
@@ -405,6 +420,55 @@ impl Store {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn provider_and_models_roll_back_together_on_model_conflict() {
+        let store = Store::open(Path::new(":memory:")).unwrap();
+        let provider = ProviderRecord {
+            id: "primary".into(),
+            name: "Original".into(),
+            base_url: "https://example.invalid/v1".into(),
+            model_id: "first-model".into(),
+            credential_ref: Some("synthetic-reference".into()),
+        };
+        store.put_provider(&provider).unwrap();
+        let other = ProviderRecord {
+            id: "other".into(),
+            ..provider.clone()
+        };
+        store.put_provider(&other).unwrap();
+        let owned = ModelRecord {
+            provider_id: "other".into(),
+            public_id: "sx-owned".into(),
+            display_name: "Owned model".into(),
+            upstream_model: "first-model".into(),
+            metadata: "{}".into(),
+            enabled: false,
+            fallback_provider_id: None,
+        };
+        store.put_model(&owned).unwrap();
+        let added = ModelRecord {
+            provider_id: "primary".into(),
+            public_id: "sx-new".into(),
+            ..owned.clone()
+        };
+        let conflicting = ModelRecord {
+            provider_id: "primary".into(),
+            upstream_model: "second-model".into(),
+            ..owned.clone()
+        };
+        let updated = ProviderRecord {
+            name: "Updated".into(),
+            ..provider.clone()
+        };
+        assert!(
+            store
+                .put_provider_with_models(&updated, &[added, conflicting])
+                .is_err()
+        );
+        assert_eq!(store.provider("primary").unwrap().unwrap(), provider);
+        assert_eq!(store.models().unwrap(), [owned]);
+    }
 
     #[test]
     fn v5_migration_preserves_data_and_supports_atomic_independent_mappings() {
