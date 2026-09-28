@@ -4,9 +4,10 @@ use std::{
 };
 
 use crate::{
+    catalog,
     credentials::{CredentialError, CredentialStore, PROVIDER_KEY_SERVICE, Secret},
     direct::validate_provider,
-    storage::{ProviderRecord, Store},
+    storage::{ModelRecord, ProviderRecord, Store},
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -63,7 +64,20 @@ pub struct ProviderView {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Snapshot {
     pub providers: Vec<ProviderView>,
+    pub models: Vec<ModelView>,
     pub credentials_checked: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ModelView {
+    pub provider_id: String,
+    pub provider_name: String,
+    pub upstream_model: String,
+    pub public_id: String,
+    pub display_name: String,
+    pub detail: String,
+    pub ready: bool,
+    pub enabled: bool,
 }
 
 pub fn data_directory() -> Result<PathBuf, AppError> {
@@ -109,9 +123,49 @@ pub fn data_directory() -> Result<PathBuf, AppError> {
 pub fn load_snapshot(data_dir: &Path, check_credentials: bool) -> Result<Snapshot, AppError> {
     let store = open_store(data_dir)?;
     let providers = store.providers().map_err(|_| AppError::Database)?;
+    let models = store.models().map_err(|_| AppError::Database)?;
     let credentials =
         CredentialStore::new(PROVIDER_KEY_SERVICE).map_err(|_| AppError::CredentialStore)?;
     Ok(Snapshot {
+        models: providers
+            .iter()
+            .map(|provider| {
+                let model = models.iter().find(|model| model.provider_id == provider.id);
+                let metadata = model.and_then(|model| {
+                    serde_json::from_str::<serde_json::Value>(&model.metadata).ok()
+                });
+                let ready = model.is_some_and(|model| model.upstream_model == provider.model_id)
+                    && metadata.as_ref().is_some_and(|metadata| {
+                        metadata["slug"] == provider.model_id
+                            && catalog::validate_metadata(metadata).is_ok()
+                    });
+                let detail = if ready {
+                    let metadata = metadata.as_ref().unwrap();
+                    format!(
+                        "上下文 {} · 资料已导入 · 实际能力待验证",
+                        metadata["context_window"]
+                    )
+                } else if model.is_some() {
+                    "模型已变化或资料无效，请重新导入".into()
+                } else {
+                    "待导入模型资料".into()
+                };
+                ModelView {
+                    provider_id: provider.id.clone(),
+                    provider_name: provider.name.clone(),
+                    upstream_model: provider.model_id.clone(),
+                    public_id: model
+                        .map(|model| model.public_id.clone())
+                        .unwrap_or_else(|| format!("sx-{}", provider.id)),
+                    display_name: model
+                        .map(|model| model.display_name.clone())
+                        .unwrap_or_else(|| format!("{} · {}", provider.name, provider.model_id)),
+                    detail,
+                    ready,
+                    enabled: ready && model.is_some_and(|model| model.enabled),
+                }
+            })
+            .collect(),
         providers: providers
             .into_iter()
             .map(|provider| provider_view(provider, &credentials, check_credentials))
@@ -159,9 +213,7 @@ pub fn save_provider(
     model_id: &str,
     key: String,
 ) -> Result<(), String> {
-    if data_dir.join("direct-journal.json").exists() {
-        return Err("直连切换正在使用上游，请先恢复原配置再编辑".into());
-    }
+    ensure_editable(data_dir)?;
     let url = validate_provider(name, base_url, model_id)?;
     let store = open_store(data_dir).map_err(|error| error.message())?;
     let old = match id {
@@ -226,9 +278,7 @@ pub fn save_provider(
 }
 
 pub fn delete_provider(data_dir: &Path, id: &str) -> Result<(), String> {
-    if data_dir.join("direct-journal.json").exists() {
-        return Err("直连切换正在使用上游，请先恢复原配置".into());
-    }
+    ensure_editable(data_dir)?;
     let store = open_store(data_dir).map_err(|error| error.message())?;
     let record = store
         .provider(id)
@@ -252,6 +302,95 @@ pub fn delete_provider(data_dir: &Path, id: &str) -> Result<(), String> {
     Ok(())
 }
 
+pub fn save_model(
+    data_dir: &Path,
+    provider_id: &str,
+    public_id: &str,
+    display_name: &str,
+    catalog_path: &str,
+) -> Result<(), String> {
+    ensure_editable(data_dir)?;
+    let store = open_store(data_dir).map_err(|error| error.message())?;
+    let provider = store
+        .provider(provider_id)
+        .map_err(|_| "无法读取上游资料")?
+        .ok_or("上游不存在")?;
+    let models = store.models().map_err(|_| "无法读取模型资料")?;
+    let old = models.iter().find(|model| model.provider_id == provider_id);
+    if models
+        .iter()
+        .any(|model| model.public_id == public_id && model.provider_id != provider_id)
+    {
+        return Err("公开模型 ID 已由另一上游使用".into());
+    }
+    let metadata = if catalog_path.trim().is_empty() {
+        old.filter(|model| model.upstream_model == provider.model_id)
+            .ok_or("请输入包含此模型的 Codex 目录 JSON 文件路径")?
+            .metadata
+            .clone()
+    } else {
+        catalog::read_template(Path::new(catalog_path.trim()), &provider.model_id)?.to_string()
+    };
+    let mut model = ModelRecord {
+        provider_id: provider_id.into(),
+        public_id: public_id.into(),
+        display_name: display_name.trim().into(),
+        upstream_model: provider.model_id,
+        metadata,
+        enabled: true,
+    };
+    catalog::publish_saved(std::slice::from_ref(&model))?;
+    model.enabled = old.is_none_or(|model| model.enabled);
+    store
+        .put_model(&model)
+        .map_err(|_| "无法保存模型资料".into())
+}
+
+pub fn select_model(data_dir: &Path, provider_id: &str, enabled: bool) -> Result<(), String> {
+    ensure_editable(data_dir)?;
+    let store = open_store(data_dir).map_err(|error| error.message())?;
+    let mut model = store
+        .models()
+        .map_err(|_| "无法读取模型资料")?
+        .into_iter()
+        .find(|model| model.provider_id == provider_id)
+        .ok_or("请先导入模型资料")?;
+    if enabled {
+        let provider = store
+            .provider(provider_id)
+            .map_err(|_| "无法读取上游资料")?
+            .ok_or("上游不存在")?;
+        if model.upstream_model != provider.model_id {
+            return Err("上游模型已变化，请重新导入资料".into());
+        }
+        model.enabled = true;
+        catalog::publish_saved(std::slice::from_ref(&model))?;
+    }
+    model.enabled = enabled;
+    store
+        .put_model(&model)
+        .map_err(|_| "无法保存模型选择".into())
+}
+
+pub fn provider_credential(provider: &ProviderRecord) -> Result<Secret, String> {
+    let reference = provider
+        .credential_ref
+        .as_deref()
+        .ok_or("上游未配置 API Key")?;
+    CredentialStore::new(PROVIDER_KEY_SERVICE)
+        .and_then(|store| store.get(reference))
+        .map_err(|_| "无法读取上游 API Key".into())
+}
+
+fn ensure_editable(data_dir: &Path) -> Result<(), String> {
+    if data_dir.join("direct-journal.json").exists()
+        || data_dir.join("switch-journal.json").exists()
+    {
+        return Err("SwitchX 正在管理配置，请先恢复原配置再编辑上游或模型".into());
+    }
+    Ok(())
+}
+
 pub fn load_provider(data_dir: &Path, id: &str) -> Result<ProviderRecord, String> {
     open_store(data_dir)
         .map_err(|error| error.message())?
@@ -260,7 +399,7 @@ pub fn load_provider(data_dir: &Path, id: &str) -> Result<ProviderRecord, String
         .ok_or_else(|| "上游不存在，请刷新后重试".into())
 }
 
-fn new_id() -> Result<String, String> {
+pub(crate) fn new_id() -> Result<String, String> {
     let mut bytes = [0_u8; 16];
     getrandom::fill(&mut bytes).map_err(|_| "无法生成上游 ID")?;
     Ok(bytes.iter().map(|byte| format!("{byte:02x}")).collect())
@@ -398,6 +537,46 @@ mod tests {
                 .unwrap_err()
                 .contains("先恢复")
         );
+        fs::remove_dir_all(path).unwrap();
+    }
+
+    #[test]
+    fn invalid_import_keeps_saved_model_and_active_route_blocks_edits() {
+        let path = env::temp_dir().join(format!("switchx-import-model-{}", new_id().unwrap()));
+        let store = open_store(&path).unwrap();
+        store
+            .put_provider(&ProviderRecord {
+                id: "mock".into(),
+                name: "Mock".into(),
+                base_url: "https://example.invalid/v1".into(),
+                model_id: "deepseek-flash".into(),
+                credential_ref: None,
+            })
+            .unwrap();
+        let source = path.join("models.json");
+        fs::write(
+            &source,
+            include_str!("../tests/fixtures/synthetic-models.json"),
+        )
+        .unwrap();
+        save_model(&path, "mock", "sx-mock", "Mock", source.to_str().unwrap()).unwrap();
+        let saved = store.models().unwrap();
+        assert_eq!(saved.len(), 1);
+        assert!(load_snapshot(&path, false).unwrap().models[0].ready);
+        fs::write(&source, r#"{"models":[{"slug":"deepseek-flash"}]}"#).unwrap();
+        assert!(save_model(&path, "mock", "sx-mock", "Broken", source.to_str().unwrap()).is_err());
+        assert_eq!(store.models().unwrap(), saved);
+        select_model(&path, "mock", false).unwrap();
+        assert!(!store.models().unwrap()[0].enabled);
+        fs::write(path.join("switch-journal.json"), "synthetic journal").unwrap();
+        assert!(
+            select_model(&path, "mock", true)
+                .unwrap_err()
+                .contains("先恢复")
+        );
+        assert!(save_model(&path, "mock", "sx-changed", "Changed", "").is_err());
+        assert!(delete_provider(&path, "mock").is_err());
+        drop(store);
         fs::remove_dir_all(path).unwrap();
     }
 }

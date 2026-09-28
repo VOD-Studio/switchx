@@ -1,6 +1,10 @@
-use std::collections::HashMap;
+use std::{collections::HashMap, fs, io::Read, path::Path};
 
 use serde_json::{Value, json};
+
+use crate::storage::ModelRecord;
+
+pub const MAX_CATALOG_BYTES: usize = 2 * 1024 * 1024;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RouteBinding {
@@ -16,10 +20,159 @@ pub struct Selection<'a> {
     pub upstream_model: &'a str,
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct Publication {
     pub catalog: Value,
     pub routes: HashMap<String, RouteBinding>,
+}
+
+pub fn read_template(path: &Path, model_id: &str) -> Result<Value, String> {
+    if !path.is_absolute() {
+        return Err("模型目录文件必须使用绝对路径".into());
+    }
+    let metadata = fs::symlink_metadata(path).map_err(|_| "无法读取模型目录文件")?;
+    if !metadata.is_file() || metadata.file_type().is_symlink() {
+        return Err("模型目录必须是普通 JSON 文件".into());
+    }
+    let mut bytes = Vec::new();
+    fs::File::open(path)
+        .map_err(|_| "无法打开模型目录文件")?
+        .take(MAX_CATALOG_BYTES as u64 + 1)
+        .read_to_end(&mut bytes)
+        .map_err(|_| "无法读取模型目录文件")?;
+    if bytes.len() > MAX_CATALOG_BYTES {
+        return Err("模型目录文件超过 2 MiB".into());
+    }
+    let catalog: Value = serde_json::from_slice(&bytes).map_err(|_| "模型目录不是有效 JSON")?;
+    let models = catalog["models"]
+        .as_array()
+        .ok_or("模型目录缺少 models 数组")?;
+    let mut matching = models.iter().filter(|model| model["slug"] == model_id);
+    let model = matching.next().ok_or("目录中没有此上游的模型 ID")?;
+    if matching.next().is_some() {
+        return Err("目录中同一模型 ID 出现多次".into());
+    }
+    validate_metadata(model)?;
+    Ok(model.clone())
+}
+
+// Validate the fields needed by the API route. The selected Codex CLI also parses
+// the complete catalog in an isolated home before a native route can be applied.
+pub fn validate_metadata(model: &Value) -> Result<(), String> {
+    for field in ["slug", "display_name"] {
+        if model[field]
+            .as_str()
+            .is_none_or(|value| value.trim().is_empty())
+        {
+            return Err(format!("模型资料缺少 {field}"));
+        }
+    }
+    if !matches!(
+        model["shell_type"].as_str(),
+        Some("unified_exec" | "shell_command" | "local" | "default" | "disabled")
+    ) {
+        return Err("模型资料的 shell_type 缺失或不受支持".into());
+    }
+    if model["supported_in_api"] != true || !model["support_verbosity"].is_boolean() {
+        return Err("模型资料必须声明 API 支持和 verbosity 能力".into());
+    }
+    if model["context_window"]
+        .as_i64()
+        .is_none_or(|value| value <= 0)
+        || model["priority"]
+            .as_i64()
+            .is_none_or(|value| i32::try_from(value).is_err())
+        || model["truncation_policy"]["limit"]
+            .as_i64()
+            .is_none_or(|value| value <= 0)
+        || !matches!(
+            model["truncation_policy"]["mode"].as_str(),
+            Some("tokens" | "bytes")
+        )
+    {
+        return Err("模型资料的上下文、优先级或截断策略无效".into());
+    }
+    let levels = model["supported_reasoning_levels"]
+        .as_array()
+        .ok_or("模型资料缺少推理档位列表")?;
+    for level in levels {
+        if level["effort"].as_str().is_none_or(|effort| {
+            effort.is_empty() || effort.len() > 32 || effort.chars().any(char::is_control)
+        }) || !level["description"].is_string()
+        {
+            return Err("模型资料的推理档位无效".into());
+        }
+    }
+    if !model["default_reasoning_level"].is_null()
+        && !levels
+            .iter()
+            .any(|level| level["effort"] == model["default_reasoning_level"])
+    {
+        return Err("默认推理档位不在支持列表中".into());
+    }
+    let modalities = model["input_modalities"]
+        .as_array()
+        .ok_or("模型资料缺少输入类型")?;
+    if !modalities.iter().any(|value| value == "text")
+        || modalities
+            .iter()
+            .any(|value| !matches!(value.as_str(), Some("text" | "image" | "audio")))
+        || model["experimental_supported_tools"]
+            .as_array()
+            .is_none_or(|tools| tools.iter().any(|tool| !tool.is_string()))
+    {
+        return Err("模型资料的输入类型或工具列表无效".into());
+    }
+    if model["use_responses_lite"] == true {
+        return Err("当前路由仅支持标准 Responses，请使用对应的模型资料".into());
+    }
+    Ok(())
+}
+
+pub fn publish_saved(records: &[ModelRecord]) -> Result<Publication, String> {
+    let mut publication = Publication {
+        catalog: json!({"models": []}),
+        routes: HashMap::new(),
+    };
+    for record in records.iter().filter(|record| record.enabled) {
+        let metadata: Value =
+            serde_json::from_str(&record.metadata).map_err(|_| "已保存的模型资料损坏")?;
+        let selected = publish(
+            &json!({"models": [metadata]}),
+            &[Selection {
+                public_id: &record.public_id,
+                display_name: &record.display_name,
+                provider_id: &record.provider_id,
+                upstream_model: &record.upstream_model,
+            }],
+        )?;
+        for (id, binding) in selected.routes {
+            if publication.routes.insert(id.clone(), binding).is_some() {
+                return Err(format!("公开模型 ID 重复：{id}"));
+            }
+        }
+        publication.catalog["models"]
+            .as_array_mut()
+            .unwrap()
+            .extend(
+                selected.catalog["models"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .cloned(),
+            );
+    }
+    if publication.routes.is_empty() {
+        return Err("请至少选择一个已导入资料的模型".into());
+    }
+    if serde_json::to_vec(&publication.catalog)
+        .map_err(|_| "无法生成模型目录")?
+        .len()
+        > MAX_CATALOG_BYTES
+    {
+        return Err("发布目录超过 2 MiB，请减少所选模型".into());
+    }
+    Ok(publication)
 }
 
 pub fn publish(templates: &Value, selections: &[Selection<'_>]) -> Result<Publication, String> {
@@ -40,6 +193,8 @@ pub fn publish(templates: &Value, selections: &[Selection<'_>]) -> Result<Public
             return Err(format!("invalid public model ID: {id}"));
         }
         if selection.display_name.trim().is_empty()
+            || selection.display_name.len() > 160
+            || selection.display_name.chars().any(char::is_control)
             || selection.provider_id.is_empty()
             || selection.upstream_model.is_empty()
         {
@@ -62,6 +217,7 @@ pub fn publish(templates: &Value, selections: &[Selection<'_>]) -> Result<Public
                 selection.upstream_model
             ));
         }
+        validate_metadata(&model)?;
         model["slug"] = id.into();
         model["display_name"] = selection.display_name.into();
         model["visibility"] = "list".into();
@@ -167,6 +323,51 @@ mod tests {
             )
             .unwrap_err()
             .contains("missing")
+        );
+    }
+
+    #[test]
+    fn saved_models_keep_provider_specific_metadata_and_reject_incomplete_templates() {
+        let template = templates()["models"][0].clone();
+        let first = ModelRecord {
+            provider_id: "first".into(),
+            public_id: "sx-first".into(),
+            display_name: "First".into(),
+            upstream_model: "deepseek-flash".into(),
+            metadata: template.to_string(),
+            enabled: true,
+        };
+        let mut second_template = template.clone();
+        second_template["context_window"] = 64000.into();
+        let mut second = ModelRecord {
+            provider_id: "second".into(),
+            public_id: "sx-second".into(),
+            metadata: second_template.to_string(),
+            ..first.clone()
+        };
+        let publication = publish_saved(&[first.clone(), second.clone()]).unwrap();
+        assert_eq!(publication.catalog["models"][0]["context_window"], 1048576);
+        assert_eq!(publication.catalog["models"][1]["context_window"], 64000);
+        assert_eq!(publication.routes["sx-second"].provider_id, "second");
+        second.public_id = first.public_id.clone();
+        assert!(
+            publish_saved(&[first.clone(), second])
+                .unwrap_err()
+                .contains("重复")
+        );
+        let mut invalid = template;
+        invalid.as_object_mut().unwrap().remove("shell_type");
+        assert!(
+            validate_metadata(&invalid)
+                .unwrap_err()
+                .contains("shell_type")
+        );
+        assert!(
+            publish_saved(&[ModelRecord {
+                enabled: false,
+                ..first
+            }])
+            .is_err()
         );
     }
 }
