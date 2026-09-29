@@ -12,6 +12,7 @@ pub struct ProviderRecord {
     pub name: String,
     pub base_url: String,
     pub model_id: String,
+    // Historical metadata only; provider API keys are read from settings_config.
     pub credential_ref: Option<String>,
 }
 
@@ -388,7 +389,7 @@ impl Store {
         transaction.commit()
     }
 
-    /// Invalid credential JSON is an error, never permission to use a legacy key.
+    /// Invalid credential JSON is an error, never a missing credential.
     pub fn provider_api_key(&self, id: &str) -> Result<Option<Secret>> {
         use rusqlite::OptionalExtension;
         let settings: Option<String> = self
@@ -426,39 +427,6 @@ impl Store {
         Ok(provider_settings(&settings)?
             .pointer("/auth/OPENAI_API_KEY")
             .is_some())
-    }
-
-    /// Migrate one old key reference only if neither its reference nor JSON changed.
-    pub fn migrate_provider_api_key(
-        &self,
-        id: &str,
-        expected_ref: &str,
-        key: &Secret,
-    ) -> Result<bool> {
-        use rusqlite::OptionalExtension;
-        let current: Option<(String, Option<String>)> = self
-            .connection
-            .query_row(
-                "SELECT settings_config, credential_ref FROM providers WHERE id = ?1",
-                [id],
-                |row| Ok((row.get(0)?, row.get(1)?)),
-            )
-            .optional()?;
-        let Some((settings, reference)) = current else {
-            return Ok(false);
-        };
-        let parsed = provider_settings(&settings)?;
-        if parsed.pointer("/auth/OPENAI_API_KEY").is_some()
-            || reference.as_deref() != Some(expected_ref)
-        {
-            return Ok(false);
-        }
-        let updated = settings_with_key(&settings, key)?;
-        Ok(self.connection.execute(
-            "UPDATE providers SET settings_config = ?1, credential_ref = NULL
-             WHERE id = ?2 AND credential_ref = ?3 AND settings_config = ?4",
-            params![updated, id, expected_ref, settings],
-        )? != 0)
     }
 
     pub fn provider_codex_options(&self, id: &str) -> Result<String> {
@@ -884,24 +852,22 @@ mod tests {
     }
 
     #[test]
-    fn legacy_key_migration_does_not_replace_newer_keys_or_references() {
+    fn provider_edits_preserve_keys_changed_by_another_connection() {
         let path = std::env::temp_dir().join(format!(
-            "switchx-api-key-cas-{}.sqlite",
+            "switchx-api-key-preserve-{}.sqlite",
             crate::app::new_id().unwrap()
         ));
         let store = Store::open(&path).unwrap();
         let provider = api_provider();
-        store.put_provider(&provider).unwrap();
-        assert!(
-            !store
-                .migrate_provider_api_key(
-                    &provider.id,
-                    "wrong-reference",
-                    &Secret::new("synthetic-old-key".into())
-                )
-                .unwrap()
-        );
-        assert!(store.provider_api_key(&provider.id).unwrap().is_none());
+        store
+            .put_provider_with_models_options_and_key(
+                &provider,
+                &[],
+                None,
+                &Secret::new("synthetic-old-key".into()),
+            )
+            .unwrap();
+        let stale_metadata = store.provider(&provider.id).unwrap().unwrap();
         let other = Store::open(&path).unwrap();
         other
             .put_provider_with_models_options_and_key(
@@ -911,28 +877,11 @@ mod tests {
                 &Secret::new("synthetic-concurrent-key".into()),
             )
             .unwrap();
-        assert!(
-            !store
-                .migrate_provider_api_key(
-                    &provider.id,
-                    "synthetic-legacy-ref",
-                    &Secret::new("synthetic-old-key".into())
-                )
-                .unwrap()
-        );
-        assert_eq!(
-            store
-                .provider_api_key(&provider.id)
-                .unwrap()
-                .unwrap()
-                .expose(),
-            "synthetic-concurrent-key"
-        );
         store
             .update_provider_preserving_key(
                 &ProviderRecord {
                     name: "Preserved concurrent key".into(),
-                    ..provider.clone()
+                    ..stale_metadata
                 },
                 &[],
                 Some("preserved-options"),
@@ -962,82 +911,38 @@ mod tests {
                 .credential_ref
                 .is_none()
         );
-
-        let second = ProviderRecord {
-            id: "second".into(),
-            ..provider.clone()
-        };
-        store.put_provider(&second).unwrap();
-        assert!(
-            store
-                .update_provider_preserving_key(
-                    &ProviderRecord {
-                        name: "Must roll back".into(),
-                        ..second.clone()
-                    },
-                    &[],
-                    Some("must-roll-back"),
-                )
-                .is_err()
-        );
-        assert_eq!(store.provider(&second.id).unwrap(), Some(second.clone()));
-        assert_eq!(store.provider_codex_options(&second.id).unwrap(), "");
-        other
-            .put_provider(&ProviderRecord {
-                credential_ref: Some("new-reference".into()),
-                ..second.clone()
-            })
-            .unwrap();
-        assert!(
-            !store
-                .migrate_provider_api_key(
-                    &second.id,
-                    "synthetic-legacy-ref",
-                    &Secret::new("synthetic-old-key".into())
-                )
-                .unwrap()
-        );
-        assert!(
-            store
-                .migrate_provider_api_key(
-                    &second.id,
-                    "new-reference",
-                    &Secret::new("synthetic-migrated-key".into())
-                )
-                .unwrap()
-        );
-        assert_eq!(
-            store
-                .provider_api_key(&second.id)
-                .unwrap()
-                .unwrap()
-                .expose(),
-            "synthetic-migrated-key"
-        );
-        assert!(
-            store
-                .provider(&second.id)
-                .unwrap()
-                .unwrap()
-                .credential_ref
-                .is_none()
-        );
-        assert!(
-            !store
-                .migrate_provider_api_key(
-                    "missing",
-                    "new-reference",
-                    &Secret::new("synthetic-key".into())
-                )
-                .unwrap()
-        );
         drop(other);
         drop(store);
         std::fs::remove_file(path).unwrap();
     }
 
     #[test]
-    fn malformed_credential_json_never_falls_back_or_leaks_keys_in_errors() {
+    fn provider_edits_without_a_saved_key_roll_back_metadata_and_options() {
+        let store = Store::open(Path::new(":memory:")).unwrap();
+        let provider = api_provider();
+        store.put_provider(&provider).unwrap();
+        assert!(
+            store
+                .update_provider_preserving_key(
+                    &ProviderRecord {
+                        name: "Must roll back".into(),
+                        ..provider.clone()
+                    },
+                    &[],
+                    Some("must-roll-back"),
+                )
+                .is_err()
+        );
+        assert_eq!(
+            store.provider(&provider.id).unwrap(),
+            Some(provider.clone())
+        );
+        assert_eq!(store.provider_codex_options(&provider.id).unwrap(), "");
+        assert!(store.provider_api_key(&provider.id).unwrap().is_none());
+    }
+
+    #[test]
+    fn malformed_credential_json_rejects_reads_and_writes_without_leaking_keys() {
         let store = Store::open(Path::new(":memory:")).unwrap();
         let provider = api_provider();
         store.put_provider(&provider).unwrap();
@@ -1061,15 +966,6 @@ mod tests {
                 .to_string();
             assert!(!error.contains("synthetic-private-key"));
             assert!(store.has_provider_api_key(&provider.id).is_err());
-            assert!(
-                store
-                    .migrate_provider_api_key(
-                        &provider.id,
-                        "synthetic-legacy-ref",
-                        &Secret::new("synthetic-legacy-key".into())
-                    )
-                    .is_err()
-            );
             assert!(
                 store
                     .put_provider_with_models_options_and_key(

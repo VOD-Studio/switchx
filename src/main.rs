@@ -10,7 +10,7 @@ use switchx::{
     accounts::AccountManager,
     app::{self, AppError, Snapshot, data_directory, load_snapshot},
     catalog, chatgpt, client, config_transaction,
-    credentials::{CredentialStore, PROVIDER_KEY_SERVICE, ROUTER_TOKEN_SERVICE, Secret},
+    credentials::{CredentialStore, ROUTER_TOKEN_SERVICE, Secret},
     direct,
     direct_config::{self, PreparedDirectSwitch},
     provider_config::{self, CodexOptions},
@@ -1827,16 +1827,13 @@ fn credential_command() -> Result<bool, Box<dyn std::error::Error>> {
         .to_str()
         .ok_or("credential reference is invalid")?;
     let secret = if command == "credential" {
-        if let Some(data_dir) = data_dir {
-            if !data_dir.is_absolute() {
-                return Err("credential data directory must be absolute".into());
-            }
-            let provider = app::load_provider(&data_dir, reference)?;
-            app::provider_credential(&data_dir, &provider)?
-        } else {
-            // Existing active configurations still use the two-argument keychain helper.
-            CredentialStore::new(PROVIDER_KEY_SERVICE)?.get(reference)?
+        let data_dir = data_dir
+            .ok_or("credential data directory is missing; regenerate the SwitchX configuration")?;
+        if !data_dir.is_absolute() {
+            return Err("credential data directory must be absolute".into());
         }
+        let provider = app::load_provider(&data_dir, reference)?;
+        app::provider_credential(&data_dir, &provider)?
     } else {
         if data_dir.is_some() {
             return Err("unexpected local-token command argument".into());

@@ -27,9 +27,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
     let source = Store::open_read_only(&data.join("switchx.sqlite"))?;
     let provider = source.provider(&id)?.ok_or("provider was not found")?;
-    let key = source.provider_api_key(&id)?.ok_or(
-        "provider key is not stored in SQLite; open SwitchX to migrate legacy credentials first",
-    )?;
+    let key = source
+        .provider_api_key(&id)?
+        .ok_or("provider key is not stored in SQLite; enter an API Key in SwitchX first")?;
     drop(source);
     let helper = std::env::current_exe()?
         .parent()

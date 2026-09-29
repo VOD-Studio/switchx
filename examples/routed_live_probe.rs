@@ -42,7 +42,7 @@ async fn main() -> ProbeResult {
         .iter()
         .map(|(_, provider)| {
             source.provider_api_key(&provider.id)?.ok_or_else(|| {
-                "provider key is not stored in SQLite; open SwitchX to migrate legacy credentials first".into()
+                "provider key is not stored in SQLite; enter an API Key in SwitchX first".into()
             })
         })
         .collect::<ProbeResult<Vec<_>>>()?;
