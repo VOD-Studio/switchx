@@ -33,6 +33,7 @@ struct PreparedRoute {
     token_reference: String,
     local_token: Secret,
     chatgpt_workspace: Option<chatgpt::Workspace>,
+    managed_account_id: Option<String>,
     publication: Publication,
     models: Vec<ModelRecord>,
     providers: Vec<ProviderRecord>,
@@ -118,11 +119,25 @@ impl RouteSession {
         let uses_chatgpt = providers
             .iter()
             .any(|provider| provider.id == chatgpt::PROVIDER_ID);
+        let managed_account_id = if uses_chatgpt {
+            chatgpt::managed_account(state_dir)?
+        } else {
+            None
+        };
+        if let Some(id) = &managed_account_id {
+            let manager = crate::accounts::AccountManager::open(state_dir)?;
+            if manager.active_id(config_home)?.as_ref() != Some(id) {
+                return Err("所选账号尚未用于此 Codex 目录，请先点击“使用账号”".into());
+            }
+        }
         let chatgpt_workspace = if uses_chatgpt {
             chatgpt::workspace(config_home).await?
         } else {
             None
         };
+        if managed_account_id.is_some() && chatgpt_workspace.is_none() {
+            return Err("当前 Codex CLI 未返回工作区路由资料，请更新 CLI 后使用保存的账号".into());
+        }
         let switch =
             PreparedSwitch::inspect(&target, state_dir, &publication, address, default_model)?;
         let remote_direct_only = config_provider_id != chatgpt::PROVIDER_ID
@@ -146,6 +161,19 @@ impl RouteSession {
         } else {
             switch.with_credential_helper(helper, &token_reference)?
         };
+        if managed_account_id.is_some() {
+            let document: toml_edit::DocumentMut = switch
+                .preview
+                .proposed
+                .parse()
+                .map_err(|_| "待发布的 Codex 配置无效")?;
+            if document["cli_auth_credentials_store"].as_str() != Some("file") {
+                return Err(
+                    "保存的账号需要文件登录存储；请移除通用配置中的登录存储覆盖后重新使用账号"
+                        .into(),
+                );
+            }
+        }
         let cli_path = client::cli_path()?;
         let client_version = client::check_catalog_using(&publication.catalog, &cli_path).await?;
         let mappings = models
@@ -196,7 +224,11 @@ impl RouteSession {
             target.display(),
             switch.preview.changed_fields.join("、"),
             if uses_chatgpt {
-                "\n订阅认证由目标 Codex 管理；仅官方模型传递认证。独立本地令牌会写入仅当前用户可读的配置及恢复记录。切换工作区请先恢复；切到第三方时请新建会话。"
+                if managed_account_id.is_some() {
+                    "\n订阅请求固定使用所选保存账号；仅官方模型传递认证。独立本地令牌会写入仅当前用户可读的配置及恢复记录。切换账号请先恢复；切到第三方时请新建会话。"
+                } else {
+                    "\n订阅认证由目标 Codex 管理；仅官方模型传递认证。独立本地令牌会写入仅当前用户可读的配置及恢复记录。切换工作区请先恢复；切到第三方时请新建会话。"
+                }
             } else {
                 ""
             }
@@ -234,6 +266,7 @@ impl RouteSession {
             token_reference,
             local_token,
             chatgpt_workspace,
+            managed_account_id,
             publication,
             models,
             providers,
@@ -277,6 +310,27 @@ impl RouteSession {
         for provider in &providers {
             if provider.id == chatgpt::PROVIDER_ID {
                 chatgpt::validate_provider(provider)?;
+                let managed_id = chatgpt::managed_account(state_dir)?;
+                if managed_id != prepared.managed_account_id {
+                    return Err("订阅账号选择已变化，请重新预览".into());
+                }
+                let manager = managed_id
+                    .as_ref()
+                    .map(|_| crate::accounts::AccountManager::open(state_dir))
+                    .transpose()?;
+                if let (Some(id), Some(manager)) = (&managed_id, &manager) {
+                    if manager.active_id(config_home)?.as_ref() != Some(id) {
+                        return Err("目标 Codex 的登录账号已变化，请重新使用并预览账号".into());
+                    }
+                    let credential = manager.credential(id, config_home).await?;
+                    if prepared
+                        .chatgpt_workspace
+                        .as_ref()
+                        .is_none_or(|workspace| workspace.account_id != credential.workspace_id)
+                    {
+                        return Err("账号与已预览的工作区不一致，请重新预览".into());
+                    }
+                }
                 let workspace = chatgpt::workspace(config_home).await?;
                 if workspace != prepared.chatgpt_workspace {
                     return Err("订阅工作区或官方区域路由已变化，请重新预览发布".into());
@@ -298,9 +352,13 @@ impl RouteSession {
                 }
                 upstreams.insert(
                     provider.id.clone(),
-                    match workspace {
-                        Some(workspace) => Upstream::chatgpt_for_workspace(&workspace)?,
-                        None => Upstream::chatgpt(),
+                    match (managed_id, manager, workspace) {
+                        (Some(id), Some(manager), Some(workspace)) => {
+                            Upstream::managed_chatgpt(manager, id, config_home.into(), &workspace)?
+                        }
+                        (None, _, Some(workspace)) => Upstream::chatgpt_for_workspace(&workspace)?,
+                        (None, _, None) => Upstream::chatgpt(),
+                        _ => return Err("保存账号的工作区资料缺失，请重新预览".into()),
                     },
                 );
                 continue;
@@ -330,6 +388,14 @@ impl RouteSession {
                 != prepared.config_state
         {
             return Err("检查期间上游或模型资料已变化，请重新预览".into());
+        }
+        if prepared
+            .providers
+            .iter()
+            .any(|provider| provider.id == chatgpt::PROVIDER_ID)
+            && chatgpt::managed_account(state_dir)? != prepared.managed_account_id
+        {
+            return Err("检查期间订阅账号选择已变化，请重新预览".into());
         }
         let local_token = prepared.local_token;
         let request_store = app::open_store(state_dir).map_err(|error| error.message())?;
@@ -546,6 +612,47 @@ fn selected_inputs(state_dir: &Path) -> Result<(Vec<ModelRecord>, Vec<ProviderRe
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn managed_preview_requires_explicit_use_and_preserves_native_files() {
+        let root = std::env::temp_dir().join(format!(
+            "switchx-account-preview-{}",
+            app::new_id().unwrap()
+        ));
+        let home = root.join("codex");
+        let data = root.join("data");
+        std::fs::create_dir_all(&home).unwrap();
+        std::fs::create_dir(&data).unwrap();
+        let config = b"# unmodified native config\nmodel = \"user-model\"\n";
+        let auth = b"synthetic unowned auth bytes";
+        std::fs::write(home.join("config.toml"), config).unwrap();
+        std::fs::write(home.join("auth.json"), auth).unwrap();
+        let templates: serde_json::Value =
+            serde_json::from_str(include_str!("../tests/fixtures/synthetic-models.json")).unwrap();
+        chatgpt::save_connection(&data, templates["models"].as_array().unwrap()).unwrap();
+        let model = app::open_store(&data)
+            .unwrap()
+            .models()
+            .unwrap()
+            .into_iter()
+            .find(|model| model.enabled)
+            .unwrap()
+            .public_id;
+        chatgpt::bind_managed_account(&data, Some("0123456789abcdef0123456789abcdef")).unwrap();
+        let mut session = RouteSession::default();
+        let error = session
+            .prepare(&data, &home, 0, &model, &root.join("must-not-run"))
+            .await
+            .unwrap_err();
+        assert!(error.contains("使用账号"));
+        assert_eq!(std::fs::read(home.join("config.toml")).unwrap(), config);
+        assert_eq!(std::fs::read(home.join("auth.json")).unwrap(), auth);
+        assert!(!home.join(".switchx-account.json").exists());
+        assert!(!data.join("codex_oauth_auth.json").exists());
+        assert!(!data.join("switch-journal.json").exists());
+        assert!(session.prepared.is_none());
+        std::fs::remove_dir_all(root).unwrap();
+    }
 
     #[tokio::test]
     async fn launcher_requires_the_running_routes_unchanged_target_and_catalog() {

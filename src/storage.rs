@@ -334,6 +334,43 @@ impl Store {
         )
     }
 
+    /// The subscription provider's explicit account binding; absent follows native Codex login.
+    /// `default` resolves the managed account default when preparing a new route.
+    pub fn chatgpt_account_binding(&self) -> Result<Option<String>> {
+        use rusqlite::OptionalExtension;
+        self.connection
+            .query_row(
+                "SELECT value FROM app_settings WHERE key = 'chatgpt_account_binding'",
+                [],
+                |row| row.get(0),
+            )
+            .optional()
+    }
+
+    pub fn bind_chatgpt_account(&self, account: Option<&str>) -> Result<()> {
+        if let Some(account) = account {
+            if account.is_empty()
+                || account.len() > 128
+                || !account
+                    .bytes()
+                    .all(|byte| byte.is_ascii_alphanumeric() || byte == b'-')
+            {
+                return Err(rusqlite::Error::InvalidQuery);
+            }
+            self.connection.execute(
+                "INSERT INTO app_settings (key, value) VALUES ('chatgpt_account_binding', ?1)
+                 ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+                [account],
+            )?;
+        } else {
+            self.connection.execute(
+                "DELETE FROM app_settings WHERE key = 'chatgpt_account_binding'",
+                [],
+            )?;
+        }
+        Ok(())
+    }
+
     pub fn common_codex_config(&self) -> Result<String> {
         use rusqlite::OptionalExtension;
         Ok(self

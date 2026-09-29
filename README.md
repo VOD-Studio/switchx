@@ -2,7 +2,7 @@
 
 Rust + Slint 原生桌面应用。M2 直连已完成 macOS / DeepSeek 验收，M3 已实现模型目录、API 与 ChatGPT 订阅账号路由；目前仍为模型路由预览版，真实官方上游和认证生命周期尚待验收。完整范围见 `docs/SWITCHX-PLAN.md`。
 
-原生界面现可管理上游、直连配置、模型资料与 loopback 路由。SQLite 保存元数据和凭据引用，系统凭据存储保存上游 Key 与独立的本地路由令牌。仓库中的**合成目录夹具**仅用于测试，不能作为真实模型能力或发布模板；`catalog_probe` 仍只输出夹具，不读取账号、凭据或现有 Codex 配置。
+原生界面现可管理上游、直连配置、模型资料、多个 ChatGPT 账号与 loopback 路由。SQLite 保存元数据、凭据引用和账号绑定，系统凭据存储保存上游 Key 与独立的本地路由令牌；ChatGPT OAuth 账号单独保存在私有 JSON 文件中，详见下文。仓库中的**合成目录夹具**仅用于测试，不能作为真实模型能力或发布模板；`catalog_probe` 仍只输出夹具，不读取账号、凭据或现有 Codex 配置。
 
 ```sh
 cargo run
@@ -42,7 +42,7 @@ M1 收口检查（2026-09-24，macOS 调试 bundle，隔离的 `SWITCHX_DATA_DIR
 
 原生“上游供应商”页面现可添加、编辑、删除 Responses 上游，保存名称、API 地址、模型 ID 和系统钥匙串凭据。已有 SQLite v1 上游资料迁移到 v2 后保留原记录，缺少模型 ID 的旧记录需编辑补齐。输入地址只允许 HTTPS 或 `127.0.0.1` HTTP，拒绝 URL 内的用户名、密码、查询参数与片段。“检查”读取上游 `/models` 并核对所选 ID；它不发送推理请求，也不证明工具调用兼容。直连生效期间暂不允许编辑或删除上游，避免已配置的客户端拿到另一上游的 Key。
 
-“配置与恢复”页面可选择绝对路径的 Codex 配置目录、读取当前配置、将当前自定义上游的**元数据**填入新建表单，以及查看 `codex login status` 报告的 ChatGPT 登录、API Key 登录或未知状态。导入不复制原配置中的凭据，也不读取 `auth.json`；新建上游须重新输入自己的 API Key。`SWITCHX_CODEX_CLI` 可指向要检查的 CLI；默认优先使用本机 ChatGPT.app 内的 CLI。
+“配置与恢复”页面可选择绝对路径的 Codex 配置目录、读取当前配置、将当前自定义上游的**元数据**填入新建表单，以及查看 `codex login status` 报告的 ChatGPT 登录、API Key 登录或未知状态。“导入当前上游”不复制原配置中的凭据，也不读取 `auth.json`；新建上游须重新输入自己的 API Key。ChatGPT 账号另有明确的“导入当前 Codex 账号”入口，见下文。`SWITCHX_CODEX_CLI` 可指向要检查的 CLI；默认优先使用本机 ChatGPT.app 内的 CLI。
 
 添加和编辑供应商时提供以下 Codex 配置选项，界面与操作参考 `others/cc-switch`：
 
@@ -155,17 +155,21 @@ cargo run --locked --example routed_cli_probe -- --desktop-models
 
 再次添加会保留已有映射和选择。自动生成的公开 ID 与已有映射或本批模型冲突时，整批拒绝保存，避免覆盖用户修改。
 
-1. 在“配置与恢复”指定目标 `CODEX_HOME`，点击“登录 ChatGPT”。存在受管配置时先恢复并停止路由，再由 Codex app-server 打开官方登录页。登录可取消，等待期间锁定配置目录；取消不清除已有登录。
-2. 点击“检查并续期”，由 Codex 查询账号并请求续期。SwitchX 不读取或复制 access/refresh token，不另设刷新轮询器；登录凭据保留在 Codex 自己的存储中。该检查成功不能证明 token 实际发生了轮换。
-3. 选择订阅模型后“预览发布 → 开启路由”，再点击“启动 Codex”从新会话选择模型。新版本 CLI 提供的工作区、官方 HTTPS 目的地和区域约束在预览与启用时核对，并绑定到路由；旧版本未返回工作区资料时，固定到全球官方端点并在首个请求绑定工作区。工作区变化要求恢复后重新发布。
-4. 官方 401/403 的状态和响应正文原样返回 Codex，由 Codex 执行自己的认证恢复；界面显示失效、权限不足或工作区变化的提示。SwitchX 不重放请求，不把订阅连接用于自动备用切换。仍失败时可“恢复并重新登录”。
-5. 点击“切回 API 预览”会先恢复原配置，再取消订阅映射的发布选择，生成仅含已选 API 模型的预览。确认后点击“开启路由”，不要求订阅登录。跨官方与第三方上游时须新建会话。
+1. 在“配置与恢复”指定目标 `CODEX_HOME`。点击“添加 ChatGPT 账号”，复制设备验证码，在官方页面完成登录；成功后保存到 SwitchX，可重复添加不同账号，完成后点击“使用”才更新 Codex 登录。已有账号失效时，也用“添加 ChatGPT 账号”重新登录：相同工作区和用户身份会更新已有凭据，保留账号 ID、默认选择和绑定。取消登录不会保存候选账号，也不清除已有账号。“导入当前 Codex 账号”会明确读取所选目录 `auth.json` 中的完整 ChatGPT 文件登录并保存；API Key 登录不能作为订阅账号导入。
+2. “设为默认”只改变默认选择，不会改动 Codex 当前登录。点击某个账号的“使用”会绑定该账号；“使用默认账号”会绑定默认选择。使用前先恢复受管配置并停止已有路由，再把所选账号完整登录写入目标 Codex 的 `auth.json`。配置读取、模型预览和发布不会隐式更换账号。
+3. “跟随 Codex 当前登录”解除 SwitchX 的账号绑定，保留当前原生登录。也可用“Codex 原生登录”打开 Codex app-server 的官方登录流程。点击“检查并续期”检查当前登录；保存的账号按需刷新，原生客户端继续使用 Codex 的续期流程，不启动后台刷新轮询器。检查成功不能证明真实 token 已发生轮换。
+4. 选择订阅模型后“预览发布 → 开启路由”，再点击“启动 Codex”从新会话选择模型。CLI 提供的工作区、官方 HTTPS 目的地和区域约束在预览与启用时核对，并绑定到路由。使用保存的账号要求 CLI 返回工作区路由资料；“跟随 Codex 当前登录”仍兼容未返回该资料的旧版 CLI，固定到全球官方端点并在首个请求绑定工作区。账号或工作区变化要求重新使用账号、预览和发布。
+5. “移除”需确认，会删除该账号的本地保存和缓存；移除正在使用的账号会先恢复配置并停止路由，不删除 Codex 目录。已绑定的账号被移除后，该绑定失效并要求重新选择，不静默回退到另一账号。
+6. 官方 401/403 的状态和响应正文原样返回 Codex，由 Codex 执行自己的认证恢复；界面显示失效、权限不足或工作区变化的提示。SwitchX 不重放请求，不把订阅连接用于自动备用切换。仍失败时可重新登录。
+7. 点击“切回 API 预览”会先恢复原配置，再取消订阅映射的发布选择，生成仅含已选 API 模型的预览。确认后点击“开启路由”，不要求订阅登录。跨官方与第三方上游时须新建会话。
 
-含订阅模型的配置使用 `requires_openai_auth = true`，通过独立 `x-switchx-local-token` 请求头校验本地访问。该本地令牌写入仅当前用户可读的配置与恢复 journal；macOS 上两者权限为 `0600`，不会转发到上游。官方模型只向已验证的 ChatGPT 目的地发送该次请求的 Bearer、工作区和允许的 Codex 协议头；API 模型丢弃这些信息并注入自己的 Key。Cookie 和任意客户端头均不复制到上游。
+多个账号的 refresh token、ID token 和账号资料保存在 `SWITCHX_DATA_DIR/codex_oauth_auth.json`，采用原子文件写入，Unix 文件权限为 `0600`；access token 仅在内存中缓存。显式使用账号时，会将 Codex 的 `cli_auth_credentials_store` 设为 `"file"`，并把完整 token bundle 写入目标 `auth.json`，供原生客户端运行和续期；覆盖已有完整 ChatGPT 文件登录前会先保存该账号。账号文件依赖操作系统文件权限保护，不提供文件加密或跨设备同步；API Key 和本地路由令牌仍保存在系统凭据存储中，SQLite 不保存这些 token。
+
+含订阅模型的配置使用 `requires_openai_auth = true`，通过独立 `x-switchx-local-token` 请求头校验本地访问。该本地令牌写入仅当前用户可读的配置与恢复 journal；macOS 上两者权限为 `0600`，不会转发到上游。保存账号的路由只使用绑定账号的 Bearer 与工作区，忽略客户端另带的官方认证；跟随原生登录时使用客户端认证。官方模型只向已验证的 ChatGPT 目的地发送认证与允许的 Codex 协议头；API 模型丢弃这些信息并注入自己的 Key。Cookie 和任意客户端头均不复制到上游。
 
 官方路径支持 `/responses/compact` 与加密推理/compaction 输入；API 路径分别返回 501/422，要求新建会话。两条路径都拒绝 `previous_response_id` 与 `conversation` 等服务器状态引用。请求记录只保存安全的状态和错误分类，不保存官方认证、工作区 ID、正文或加密内容。
 
-实现参考 CC Switch `da193d4` 的 [官方 provider 判断](https://github.com/farion1231/cc-switch/blob/da193d4f7a6ce3710623c312245c752376c0d036/src-tauri/src/proxy/providers/codex.rs) 与 [认证透传](https://github.com/farion1231/cc-switch/blob/da193d4f7a6ce3710623c312245c752376c0d036/src-tauri/src/proxy/forwarder.rs)。本版复用 Codex 原生登录和续期，一套 `CODEX_HOME` 使用其原生账号；没有新增多账号 OAuth 凭据管理器。[Codex 认证](https://learn.chatgpt.com/docs/auth)、[app-server 账号接口](https://learn.chatgpt.com/docs/app-server)
+认证透传参考 CC Switch `da193d4` 的 [官方 provider 判断](https://github.com/farion1231/cc-switch/blob/da193d4f7a6ce3710623c312245c752376c0d036/src-tauri/src/proxy/providers/codex.rs) 与 [认证透传](https://github.com/farion1231/cc-switch/blob/da193d4f7a6ce3710623c312245c752376c0d036/src-tauri/src/proxy/forwarder.rs)；2026-09-29 的账号管理方案另参考本地 CC Switch `846de29`，按用户选择增加私有 JSON 账号保存。多账号实现目前仅以合成凭据和本地 mock 验证，见 [多账号检查记录](docs/acceptance/M3-managed-accounts-2026-09-29.md)；真实设备登录、多账号切换、token 轮换和 Windows/Linux 权限及凭据环境仍待验收。[Codex 认证](https://learn.chatgpt.com/docs/auth)、[app-server 账号接口](https://learn.chatgpt.com/docs/app-server)
 
 可复跑的隔离验证：
 
@@ -174,6 +178,9 @@ cargo run --locked --example chatgpt_route_probe
 # 可选：检查合成登录状态、恢复和 API 预览；不启用真实账号
 sh scripts/bundle-macos.sh
 cargo run --locked --example chatgpt_route_probe -- --desktop
+# 多账号界面夹具：纯合成账号，禁用 CLI 与外网，不登录真实账号
+cargo test --locked --test router managed_accounts
+cargo run --locked --example managed_accounts_desktop
 ```
 
 探针使用合成 ChatGPT 形状凭据、本地工作区发现服务与两个本地假上游，核对原生 CLI 的订阅/API 文件工具轮次、四条完成记录，以及配置恢复后原生登录文件保留。桌面夹具的 API 连接没有 Key，只用于恢复与预览检查。2026-09-28 已通过 CLI `0.158.0-alpha.2.1` 的隔离探针；测试范围、界面截图与未完成的真实账户验收见 [订阅路由记录](docs/acceptance/M3-subscription-2026-09-28.md)。

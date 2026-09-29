@@ -1,4 +1,4 @@
-//! Codex owns ChatGPT OAuth credentials, refresh and logout. SwitchX never reads them.
+//! Native Codex login and workspace discovery. Managed accounts live in `accounts`.
 
 use std::{
     path::{Path, PathBuf},
@@ -26,7 +26,31 @@ pub const ACCOUNT_HEADER: &str = "chatgpt-account-id";
 const RPC_TIMEOUT: Duration = Duration::from_secs(15);
 const MAX_REPLY_BYTES: usize = 2 * 1024 * 1024;
 
-/// Native account metadata only; no access, refresh or ID token is read by SwitchX.
+pub fn managed_account(data_dir: &Path) -> Result<Option<String>, String> {
+    match account_binding(data_dir)? {
+        Some(id) if id == "default" => crate::accounts::AccountManager::open(data_dir)?
+            .default_id()?
+            .map(Some)
+            .ok_or_else(|| "尚未保存默认 ChatGPT 账号，请添加或选择账号".into()),
+        binding => Ok(binding),
+    }
+}
+
+pub fn account_binding(data_dir: &Path) -> Result<Option<String>, String> {
+    app::open_store(data_dir)
+        .map_err(|_| "无法读取订阅账号绑定")?
+        .chatgpt_account_binding()
+        .map_err(|_| "无法读取订阅账号绑定".into())
+}
+
+pub fn bind_managed_account(data_dir: &Path, id: Option<&str>) -> Result<(), String> {
+    app::open_store(data_dir)
+        .map_err(|_| "无法读取订阅账号绑定")?
+        .bind_chatgpt_account(id)
+        .map_err(|_| "无法保存订阅账号绑定".into())
+}
+
+/// Workspace routing metadata from the native CLI; this type contains no OAuth tokens.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Workspace {
     pub account_id: String,
