@@ -33,7 +33,10 @@ enum Command {
         key: String,
         options: CodexOptions,
     },
-    BeginProviderEditor(String),
+    BeginProviderEditor {
+        id: String,
+        home: String,
+    },
     OpenCommonConfig(String),
     ExtractCommonConfig(String),
     SaveCommonConfig(String),
@@ -371,6 +374,16 @@ fn home(text: &str) -> Result<PathBuf, String> {
     Ok(path)
 }
 
+fn common_config_for_home(data_dir: &Path, target: &str) -> Result<String, String> {
+    match home(target).and_then(|target| app::initialize_common_config(data_dir, &target)) {
+        Ok(common) => Ok(common),
+        Err(error) => {
+            eprintln!("未自动提取 Codex 通用配置：{error}");
+            app::load_common_config(data_dir)
+        }
+    }
+}
+
 async fn restore_connections(
     session: &mut RouteSession,
     data_dir: &Path,
@@ -561,10 +574,10 @@ async fn worker(
                     .and_then(|path| load_snapshot(path, check_credentials));
                 let _ = weak.upgrade_in_event_loop(move |app| show_result(&app, result));
             }
-            Command::BeginProviderEditor(id) => {
+            Command::BeginProviderEditor { id, home: target } => {
                 let result = (|| {
                     let data_dir = directory.as_ref().map_err(|error| error.message())?;
-                    let common = app::load_common_config(data_dir)?;
+                    let common = common_config_for_home(data_dir, &target)?;
                     let (provider, options) = if id.is_empty() {
                         (None, CodexOptions::for_common(&common)?)
                     } else {
@@ -592,7 +605,7 @@ async fn worker(
                 let result = directory
                     .as_ref()
                     .map_err(|error| error.message().to_owned())
-                    .and_then(|path| app::load_common_config(path));
+                    .and_then(|path| common_config_for_home(path, &target));
                 let _ = weak.upgrade_in_event_loop(move |app| {
                     app.set_busy(false);
                     match result {
@@ -602,33 +615,46 @@ async fn worker(
                             app.set_common_config_error("".into());
                             app.set_common_config_message("".into());
                             app.set_common_config_current_source(
-                                Path::new(&target)
-                                    .join("config.toml")
-                                    .display()
-                                    .to_string()
-                                    .into(),
+                                "供应商表单当前 config.toml".into(),
                             );
+                            update_provider_config_preview(&app);
                             app.set_common_config_editor_open(true);
                         }
                         Err(error) => show_action(&app, Err(error)),
                     }
                 });
             }
-            Command::ExtractCommonConfig(target) => {
-                let source = Path::new(&target).join("config.toml").display().to_string();
-                let result = (|| provider_config::extract_from_home(&home(&target)?))();
+            Command::ExtractCommonConfig(form_toml) => {
+                let result = directory
+                    .as_ref()
+                    .map_err(|error| error.message().to_owned())
+                    .and_then(|path| app::extract_and_save_common_config(path, &form_toml));
+                if result.is_ok() {
+                    prepared = None;
+                    route_session.discard_preview();
+                }
                 let _ = weak.upgrade_in_event_loop(move |app| {
                     app.set_busy(false);
                     match result {
                         Ok(snippet) => {
-                            app.set_common_config_current_source(source.into());
+                            app.set_common_config_current_source(
+                                "供应商表单当前 config.toml".into(),
+                            );
+                            app.set_common_config_saved(snippet.clone().into());
                             app.set_common_config_draft(snippet.into());
                             app.set_common_config_error("".into());
                             app.set_common_config_message(
-                                "已提取非敏感配置到草稿；点击保存后生效。".into(),
+                                "已从供应商表单提取并保存通用配置；取消不会撤销这次提取。".into(),
                             );
+                            app.set_direct_preview_ready(false);
+                            app.set_route_preview_ready(false);
+                            update_provider_config_preview(&app);
+                            show_action(&app, Ok("已从供应商表单提取并保存 Codex 通用配置".into()));
                         }
-                        Err(error) => app.set_common_config_error(error.into()),
+                        Err(error) => {
+                            app.set_common_config_error(error.clone().into());
+                            show_action(&app, Err(error));
+                        }
                     }
                 });
             }
@@ -965,6 +991,7 @@ async fn worker(
                     let target = managed
                         .and_then(|path| path.parent().map(Path::to_path_buf))
                         .unwrap_or(home(&target)?);
+                    common_config_for_home(data_dir, &target.to_string_lossy())?;
                     client::inspect(&target, data_dir).map(|status| (status, target))
                 })();
                 let _ = weak.upgrade_in_event_loop(move |app| match result {
@@ -989,7 +1016,7 @@ async fn worker(
                 let result = (|| {
                     let candidate = client::import_candidate(&home(&target)?)?;
                     let data_dir = directory.as_ref().map_err(|error| error.message())?;
-                    let common = app::load_common_config(data_dir)?;
+                    let common = common_config_for_home(data_dir, &target)?;
                     let options = CodexOptions::for_common(&common)?;
                     Ok::<_, String>((candidate, options, common))
                 })();
@@ -1611,7 +1638,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             queue(
                 &app,
                 &callback_sender,
-                Command::BeginProviderEditor(id.into()),
+                Command::BeginProviderEditor {
+                    id: id.into(),
+                    home: app.get_config_home().into(),
+                },
             );
         }
     });
@@ -1636,10 +1666,23 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let weak = app.as_weak();
     app.on_extract_common_config(move || {
         if let Some(app) = weak.upgrade() {
+            update_provider_config_preview(&app);
+            if !app.get_edit_config_error().is_empty() {
+                let error = app.get_edit_config_error().to_string();
+                app.set_common_config_error(error.clone().into());
+                show_action(&app, Err(error));
+                return;
+            }
+            if app.get_edit_config_preview().trim().is_empty() {
+                let error = "供应商配置预览为空，请先检查表单内容".to_owned();
+                app.set_common_config_error(error.clone().into());
+                show_action(&app, Err(error));
+                return;
+            }
             queue(
                 &app,
                 &callback_sender,
-                Command::ExtractCommonConfig(app.get_config_home().into()),
+                Command::ExtractCommonConfig(app.get_edit_config_preview().into()),
             );
         }
     });
