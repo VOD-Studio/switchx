@@ -2,7 +2,7 @@ use std::path::Path;
 
 use rusqlite::{Connection, OpenFlags, Result, params};
 
-const SCHEMA_VERSION: i64 = 6;
+const SCHEMA_VERSION: i64 = 7;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ProviderRecord {
@@ -185,6 +185,18 @@ impl Store {
                  COMMIT;",
             )?;
         }
+        if version < 7 {
+            connection.execute_batch(
+                "BEGIN IMMEDIATE;
+                 ALTER TABLE providers ADD COLUMN codex_options TEXT NOT NULL DEFAULT '';
+                 CREATE TABLE app_settings (
+                    key TEXT PRIMARY KEY NOT NULL,
+                    value TEXT NOT NULL
+                 );
+                 PRAGMA user_version = 7;
+                 COMMIT;",
+            )?;
+        }
         Ok(Self { connection })
     }
 
@@ -264,6 +276,24 @@ impl Store {
         provider: &ProviderRecord,
         models: &[ModelRecord],
     ) -> Result<()> {
+        self.write_provider_with_models(provider, models, None)
+    }
+
+    pub fn put_provider_with_models_and_options(
+        &self,
+        provider: &ProviderRecord,
+        models: &[ModelRecord],
+        options: &str,
+    ) -> Result<()> {
+        self.write_provider_with_models(provider, models, Some(options))
+    }
+
+    fn write_provider_with_models(
+        &self,
+        provider: &ProviderRecord,
+        models: &[ModelRecord],
+        options: Option<&str>,
+    ) -> Result<()> {
         let transaction = self.connection.unchecked_transaction()?;
         transaction.execute(
             "INSERT INTO providers (id, name, base_url, model_id, credential_ref)
@@ -281,6 +311,12 @@ impl Store {
                 provider.credential_ref
             ],
         )?;
+        if let Some(options) = options {
+            transaction.execute(
+                "UPDATE providers SET codex_options = ?1 WHERE id = ?2",
+                params![options, provider.id],
+            )?;
+        }
         for model in models {
             if model.provider_id != provider.id {
                 return Err(rusqlite::Error::InvalidQuery);
@@ -288,6 +324,36 @@ impl Store {
             Self::write_model(&transaction, model)?;
         }
         transaction.commit()
+    }
+
+    pub fn provider_codex_options(&self, id: &str) -> Result<String> {
+        self.connection.query_row(
+            "SELECT codex_options FROM providers WHERE id = ?1",
+            [id],
+            |row| row.get(0),
+        )
+    }
+
+    pub fn common_codex_config(&self) -> Result<String> {
+        use rusqlite::OptionalExtension;
+        Ok(self
+            .connection
+            .query_row(
+                "SELECT value FROM app_settings WHERE key = 'common_codex_config'",
+                [],
+                |row| row.get(0),
+            )
+            .optional()?
+            .unwrap_or_default())
+    }
+
+    pub fn put_common_codex_config(&self, snippet: &str) -> Result<()> {
+        self.connection.execute(
+            "INSERT INTO app_settings (key, value) VALUES ('common_codex_config', ?1)
+             ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+            [snippet],
+        )?;
+        Ok(())
     }
 
     pub fn providers(&self) -> Result<Vec<ProviderRecord>> {
@@ -431,7 +497,9 @@ mod tests {
             model_id: "first-model".into(),
             credential_ref: Some("synthetic-reference".into()),
         };
-        store.put_provider(&provider).unwrap();
+        store
+            .put_provider_with_models_and_options(&provider, &[], "original options")
+            .unwrap();
         let other = ProviderRecord {
             id: "other".into(),
             ..provider.clone()
@@ -463,11 +531,121 @@ mod tests {
         };
         assert!(
             store
-                .put_provider_with_models(&updated, &[added, conflicting])
+                .put_provider_with_models_and_options(
+                    &updated,
+                    &[added, conflicting],
+                    "updated options",
+                )
                 .is_err()
         );
         assert_eq!(store.provider("primary").unwrap().unwrap(), provider);
+        assert_eq!(
+            store.provider_codex_options("primary").unwrap(),
+            "original options"
+        );
         assert_eq!(store.models().unwrap(), [owned]);
+    }
+
+    #[test]
+    fn provider_options_and_common_config_persist_without_changing_provider_metadata() {
+        let path = std::env::temp_dir().join(format!(
+            "switchx-codex-options-{}.sqlite",
+            crate::app::new_id().unwrap()
+        ));
+        let provider = ProviderRecord {
+            id: "primary".into(),
+            name: "Primary".into(),
+            base_url: "https://example.invalid/v1".into(),
+            model_id: "first-model".into(),
+            credential_ref: Some("synthetic-reference".into()),
+        };
+        let options = r#"{"remote_compaction":true,"context_window":1000000}"#;
+        let snippet = "[features]\nmemories = true\n";
+        {
+            let store = Store::open(&path).unwrap();
+            assert_eq!(store.common_codex_config().unwrap(), "");
+            assert!(matches!(
+                store.provider_codex_options("missing"),
+                Err(rusqlite::Error::QueryReturnedNoRows)
+            ));
+            store
+                .put_provider_with_models_and_options(&provider, &[], options)
+                .unwrap();
+            store.put_common_codex_config(snippet).unwrap();
+            assert_eq!(store.provider("primary").unwrap(), Some(provider.clone()));
+            assert_eq!(store.provider_codex_options("primary").unwrap(), options);
+            store.put_common_codex_config("updated snippet").unwrap();
+            assert_eq!(store.common_codex_config().unwrap(), "updated snippet");
+            store.put_common_codex_config(snippet).unwrap();
+            store.put_provider(&provider).unwrap();
+            store.put_provider_with_models(&provider, &[]).unwrap();
+            assert_eq!(store.provider_codex_options("primary").unwrap(), options);
+        }
+        let store = Store::open(&path).unwrap();
+        assert_eq!(store.provider_codex_options("primary").unwrap(), options);
+        assert_eq!(store.common_codex_config().unwrap(), snippet);
+        store.delete_provider("primary").unwrap();
+        assert!(matches!(
+            store.provider_codex_options("primary"),
+            Err(rusqlite::Error::QueryReturnedNoRows)
+        ));
+        assert_eq!(store.common_codex_config().unwrap(), snippet);
+        drop(store);
+        std::fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    fn v6_migration_preserves_provider_model_and_request_data_with_empty_options() {
+        let path = std::env::temp_dir().join(format!(
+            "switchx-options-migration-{}.sqlite",
+            crate::app::new_id().unwrap()
+        ));
+        let store = Store::open(&path).unwrap();
+        let provider = ProviderRecord {
+            id: "primary".into(),
+            name: "Primary".into(),
+            base_url: "https://example.invalid/v1".into(),
+            model_id: "first-model".into(),
+            credential_ref: Some("synthetic-reference".into()),
+        };
+        let model = ModelRecord {
+            provider_id: "primary".into(),
+            public_id: "sx-first".into(),
+            display_name: "First".into(),
+            upstream_model: "first-model".into(),
+            metadata: "retained metadata".into(),
+            enabled: true,
+            fallback_provider_id: None,
+        };
+        store
+            .put_provider_with_models(&provider, std::slice::from_ref(&model))
+            .unwrap();
+        store
+            .connection
+            .execute_batch(
+                "INSERT INTO request_records (id, started_at_ms, generation, duration_ms, status)
+                    VALUES ('v6-request', 1, 'old-generation', 3, 'completed');
+                 ALTER TABLE providers DROP COLUMN codex_options;
+                 DROP TABLE app_settings;
+                 PRAGMA user_version = 6;",
+            )
+            .unwrap();
+        drop(store);
+        let store = Store::open(&path).unwrap();
+        assert_eq!(store.providers().unwrap(), [provider]);
+        assert_eq!(store.models().unwrap(), [model]);
+        assert_eq!(store.requests(1).unwrap()[0].id, "v6-request");
+        assert_eq!(store.provider_codex_options("primary").unwrap(), "");
+        assert_eq!(store.common_codex_config().unwrap(), "");
+        assert_eq!(
+            store
+                .connection
+                .query_row("PRAGMA user_version", [], |row| row.get::<_, i64>(0))
+                .unwrap(),
+            7
+        );
+        drop(store);
+        std::fs::remove_file(path).unwrap();
     }
 
     #[test]
@@ -508,6 +686,8 @@ mod tests {
              INSERT INTO old_models SELECT provider_id, public_id, display_name, upstream_model, metadata, enabled, fallback_provider_id FROM published_models;
              DROP TABLE published_models;
              ALTER TABLE old_models RENAME TO published_models;
+             ALTER TABLE providers DROP COLUMN codex_options;
+             DROP TABLE app_settings;
              PRAGMA user_version = 5;"
         ).unwrap();
         drop(store);
@@ -629,7 +809,10 @@ mod tests {
                 "INSERT INTO request_records (id, started_at_ms, generation, duration_ms, status)
                     VALUES ('v4-request', 1, 'old-generation', 3, 'completed');
                  ALTER TABLE published_models DROP COLUMN fallback_provider_id;
-            ALTER TABLE request_records DROP COLUMN fallback_from; PRAGMA user_version = 4;",
+                 ALTER TABLE request_records DROP COLUMN fallback_from;
+                 ALTER TABLE providers DROP COLUMN codex_options;
+                 DROP TABLE app_settings;
+                 PRAGMA user_version = 4;",
             )
             .unwrap();
         drop(store);
@@ -664,7 +847,7 @@ mod tests {
         let store = Store::open(&path).unwrap();
         store
             .connection
-            .execute_batch("DROP TABLE request_records; ALTER TABLE published_models DROP COLUMN fallback_provider_id; PRAGMA user_version = 3;")
+            .execute_batch("DROP TABLE request_records; ALTER TABLE published_models DROP COLUMN fallback_provider_id; ALTER TABLE providers DROP COLUMN codex_options; DROP TABLE app_settings; PRAGMA user_version = 3;")
             .unwrap();
         drop(store);
         let store = Store::open(&path).unwrap();

@@ -7,6 +7,7 @@ use serde::{Deserialize, Serialize};
 use toml_edit::{Array, DocumentMut, Item, Value, table, value};
 
 use crate::{
+    config_overlay::Overlay,
     config_transaction::{
         HeaderDecor, RestoreResult, lock_config, read_config, replace, sync_parent,
         write_exclusive_atomic,
@@ -36,6 +37,8 @@ struct Journal {
     applied_provider_header: HeaderDecor,
     applied_parent_header: Option<HeaderDecor>,
     before_providers_table: bool,
+    #[serde(default)]
+    overlay: Overlay,
 }
 
 pub struct PreparedDirectSwitch {
@@ -186,6 +189,7 @@ impl PreparedDirectSwitch {
                 HeaderDecor::from_table(serialized["model_providers"].as_table().unwrap())
             }),
             before_providers_table,
+            overlay: Overlay::default(),
         };
         Ok(Self {
             config_path: config_path.into(),
@@ -195,6 +199,59 @@ impl PreparedDirectSwitch {
             proposed,
             changes,
         })
+    }
+
+    pub fn with_codex_options(
+        self,
+        options: &crate::provider_config::CodexOptions,
+        common: &str,
+    ) -> Result<Self, String> {
+        self.with_document_update(|document, provider_id| {
+            crate::provider_config::apply_to_document(document, options, common, provider_id)
+        })
+    }
+
+    pub fn with_common_config(self, common: &str) -> Result<Self, String> {
+        self.with_document_update(|document, _| {
+            crate::provider_config::apply_common_to_document(document, common)
+        })
+    }
+
+    fn with_document_update(
+        mut self,
+        update: impl FnOnce(&mut DocumentMut, &str) -> Result<(), String>,
+    ) -> Result<Self, String> {
+        let current = self
+            .original
+            .as_deref()
+            .map(std::str::from_utf8)
+            .transpose()
+            .map_err(|_| "Codex config is not UTF-8")?
+            .unwrap_or("");
+        let before: DocumentMut = current.parse().map_err(|_| "invalid Codex TOML")?;
+        let mut document: DocumentMut = self
+            .proposed
+            .parse()
+            .map_err(|_| "invalid generated config")?;
+        update(&mut document, &self.journal.provider_id)?;
+        self.proposed = document.to_string();
+        let applied: DocumentMut = self
+            .proposed
+            .parse()
+            .map_err(|_| "invalid generated config")?;
+        let previous_paths = self.journal.overlay.paths();
+        self.changes.retain(|path| !previous_paths.contains(path));
+        self.journal.overlay = Overlay::between(&before, &applied)?;
+        for path in self.journal.overlay.paths() {
+            if !self.changes.contains(&path) {
+                self.changes.push(path);
+            }
+        }
+        let provider = &applied["model_providers"][&self.journal.provider_id];
+        self.journal.applied_provider = provider.to_string();
+        self.journal.applied_provider_header =
+            HeaderDecor::from_table(provider.as_table().ok_or("invalid generated provider")?);
+        Ok(self)
     }
 
     pub fn apply(self) -> Result<(), String> {
@@ -322,6 +379,7 @@ pub fn restore(config_path: &Path, state_dir: &Path) -> Result<RestoreResult, St
         document.as_table_mut().remove("model_providers");
         changed = true;
     }
+    changed |= journal.overlay.restore(&mut document, &mut conflicts)?;
     if changed
         && !journal.config_existed
         && document.to_string().trim().is_empty()
@@ -558,5 +616,162 @@ mod tests {
         let journal = fs::read_to_string(home.state().join(JOURNAL_NAME)).unwrap();
         assert!(!journal.contains("private-marker"));
         assert!(!journal.contains("private-parent"));
+    }
+
+    #[test]
+    fn direct_codex_options_apply_and_restore_only_changed_leaves() {
+        let home = Home::new();
+        let original = "model = \"old\"\napproval_policy = \"on-request\" # private-preference\nmodel_context_window = 128000 # keep-window-note\nmodel_auto_compact_token_limit = 96000\n\n[features]\nhooks = false\nexternal = true\n\n[mcp_servers.private]\ncommand = \"private-command\"\n";
+        fs::write(home.config(), original).unwrap();
+        let options = crate::provider_config::CodexOptions {
+            remote_compaction: true,
+            use_common_config: true,
+            context_1m: true,
+            compact_limit: 875000,
+        };
+        let common = "approval_policy = \"never\"\nmodel_auto_compact_token_limit = 12\n\n[features]\nhooks = true\nmemories = true\n\n[tui]\nnotifications = true\n";
+        let prepared = PreparedDirectSwitch::inspect(
+            &home.config(),
+            &home.state(),
+            &provider(),
+            &std::env::current_exe().unwrap(),
+        )
+        .unwrap()
+        .with_codex_options(&options, common)
+        .unwrap();
+        let preview: DocumentMut = prepared.proposed.parse().unwrap();
+        assert_eq!(
+            preview["model_providers"]["switchx_direct_test-id"]["name"].as_str(),
+            Some("OpenAI")
+        );
+        assert_eq!(preview["model_context_window"].as_integer(), Some(1000000));
+        assert_eq!(
+            preview["model_auto_compact_token_limit"].as_integer(),
+            Some(875000)
+        );
+        assert!(prepared.changes.contains(&"features.memories".into()));
+        prepared.apply().unwrap();
+        let journal = fs::read_to_string(home.state().join(JOURNAL_NAME)).unwrap();
+        assert!(!journal.contains("private-preference"));
+        assert!(!journal.contains("keep-window-note"));
+        assert!(!journal.contains("private-command"));
+        let result = restore(&home.config(), &home.state()).unwrap();
+        assert!(result.conflicts.is_empty(), "{:?}", result.conflicts);
+        let text = fs::read_to_string(home.config()).unwrap();
+        let restored: DocumentMut = text.parse().unwrap();
+        assert_eq!(restored["model_context_window"].as_integer(), Some(128000));
+        assert_eq!(
+            restored["model_auto_compact_token_limit"].as_integer(),
+            Some(96000)
+        );
+        assert_eq!(restored["approval_policy"].as_str(), Some("on-request"));
+        assert_eq!(restored["features"]["hooks"].as_bool(), Some(false));
+        assert_eq!(restored["features"]["external"].as_bool(), Some(true));
+        assert!(restored["features"].get("memories").is_none());
+        assert!(restored.as_table().get("tui").is_none());
+        assert!(text.contains("# private-preference"));
+        assert!(text.contains("# keep-window-note"));
+        assert!(!text.contains("switchx_direct_test-id"));
+    }
+
+    #[test]
+    fn direct_context_disable_restores_previous_values_and_rejects_comment_loss() {
+        let home = Home::new();
+        let helper = std::env::current_exe().unwrap();
+        let original = "model_context_window = 128000\nmodel_auto_compact_token_limit = 96000\n";
+        fs::write(home.config(), original).unwrap();
+        PreparedDirectSwitch::inspect(&home.config(), &home.state(), &provider(), &helper)
+            .unwrap()
+            .with_codex_options(&crate::provider_config::CodexOptions::default(), "")
+            .unwrap()
+            .apply()
+            .unwrap();
+        assert!(
+            !fs::read_to_string(home.config())
+                .unwrap()
+                .contains("model_context_window")
+        );
+        assert!(
+            restore(&home.config(), &home.state())
+                .unwrap()
+                .conflicts
+                .is_empty()
+        );
+        let restored: DocumentMut = fs::read_to_string(home.config()).unwrap().parse().unwrap();
+        assert_eq!(restored["model_context_window"].as_integer(), Some(128000));
+        assert_eq!(
+            restored["model_auto_compact_token_limit"].as_integer(),
+            Some(96000)
+        );
+        fs::write(home.config(), "model_context_window = 128000 # user note\n").unwrap();
+        let error =
+            PreparedDirectSwitch::inspect(&home.config(), &home.state(), &provider(), &helper)
+                .unwrap()
+                .with_codex_options(&crate::provider_config::CodexOptions::default(), "")
+                .err()
+                .unwrap();
+        assert!(error.contains("注释"), "{error}");
+        assert!(!home.state().join(JOURNAL_NAME).exists());
+    }
+
+    #[test]
+    fn direct_restore_reads_legacy_journal_without_overlay() {
+        let home = Home::new();
+        let original = "model = \"old\"\n";
+        fs::write(home.config(), original).unwrap();
+        PreparedDirectSwitch::inspect(
+            &home.config(),
+            &home.state(),
+            &provider(),
+            &std::env::current_exe().unwrap(),
+        )
+        .unwrap()
+        .apply()
+        .unwrap();
+        let path = home.state().join(JOURNAL_NAME);
+        let mut old: serde_json::Value = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+        old.as_object_mut().unwrap().remove("overlay");
+        fs::write(path, serde_json::to_vec(&old).unwrap()).unwrap();
+        assert!(
+            restore(&home.config(), &home.state())
+                .unwrap()
+                .conflicts
+                .is_empty()
+        );
+        assert_eq!(fs::read_to_string(home.config()).unwrap(), original);
+    }
+
+    #[test]
+    fn legacy_direct_common_config_preserves_existing_window_settings() {
+        let home = Home::new();
+        let original = "model_context_window = 262144\nmodel_auto_compact_token_limit = 200000\n";
+        fs::write(home.config(), original).unwrap();
+        let prepared = PreparedDirectSwitch::inspect(
+            &home.config(),
+            &home.state(),
+            &provider(),
+            &std::env::current_exe().unwrap(),
+        )
+        .unwrap()
+        .with_common_config("[features]\nhooks = true\n")
+        .unwrap();
+        let proposed: DocumentMut = prepared.proposed.parse().unwrap();
+        assert_eq!(proposed["model_context_window"].as_integer(), Some(262144));
+        assert_eq!(
+            proposed["model_auto_compact_token_limit"].as_integer(),
+            Some(200000)
+        );
+        assert_eq!(
+            proposed["model_providers"]["switchx_direct_test-id"]["name"].as_str(),
+            Some("Mock Responses")
+        );
+        prepared.apply().unwrap();
+        assert!(
+            restore(&home.config(), &home.state())
+                .unwrap()
+                .conflicts
+                .is_empty()
+        );
+        assert_eq!(fs::read_to_string(home.config()).unwrap(), original);
     }
 }

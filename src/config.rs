@@ -13,7 +13,7 @@ pub(crate) const PROVIDER_ID: &str = "switchx_router";
 #[derive(Debug)]
 pub struct Preview {
     pub proposed: String,
-    pub changed_fields: Vec<&'static str>,
+    pub changed_fields: Vec<String>,
     pub required_environment_variable: Option<&'static str>,
 }
 
@@ -65,7 +65,7 @@ pub fn preview_route(
             return Err(format!("managed Codex field {key} is not a string"));
         }
         if document.as_table().get(key).and_then(|item| item.as_str()) != Some(new_value) {
-            changed_fields.push(key);
+            changed_fields.push(key.to_owned());
             if let Some(item) = document.as_table_mut().get_mut(key) {
                 let old = item
                     .as_value_mut()
@@ -101,7 +101,7 @@ pub fn preview_route(
     provider.insert("supports_websockets", value(false));
     provider.insert("request_max_retries", value(0));
     provider.insert("stream_max_retries", value(0));
-    changed_fields.push("model_providers.switchx_router");
+    changed_fields.push("model_providers.switchx_router".into());
 
     Ok(Preview {
         proposed: document.to_string(),
