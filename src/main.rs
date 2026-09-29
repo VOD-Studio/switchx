@@ -79,6 +79,9 @@ enum Command {
         port: String,
         model: String,
     },
+    LaunchCodex {
+        home: String,
+    },
     CancelRoutePreview,
     Quit,
 }
@@ -1110,7 +1113,13 @@ async fn worker(
                     match result {
                         Ok(summary) => {
                             app.set_route_preview(summary.into());
-                            show_action(&app, Ok("发布预览已准备；点击“开启路由”后检查凭据和上游，并写入目标配置".into()));
+                            show_action(
+                                &app,
+                                Ok(
+                                    "发布预览已准备；开启路由后点击“启动 Codex”，在新会话选择模型"
+                                        .into(),
+                                ),
+                            );
                         }
                         Err(error) => show_action(&app, Err(error)),
                     }
@@ -1140,10 +1149,22 @@ async fn worker(
                     show_action(
                         &app,
                         result.map(|()| {
-                            "模型路由已开启，目录和配置已发布；请重启目标 Codex 后选择模型".into()
+                            "模型路由已开启，目录和配置已发布；点击“启动 Codex”后在新会话选择模型".into()
                         }),
                     );
                 });
+            }
+            Command::LaunchCodex { home: target } => {
+                let result = async {
+                    let directory = directory.as_ref().map_err(|error| error.message())?;
+                    let path = route_session
+                        .codex_launcher(directory, &home(&target)?)
+                        .await?;
+                    client::open_codex_launcher(&path)?;
+                    Ok("已打开新的 Codex 会话；输入 /model 选择已发布模型".into())
+                }
+                .await;
+                let _ = weak.upgrade_in_event_loop(move |app| show_action(&app, result));
             }
             Command::CancelRoutePreview => {
                 route_session.discard_preview();
@@ -1738,6 +1759,19 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     home: app.get_config_home().into(),
                     port: app.get_route_port().into(),
                     model: app.get_default_model().into(),
+                },
+            );
+        }
+    });
+    let callback_sender = sender.clone();
+    let weak = app.as_weak();
+    app.on_launch_codex(move || {
+        if let Some(app) = weak.upgrade() {
+            queue(
+                &app,
+                &callback_sender,
+                Command::LaunchCodex {
+                    home: app.get_config_home().into(),
                 },
             );
         }

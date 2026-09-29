@@ -86,9 +86,18 @@ cargo run --locked --example direct_live_probe -- /absolute/switchx-data PROVIDE
 
 1. 保存 Responses 上游及 API Key，在“模型路由 → 添加模型映射”手动填写参数，或导入包含实际模型 ID 的 `models.json`。映射编辑器也提供“获取模型列表”。可参考供应商提供的目录，例如 [DeepSeek 的 Codex 接入文档](https://api-docs.deepseek.com/quick_start/agent_integrations/codex)。`/models` 的 ID 列表不包含完整能力资料。
 2. 选择要发布的模型和默认模型，在“配置与恢复”指定目标 Codex 配置目录。
-3. 点击“预览发布”。SwitchX 预留所选 loopback 端口，并让本机 Codex CLI 在独立临时目录实际解析完整目录。可用 `SWITCHX_CODEX_CLI` 指定 CLI 程序。
-4. 点击“开启路由”。再次核对 CLI、模型与上游资料；API 上游按连接读取凭据和 `/models`，订阅连接核对目标 Codex 的登录、工作区与 CLI 内置模型。验证本地路由后发布目录和配置。重启目标 Codex，在模型菜单或 `-m` 参数选择公开 ID。
-5. 点击“恢复并停止”，或从托盘恢复、退出。macOS Command-Q 也会先恢复路由配置；冲突时保留恢复记录和仍在运行的路由，并阻止退出。活动请求最多等待 5 秒后取消。强杀后的下次启动显示待恢复目标，不自动重启路由。
+3. 点击“预览发布”。SwitchX 预留所选 loopback 端口，并让本机 Codex CLI 在独立临时目录检查完整目录，以及新启动的 app-server `model/list` 返回的可选模型。可用 `SWITCHX_CODEX_CLI` 指定 CLI 程序。
+4. 点击“开启路由”。再次核对 CLI、模型与上游资料；API 上游按连接读取凭据和 `/models`，订阅连接核对目标 Codex 的登录、工作区与 CLI 内置模型。验证本地路由后发布目录和配置。
+5. 在 macOS 点击“启动 Codex”。SwitchX 打开 Terminal 中的新 Codex 会话，使用刚发布的配置目录和检查时选择的 CLI，不复用旧后台服务。在新会话输入 `/model` 选择模型，也可用 `-m` 参数指定公开 ID。此启动入口目前只支持 macOS。
+6. 点击“恢复并停止”，或从托盘恢复、退出。macOS Command-Q 也会先恢复路由配置；冲突时保留恢复记录和仍在运行的路由，并阻止退出。活动请求最多等待 5 秒后取消。强杀后的下次启动显示待恢复目标，不自动重启路由。
+
+部分 Codex CLI 会复用共享后台服务；该服务已经加载的模型目录不会随 `config.toml` 修改自动刷新，因此只退出并重开 CLI 可能仍显示旧模型。SwitchX 的“启动 Codex”使用 `--no-daemon` 建立新会话，不停止或修改现有后台服务。也可在终端手动启动，确保 `CODEX_HOME` 与 SwitchX 显示的目标目录相同，并使用 `SWITCHX_CODEX_CLI` 指定的同一程序：
+
+```sh
+CODEX_HOME="/absolute/codex-home" codex --no-daemon
+```
+
+目录检查会同时核对解析结果和新服务的 `model/list`，不再只以 `debug models` 能解析 JSON 作为模型菜单通过的依据。检查不读取原有账号或调用模型；目录与菜单检查通过仍不代表真实上游的工具能力或账号权限已验证。
 
 仅含 API 模型的原生路由使用独立 `auth.command` helper 获取本地令牌，无需手工设置终端环境变量。上游 Key 不进入 Codex 配置、SQLite 或恢复记录；API 出站请求只使用映射上游的 Key。原生 SSE 透传，取消不重放请求；服务器状态引用始终拒绝，API 模型另拒绝加密推理与压缩状态续接。应用运行中或有恢复记录时禁止修改上游、模型和绑定。成功的 `/models` 检查和目录解析不代表真实工具能力已验证。[Codex 配置约定](https://learn.chatgpt.com/docs/config-file/config-reference)
 
@@ -102,6 +111,14 @@ cargo run --locked --example routed_cli_probe -- --desktop
 ```
 
 `routed_cli_probe` 使用本机 CLI、两个本地假上游、临时配置和独立的合成钥匙串条目，检查目录兼容性、同名模型映射、helper 鉴权、文件工具轮次及恢复冲突，结束后恢复并清理；恢复失败则保留目录。2026-09-28 已通过 Codex CLI 0.156.1 的探针与原生页面配置的实际 CLI 请求，详见 [M3 首批验收记录](docs/acceptance/M3-2026-09-28.md)。本轮没有真实上游调用。
+
+单独验证新启动器和模型菜单：
+
+```sh
+cargo run --locked --example model_menu_probe -- --desktop
+```
+
+探针打印生产启动器生成的 `.command` 路径。另开终端运行该文件，只输入 `/model`，应看到 `SwitchX Mock Alpha` 和 `SwitchX Mock Beta`。关闭测试 Codex 后在探针终端按 Ctrl-C 清理临时目录。探针使用合成目录与凭据，不读取现有账号，也不发送模型请求。2026-09-29 已通过本机 Codex CLI 0.158.0 和 0.158.0-alpha.2.1 的隔离菜单检查。
 
 当前仍是 **模型路由预览版**：一个连接可映射多个模型，修改目录需恢复后重新发布；已支持下述单个显式 API 备用上游，不提供热更新、多候选链、熔断或费用统计。订阅路由实现与隔离测试见下文；真实官方请求、实际认证续期与失效恢复、DeepSeek ↔ 官方真实切换、同会话跨上游工具历史、远端压缩、Desktop/IDE 与其他平台仍待验收，M3 尚未完整完成。
 
@@ -124,7 +141,7 @@ cargo run --locked --example routed_cli_probe -- --desktop-models
 
 1. 在“配置与恢复”指定目标 `CODEX_HOME`，点击“登录 ChatGPT”。存在受管配置时先恢复并停止路由，再由 Codex app-server 打开官方登录页。登录可取消，等待期间锁定配置目录；取消不清除已有登录。
 2. 点击“检查并续期”，由 Codex 查询账号并请求续期。SwitchX 不读取或复制 access/refresh token，不另设刷新轮询器；登录凭据保留在 Codex 自己的存储中。该检查成功不能证明 token 实际发生了轮换。
-3. 选择订阅模型后“预览发布 → 开启路由”。新版本 CLI 提供的工作区、官方 HTTPS 目的地和区域约束在预览与启用时核对，并绑定到路由；旧版本未返回工作区资料时，固定到全球官方端点并在首个请求绑定工作区。工作区变化要求恢复后重新发布。
+3. 选择订阅模型后“预览发布 → 开启路由”，再点击“启动 Codex”从新会话选择模型。新版本 CLI 提供的工作区、官方 HTTPS 目的地和区域约束在预览与启用时核对，并绑定到路由；旧版本未返回工作区资料时，固定到全球官方端点并在首个请求绑定工作区。工作区变化要求恢复后重新发布。
 4. 官方 401/403 的状态和响应正文原样返回 Codex，由 Codex 执行自己的认证恢复；界面显示失效、权限不足或工作区变化的提示。SwitchX 不重放请求，不把订阅连接用于自动备用切换。仍失败时可“恢复并重新登录”。
 5. 点击“切回 API 预览”会先恢复原配置，再取消订阅映射的发布选择，生成仅含已选 API 模型的预览。确认后点击“开启路由”，不要求订阅登录。跨官方与第三方上游时须新建会话。
 

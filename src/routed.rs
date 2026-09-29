@@ -29,6 +29,7 @@ struct PreparedRoute {
     requested_port: u16,
     default_model: String,
     client_version: String,
+    cli_path: PathBuf,
     token_reference: String,
     local_token: Secret,
     chatgpt_workspace: Option<chatgpt::Workspace>,
@@ -41,6 +42,10 @@ struct ActiveRoute {
     server: RunningRouter,
     address: SocketAddr,
     target: PathBuf,
+    catalog_path: PathBuf,
+    public_models: HashSet<String>,
+    cli_path: PathBuf,
+    provider_config: Secret,
     token_reference: String,
 }
 
@@ -116,7 +121,8 @@ impl RouteSession {
         } else {
             switch.with_credential_helper(helper, &token_reference)?
         };
-        let client_version = client::check_catalog(&publication.catalog).await?;
+        let cli_path = client::cli_path()?;
+        let client_version = client::check_catalog_using(&publication.catalog, &cli_path).await?;
         let mappings = models
             .iter()
             .filter(|model| model.enabled)
@@ -160,7 +166,7 @@ impl RouteSession {
             .collect::<Vec<_>>()
             .join("\n");
         let summary = format!(
-            "{client_version} 已解析 {} 个模型 · http://{address}/v1\n目标：{}\n{mappings}\n受管变更：{}{}",
+            "{client_version} 已核对 {} 个可选模型 · http://{address}/v1\n目标：{}\n{mappings}\n受管变更：{}{}",
             publication.routes.len(),
             target.display(),
             switch.preview.changed_fields.join("、"),
@@ -187,6 +193,7 @@ impl RouteSession {
             requested_port: port,
             default_model: default_model.into(),
             client_version,
+            cli_path,
             token_reference,
             local_token,
             chatgpt_workspace,
@@ -216,7 +223,11 @@ impl RouteSession {
         if models != prepared.models || providers != prepared.providers {
             return Err("上游或模型资料已变化，请重新预览".into());
         }
-        if client::check_catalog(&prepared.publication.catalog).await? != prepared.client_version {
+        if client::cli_path()? != prepared.cli_path
+            || client::check_catalog_using(&prepared.publication.catalog, &prepared.cli_path)
+                .await?
+                != prepared.client_version
+        {
             return Err("Codex CLI 版本已变化，请重新预览".into());
         }
         let mut upstreams = HashMap::new();
@@ -283,6 +294,16 @@ impl RouteSession {
             .unwrap()
             .to_string_lossy()
             .into_owned();
+        let catalog_path = prepared.switch.catalog_path().to_path_buf();
+        let public_models = prepared.publication.routes.keys().cloned().collect();
+        let document: toml_edit::DocumentMut = prepared
+            .switch
+            .preview
+            .proposed
+            .parse()
+            .map_err(|_| "待发布的 Codex 配置无效")?;
+        let provider_config =
+            Secret::new(document["model_providers"][crate::config::PROVIDER_ID].to_string());
         let state = RouterState::new(
             prepared.address,
             local_token.expose().into(),
@@ -313,6 +334,10 @@ impl RouteSession {
             server,
             address: prepared.address,
             target: prepared.target,
+            catalog_path,
+            public_models,
+            cli_path: prepared.cli_path,
+            provider_config,
             token_reference: prepared.token_reference,
         });
         if let Err(error) = prepared.switch.apply() {
@@ -326,6 +351,43 @@ impl RouteSession {
             ));
         }
         Ok(())
+    }
+
+    pub async fn codex_launcher(
+        &self,
+        state_dir: &Path,
+        config_home: &Path,
+    ) -> Result<PathBuf, String> {
+        let active = self
+            .active
+            .as_ref()
+            .filter(|active| active.server.is_running())
+            .ok_or("请先开启模型路由，再启动 Codex")?;
+        let target = client::config_path(config_home)?;
+        let recovery = config_transaction::recovery(state_dir)?
+            .ok_or("路由恢复记录已变化，请检查配置后重新发布")?;
+        if target != active.target || recovery.config_path != active.target {
+            return Err("目标配置目录已变化，请使用当前路由的配置目录启动 Codex".into());
+        }
+        let bytes = config_transaction::read_config(&target)?.ok_or("路由配置文件已不存在")?;
+        let document: toml_edit::DocumentMut = std::str::from_utf8(&bytes)
+            .map_err(|_| "Codex 配置不是 UTF-8")?
+            .parse()
+            .map_err(|_| "Codex 配置 TOML 无效")?;
+        let field = |name: &str| document.get(name).and_then(toml_edit::Item::as_str);
+        let provider = document
+            .get("model_providers")
+            .and_then(|providers| providers.get(crate::config::PROVIDER_ID));
+        if field("model_provider") != Some(crate::config::PROVIDER_ID)
+            || field("model_catalog_json") != active.catalog_path.to_str()
+            || !provider
+                .is_some_and(|provider| provider.to_string() == active.provider_config.expose())
+            || !field("model").is_some_and(|model| active.public_models.contains(model))
+            || !active.catalog_path.is_file()
+        {
+            return Err("路由配置已被外部修改，请检查配置并重新发布后再启动 Codex".into());
+        }
+        client::write_codex_launcher(state_dir, config_home, &active.cli_path).await
     }
 
     pub async fn restore(&mut self, state_dir: &Path, config_home: &Path) -> Result<(), String> {
@@ -438,6 +500,113 @@ fn selected_inputs(state_dir: &Path) -> Result<(Vec<ModelRecord>, Vec<ProviderRe
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn launcher_requires_the_running_routes_unchanged_target_and_catalog() {
+        let root =
+            std::env::temp_dir().join(format!("switchx-launch-guard-{}", app::new_id().unwrap()));
+        let home = root.join("codex");
+        let data = root.join("data");
+        std::fs::create_dir_all(&home).unwrap();
+        std::fs::create_dir(&data).unwrap();
+        let mut session = RouteSession::default();
+        assert!(
+            session
+                .codex_launcher(&data, &home)
+                .await
+                .unwrap_err()
+                .contains("开启模型路由")
+        );
+
+        let templates =
+            serde_json::from_str(include_str!("../tests/fixtures/synthetic-models.json")).unwrap();
+        let publication = catalog::publish(
+            &templates,
+            &[catalog::Selection {
+                public_id: "sx-test",
+                display_name: "Synthetic test",
+                provider_id: "mock",
+                upstream_model: "deepseek-flash",
+            }],
+        )
+        .unwrap();
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let switch = PreparedSwitch::inspect(
+            &home.join("config.toml"),
+            &data,
+            &publication,
+            address,
+            "sx-test",
+        )
+        .unwrap();
+        let catalog_path = switch.catalog_path().to_path_buf();
+        switch.apply().unwrap();
+        let mut upstreams = HashMap::new();
+        upstreams.insert(
+            "mock".into(),
+            Upstream::with_secret(
+                "http://127.0.0.1:1/v1",
+                Secret::new("synthetic-only".into()),
+            )
+            .unwrap(),
+        );
+        let server = RunningRouter::start(
+            listener,
+            RouterState::new(address, "s".repeat(32), publication, upstreams).unwrap(),
+        )
+        .unwrap();
+        session.active = Some(ActiveRoute {
+            server,
+            address,
+            target: home.join("config.toml"),
+            catalog_path,
+            public_models: HashSet::from(["sx-test".into()]),
+            cli_path: root.join("must-not-be-executed"),
+            provider_config: Secret::new(
+                std::fs::read_to_string(home.join("config.toml"))
+                    .unwrap()
+                    .parse::<toml_edit::DocumentMut>()
+                    .unwrap()["model_providers"][crate::config::PROVIDER_ID]
+                    .to_string(),
+            ),
+            token_reference: String::new(),
+        });
+        assert!(
+            session
+                .codex_launcher(&data, &root.join("another-home"))
+                .await
+                .unwrap_err()
+                .contains("目标配置目录")
+        );
+        let original = std::fs::read_to_string(home.join("config.toml")).unwrap();
+        for changed in [
+            original.replace("switchx_router", "external-provider"),
+            original.replace("sx-test", "unpublished-model"),
+            original.replace("catalog-", "another-catalog-"),
+            original.replace(&address.to_string(), "127.0.0.1:1"),
+            original.replace("SWITCHX_LOCAL_TOKEN", "EXTERNAL_KEY"),
+            original.replace(
+                "requires_openai_auth = false",
+                "requires_openai_auth = true",
+            ),
+            original.replace("wire_api = \"responses\"", "wire_api = \"chat\""),
+        ] {
+            std::fs::write(home.join("config.toml"), changed).unwrap();
+            assert!(
+                session
+                    .codex_launcher(&data, &home)
+                    .await
+                    .unwrap_err()
+                    .contains("外部修改")
+            );
+            assert!(!data.join("launch-codex.command").exists());
+        }
+        std::fs::write(home.join("config.toml"), original).unwrap();
+        session.active.take().unwrap().server.stop().await;
+        config_transaction::restore(&home.join("config.toml"), &data).unwrap();
+        std::fs::remove_dir_all(root).unwrap();
+    }
 
     #[test]
     fn selects_each_provider_once_and_only_the_matching_backup_model() {
