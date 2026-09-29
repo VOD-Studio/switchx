@@ -1,0 +1,111 @@
+import { ListView } from "std-widgets.slint";
+import { Theme } from "../tokens.slint";
+import { QuietButton, SurfaceCard, StatusPill } from "../components.slint";
+import { RequestRow } from "../view-models.slint";
+
+export component ActivityPage inherits VerticalLayout {
+    in property <bool> busy;
+    in property <[RequestRow]> requests;
+    in property <string> request-error;
+    callback refresh-requests();
+
+    spacing: 12px;
+    HorizontalLayout {
+        Text {
+            text: "最近 100 条已结束请求 · " + root.requests.length + " 条";
+            color: Theme.primary-text;
+            font-size: 17px;
+            vertical-alignment: center;
+        }
+
+        QuietButton {
+            width: 100px;
+            text: "刷新记录";
+            enabled: !root.busy;
+            clicked => { root.refresh-requests(); }
+        }
+    }
+
+    Text {
+        text: "仅记录经过 SwitchX 路由的请求；正文与凭据不保存。手动刷新查看最新结果。";
+        color: Theme.muted-text;
+        font-size: 12px;
+        wrap: word-wrap;
+    }
+
+    if root.request-error != "": Text {
+        text: root.request-error;
+        color: Theme.warning;
+        wrap: word-wrap;
+    }
+    if root.requests.length == 0: Text {
+        text: root.busy ? "正在读取请求记录…" : "暂无请求记录。开启模型路由并完成请求后，可在这里查看结果。";
+        color: Theme.muted-text;
+        wrap: word-wrap;
+    }
+    ListView {
+        vertical-stretch: 1;
+        for request in root.requests: SurfaceCard {
+            height: (request.error == "" ? 132px : 160px) + (request.fallback == "" ? 0px : 28px);
+            VerticalLayout {
+                padding: 14px;
+                spacing: 6px;
+                HorizontalLayout {
+                    Text {
+                        text: request.time;
+                        color: Theme.muted-text;
+                        font-size: 12px;
+                        vertical-alignment: center;
+                    }
+
+                    StatusPill {
+                        width: request.cancelled ? 176px : 100px;
+                        label: request.status;
+                        ink: request.completed ? Theme.success : request.cancelled ? Theme.muted-text : Theme.warning;
+                    }
+                }
+
+                Text {
+                    text: request.route;
+                    color: Theme.primary-text;
+                    font-size: 14px;
+                    overflow: elide;
+                }
+
+                if request.fallback != "": Text {
+                    text: request.fallback;
+                    color: Theme.muted-text;
+                    font-size: 12px;
+                    overflow: elide;
+                }
+
+                Text {
+                    text: request.timing;
+                    color: Theme.muted-text;
+                    font-size: 12px;
+                }
+
+                Text {
+                    text: request.detail;
+                    color: Theme.muted-text;
+                    font-size: 10px;
+                    overflow: elide;
+                }
+
+                if request.error != "": Text {
+                    text: request.error;
+                    color: request.cancelled ? Theme.muted-text : Theme.warning;
+                    font-size: 12px;
+                    overflow: elide;
+                }
+            }
+        }
+    }
+
+    Text {
+        text: "“正常完成”表示已收到上游完成信号；客户端断开无法判断是否由用户主动取消。用量与费用统计尚未接入。";
+        color: Theme.muted-text;
+        font-size: 12px;
+        wrap: word-wrap;
+    }
+}
