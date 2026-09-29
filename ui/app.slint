@@ -102,6 +102,11 @@ export component AppWindow inherits Window {
     in-out property <[string]> subscription-account-ids: [];
     in-out property <[string]> subscription-account-options: [];
     in-out property <int> subscription-account-choice: 0;
+    in-out property <string> subscription-auth-json: "";
+    in-out property <string> subscription-auth-error: "";
+    in-out property <bool> config-editor-updating: false;
+    in-out property <int> subscription-editor-generation: 0;
+    in-out property <bool> subscription-editor-pending: false;
     in-out property <bool> delete-confirm: false;
     in-out property <string> edit-id: "";
     in-out property <string> edit-name: "";
@@ -192,6 +197,19 @@ export component AppWindow inherits Window {
         root.route-preview-ready = false;
         root.direct-preview-ready = false;
         root.auth-status = "此目录的官方登录状态尚未检查";
+        if (root.subscription-editor-open || root.subscription-editor-pending) { root.cancel-subscription-editor(); }
+    }
+    changed active-page => {
+        if (root.active-page != 1 && (root.subscription-editor-open || root.subscription-editor-pending)) { root.cancel-subscription-editor(); }
+    }
+    changed subscription-editor-open => {
+        if (!root.subscription-editor-open) {
+            root.subscription-auth-json = "";
+            root.subscription-auth-error = "";
+        }
+    }
+    changed subscription-account-choice => {
+        if (root.subscription-editor-open && !root.config-editor-updating) { root.load-subscription-auth(); }
     }
     changed route-port => { root.route-preview-ready = false; }
     changed default-model => {
@@ -237,6 +255,13 @@ export component AppWindow inherits Window {
     callback begin-provider-editor(string);
     callback begin-subscription-editor(string);
     callback save-subscription(string, string, string);
+    callback cancel-subscription-editor();
+    callback load-subscription-auth();
+    callback format-subscription-auth();
+    callback subscription-auth-edited();
+    callback subscription-config-edited();
+    callback update-subscription-context();
+    callback update-subscription-common();
     callback update-provider-config-preview();
     callback open-common-config();
     callback extract-common-config();
@@ -715,7 +740,7 @@ export component AppWindow inherits Window {
                 }
             }
 
-            if root.active-page == 1 && !root.common-config-editor-open: ScrollView {
+            if root.active-page == 1 && !root.common-config-editor-open && !root.subscription-editor-open: ScrollView {
                 vertical-stretch: 1;
                 VerticalLayout {
                     spacing: 12px;
@@ -783,101 +808,6 @@ export component AppWindow inherits Window {
                         color: Theme.warning;
                         font-size: 13px;
                         wrap: word-wrap;
-                    }
-
-                    if root.subscription-editor-open: SurfaceCard {
-                        height: 330px;
-                        VerticalLayout {
-                            padding: 18px;
-                            spacing: 12px;
-                            Text {
-                                text: root.subscription-id == "" ? "添加 ChatGPT 订阅连接" : "编辑 ChatGPT 订阅连接";
-                                color: Theme.primary-text;
-                                font-size: 17px;
-                                font-weight: 600;
-                            }
-
-                            HorizontalLayout {
-                                spacing: 8px;
-                                Text {
-                                    width: 92px;
-                                    text: "名称";
-                                    color: Theme.muted-text;
-                                    vertical-alignment: center;
-                                }
-
-                                LineEdit {
-                                    text <=> root.subscription-name;
-                                    placeholder-text: "例如 ChatGPT · 工作账号";
-                                    accessible-label: "ChatGPT 订阅连接名称";
-                                    enabled: !root.busy && !root.config-managed;
-                                }
-                            }
-
-                            HorizontalLayout {
-                                spacing: 8px;
-                                Text {
-                                    width: 92px;
-                                    text: "绑定账号";
-                                    color: Theme.muted-text;
-                                    vertical-alignment: center;
-                                }
-
-                                ComboBox {
-                                    model: root.subscription-account-options;
-                                    current-index <=> root.subscription-account-choice;
-                                    accessible-label: "为订阅连接选择已保存账号";
-                                    enabled: !root.busy && !root.config-managed;
-                                }
-
-                                QuietButton {
-                                    text: "管理 ChatGPT 账号";
-                                    enabled: !root.busy;
-                                    clicked => { root.active-page = 5; }
-                                }
-                            }
-
-                            Text {
-                                text: root.subscription-binding-label;
-                                color: Theme.muted-text;
-                                font-size: 12px;
-                                wrap: word-wrap;
-                            }
-
-                            Text {
-                                text: "保存绑定不会修改 Codex 登录。多个订阅连接可同时使用各自的账号；官方模型列表来自 CLI 内置目录，实际权限以请求为准。";
-                                color: Theme.muted-text;
-                                font-size: 12px;
-                                wrap: word-wrap;
-                            }
-
-                            HorizontalLayout {
-                                spacing: 8px;
-                                QuietButton {
-                                    text: "保存订阅连接";
-                                    primary: true;
-                                    enabled: !root.busy && !root.config-managed && root.subscription-name != "" && (root.subscription-id != "" || root.subscription-account-choice > 0);
-                                    clicked => {
-                                        root.save-subscription(root.subscription-id, root.subscription-name, root.subscription-account-ids[root.subscription-account-choice]);
-                                    }
-                                }
-
-                                QuietButton {
-                                    text: "取消";
-                                    enabled: !root.busy;
-                                    clicked => { root.subscription-editor-open = false; }
-                                }
-
-                                if root.subscription-id != "": QuietButton {
-                                    text: root.delete-confirm ? "确认删除上游" : "删除上游";
-                                    enabled: !root.busy && !root.config-managed;
-                                    clicked => {
-                                        if root.delete-confirm { root.delete-provider(root.subscription-id); }
-                                        else { root.delete-confirm = true; }
-                                    }
-                                }
-                            }
-                        }
                     }
 
                     if root.editor-open: SurfaceCard {
@@ -1317,6 +1247,245 @@ export component AppWindow inherits Window {
                                     root.inspect-direct(provider.id, root.config-home);
                                 }
                             }
+                        }
+                    }
+                }
+            }
+
+            if root.active-page == 1 && root.subscription-editor-open && !root.common-config-editor-open: SurfaceCard {
+                vertical-stretch: 1;
+                VerticalLayout {
+                    padding: 18px;
+                    spacing: 12px;
+                    Text {
+                        text: root.subscription-id == "" ? "添加 ChatGPT 订阅连接" : "编辑 ChatGPT 订阅连接";
+                        color: Theme.primary-text;
+                        font-size: 17px;
+                        font-weight: 600;
+                    }
+
+                    ScrollView {
+                        vertical-stretch: 1;
+                        VerticalLayout {
+                            spacing: 12px;
+                            HorizontalLayout {
+                                height: 36px;
+                                spacing: 8px;
+                                Text {
+                                    width: 92px;
+                                    text: "名称";
+                                    color: Theme.muted-text;
+                                    vertical-alignment: center;
+                                }
+
+                                LineEdit {
+                                    text <=> root.subscription-name;
+                                    placeholder-text: "例如 ChatGPT · 工作账号";
+                                    accessible-label: "ChatGPT 订阅连接名称";
+                                    enabled: !root.busy && !root.config-managed;
+                                }
+                            }
+
+                            HorizontalLayout {
+                                height: 36px;
+                                spacing: 8px;
+                                Text {
+                                    width: 92px;
+                                    text: "绑定账号";
+                                    color: Theme.muted-text;
+                                    vertical-alignment: center;
+                                }
+
+                                ComboBox {
+                                    model: root.subscription-account-options;
+                                    current-index <=> root.subscription-account-choice;
+                                    accessible-label: "为订阅连接选择已保存账号";
+                                    enabled: !root.busy && !root.config-managed;
+                                }
+
+                                QuietButton {
+                                    text: "管理 ChatGPT 账号";
+                                    enabled: !root.busy;
+                                    clicked => { root.active-page = 5; }
+                                }
+                            }
+
+                            Text {
+                                text: root.subscription-binding-label;
+                                color: Theme.muted-text;
+                                font-size: 12px;
+                                wrap: word-wrap;
+                            }
+
+                            HorizontalLayout {
+                                height: 32px;
+                                Text {
+                                    text: "auth.json (JSON)";
+                                    color: Theme.primary-text;
+                                    font-size: 14px;
+                                    font-weight: 600;
+                                    vertical-alignment: center;
+                                }
+
+                                Rectangle {
+                                    horizontal-stretch: 1;
+                                }
+
+                                QuietButton {
+                                    text: "格式化";
+                                    enabled: !root.busy;
+                                    clicked => { root.format-subscription-auth(); }
+                                }
+                            }
+
+                            TextEdit {
+                                height: 208px;
+                                vertical-stretch: 0;
+                                text <=> root.subscription-auth-json;
+                                edited(text) => { root.subscription-auth-edited(); }
+                                wrap: no-wrap;
+                                font-family: "Menlo";
+                                font-size: 12px;
+                                enabled: !root.busy && !root.config-managed;
+                                accessible-label: "ChatGPT auth.json 编辑内容";
+                            }
+
+                            if root.subscription-auth-error != "": Text {
+                                text: root.subscription-auth-error;
+                                color: Theme.error;
+                                font-size: 12px;
+                                wrap: word-wrap;
+                            }
+
+                            Text {
+                                text: "可查看和修改所选账号的登录 JSON。修改后保存到私有账号文件；需要切换 Codex 登录时，在账号管理中点击“写入 Codex 登录”。";
+                                color: Theme.muted-text;
+                                font-size: 12px;
+                                wrap: word-wrap;
+                            }
+
+                            HorizontalLayout {
+                                height: 32px;
+                                spacing: 12px;
+                                Text {
+                                    text: "config.toml (TOML)";
+                                    color: Theme.primary-text;
+                                    font-size: 14px;
+                                    font-weight: 600;
+                                    vertical-alignment: center;
+                                }
+
+                                Rectangle {
+                                    horizontal-stretch: 1;
+                                }
+
+                                CheckBox {
+                                    text: "应用通用配置";
+                                    checked <=> root.edit-use-common-config;
+                                    toggled => { root.update-subscription-common(); }
+                                    enabled: !root.busy && !root.config-managed;
+                                }
+
+                                QuietButton {
+                                    text: "编辑通用配置";
+                                    enabled: !root.busy && !root.config-managed;
+                                    clicked => { root.open-common-config(); }
+                                }
+                            }
+
+                            HorizontalLayout {
+                                height: 32px;
+                                spacing: 12px;
+                                CheckBox {
+                                    text: "1M 上下文窗口";
+                                    checked <=> root.edit-context-1m;
+                                    toggled => { root.update-subscription-context(); }
+                                    accessible-label: "订阅一百万 token 上下文窗口";
+                                    enabled: !root.busy && !root.config-managed;
+                                }
+
+                                Text {
+                                    text: "压缩阈值";
+                                    color: Theme.muted-text;
+                                    vertical-alignment: center;
+                                }
+
+                                LineEdit {
+                                    width: 144px;
+                                    horizontal-stretch: 0;
+                                    text <=> root.edit-compact-limit;
+                                    edited(text) => { root.update-subscription-context(); }
+                                    input-type: number;
+                                    accessible-label: "订阅自动压缩 token 阈值";
+                                    enabled: root.edit-context-1m && !root.busy && !root.config-managed;
+                                }
+
+                                Text {
+                                    text: "tokens";
+                                    color: Theme.muted-text;
+                                    vertical-alignment: center;
+                                }
+
+                                Rectangle {
+                                    horizontal-stretch: 1;
+                                }
+                            }
+
+                            TextEdit {
+                                height: 240px;
+                                vertical-stretch: 0;
+                                text <=> root.edit-config-preview;
+                                edited(text) => { root.subscription-config-edited(); }
+                                wrap: no-wrap;
+                                font-family: "Menlo";
+                                font-size: 12px;
+                                enabled: !root.busy && !root.config-managed;
+                                accessible-label: "ChatGPT config.toml 编辑内容";
+                            }
+
+                            if root.edit-config-error != "": Text {
+                                text: root.edit-config-error;
+                                color: Theme.error;
+                                font-size: 12px;
+                                wrap: word-wrap;
+                            }
+
+                            Text {
+                                text: "保存后在下次开启路由时应用默认模型所属连接的配置。可编辑模型和非敏感设置；官方地址与路由认证由 SwitchX 管理。";
+                                color: Theme.muted-text;
+                                font-size: 12px;
+                                wrap: word-wrap;
+                            }
+                        }
+                    }
+
+                    HorizontalLayout {
+                        height: 36px;
+                        spacing: 8px;
+                        if root.subscription-id != "": QuietButton {
+                            text: root.delete-confirm ? "确认删除上游" : "删除上游";
+                            enabled: !root.busy && !root.config-managed;
+                            clicked => {
+                                if root.delete-confirm { root.delete-provider(root.subscription-id); }
+                                else { root.delete-confirm = true; }
+                            }
+                        }
+
+                        Rectangle {
+                            horizontal-stretch: 1;
+                        }
+
+                        QuietButton {
+                            text: "取消";
+                            enabled: !root.busy;
+                            clicked => { root.cancel-subscription-editor(); }
+                        }
+
+                        QuietButton {
+                            text: "保存订阅连接";
+                            primary: true;
+                            enabled: !root.busy && !root.config-managed && root.subscription-name != "" && root.edit-config-error == "" && root.subscription-auth-error == "";
+                            clicked => { root.save-subscription(root.subscription-id, root.subscription-name, root.subscription-account-ids[root.subscription-account-choice]); }
                         }
                     }
                 }

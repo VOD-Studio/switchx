@@ -1078,6 +1078,7 @@ mod tests {
             use_common_config: true,
             context_1m: true,
             compact_limit: 900000,
+            ..Default::default()
         };
         let common = "approval_policy = \"never\"\n\n[features]\nhooks = true\nmemories = true\n\n[tui]\nnotifications = true\n";
         let reference = format!("router-{}", "b".repeat(32));
@@ -1129,6 +1130,67 @@ mod tests {
                 .is_empty()
         );
         assert!(!home.state().join(JOURNAL_NAME).exists());
+    }
+
+    #[test]
+    fn subscription_raw_settings_restore_through_the_existing_routed_overlay() {
+        let home = TestHome::new();
+        let original = "model = 'old'\napproval_policy = 'on-request' # keep preference\n[features]\nhooks = false\n[mcp_servers.local]\ncommand = 'old-command' # keep MCP note\n[mcp_servers.local.env]\nSERVICE_API_KEY = 'synthetic-existing-secret'\n";
+        fs::write(home.config(), original).unwrap();
+        let options = crate::provider_config::subscription_options_from_config(
+            &crate::provider_config::CodexOptions::default(),
+            "model = 'upstream-model-metadata'\napproval_policy = 'never'\nmodel_context_window = 128000\nmodel_auto_compact_token_limit = 96000\nmodel_reasoning_effort = 'max'\n[features]\nhooks = true\n[mcp_servers.local]\ncommand = 'new-command'\n[mcp_servers.local.env]\nLANG = 'en_US'\n",
+        ).unwrap();
+        let prepared = inspect(&home);
+        let managed: DocumentMut = prepared.preview.proposed.parse().unwrap();
+        let prepared = prepared.with_codex_options(&options, "").unwrap();
+        let applied: DocumentMut = prepared.preview.proposed.parse().unwrap();
+        assert_eq!(applied["model"].as_str(), managed["model"].as_str());
+        assert_eq!(
+            applied["model_provider"].as_str(),
+            managed["model_provider"].as_str()
+        );
+        assert_eq!(
+            applied["model_catalog_json"].as_str(),
+            managed["model_catalog_json"].as_str()
+        );
+        assert_eq!(
+            applied["model_providers"].to_string(),
+            managed["model_providers"].to_string()
+        );
+        assert_eq!(applied["model_context_window"].as_integer(), Some(128000));
+        assert_eq!(
+            applied["mcp_servers"]["local"]["command"].as_str(),
+            Some("new-command")
+        );
+        prepared.apply().unwrap();
+        let journal = fs::read_to_string(home.state().join(JOURNAL_NAME)).unwrap();
+        assert!(!journal.contains("synthetic-existing-secret"));
+        assert!(!journal.contains("keep preference"));
+        assert!(!journal.contains("keep MCP note"));
+        let result = restore(&home.config(), &home.state()).unwrap();
+        assert!(result.conflicts.is_empty(), "{:?}", result.conflicts);
+        let restored = fs::read_to_string(home.config()).unwrap();
+        let document: DocumentMut = restored.parse().unwrap();
+        assert_eq!(document["approval_policy"].as_str(), Some("on-request"));
+        assert_eq!(document["features"]["hooks"].as_bool(), Some(false));
+        assert_eq!(
+            document["mcp_servers"]["local"]["command"].as_str(),
+            Some("old-command")
+        );
+        assert_eq!(
+            document["mcp_servers"]["local"]["env"]["SERVICE_API_KEY"].as_str(),
+            Some("synthetic-existing-secret")
+        );
+        assert!(
+            document["mcp_servers"]["local"]["env"]
+                .get("LANG")
+                .is_none()
+        );
+        assert!(document.get("model_context_window").is_none());
+        assert!(document.get("model_reasoning_effort").is_none());
+        assert!(restored.contains("# keep preference"));
+        assert!(restored.contains("# keep MCP note"));
     }
 
     #[test]
