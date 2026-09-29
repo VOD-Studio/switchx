@@ -2,7 +2,7 @@
 
 Rust + Slint 原生桌面应用。M2 直连已完成 macOS / DeepSeek 验收，M3 已实现模型目录、API 与 ChatGPT 订阅账号路由；目前仍为模型路由预览版，真实官方上游和认证生命周期尚待验收。完整范围见 `docs/SWITCHX-PLAN.md`。
 
-原生界面现可管理上游、直连配置、模型资料、多个 ChatGPT 账号与 loopback 路由。SQLite 保存供应商配置、明文 API Key、模型资料和账号绑定；ChatGPT OAuth 账号单独保存在私有 JSON 文件中，独立的本地路由令牌仍使用系统凭据存储。API Key 保存方式按用户选择对齐 CC Switch，详见下文。仓库中的**合成目录夹具**仅用于测试，不能作为真实模型能力或发布模板；`catalog_probe` 仍只输出夹具，不读取账号、凭据或现有 Codex 配置。
+原生界面现可管理上游、直连配置、模型资料、多个 ChatGPT 账号与 loopback 路由。SQLite 保存供应商配置、明文 API Key、本地路由令牌、模型资料和账号绑定；ChatGPT OAuth 账号单独保存在私有 JSON 文件中。API Key 保存方式按用户选择对齐 CC Switch，详见下文。仓库中的**合成目录夹具**仅用于测试，不能作为真实模型能力或发布模板；`catalog_probe` 仍只输出夹具，不读取账号、凭据或现有 Codex 配置。
 
 ```sh
 cargo run
@@ -24,7 +24,7 @@ M1 收口检查（2026-09-24，macOS 调试 bundle，隔离的 `SWITCHX_DATA_DIR
 
 `tests/fixtures/published-models.json` 与 `tests/fixtures/routed-user-config.toml` 是合成目录和 Codex 配置的 golden fixtures，用于检查 schema 输出与无关 TOML 字段、注释的保留。
 
-`cargo run --example keychain_probe` 在系统凭据存储中写入一次独立的合成测试条目，读取后立即删除；不读取现有账号数据。macOS 本机测试已通过。
+`cargo run --example local_token_probe` 在独立临时 SQLite 中保存一个合成本地令牌，通过只读连接读取，再删除令牌和临时目录；不访问真实账号或系统凭据。
 
 `cargo run --example config_probe -- /tmp/switchx-models.json` 只把合成 `config.toml` 差异预览输出到 stdout。预览保留其他 provider、MCP、项目、安全设置和注释；它不写用户配置。生成的 `env_key = "SWITCHX_LOCAL_TOKEN"` 仅在启动 Codex 的环境已提供本地令牌时才可用于请求。
 
@@ -42,7 +42,7 @@ M1 收口检查（2026-09-24，macOS 调试 bundle，隔离的 `SWITCHX_DATA_DIR
 
 原生“上游供应商”页面现可添加、编辑、删除 Responses 上游，保存名称、API 地址、模型 ID 和 API Key。API Key 按用户选择以明文 JSON 存在 SQLite `providers.settings_config` 的 `auth.OPENAI_API_KEY` 字段，编辑输入保持密码形式，留空保留已有 Key；列表、状态、TOML 预览和恢复 journal 不显示或保存 Key。数据库及其副本包含凭据，本版不提供数据库加密或凭据同步。旧记录迁移后保留上游资料，缺少模型 ID 或凭据时可重新输入。输入地址只允许 HTTPS 或 `127.0.0.1` HTTP，拒绝 URL 内的用户名、密码、查询参数与片段。“检查”读取上游 `/models` 并核对所选 ID；它不发送推理请求，也不证明工具调用兼容。直连生效期间暂不允许编辑或删除上游，避免已配置的客户端拿到另一上游的 Key。
 
-SQLite 自动升级至 v8，保留原有资料。API Key 仅从 SQLite 读取，不再支持旧钥匙串 Key 迁移或旧版两参数 credential helper；数据库中缺少 Key 时须在编辑表单重新输入。不会读取或清理旧 API Key 钥匙串条目；已有旧 helper 配置须先恢复，再重新预览应用。本地路由令牌继续保存在系统凭据库。验证使用合成凭据与临时数据库，跨平台运行尚待验收。
+SQLite 自动升级至 v8，保留原有资料。API Key 仅从 SQLite 读取，数据库中缺少 Key 时须在编辑表单重新输入。本地路由令牌也改存 SQLite；程序不再依赖 keyring，不读取、迁移或清理旧钥匙串条目。已有旧 helper 配置须先恢复，再重新预览应用；新的 helper 使用显式绝对数据目录。合成存储、独立 helper 与本机 CLI 检查已通过，见 [本地令牌保存检查](docs/acceptance/M3-local-token-storage-2026-09-29.md)。
 
 “配置与恢复”页面可选择绝对路径的 Codex 配置目录、读取当前配置、将当前自定义上游的**元数据**填入新建表单，以及查看 `codex login status` 报告的 ChatGPT 登录、API Key 登录或未知状态。“导入当前上游”不复制原配置中的凭据，也不读取 `auth.json`；新建上游须重新输入自己的 API Key。ChatGPT 账号另有明确的“导入当前 Codex 账号”入口，见下文。`SWITCHX_CODEX_CLI` 可指向要检查的 CLI；默认优先使用本机 ChatGPT.app 内的 CLI。
 
@@ -119,6 +119,8 @@ CODEX_HOME="/absolute/codex-home" codex --no-daemon
 
 仅含 API 模型的原生路由使用独立 `auth.command` helper 获取本地令牌，无需手工设置终端环境变量。上游 Key 保存于 SQLite，不进入 Codex 配置、请求记录或恢复 journal；API 出站请求只使用映射上游的 Key。原生 SSE 透传，取消不重放请求；服务器状态引用始终拒绝，API 模型另拒绝加密推理与压缩状态续接。应用运行中或有恢复记录时禁止修改上游、模型和绑定。成功的 `/models` 检查和目录解析不代表真实工具能力已验证。[Codex 配置约定](https://learn.chatgpt.com/docs/config-file/config-reference)
 
+每次发布生成独立的随机本地令牌，由 64 个十六进制字符组成，以明文保存在 SQLite `app_settings` 的 `local_token:router-<32hex>` 键下。API 路由的 `local-token REF ABS_DATA_DIR` helper 只读打开明确指定的数据库，不创建或迁移数据库；令牌缺失、格式无效或数据库不可用时拒绝提供凭据。配置恢复有冲突时保留令牌、路由与 journal；配置恢复完成后停止路由，删除令牌，最后移除 journal。令牌删除失败时保留 journal 和引用，排除数据库问题后可再次恢复，重启应用后也可重试。旧版无数据目录的 helper 不兼容，须先恢复原配置再重新发布。新路径的存储、helper、失败清理和恢复重试结果见 [本地令牌保存检查](docs/acceptance/M3-local-token-storage-2026-09-29.md)。
+
 可复跑的隔离验收：
 
 ```sh
@@ -132,7 +134,9 @@ cargo run --locked --example routed_cli_probe -- --desktop
 
 `routed_cli_probe` 使用本机 CLI、两个本地假上游、临时配置和合成供应商凭据，检查目录兼容性、同名模型映射、helper 鉴权、文件工具轮次及恢复冲突，结束后恢复并清理；恢复失败则保留目录。2026-09-28 的旧版钥匙串存储已通过 Codex CLI 0.156.1 探针与原生页面配置的实际 CLI 请求，详见 [M3 首批验收记录](docs/acceptance/M3-2026-09-28.md)。该历史结果不验证本轮 SQLite API Key 存储变更，没有真实上游调用。
 
-2026-09-29 的 `--http-only` 检查已验证生产 `RouteSession` 从 SQLite 读取两条合成 Key，将公开模型分别转发到正确假上游，并通过 SSE 完成记录、凭据隔离与恢复冲突检查。完整 CLI 探针在独立 helper 读取本地令牌时超时，因此本轮不计为 CLI 请求或文件工具验收；没有调用真实上游。详见 [API Key 存储验收记录](docs/acceptance/M3-api-key-storage-2026-09-29.md)。
+本地令牌改存 SQLite 之前，2026-09-29 的 API Key 存储阶段通过了 `--http-only` 检查，但完整 CLI 在 helper 读取本地令牌时超时；该历史阶段没有完成 CLI 请求或文件工具验收，见 [原检查记录](docs/acceptance/M3-api-key-storage-2026-09-29.md)。
+
+本地令牌改存 SQLite 后，126 项自动检查通过，当前默认 `routed_cli_probe` 在 Codex CLI `0.158.0-alpha.2.1` 中完成两模型映射和 Alpha 文件工具两轮。独立 helper、写入失败时不发布、删除失败后模拟重启重试、直连 helper 回归及 macOS bundle 构建均通过；临时目录已清理。详见 [本地令牌保存检查](docs/acceptance/M3-local-token-storage-2026-09-29.md)。真实上游、Windows/Linux 和原生界面仍未验收。
 
 单独验证新启动器和模型菜单：
 
@@ -169,7 +173,7 @@ cargo run --locked --example routed_cli_probe -- --desktop-models
 6. 官方 401/403 的状态和响应正文原样返回 Codex，由 Codex 执行自己的认证恢复；界面显示失效、权限不足或工作区变化的提示。SwitchX 不重放请求，不把订阅连接用于自动备用切换。仍失败时可重新登录。
 7. 点击“切回 API 预览”会先恢复原配置，再取消订阅映射的发布选择，生成仅含已选 API 模型的预览。确认后点击“开启路由”，不要求订阅登录。跨官方与第三方上游时须新建会话。
 
-多个账号的 refresh token、ID token 和账号资料保存在 `SWITCHX_DATA_DIR/codex_oauth_auth.json`，采用原子文件写入，Unix 文件权限为 `0600`；access token 仅在内存中缓存。显式使用账号时，会将 Codex 的 `cli_auth_credentials_store` 设为 `"file"`，并把完整 token bundle 写入目标 `auth.json`，供原生客户端运行和续期；覆盖已有完整 ChatGPT 文件登录前会先保存该账号。账号文件依赖操作系统文件权限保护，不提供文件加密或跨设备同步。SQLite 保存供应商 API Key，不保存 ChatGPT OAuth token；本地路由令牌仍保存在系统凭据存储中。
+多个账号的 refresh token、ID token 和账号资料保存在 `SWITCHX_DATA_DIR/codex_oauth_auth.json`，采用原子文件写入，Unix 文件权限为 `0600`；access token 仅在内存中缓存。显式使用账号时，会将 Codex 的 `cli_auth_credentials_store` 设为 `"file"`，并把完整 token bundle 写入目标 `auth.json`，供原生客户端运行和续期；覆盖已有完整 ChatGPT 文件登录前会先保存该账号。账号文件依赖操作系统文件权限保护，不提供文件加密或跨设备同步。SQLite 保存供应商 API Key 与本地路由令牌，不保存 ChatGPT OAuth token。
 
 含订阅模型的配置使用 `requires_openai_auth = true`，通过独立 `x-switchx-local-token` 请求头校验本地访问。该本地令牌写入仅当前用户可读的配置与恢复 journal；macOS 上两者权限为 `0600`，不会转发到上游。保存账号的路由只使用绑定账号的 Bearer 与工作区，忽略客户端另带的官方认证；跟随原生登录时使用客户端认证。官方模型只向已验证的 ChatGPT 目的地发送认证与允许的 Codex 协议头；API 模型丢弃这些信息并注入自己的 Key。Cookie 和任意客户端头均不复制到上游。
 
@@ -202,7 +206,7 @@ cargo run --locked --example routed_live_probe -- /absolute/switchx-data PUBLIC_
 cargo run --locked --example routed_live_probe -- /absolute/switchx-data FIRST_PUBLIC_ID SECOND_PUBLIC_ID
 ```
 
-源数据库只读打开。选定供应商配置、API Key 和模型资料复制到权限受限的临时 SQLite 数据库，并在独立临时 `CODEX_HOME` 中通过生产 `RouteSession` 预览、检查 `/models`、发布目录和启用 helper 路由。本地路由令牌仍通过系统凭据库存取。只在临时副本中启用选定模型并清除备用设置，避免验收请求进入未选定的上游；原有选择与备用设置保留。
+源数据库只读打开。选定供应商配置、API Key 和模型资料复制到权限受限的临时 SQLite 数据库，并在独立临时 `CODEX_HOME` 中通过生产 `RouteSession` 预览、检查 `/models`、发布目录和启用 helper 路由。本地路由令牌在该临时数据库中保存和清理。只在临时副本中启用选定模型并清除备用设置，避免验收请求进入未选定的上游；原有选择与备用设置保留。
 
 每个模型由本机 Codex CLI 完成精确短回答和“读取随机标记文件 → 工具结果 → 第二轮回答”。回答与工具检查和 `direct_live_probe` 共用；请求记录另外核对短回答至少一条、工具轮次至少两条正常完成记录，以及公开 ID、provider ID、实际模型、目录版本、HTTP 状态和首事件计时。清除继承的 API Key、base URL 与本地令牌环境变量；不读取用户配置或登录文件，不输出 Key、原始 CLI 错误或对话正文。这些真实模型调用可能计费。
 

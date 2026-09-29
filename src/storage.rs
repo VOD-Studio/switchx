@@ -437,6 +437,45 @@ impl Store {
         )
     }
 
+    pub fn put_local_token(&self, reference: &str, token: &Secret) -> Result<()> {
+        let key = local_token_key(reference)?;
+        validate_local_token(token.expose())?;
+        self.connection.execute(
+            "INSERT INTO app_settings (key, value) VALUES (?1, ?2)
+             ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+            params![key, token.expose()],
+        )?;
+        Ok(())
+    }
+
+    pub fn local_token(&self, reference: &str) -> Result<Option<Secret>> {
+        use rusqlite::OptionalExtension;
+        let key = local_token_key(reference)?;
+        let token: Option<String> = self
+            .connection
+            .query_row(
+                "SELECT value FROM app_settings WHERE key = ?1",
+                [key],
+                |row| row.get(0),
+            )
+            .optional()?;
+        token
+            .map(|token| {
+                let token = Secret::new(token);
+                validate_local_token(token.expose())?;
+                Ok(token)
+            })
+            .transpose()
+    }
+
+    pub fn delete_local_token(&self, reference: &str) -> Result<()> {
+        self.connection.execute(
+            "DELETE FROM app_settings WHERE key = ?1",
+            [local_token_key(reference)?],
+        )?;
+        Ok(())
+    }
+
     /// The subscription provider's explicit account binding; absent follows native Codex login.
     /// `default` resolves the managed account default when preparing a new route.
     pub fn chatgpt_account_binding(&self) -> Result<Option<String>> {
@@ -639,6 +678,23 @@ impl Store {
     }
 }
 
+fn local_token_key(reference: &str) -> Result<String> {
+    if !reference
+        .strip_prefix("router-")
+        .is_some_and(|id| id.len() == 32 && id.bytes().all(|byte| byte.is_ascii_hexdigit()))
+    {
+        return Err(rusqlite::Error::InvalidQuery);
+    }
+    Ok(format!("local_token:{reference}"))
+}
+
+fn validate_local_token(token: &str) -> Result<()> {
+    if token.len() != 64 || !token.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+        return Err(rusqlite::Error::InvalidQuery);
+    }
+    Ok(())
+}
+
 fn provider_settings(settings: &str) -> Result<serde_json::Value> {
     let settings: serde_json::Value =
         serde_json::from_str(settings).map_err(|_| rusqlite::Error::InvalidQuery)?;
@@ -675,6 +731,101 @@ fn settings_with_key(settings: &str, key: &Secret) -> Result<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn local_tokens_persist_and_delete_only_the_selected_reference() {
+        let path = std::env::temp_dir().join(format!(
+            "switchx-local-token-{}.sqlite",
+            crate::app::new_id().unwrap()
+        ));
+        let first = format!("router-{}", "a".repeat(32));
+        let second = format!("router-{}", "b".repeat(32));
+        let token = Secret::new("a".repeat(64));
+        {
+            let store = Store::open(&path).unwrap();
+            store.put_common_codex_config("keep-config").unwrap();
+            store.bind_chatgpt_account(Some("default")).unwrap();
+            store.put_local_token(&first, &token).unwrap();
+            store
+                .put_local_token(&second, &Secret::new("b".repeat(64)))
+                .unwrap();
+        }
+        {
+            let store = Store::open_read_only(&path).unwrap();
+            assert_eq!(
+                store.local_token(&first).unwrap().unwrap().expose(),
+                token.expose()
+            );
+            assert!(!format!("{:?}", store.local_token(&first).unwrap()).contains(token.expose()));
+            assert!(store.delete_local_token(&first).is_err());
+        }
+        let store = Store::open(&path).unwrap();
+        store.delete_local_token(&first).unwrap();
+        store.delete_local_token(&first).unwrap();
+        assert!(store.local_token(&first).unwrap().is_none());
+        assert_eq!(
+            store.local_token(&second).unwrap().unwrap().expose(),
+            "b".repeat(64)
+        );
+        assert_eq!(store.common_codex_config().unwrap(), "keep-config");
+        assert_eq!(
+            store.chatgpt_account_binding().unwrap().as_deref(),
+            Some("default")
+        );
+        assert_eq!(
+            store
+                .connection
+                .query_row("PRAGMA user_version", [], |row| row.get::<_, i64>(0))
+                .unwrap(),
+            8
+        );
+        drop(store);
+        std::fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    fn local_tokens_reject_invalid_references_and_values_without_exposing_them() {
+        let store = Store::open(Path::new(":memory:")).unwrap();
+        let reference = format!("router-{}", "a".repeat(32));
+        let token = Secret::new("a".repeat(64));
+        for invalid in [
+            "",
+            "../outside",
+            "router-a",
+            &format!("router-{}", "g".repeat(32)),
+        ] {
+            assert!(store.put_local_token(invalid, &token).is_err());
+            assert!(store.local_token(invalid).is_err());
+            assert!(store.delete_local_token(invalid).is_err());
+        }
+        for invalid in [
+            String::new(),
+            "a".repeat(63),
+            "g".repeat(64),
+            format!("{}\n", "a".repeat(63)),
+        ] {
+            assert!(
+                store
+                    .put_local_token(&reference, &Secret::new(invalid))
+                    .is_err()
+            );
+        }
+        assert!(store.local_token(&reference).unwrap().is_none());
+        store
+            .connection
+            .execute(
+                "INSERT INTO app_settings (key, value) VALUES (?1, ?2)",
+                params![
+                    format!("local_token:{reference}"),
+                    "synthetic-private-invalid-token"
+                ],
+            )
+            .unwrap();
+        let error = store.local_token(&reference).unwrap_err().to_string();
+        assert!(!error.contains("synthetic-private-invalid-token"));
+        store.delete_local_token(&reference).unwrap();
+        assert!(store.local_token(&reference).unwrap().is_none());
+    }
 
     fn api_provider() -> ProviderRecord {
         ProviderRecord {

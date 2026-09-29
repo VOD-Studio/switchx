@@ -6,7 +6,7 @@
 //! `--live-probe` checks the real-route probe against these synthetic upstreams.
 //! `--models` checks two distinct models on one provider, including a manual catalog.
 //! `--desktop-models` opens that fixture for discovery and mapping UI checks.
-//! `--http-only` checks production forwarding without a separate CLI keychain reader.
+//! `--http-only` checks production forwarding without invoking the CLI token helper.
 
 use std::{
     path::{Path, PathBuf},
@@ -25,12 +25,7 @@ use axum::{
     routing::{get, post},
 };
 use serde_json::{Value, json};
-use switchx::{
-    app, client, config_transaction,
-    credentials::{CredentialStore, ROUTER_TOKEN_SERVICE},
-    routed::RouteSession,
-    storage::Store,
-};
+use switchx::{app, client, config_transaction, routed::RouteSession, storage::Store};
 use tokio::{net::TcpListener, process::Command, sync::mpsc, time::timeout};
 
 const ORIGINAL: &str = "model = \"original-model\" # keep\napproval_policy = \"never\"\n\n[mcp_servers.synthetic]\nenabled = false\ncommand = \"false\"\n";
@@ -508,6 +503,41 @@ async fn headless(
     )?;
     store.put_provider(&original_provider)?;
 
+    let refused = TcpListener::bind("127.0.0.1:0").await?;
+    let refused_address = refused.local_addr()?;
+    drop(refused);
+    let connection = rusqlite::Connection::open(data.join("switchx.sqlite"))?;
+    connection.execute_batch(
+        "CREATE TRIGGER refuse_synthetic_local_token BEFORE INSERT ON app_settings
+         WHEN NEW.key LIKE 'local_token:%'
+         BEGIN SELECT RAISE(ABORT, 'synthetic local token write failure'); END;",
+    )?;
+    session
+        .prepare(data, home, refused_address.port(), "sx-mock-alpha", helper)
+        .await?;
+    let failed = session
+        .apply(data, home, refused_address.port(), "sx-mock-alpha")
+        .await;
+    let token_count: i64 = connection.query_row(
+        "SELECT COUNT(*) FROM app_settings WHERE key LIKE 'local_token:%'",
+        [],
+        |row| row.get(0),
+    )?;
+    check(
+        failed.is_err_and(|error| error == "无法保存本地路由访问令牌")
+            && !session.is_running()
+            && config_transaction::recovery(data)?.is_none()
+            && std::fs::read_to_string(home.join("config.toml"))? == ORIGINAL
+            && token_count == 0,
+        "refused SQLite token write published a route, journal, token or configuration",
+    )?;
+    let released = TcpListener::bind(refused_address)
+        .await
+        .map_err(|_| "refused SQLite token write retained the router port")?;
+    drop(released);
+    connection.execute_batch("DROP TRIGGER refuse_synthetic_local_token")?;
+    drop(connection);
+
     if multiple {
         let extra = store
             .models()?
@@ -548,6 +578,12 @@ async fn headless(
         "active route allowed model edits",
     )?;
     let active = std::fs::read_to_string(home.join("config.toml"))?;
+    let token_reference = config_transaction::recovery(data)?
+        .and_then(|recovery| recovery.local_token_reference)
+        .ok_or("synthetic route's local token reference is missing")?;
+    let local_token = Store::open_read_only(&data.join("switchx.sqlite"))?
+        .local_token(&token_reference)?
+        .ok_or("synthetic route's local token was not saved in SQLite")?;
     check(
         active.contains("local-token") && !active.contains("env_key"),
         "generated config did not use the local token helper",
@@ -679,6 +715,12 @@ async fn headless(
             && config_transaction::recovery(data)?.is_some(),
         "recovery conflict did not preserve the running route and journal",
     )?;
+    check(
+        Store::open_read_only(&data.join("switchx.sqlite"))?
+            .local_token(&token_reference)?
+            .is_some_and(|saved| saved.expose() == local_token.expose()),
+        "recovery conflict did not retain the route's SQLite token",
+    )?;
     let conflicted = std::fs::read_to_string(home.join("config.toml"))?;
     check(
         conflicted.contains("external-choice"),
@@ -688,13 +730,43 @@ async fn headless(
         home.join("config.toml"),
         conflicted.replace("model = \"external-choice\"", "model = \"original-model\""),
     )?;
-    session.restore(data, home).await?;
+    let connection = rusqlite::Connection::open(data.join("switchx.sqlite"))?;
+    connection.execute_batch(
+        "CREATE TRIGGER refuse_synthetic_local_token_delete BEFORE DELETE ON app_settings
+         WHEN OLD.key LIKE 'local_token:%'
+         BEGIN SELECT RAISE(ABORT, 'synthetic local token delete failure'); END;",
+    )?;
+    check(
+        session
+            .restore(data, home)
+            .await
+            .is_err_and(|error| error.contains("令牌"))
+            && !session.is_running()
+            && config_transaction::recovery(data)?.is_some_and(|recovery| {
+                recovery.local_token_reference.as_deref() == Some(token_reference.as_str())
+            })
+            && Store::open_read_only(&data.join("switchx.sqlite"))?
+                .local_token(&token_reference)?
+                .is_some_and(|saved| saved.expose() == local_token.expose())
+            && std::fs::read_to_string(home.join("config.toml"))?
+                == format!("{ORIGINAL}\n# external note\n"),
+        "failed token cleanup did not stop the route, restore config and retain retry references",
+    )?;
+    connection.execute_batch("DROP TRIGGER refuse_synthetic_local_token_delete")?;
+    drop(connection);
+    RouteSession::default().restore(data, home).await?;
     check(
         !session.is_running()
             && config_transaction::recovery(data)?.is_none()
             && std::fs::read_to_string(home.join("config.toml"))?
                 == format!("{ORIGINAL}\n# external note\n"),
         "route recovery did not restore the config and stop the route",
+    )?;
+    check(
+        Store::open_read_only(&data.join("switchx.sqlite"))?
+            .local_token(&token_reference)?
+            .is_none(),
+        "successful recovery did not delete the route's SQLite token",
     )?;
     println!(
         "Port conflicts, invalid catalog, stale preview and recovery conflicts were handled without losing user settings."
@@ -711,7 +783,9 @@ async fn http_round_trip(
         .and_then(|recovery| recovery.local_token_reference)
         .ok_or("synthetic route's local token reference is missing")?;
     // This is only the token that this probe created; no user credentials are read.
-    let token = CredentialStore::new(ROUTER_TOKEN_SERVICE)?.get(&reference)?;
+    let token = Store::open_read_only(&data.join("switchx.sqlite"))?
+        .local_token(&reference)?
+        .ok_or("synthetic route's local token is missing from SQLite")?;
     let address = session.address().ok_or("synthetic route is not running")?;
     let client = reqwest::Client::builder()
         .no_proxy()

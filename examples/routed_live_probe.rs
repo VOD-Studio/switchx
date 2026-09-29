@@ -12,9 +12,7 @@ use std::{
 
 use live_probe::ProbeResult;
 use switchx::{
-    config_transaction,
-    credentials::{CredentialError, CredentialStore, ROUTER_TOKEN_SERVICE},
-    direct,
+    config_transaction, direct,
     routed::RouteSession,
     storage::{ModelRecord, ProviderRecord, RequestRecord, RequestStatus, Store},
 };
@@ -251,10 +249,9 @@ async fn cleanup(session: &mut RouteSession, home: &Path, state: &Path) -> Probe
         return Err("isolated config differed after restore".into());
     }
     if let Some(reference) = reference
-        && !matches!(
-            CredentialStore::new(ROUTER_TOKEN_SERVICE)?.get(&reference),
-            Err(CredentialError::Missing)
-        )
+        && Store::open_read_only(&state.join("switchx.sqlite"))?
+            .local_token(&reference)?
+            .is_some()
     {
         return Err("local route token was not removed".into());
     }
