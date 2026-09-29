@@ -468,8 +468,6 @@ pub fn load_snapshot(data_dir: &Path, check_credentials: bool) -> Result<Snapsho
     let store = open_store(data_dir)?;
     let providers = store.providers().map_err(|_| AppError::Database)?;
     let models = store.models().map_err(|_| AppError::Database)?;
-    let credentials =
-        CredentialStore::new(PROVIDER_KEY_SERVICE).map_err(|_| AppError::CredentialStore)?;
     let mut views = Vec::new();
     for provider in &providers {
         let mappings: Vec<_> = models
@@ -490,7 +488,7 @@ pub fn load_snapshot(data_dir: &Path, check_credentials: bool) -> Result<Snapsho
         models: views,
         providers: providers
             .into_iter()
-            .map(|provider| provider_view(provider, &credentials, check_credentials))
+            .map(|provider| provider_view(provider, &store, data_dir, check_credentials))
             .collect(),
         credentials_checked: check_credentials,
     })
@@ -576,21 +574,28 @@ fn model_view(
 
 fn provider_view(
     provider: ProviderRecord,
-    credentials: &CredentialStore,
+    store: &Store,
+    data_dir: &Path,
     check_credentials: bool,
 ) -> ProviderView {
     let credential_status = if provider.id == crate::chatgpt::PROVIDER_ID {
         "登录与续期由目标 Codex 管理"
     } else {
-        match provider.credential_ref.as_deref() {
-            None => "未配置凭据",
-            Some(_) if !check_credentials => "凭据未检查",
-            Some(reference) => match credentials.get(reference) {
-                Ok(_) => "凭据可读取",
-                Err(CredentialError::Missing) => "凭据缺失",
-                Err(CredentialError::InvalidReference) => "凭据引用无效",
-                Err(CredentialError::Unavailable) => "系统凭据不可用",
-            },
+        match store.has_provider_api_key(&provider.id) {
+            Ok(true) if !check_credentials => "凭据未检查",
+            Ok(true) => "凭据可读取",
+            Ok(false) if provider.credential_ref.is_none() => "未配置凭据",
+            Ok(false) if !check_credentials && ensure_editable(data_dir).is_err() => "旧凭据待迁移",
+            Ok(false) => {
+                match provider_key_from_store(store, &provider, ensure_editable(data_dir).is_ok()) {
+                    Ok(_) => "凭据可读取",
+                    Err(ProviderKeyError::Missing) => "旧凭据缺失，请重新输入",
+                    Err(ProviderKeyError::InvalidReference) => "凭据引用无效",
+                    Err(ProviderKeyError::LegacyUnavailable) => "旧凭据尚未迁移，请重试",
+                    Err(ProviderKeyError::Database) => "本地凭据读取或迁移失败",
+                }
+            }
+            Err(_) => "本地凭据格式无效",
         }
     };
     let preset_id = provider_preset(&provider.base_url)
@@ -665,59 +670,45 @@ fn save_provider_inner(
         Some(record) => record.id.clone(),
         None => new_id()?,
     };
-    let changing_key = !key.is_empty();
-    let reference = if key.is_empty() {
-        old.as_ref()
-            .and_then(|record| record.credential_ref.clone())
-            .ok_or("请输入 API Key")?
+    let key = if key.is_empty() {
+        let old = old.as_ref().ok_or("请输入 API Key")?;
+        if !store
+            .has_provider_api_key(&id)
+            .map_err(|_| "本地 API Key 格式无效")?
+        {
+            provider_key_from_store(&store, old, true).map_err(ProviderKeyError::message)?;
+        }
+        None
     } else {
-        id.clone()
+        Some(Secret::new(key))
     };
     let record = ProviderRecord {
         id: id.clone(),
         name: name.trim().into(),
         base_url: url.to_string(),
         model_id: model_id.into(),
-        credential_ref: Some(reference.clone()),
+        credential_ref: None,
     };
     let models = store.models().map_err(|_| "无法读取模型资料")?;
     let defaults = new_preset_models(&record, &models)?;
-    let credentials =
-        CredentialStore::new(PROVIDER_KEY_SERVICE).map_err(|_| "系统凭据存储不可用")?;
-    let previous_secret = if !key.is_empty()
-        && old
-            .as_ref()
-            .is_some_and(|record| record.credential_ref.as_deref() == Some(id.as_str()))
+    let options = options
+        .map(serde_json::to_string)
+        .transpose()
+        .map_err(|_| "无法序列化 Codex 选项")?;
+    let saved = match &key {
+        Some(key) => store.put_provider_with_models_options_and_key(
+            &record,
+            &defaults,
+            options.as_deref(),
+            key,
+        ),
+        None => store.update_provider_preserving_key(&record, &defaults, options.as_deref()),
+    };
+    saved.map_err(|_| "无法保存上游资料与 API Key；原资料未修改")?;
+    if key.is_some()
+        && let Some(reference) = old.and_then(|record| record.credential_ref)
     {
-        match credentials.get(&id) {
-            Ok(secret) => Some(secret),
-            Err(CredentialError::Missing) => None,
-            Err(_) => return Err("无法读取旧 API Key，未修改上游".into()),
-        }
-    } else {
-        None
-    };
-    if changing_key {
-        credentials
-            .put(&reference, &Secret::new(key))
-            .map_err(|_| "无法保存 API Key 到系统凭据存储")?;
-    }
-    let saved = match options {
-        Some(options) => {
-            let options = serde_json::to_string(options).map_err(|_| "无法序列化 Codex 选项")?;
-            store.put_provider_with_models_and_options(&record, &defaults, &options)
-        }
-        None => store.put_provider_with_models(&record, &defaults),
-    };
-    if saved.is_err() {
-        if changing_key {
-            if let Some(previous_secret) = &previous_secret {
-                let _ = credentials.put(&reference, previous_secret);
-            } else {
-                let _ = credentials.delete(&reference);
-            }
-        }
-        return Err("无法保存上游资料".into());
+        cleanup_legacy_key(&id, &reference);
     }
     Ok(())
 }
@@ -729,20 +720,9 @@ pub fn delete_provider(data_dir: &Path, id: &str) -> Result<(), String> {
         .provider(id)
         .map_err(|_| "无法读取上游资料")?
         .ok_or("上游不存在")?;
-    let credentials =
-        CredentialStore::new(PROVIDER_KEY_SERVICE).map_err(|_| "系统凭据存储不可用")?;
-    if record.credential_ref.as_deref() == Some(id) {
-        match credentials.get(id) {
-            Ok(_) | Err(CredentialError::Missing) => {}
-            Err(_) => return Err("无法检查系统凭据，未删除上游".into()),
-        }
-    }
     store.delete_provider(id).map_err(|_| "无法删除上游资料")?;
-    if let Some(reference) = record.credential_ref.filter(|reference| reference == id) {
-        match credentials.delete(&reference) {
-            Ok(()) | Err(CredentialError::Missing) => {}
-            Err(_) => return Err("上游资料已删除，但系统凭据清理失败".into()),
-        }
+    if let Some(reference) = record.credential_ref {
+        cleanup_legacy_key(id, &reference);
     }
     Ok(())
 }
@@ -966,17 +946,101 @@ pub fn delete_model(data_dir: &Path, public_id: &str) -> Result<(), String> {
     Ok(())
 }
 
-pub fn provider_credential(provider: &ProviderRecord) -> Result<Secret, String> {
+pub fn provider_credential(data_dir: &Path, provider: &ProviderRecord) -> Result<Secret, String> {
     if provider.id == crate::chatgpt::PROVIDER_ID {
         return Err("订阅凭据由目标 Codex 管理，请使用官方登录".into());
+    }
+    let store = open_store(data_dir).map_err(|error| error.message())?;
+    provider_key_from_store(&store, provider, ensure_editable(data_dir).is_ok())
+        .map_err(|error| error.message().into())
+}
+
+#[derive(Debug)]
+enum ProviderKeyError {
+    Missing,
+    InvalidReference,
+    LegacyUnavailable,
+    Database,
+}
+
+impl ProviderKeyError {
+    fn message(self) -> &'static str {
+        match self {
+            Self::Missing => "上游未配置 API Key；旧凭据缺失时请重新输入",
+            Self::InvalidReference => "旧 API Key 凭据引用无效，请重新输入",
+            Self::LegacyUnavailable => "无法读取旧系统凭据；迁移未完成，请重试或重新输入 API Key",
+            Self::Database => "无法读取或迁移本地 API Key；原凭据保留，请重试",
+        }
+    }
+}
+
+fn provider_key_from_store(
+    store: &Store,
+    provider: &ProviderRecord,
+    migrate: bool,
+) -> Result<Secret, ProviderKeyError> {
+    provider_key_with(
+        store,
+        provider,
+        migrate,
+        |reference| {
+            CredentialStore::new(PROVIDER_KEY_SERVICE).and_then(|store| store.get(reference))
+        },
+        |reference| {
+            CredentialStore::new(PROVIDER_KEY_SERVICE).and_then(|store| store.delete(reference))
+        },
+    )
+}
+
+fn provider_key_with(
+    store: &Store,
+    provider: &ProviderRecord,
+    migrate: bool,
+    read_legacy: impl FnOnce(&str) -> Result<Secret, CredentialError>,
+    remove_legacy: impl FnOnce(&str) -> Result<(), CredentialError>,
+) -> Result<Secret, ProviderKeyError> {
+    if let Some(key) = store
+        .provider_api_key(&provider.id)
+        .map_err(|_| ProviderKeyError::Database)?
+    {
+        return Ok(key);
     }
     let reference = provider
         .credential_ref
         .as_deref()
-        .ok_or("上游未配置 API Key")?;
-    CredentialStore::new(PROVIDER_KEY_SERVICE)
-        .and_then(|store| store.get(reference))
-        .map_err(|_| "无法读取上游 API Key".into())
+        .ok_or(ProviderKeyError::Missing)?;
+    let key = read_legacy(reference).map_err(|error| match error {
+        CredentialError::Missing => ProviderKeyError::Missing,
+        CredentialError::InvalidReference => ProviderKeyError::InvalidReference,
+        CredentialError::Unavailable => ProviderKeyError::LegacyUnavailable,
+    })?;
+    if migrate {
+        if !store
+            .migrate_provider_api_key(&provider.id, reference, &key)
+            .map_err(|_| ProviderKeyError::Database)?
+        {
+            return store
+                .provider_api_key(&provider.id)
+                .map_err(|_| ProviderKeyError::Database)?
+                .ok_or(ProviderKeyError::Database);
+        }
+        if reference == provider.id {
+            match remove_legacy(reference) {
+                Ok(()) | Err(CredentialError::Missing) => {}
+                Err(_) => eprintln!("API Key 已保存到本地数据库；旧系统凭据副本清理失败"),
+            }
+        }
+    }
+    Ok(key)
+}
+
+fn cleanup_legacy_key(id: &str, reference: &str) {
+    if reference == id {
+        match CredentialStore::new(PROVIDER_KEY_SERVICE).and_then(|store| store.delete(reference)) {
+            Ok(()) | Err(CredentialError::Missing) => {}
+            Err(_) => eprintln!("本地资料已更新；旧系统凭据副本清理失败"),
+        }
+    }
 }
 
 pub(crate) fn ensure_editable(data_dir: &Path) -> Result<(), String> {
@@ -1611,7 +1675,7 @@ mod tests {
             .unwrap();
         drop(store);
         let initial = load_snapshot(&path, false).unwrap();
-        assert_eq!(initial.providers[0].credential_status, "凭据未检查");
+        assert_eq!(initial.providers[0].credential_status, "凭据引用无效");
         let checked = load_snapshot(&path, true).unwrap();
         assert_eq!(checked.providers[0].credential_status, "凭据引用无效");
         assert_eq!(checked.providers[0].endpoint, "https://example.invalid");
@@ -1638,6 +1702,263 @@ mod tests {
                 0o600
             );
         }
+        fs::remove_dir_all(path).unwrap();
+    }
+
+    #[test]
+    fn provider_save_edit_and_delete_use_private_sqlite_without_keychain() {
+        let path = env::temp_dir().join(format!("switchx-api-key-{}", new_id().unwrap()));
+        let original = "synthetic-sqlite-api-key";
+        save_provider(
+            &path,
+            None,
+            "Mock",
+            "https://example.invalid/v1",
+            "mock",
+            original.into(),
+        )
+        .unwrap();
+        let store = open_store(&path).unwrap();
+        let provider = store.providers().unwrap().remove(0);
+        assert!(provider.credential_ref.is_none());
+        assert_eq!(
+            provider_credential(&path, &provider).unwrap().expose(),
+            original
+        );
+        let snapshot = load_snapshot(&path, true).unwrap();
+        assert_eq!(snapshot.providers[0].credential_status, "凭据可读取");
+        assert!(!format!("{snapshot:?}").contains(original));
+        save_provider(
+            &path,
+            Some(&provider.id),
+            "Edited",
+            "https://example.invalid/v1",
+            "new-model",
+            String::new(),
+        )
+        .unwrap();
+        assert_eq!(
+            store
+                .provider_api_key(&provider.id)
+                .unwrap()
+                .unwrap()
+                .expose(),
+            original
+        );
+        save_provider(
+            &path,
+            Some(&provider.id),
+            "Edited",
+            "https://example.invalid/v1",
+            "new-model",
+            "synthetic-replacement-key".into(),
+        )
+        .unwrap();
+        assert_eq!(
+            store
+                .provider_api_key(&provider.id)
+                .unwrap()
+                .unwrap()
+                .expose(),
+            "synthetic-replacement-key"
+        );
+        assert!(
+            save_provider(
+                &path,
+                Some(&provider.id),
+                "Edited",
+                "https://user:invalid@example.invalid/v1",
+                "new-model",
+                "must-not-save".into()
+            )
+            .is_err()
+        );
+        assert_eq!(
+            store
+                .provider_api_key(&provider.id)
+                .unwrap()
+                .unwrap()
+                .expose(),
+            "synthetic-replacement-key"
+        );
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            assert_eq!(
+                fs::metadata(&path).unwrap().permissions().mode() & 0o777,
+                0o700
+            );
+            assert_eq!(
+                fs::metadata(path.join("switchx.sqlite"))
+                    .unwrap()
+                    .permissions()
+                    .mode()
+                    & 0o777,
+                0o600
+            );
+        }
+        delete_provider(&path, &provider.id).unwrap();
+        assert!(store.provider(&provider.id).unwrap().is_none());
+        assert!(store.provider_api_key(&provider.id).unwrap().is_none());
+        drop(store);
+        fs::remove_dir_all(path).unwrap();
+    }
+
+    #[test]
+    fn legacy_migration_commits_before_owned_key_cleanup_and_keeps_native_other_refs() {
+        let store = Store::open(Path::new(":memory:")).unwrap();
+        let provider = ProviderRecord {
+            id: "legacy-key".into(),
+            name: "Mock".into(),
+            base_url: "https://example.invalid/v1".into(),
+            model_id: "mock".into(),
+            credential_ref: Some("legacy-key".into()),
+        };
+        store.put_provider(&provider).unwrap();
+        let key = provider_key_with(
+            &store,
+            &provider,
+            true,
+            |reference| {
+                assert_eq!(reference, provider.id);
+                Ok(Secret::new("synthetic-legacy-key".into()))
+            },
+            |reference| {
+                assert_eq!(reference, provider.id);
+                assert!(
+                    store
+                        .provider(&provider.id)
+                        .unwrap()
+                        .unwrap()
+                        .credential_ref
+                        .is_none()
+                );
+                assert_eq!(
+                    store
+                        .provider_api_key(&provider.id)
+                        .unwrap()
+                        .unwrap()
+                        .expose(),
+                    "synthetic-legacy-key"
+                );
+                // Cleanup failure must not roll back a committed key.
+                Err(CredentialError::Unavailable)
+            },
+        )
+        .unwrap();
+        assert_eq!(key.expose(), "synthetic-legacy-key");
+        provider_key_with(
+            &store,
+            &provider,
+            true,
+            |_| panic!("SQLite keys must not read keychain"),
+            |_| panic!("SQLite keys must not delete keychain"),
+        )
+        .unwrap();
+        let other = ProviderRecord {
+            id: "different-owner".into(),
+            ..provider
+        };
+        store.put_provider(&other).unwrap();
+        provider_key_with(
+            &store,
+            &other,
+            true,
+            |_| Ok(Secret::new("synthetic-other-ref".into())),
+            |_| panic!("only the same provider's old entry can be deleted"),
+        )
+        .unwrap();
+        assert!(
+            store
+                .provider(&other.id)
+                .unwrap()
+                .unwrap()
+                .credential_ref
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn failed_legacy_reads_and_concurrent_edits_preserve_source_credentials() {
+        let store = Store::open(Path::new(":memory:")).unwrap();
+        let provider = ProviderRecord {
+            id: "legacy-key".into(),
+            name: "Mock".into(),
+            base_url: "https://example.invalid/v1".into(),
+            model_id: "mock".into(),
+            credential_ref: Some("legacy-key".into()),
+        };
+        store.put_provider(&provider).unwrap();
+        for error in [CredentialError::Missing, CredentialError::Unavailable] {
+            assert!(
+                provider_key_with(
+                    &store,
+                    &provider,
+                    true,
+                    |_| Err(error),
+                    |_| panic!("failed reads must preserve the source")
+                )
+                .is_err()
+            );
+            assert_eq!(store.provider(&provider.id).unwrap().unwrap(), provider);
+            assert!(store.provider_api_key(&provider.id).unwrap().is_none());
+        }
+        let key = provider_key_with(
+            &store,
+            &provider,
+            true,
+            |_| {
+                store
+                    .put_provider_with_models_options_and_key(
+                        &provider,
+                        &[],
+                        None,
+                        &Secret::new("synthetic-newer-key".into()),
+                    )
+                    .unwrap();
+                Ok(Secret::new("synthetic-stale-key".into()))
+            },
+            |_| panic!("an uncommitted migration must not delete the source"),
+        )
+        .unwrap();
+        assert_eq!(key.expose(), "synthetic-newer-key");
+    }
+
+    #[test]
+    fn failed_migration_write_keeps_keychain_reference_and_active_switch_defers_migration() {
+        let path = env::temp_dir().join(format!("switchx-key-migration-{}", new_id().unwrap()));
+        let store = open_store(&path).unwrap();
+        let provider = ProviderRecord {
+            id: "legacy-key".into(),
+            name: "Mock".into(),
+            base_url: "https://example.invalid/v1".into(),
+            model_id: "mock".into(),
+            credential_ref: Some("legacy-key".into()),
+        };
+        store.put_provider(&provider).unwrap();
+        let connection = rusqlite::Connection::open(path.join("switchx.sqlite")).unwrap();
+        connection.execute_batch("CREATE TRIGGER block_migration BEFORE UPDATE ON providers BEGIN SELECT RAISE(ABORT, 'synthetic write failure'); END;").unwrap();
+        assert!(
+            provider_key_with(
+                &store,
+                &provider,
+                true,
+                |_| Ok(Secret::new("synthetic-legacy-key".into())),
+                |_| panic!("failed writes must preserve the source")
+            )
+            .is_err()
+        );
+        assert_eq!(store.provider(&provider.id).unwrap().unwrap(), provider);
+        assert!(store.provider_api_key(&provider.id).unwrap().is_none());
+        for journal in ["direct-journal.json", "switch-journal.json"] {
+            fs::write(path.join(journal), "synthetic active switch").unwrap();
+            let snapshot = load_snapshot(&path, false).unwrap();
+            assert_eq!(snapshot.providers[0].credential_status, "旧凭据待迁移");
+            assert_eq!(store.provider(&provider.id).unwrap().unwrap(), provider);
+            fs::remove_file(path.join(journal)).unwrap();
+        }
+        drop(connection);
+        drop(store);
         fs::remove_dir_all(path).unwrap();
     }
 

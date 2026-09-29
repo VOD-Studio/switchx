@@ -2,7 +2,9 @@ use std::path::Path;
 
 use rusqlite::{Connection, OpenFlags, Result, params};
 
-const SCHEMA_VERSION: i64 = 7;
+use crate::credentials::Secret;
+
+const SCHEMA_VERSION: i64 = 8;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ProviderRecord {
@@ -197,6 +199,14 @@ impl Store {
                  COMMIT;",
             )?;
         }
+        if version < 8 {
+            connection.execute_batch(
+                "BEGIN IMMEDIATE;
+                 ALTER TABLE providers ADD COLUMN settings_config TEXT NOT NULL DEFAULT '{}';
+                 PRAGMA user_version = 8;
+                 COMMIT;",
+            )?;
+        }
         Ok(Self { connection })
     }
 
@@ -276,7 +286,7 @@ impl Store {
         provider: &ProviderRecord,
         models: &[ModelRecord],
     ) -> Result<()> {
-        self.write_provider_with_models(provider, models, None)
+        self.write_provider_with_models(provider, models, None, None, false)
     }
 
     pub fn put_provider_with_models_and_options(
@@ -285,7 +295,29 @@ impl Store {
         models: &[ModelRecord],
         options: &str,
     ) -> Result<()> {
-        self.write_provider_with_models(provider, models, Some(options))
+        self.write_provider_with_models(provider, models, Some(options), None, false)
+    }
+
+    /// Store CC Switch-style API credentials alongside metadata and model edits.
+    /// ProviderRecord remains metadata only; JSON credentials are read separately.
+    pub fn put_provider_with_models_options_and_key(
+        &self,
+        provider: &ProviderRecord,
+        models: &[ModelRecord],
+        options: Option<&str>,
+        key: &Secret,
+    ) -> Result<()> {
+        self.write_provider_with_models(provider, models, options, Some(key), false)
+    }
+
+    /// Edit a saved API provider without reading and rewriting its existing key.
+    pub fn update_provider_preserving_key(
+        &self,
+        provider: &ProviderRecord,
+        models: &[ModelRecord],
+        options: Option<&str>,
+    ) -> Result<()> {
+        self.write_provider_with_models(provider, models, options, None, true)
     }
 
     fn write_provider_with_models(
@@ -293,6 +325,8 @@ impl Store {
         provider: &ProviderRecord,
         models: &[ModelRecord],
         options: Option<&str>,
+        key: Option<&Secret>,
+        require_existing_key: bool,
     ) -> Result<()> {
         let transaction = self.connection.unchecked_transaction()?;
         transaction.execute(
@@ -302,7 +336,10 @@ impl Store {
                 name = excluded.name,
                 base_url = excluded.base_url,
                 model_id = excluded.model_id,
-                credential_ref = excluded.credential_ref",
+                credential_ref = CASE WHEN json_valid(providers.settings_config)
+                    THEN CASE WHEN json_type(providers.settings_config, '$.auth.OPENAI_API_KEY') = 'text'
+                        THEN NULL ELSE excluded.credential_ref END
+                    ELSE excluded.credential_ref END",
             params![
                 provider.id,
                 provider.name,
@@ -317,6 +354,31 @@ impl Store {
                 params![options, provider.id],
             )?;
         }
+        if key.is_some() || require_existing_key {
+            let settings: String = transaction.query_row(
+                "SELECT settings_config FROM providers WHERE id = ?1",
+                [&provider.id],
+                |row| row.get(0),
+            )?;
+            if let Some(key) = key {
+                let settings = settings_with_key(&settings, key)?;
+                transaction.execute(
+                    "UPDATE providers SET settings_config = ?1, credential_ref = NULL WHERE id = ?2",
+                    params![settings, provider.id],
+                )?;
+            } else {
+                if provider_settings(&settings)?
+                    .pointer("/auth/OPENAI_API_KEY")
+                    .is_none()
+                {
+                    return Err(rusqlite::Error::InvalidQuery);
+                }
+                transaction.execute(
+                    "UPDATE providers SET credential_ref = NULL WHERE id = ?1",
+                    [&provider.id],
+                )?;
+            }
+        }
         for model in models {
             if model.provider_id != provider.id {
                 return Err(rusqlite::Error::InvalidQuery);
@@ -324,6 +386,79 @@ impl Store {
             Self::write_model(&transaction, model)?;
         }
         transaction.commit()
+    }
+
+    /// Invalid credential JSON is an error, never permission to use a legacy key.
+    pub fn provider_api_key(&self, id: &str) -> Result<Option<Secret>> {
+        use rusqlite::OptionalExtension;
+        let settings: Option<String> = self
+            .connection
+            .query_row(
+                "SELECT settings_config FROM providers WHERE id = ?1",
+                [id],
+                |row| row.get(0),
+            )
+            .optional()?;
+        let Some(settings) = settings else {
+            return Ok(None);
+        };
+        let settings = provider_settings(&settings)?;
+        Ok(settings
+            .pointer("/auth/OPENAI_API_KEY")
+            .and_then(serde_json::Value::as_str)
+            .map(|key| Secret::new(key.to_owned())))
+    }
+
+    /// Validate stored credentials for UI status without returning a secret.
+    pub fn has_provider_api_key(&self, id: &str) -> Result<bool> {
+        use rusqlite::OptionalExtension;
+        let settings: Option<String> = self
+            .connection
+            .query_row(
+                "SELECT settings_config FROM providers WHERE id = ?1",
+                [id],
+                |row| row.get(0),
+            )
+            .optional()?;
+        let Some(settings) = settings else {
+            return Ok(false);
+        };
+        Ok(provider_settings(&settings)?
+            .pointer("/auth/OPENAI_API_KEY")
+            .is_some())
+    }
+
+    /// Migrate one old key reference only if neither its reference nor JSON changed.
+    pub fn migrate_provider_api_key(
+        &self,
+        id: &str,
+        expected_ref: &str,
+        key: &Secret,
+    ) -> Result<bool> {
+        use rusqlite::OptionalExtension;
+        let current: Option<(String, Option<String>)> = self
+            .connection
+            .query_row(
+                "SELECT settings_config, credential_ref FROM providers WHERE id = ?1",
+                [id],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .optional()?;
+        let Some((settings, reference)) = current else {
+            return Ok(false);
+        };
+        let parsed = provider_settings(&settings)?;
+        if parsed.pointer("/auth/OPENAI_API_KEY").is_some()
+            || reference.as_deref() != Some(expected_ref)
+        {
+            return Ok(false);
+        }
+        let updated = settings_with_key(&settings, key)?;
+        Ok(self.connection.execute(
+            "UPDATE providers SET settings_config = ?1, credential_ref = NULL
+             WHERE id = ?2 AND credential_ref = ?3 AND settings_config = ?4",
+            params![updated, id, expected_ref, settings],
+        )? != 0)
     }
 
     pub fn provider_codex_options(&self, id: &str) -> Result<String> {
@@ -536,9 +671,504 @@ impl Store {
     }
 }
 
+fn provider_settings(settings: &str) -> Result<serde_json::Value> {
+    let settings: serde_json::Value =
+        serde_json::from_str(settings).map_err(|_| rusqlite::Error::InvalidQuery)?;
+    if !settings.is_object() || settings.get("auth").is_some_and(|auth| !auth.is_object()) {
+        return Err(rusqlite::Error::InvalidQuery);
+    }
+    if let Some(key) = settings.pointer("/auth/OPENAI_API_KEY") {
+        validate_api_key(key.as_str().ok_or(rusqlite::Error::InvalidQuery)?)?;
+    }
+    Ok(settings)
+}
+
+fn validate_api_key(key: &str) -> Result<()> {
+    if key.is_empty() || key.len() > 65536 || key.chars().any(char::is_control) {
+        return Err(rusqlite::Error::InvalidQuery);
+    }
+    Ok(())
+}
+
+fn settings_with_key(settings: &str, key: &Secret) -> Result<String> {
+    validate_api_key(key.expose())?;
+    let mut settings = provider_settings(settings)?;
+    let auth = settings
+        .as_object_mut()
+        .ok_or(rusqlite::Error::InvalidQuery)?
+        .entry("auth")
+        .or_insert_with(|| serde_json::json!({}));
+    auth.as_object_mut()
+        .ok_or(rusqlite::Error::InvalidQuery)?
+        .insert("OPENAI_API_KEY".into(), key.expose().into());
+    serde_json::to_string(&settings).map_err(|_| rusqlite::Error::InvalidQuery)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn api_provider() -> ProviderRecord {
+        ProviderRecord {
+            id: "synthetic-api".into(),
+            name: "Synthetic API".into(),
+            base_url: "https://example.invalid/v1".into(),
+            model_id: "synthetic-model".into(),
+            credential_ref: Some("synthetic-legacy-ref".into()),
+        }
+    }
+
+    #[test]
+    fn api_keys_persist_as_json_while_metadata_writes_preserve_them() {
+        let path = std::env::temp_dir().join(format!(
+            "switchx-api-key-{}.sqlite",
+            crate::app::new_id().unwrap()
+        ));
+        let provider = api_provider();
+        let key = Secret::new("synthetic-plaintext-key".into());
+        {
+            let store = Store::open(&path).unwrap();
+            store.put_provider(&provider).unwrap();
+            store
+                .connection
+                .execute(
+                    "UPDATE providers SET settings_config = ?1 WHERE id = ?2",
+                    params![
+                        r#"{"auth":{"keep":"extra-auth"},"config":"extra-config"}"#,
+                        provider.id
+                    ],
+                )
+                .unwrap();
+            store
+                .put_provider_with_models_options_and_key(
+                    &provider,
+                    &[],
+                    Some("keep-options"),
+                    &key,
+                )
+                .unwrap();
+            store
+                .put_provider(&ProviderRecord {
+                    name: "Renamed".into(),
+                    ..provider.clone()
+                })
+                .unwrap();
+            store
+                .put_provider_with_models_and_options(&provider, &[], "updated-options")
+                .unwrap();
+            assert!(
+                store
+                    .provider(&provider.id)
+                    .unwrap()
+                    .unwrap()
+                    .credential_ref
+                    .is_none()
+            );
+        }
+        let store = Store::open(&path).unwrap();
+        assert_eq!(
+            store
+                .provider_api_key(&provider.id)
+                .unwrap()
+                .unwrap()
+                .expose(),
+            key.expose()
+        );
+        assert!(store.has_provider_api_key(&provider.id).unwrap());
+        assert!(!store.has_provider_api_key("missing").unwrap());
+        assert!(store.provider_api_key("missing").unwrap().is_none());
+        assert_eq!(
+            store.provider_codex_options(&provider.id).unwrap(),
+            "updated-options"
+        );
+        let settings: String = store
+            .connection
+            .query_row(
+                "SELECT settings_config FROM providers WHERE id = ?1",
+                [&provider.id],
+                |row| row.get(0),
+            )
+            .unwrap();
+        let settings: serde_json::Value = serde_json::from_str(&settings).unwrap();
+        assert_eq!(settings["auth"]["OPENAI_API_KEY"], key.expose());
+        assert_eq!(settings["auth"]["keep"], "extra-auth");
+        assert_eq!(settings["config"], "extra-config");
+        assert!(!format!("{:?}", store.providers().unwrap()).contains(key.expose()));
+        drop(store);
+        std::fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    fn provider_key_models_and_options_roll_back_in_one_transaction() {
+        let store = Store::open(Path::new(":memory:")).unwrap();
+        let provider = api_provider();
+        let old_key = Secret::new("synthetic-old-key".into());
+        store
+            .put_provider_with_models_options_and_key(&provider, &[], Some("old-options"), &old_key)
+            .unwrap();
+        let other = ProviderRecord {
+            id: "other".into(),
+            credential_ref: None,
+            ..provider.clone()
+        };
+        store.put_provider(&other).unwrap();
+        let owned = ModelRecord {
+            provider_id: other.id,
+            public_id: "sx-owned".into(),
+            display_name: "Owned".into(),
+            upstream_model: "owned-upstream".into(),
+            metadata: "{}".into(),
+            enabled: false,
+            fallback_provider_id: None,
+        };
+        store.put_model(&owned).unwrap();
+        let models = [
+            ModelRecord {
+                provider_id: provider.id.clone(),
+                public_id: "sx-new".into(),
+                ..owned.clone()
+            },
+            ModelRecord {
+                provider_id: provider.id.clone(),
+                upstream_model: "conflicting-upstream".into(),
+                ..owned.clone()
+            },
+        ];
+        assert!(
+            store
+                .put_provider_with_models_options_and_key(
+                    &ProviderRecord {
+                        name: "Changed".into(),
+                        ..provider.clone()
+                    },
+                    &models,
+                    Some("new-options"),
+                    &Secret::new("synthetic-new-key".into()),
+                )
+                .is_err()
+        );
+        let stored = store.provider(&provider.id).unwrap().unwrap();
+        assert_eq!(stored.name, provider.name);
+        assert!(stored.credential_ref.is_none());
+        assert_eq!(
+            store
+                .provider_api_key(&provider.id)
+                .unwrap()
+                .unwrap()
+                .expose(),
+            old_key.expose()
+        );
+        assert_eq!(
+            store.provider_codex_options(&provider.id).unwrap(),
+            "old-options"
+        );
+        assert_eq!(store.models().unwrap(), [owned]);
+        assert!(
+            store
+                .put_provider_with_models_options_and_key(
+                    &provider,
+                    &[],
+                    None,
+                    &Secret::new(String::new())
+                )
+                .is_err()
+        );
+        assert_eq!(
+            store
+                .provider_api_key(&provider.id)
+                .unwrap()
+                .unwrap()
+                .expose(),
+            old_key.expose()
+        );
+    }
+
+    #[test]
+    fn legacy_key_migration_does_not_replace_newer_keys_or_references() {
+        let path = std::env::temp_dir().join(format!(
+            "switchx-api-key-cas-{}.sqlite",
+            crate::app::new_id().unwrap()
+        ));
+        let store = Store::open(&path).unwrap();
+        let provider = api_provider();
+        store.put_provider(&provider).unwrap();
+        assert!(
+            !store
+                .migrate_provider_api_key(
+                    &provider.id,
+                    "wrong-reference",
+                    &Secret::new("synthetic-old-key".into())
+                )
+                .unwrap()
+        );
+        assert!(store.provider_api_key(&provider.id).unwrap().is_none());
+        let other = Store::open(&path).unwrap();
+        other
+            .put_provider_with_models_options_and_key(
+                &provider,
+                &[],
+                None,
+                &Secret::new("synthetic-concurrent-key".into()),
+            )
+            .unwrap();
+        assert!(
+            !store
+                .migrate_provider_api_key(
+                    &provider.id,
+                    "synthetic-legacy-ref",
+                    &Secret::new("synthetic-old-key".into())
+                )
+                .unwrap()
+        );
+        assert_eq!(
+            store
+                .provider_api_key(&provider.id)
+                .unwrap()
+                .unwrap()
+                .expose(),
+            "synthetic-concurrent-key"
+        );
+        store
+            .update_provider_preserving_key(
+                &ProviderRecord {
+                    name: "Preserved concurrent key".into(),
+                    ..provider.clone()
+                },
+                &[],
+                Some("preserved-options"),
+            )
+            .unwrap();
+        assert_eq!(
+            store.provider(&provider.id).unwrap().unwrap().name,
+            "Preserved concurrent key"
+        );
+        assert_eq!(
+            store.provider_codex_options(&provider.id).unwrap(),
+            "preserved-options"
+        );
+        assert_eq!(
+            store
+                .provider_api_key(&provider.id)
+                .unwrap()
+                .unwrap()
+                .expose(),
+            "synthetic-concurrent-key"
+        );
+        assert!(
+            store
+                .provider(&provider.id)
+                .unwrap()
+                .unwrap()
+                .credential_ref
+                .is_none()
+        );
+
+        let second = ProviderRecord {
+            id: "second".into(),
+            ..provider.clone()
+        };
+        store.put_provider(&second).unwrap();
+        assert!(
+            store
+                .update_provider_preserving_key(
+                    &ProviderRecord {
+                        name: "Must roll back".into(),
+                        ..second.clone()
+                    },
+                    &[],
+                    Some("must-roll-back"),
+                )
+                .is_err()
+        );
+        assert_eq!(store.provider(&second.id).unwrap(), Some(second.clone()));
+        assert_eq!(store.provider_codex_options(&second.id).unwrap(), "");
+        other
+            .put_provider(&ProviderRecord {
+                credential_ref: Some("new-reference".into()),
+                ..second.clone()
+            })
+            .unwrap();
+        assert!(
+            !store
+                .migrate_provider_api_key(
+                    &second.id,
+                    "synthetic-legacy-ref",
+                    &Secret::new("synthetic-old-key".into())
+                )
+                .unwrap()
+        );
+        assert!(
+            store
+                .migrate_provider_api_key(
+                    &second.id,
+                    "new-reference",
+                    &Secret::new("synthetic-migrated-key".into())
+                )
+                .unwrap()
+        );
+        assert_eq!(
+            store
+                .provider_api_key(&second.id)
+                .unwrap()
+                .unwrap()
+                .expose(),
+            "synthetic-migrated-key"
+        );
+        assert!(
+            store
+                .provider(&second.id)
+                .unwrap()
+                .unwrap()
+                .credential_ref
+                .is_none()
+        );
+        assert!(
+            !store
+                .migrate_provider_api_key(
+                    "missing",
+                    "new-reference",
+                    &Secret::new("synthetic-key".into())
+                )
+                .unwrap()
+        );
+        drop(other);
+        drop(store);
+        std::fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    fn malformed_credential_json_never_falls_back_or_leaks_keys_in_errors() {
+        let store = Store::open(Path::new(":memory:")).unwrap();
+        let provider = api_provider();
+        store.put_provider(&provider).unwrap();
+        for settings in [
+            r#"{"do-not-expose":"synthetic-private-key""#,
+            "[]",
+            r#"{"auth":null}"#,
+            r#"{"auth":{"OPENAI_API_KEY":7}}"#,
+            r#"{"auth":{"OPENAI_API_KEY":""}}"#,
+        ] {
+            store
+                .connection
+                .execute(
+                    "UPDATE providers SET settings_config = ?1 WHERE id = ?2",
+                    params![settings, provider.id],
+                )
+                .unwrap();
+            let error = store
+                .provider_api_key(&provider.id)
+                .unwrap_err()
+                .to_string();
+            assert!(!error.contains("synthetic-private-key"));
+            assert!(store.has_provider_api_key(&provider.id).is_err());
+            assert!(
+                store
+                    .migrate_provider_api_key(
+                        &provider.id,
+                        "synthetic-legacy-ref",
+                        &Secret::new("synthetic-legacy-key".into())
+                    )
+                    .is_err()
+            );
+            assert!(
+                store
+                    .put_provider_with_models_options_and_key(
+                        &provider,
+                        &[],
+                        None,
+                        &Secret::new("synthetic-new-key".into())
+                    )
+                    .is_err()
+            );
+            assert_eq!(
+                store.provider(&provider.id).unwrap(),
+                Some(provider.clone())
+            );
+        }
+    }
+
+    #[test]
+    fn key_status_and_reader_apply_the_same_byte_and_control_validation() {
+        let store = Store::open(Path::new(":memory:")).unwrap();
+        let provider = api_provider();
+        store.put_provider(&provider).unwrap();
+        for key in ["é".repeat(32769), "synthetic\nkey".into()] {
+            let settings = serde_json::json!({"auth": {"OPENAI_API_KEY": key}}).to_string();
+            store
+                .connection
+                .execute(
+                    "UPDATE providers SET settings_config = ?1 WHERE id = ?2",
+                    params![settings, provider.id],
+                )
+                .unwrap();
+            assert!(store.provider_api_key(&provider.id).is_err());
+            assert!(store.has_provider_api_key(&provider.id).is_err());
+        }
+    }
+
+    #[test]
+    fn v7_migration_keeps_legacy_references_and_initializes_empty_key_json() {
+        let path = std::env::temp_dir().join(format!(
+            "switchx-v8-migration-{}.sqlite",
+            crate::app::new_id().unwrap()
+        ));
+        let provider = api_provider();
+        let store = Store::open(&path).unwrap();
+        store
+            .put_provider_with_models_and_options(&provider, &[], "preserved-options")
+            .unwrap();
+        store.bind_chatgpt_account(Some("default")).unwrap();
+        store
+            .connection
+            .execute_batch(
+                "ALTER TABLE providers DROP COLUMN settings_config; PRAGMA user_version = 7;",
+            )
+            .unwrap();
+        drop(store);
+        let before = std::fs::read(&path).unwrap();
+        assert!(Store::open_read_only(&path).is_err());
+        assert_eq!(std::fs::read(&path).unwrap(), before);
+        let store = Store::open(&path).unwrap();
+        assert_eq!(
+            store.provider(&provider.id).unwrap(),
+            Some(provider.clone())
+        );
+        assert_eq!(
+            store.provider_codex_options(&provider.id).unwrap(),
+            "preserved-options"
+        );
+        assert_eq!(
+            store.chatgpt_account_binding().unwrap().as_deref(),
+            Some("default")
+        );
+        assert!(store.provider_api_key(&provider.id).unwrap().is_none());
+        assert!(!store.has_provider_api_key(&provider.id).unwrap());
+        let settings: String = store
+            .connection
+            .query_row(
+                "SELECT settings_config FROM providers WHERE id = ?1",
+                [&provider.id],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(settings, "{}");
+        assert_eq!(
+            store
+                .connection
+                .query_row("PRAGMA user_version", [], |row| row.get::<_, i64>(0))
+                .unwrap(),
+            SCHEMA_VERSION
+        );
+        drop(store);
+        assert_eq!(
+            Store::open_read_only(&path)
+                .unwrap()
+                .provider(&provider.id)
+                .unwrap(),
+            Some(provider)
+        );
+        std::fs::remove_file(path).unwrap();
+    }
 
     #[test]
     fn common_config_initialization_does_not_overwrite_saved_or_explicitly_cleared_values() {
@@ -705,6 +1335,7 @@ mod tests {
                 "INSERT INTO request_records (id, started_at_ms, generation, duration_ms, status)
                     VALUES ('v6-request', 1, 'old-generation', 3, 'completed');
                  ALTER TABLE providers DROP COLUMN codex_options;
+                 ALTER TABLE providers DROP COLUMN settings_config;
                  DROP TABLE app_settings;
                  PRAGMA user_version = 6;",
             )
@@ -721,7 +1352,7 @@ mod tests {
                 .connection
                 .query_row("PRAGMA user_version", [], |row| row.get::<_, i64>(0))
                 .unwrap(),
-            7
+            SCHEMA_VERSION
         );
         drop(store);
         std::fs::remove_file(path).unwrap();
@@ -766,6 +1397,7 @@ mod tests {
              DROP TABLE published_models;
              ALTER TABLE old_models RENAME TO published_models;
              ALTER TABLE providers DROP COLUMN codex_options;
+             ALTER TABLE providers DROP COLUMN settings_config;
              DROP TABLE app_settings;
              PRAGMA user_version = 5;"
         ).unwrap();
@@ -890,6 +1522,7 @@ mod tests {
                  ALTER TABLE published_models DROP COLUMN fallback_provider_id;
                  ALTER TABLE request_records DROP COLUMN fallback_from;
                  ALTER TABLE providers DROP COLUMN codex_options;
+                 ALTER TABLE providers DROP COLUMN settings_config;
                  DROP TABLE app_settings;
                  PRAGMA user_version = 4;",
             )
@@ -926,7 +1559,7 @@ mod tests {
         let store = Store::open(&path).unwrap();
         store
             .connection
-            .execute_batch("DROP TABLE request_records; ALTER TABLE published_models DROP COLUMN fallback_provider_id; ALTER TABLE providers DROP COLUMN codex_options; DROP TABLE app_settings; PRAGMA user_version = 3;")
+            .execute_batch("DROP TABLE request_records; ALTER TABLE published_models DROP COLUMN fallback_provider_id; ALTER TABLE providers DROP COLUMN codex_options; ALTER TABLE providers DROP COLUMN settings_config; DROP TABLE app_settings; PRAGMA user_version = 3;")
             .unwrap();
         drop(store);
         let store = Store::open(&path).unwrap();
@@ -973,7 +1606,7 @@ mod tests {
     }
 
     #[test]
-    fn provider_metadata_survives_reopen_without_secret_columns() {
+    fn provider_metadata_survives_reopen_without_loading_secret_json() {
         let path = std::env::temp_dir().join(format!(
             "switchx-storage-{}-{}.sqlite",
             std::process::id(),

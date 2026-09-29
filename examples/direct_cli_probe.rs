@@ -8,9 +8,7 @@ use axum::{
 };
 use serde_json::{Value, json};
 use switchx::{
-    app,
-    credentials::{CredentialStore, PROVIDER_KEY_SERVICE},
-    direct,
+    app, client, direct,
     direct_config::{self, PreparedDirectSwitch},
     storage::Store,
 };
@@ -108,7 +106,7 @@ async fn run(root: &Path) -> Result<(), Box<dyn std::error::Error>> {
             .unwrap()
             .join("switchx");
         if !helper.is_file() {
-            return Err::<String, Box<dyn std::error::Error>>(
+            return Err::<(), Box<dyn std::error::Error>>(
                 "build the switchx binary before running this probe".into(),
             );
         }
@@ -116,11 +114,9 @@ async fn run(root: &Path) -> Result<(), Box<dyn std::error::Error>> {
         let prepared =
             PreparedDirectSwitch::inspect(&home.join("config.toml"), &data, &provider, &helper)?;
         prepared.apply()?;
-        let mut command = Command::new("npx");
+        let mut command = Command::new(client::cli_executable());
         command
             .args([
-                "-y",
-                "@openai/codex@0.156.1",
                 "exec",
                 "--ephemeral",
                 "--skip-git-repo-check",
@@ -132,6 +128,15 @@ async fn run(root: &Path) -> Result<(), Box<dyn std::error::Error>> {
             ])
             .current_dir(&home)
             .env("CODEX_HOME", &home)
+            .env_remove("SWITCHX_DATA_DIR")
+            .env_remove("OPENAI_API_KEY")
+            .env_remove("CODEX_API_KEY")
+            .env_remove("CODEX_ACCESS_TOKEN")
+            .env_remove("OPENAI_BASE_URL")
+            .env("HTTPS_PROXY", "http://127.0.0.1:9")
+            .env("HTTP_PROXY", "http://127.0.0.1:9")
+            .env("ALL_PROXY", "http://127.0.0.1:9")
+            .env("NO_PROXY", "127.0.0.1,localhost")
             .stdin(Stdio::null())
             .kill_on_drop(true);
         let output = timeout(Duration::from_secs(40), command.output()).await??;
@@ -155,21 +160,10 @@ async fn run(root: &Path) -> Result<(), Box<dyn std::error::Error>> {
         println!(
             "Codex CLI used the SwitchX credential helper and sent a direct mock Responses request"
         );
-        Ok::<String, Box<dyn std::error::Error>>(provider.id)
+        Ok::<(), Box<dyn std::error::Error>>(())
     }
     .await;
     task.abort();
-    if let Ok(id) = &outcome {
-        let _ = CredentialStore::new(PROVIDER_KEY_SERVICE).and_then(|store| store.delete(id));
-    } else if let Ok(store) = Store::open(&data.join("switchx.sqlite"))
-        && let Ok(providers) = store.providers()
-    {
-        for provider in providers {
-            if let Some(reference) = provider.credential_ref {
-                let _ = CredentialStore::new(PROVIDER_KEY_SERVICE)
-                    .and_then(|store| store.delete(&reference));
-            }
-        }
-    }
-    outcome.map(|_| ())
+    // main removes the temporary database, including its synthetic provider key.
+    outcome
 }

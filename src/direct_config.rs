@@ -76,12 +76,8 @@ impl PreparedDirectSwitch {
             return Err("SwitchX credential helper is unavailable".into());
         }
         validate_provider(&provider.name, &provider.base_url, &provider.model_id)?;
-        let reference = provider
-            .credential_ref
-            .as_deref()
-            .ok_or("provider credential is missing")?;
-        if reference != provider.id || !valid_id(reference) {
-            return Err("provider credential reference is invalid".into());
+        if !valid_id(&provider.id) {
+            return Err("provider id is invalid".into());
         }
         let journal_path = state_dir.join(JOURNAL_NAME);
         if journal_path.exists() || state_dir.join("switch-journal.json").exists() {
@@ -169,7 +165,8 @@ impl PreparedDirectSwitch {
         );
         let mut args = Array::new();
         args.push("credential");
-        args.push(reference);
+        args.push(provider.id.as_str());
+        args.push(state_dir.to_str().ok_or("state path is not UTF-8")?);
         auth.insert("args", Item::Value(Value::Array(args)));
         changes.push(format!("model_providers.{provider_id}"));
         let proposed = document.to_string();
@@ -503,7 +500,7 @@ mod tests {
             name: "Mock Responses".into(),
             base_url: "http://127.0.0.1:12345/v1".into(),
             model_id: "mock-model".into(),
-            credential_ref: Some("test-id".into()),
+            credential_ref: None,
         }
     }
 
@@ -519,6 +516,14 @@ mod tests {
         assert!(!prepared.proposed.contains("model_catalog_json"));
         assert!(prepared.proposed.contains("auth"));
         assert!(!prepared.proposed.contains("test-secret"));
+        let proposed: DocumentMut = prepared.proposed.parse().unwrap();
+        let args = proposed["model_providers"]["switchx_direct_test-id"]["auth"]["args"]
+            .as_array()
+            .unwrap();
+        assert_eq!(args.len(), 3);
+        assert_eq!(args.get(0).unwrap().as_str(), Some("credential"));
+        assert_eq!(args.get(1).unwrap().as_str(), Some("test-id"));
+        assert_eq!(args.get(2).unwrap().as_str(), home.state().to_str());
         prepared.apply().unwrap();
         let active = fs::read_to_string(home.config()).unwrap();
         assert!(active.contains("model_provider = \"switchx_direct_test-id\""));

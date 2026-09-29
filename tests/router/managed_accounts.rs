@@ -10,6 +10,7 @@ use base64::{Engine, engine::general_purpose::URL_SAFE_NO_PAD};
 use serde_json::{Value, json};
 use switchx::{
     accounts::AccountManager,
+    app,
     catalog::{Selection, publish},
     chatgpt::{self, Workspace},
     routing::{LOCAL_TOKEN_HEADER, RouterState, RunningRouter, Upstream},
@@ -264,6 +265,24 @@ async fn managed_router_isolates_bound_accounts_api_keys_and_removed_bindings() 
 
     let (official_address, mut official_seen, official_task) = mock().await;
     let (api_address, mut api_seen, api_task) = mock().await;
+    app::save_provider(
+        &data,
+        None,
+        "Synthetic API",
+        &format!("http://{api_address}"),
+        "gpt-5.5",
+        "synthetic-api-key".into(),
+    )
+    .unwrap();
+    let api_provider = Store::open(&data.join("switchx.sqlite"))
+        .unwrap()
+        .providers()
+        .unwrap()
+        .into_iter()
+        .find(|provider| provider.name == "Synthetic API")
+        .unwrap();
+    assert!(api_provider.credential_ref.is_none());
+    let api_key = app::provider_credential(&data, &api_provider).unwrap();
     let templates =
         serde_json::from_str(include_str!("../fixtures/synthetic-models.json")).unwrap();
     let publication = publish(
@@ -284,7 +303,7 @@ async fn managed_router_isolates_bound_accounts_api_keys_and_removed_bindings() 
             Selection {
                 public_id: "sx-api",
                 display_name: "API",
-                provider_id: "api",
+                provider_id: &api_provider.id,
                 upstream_model: "gpt-5.5",
             },
         ],
@@ -321,9 +340,8 @@ async fn managed_router_isolates_bound_accounts_api_keys_and_removed_bindings() 
                 .unwrap(),
             ),
             (
-                "api".into(),
-                Upstream::new(&format!("http://{api_address}"), "synthetic-api-key".into())
-                    .unwrap(),
+                api_provider.id.clone(),
+                Upstream::with_secret(&format!("http://{api_address}"), api_key).unwrap(),
             ),
         ]),
     )
@@ -430,11 +448,12 @@ async fn managed_router_isolates_bound_accounts_api_keys_and_removed_bindings() 
         4
     );
 
-    let database = format!(
-        "{}{}",
-        String::from_utf8_lossy(&std::fs::read(database_path).unwrap()),
-        String::from_utf8_lossy(&std::fs::read(data.join("switchx.sqlite")).unwrap()),
-    );
+    let request_database =
+        String::from_utf8_lossy(&std::fs::read(database_path).unwrap()).into_owned();
+    let provider_database =
+        String::from_utf8_lossy(&std::fs::read(data.join("switchx.sqlite")).unwrap()).into_owned();
+    assert!(provider_database.contains("synthetic-api-key"));
+    assert!(!request_database.contains("synthetic-api-key"));
     for secret in [
         auth_a["tokens"]["access_token"].as_str().unwrap(),
         auth_b["tokens"]["access_token"].as_str().unwrap(),
@@ -444,10 +463,10 @@ async fn managed_router_isolates_bound_accounts_api_keys_and_removed_bindings() 
         "synthetic-private-prompt",
         "synthetic-private-cookie",
         "synthetic-private-proxy",
-        "synthetic-api-key",
         LOCAL_TOKEN,
     ] {
-        assert!(!database.contains(secret));
+        assert!(!request_database.contains(secret));
+        assert!(!provider_database.contains(secret));
     }
     official_task.abort();
     api_task.abort();

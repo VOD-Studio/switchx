@@ -38,6 +38,14 @@ async fn main() -> ProbeResult {
     let source = Store::open_read_only(&data.join("switchx.sqlite"))
         .map_err(|_| "cannot inspect source metadata; open it in SwitchX to update its schema")?;
     let selected = select_models(&source, &ids)?;
+    let keys = selected
+        .iter()
+        .map(|(_, provider)| {
+            source.provider_api_key(&provider.id)?.ok_or_else(|| {
+                "provider key is not stored in SQLite; open SwitchX to migrate legacy credentials first".into()
+            })
+        })
+        .collect::<ProbeResult<Vec<_>>>()?;
     drop(source);
     let helper = std::env::current_exe()?
         .parent()
@@ -71,9 +79,13 @@ async fn main() -> ProbeResult {
         std::fs::create_dir(&state)?;
         std::fs::write(home.join("config.toml"), ORIGINAL)?;
         let store = Store::open(&state.join("switchx.sqlite"))?;
-        for (model, provider) in &selected {
-            store.put_provider(provider)?;
-            store.put_model(model)?;
+        for ((model, provider), key) in selected.iter().zip(&keys) {
+            store.put_provider_with_models_options_and_key(
+                provider,
+                std::slice::from_ref(model),
+                None,
+                key,
+            )?;
         }
         drop(store);
         let default_model = &selected[0].0.public_id;

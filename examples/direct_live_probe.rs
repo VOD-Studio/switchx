@@ -3,7 +3,7 @@ mod live_probe;
 
 use std::path::{Path, PathBuf};
 use switchx::{
-    credentials::{CredentialStore, PROVIDER_KEY_SERVICE},
+    credentials::Secret,
     direct,
     direct_config::{self, PreparedDirectSwitch},
     storage::{ProviderRecord, Store},
@@ -25,9 +25,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     if args.next().is_some() || !data.is_absolute() || !data.join("switchx.sqlite").is_file() {
         return Err("use an absolute existing SwitchX data directory".into());
     }
-    let provider = Store::open_read_only(&data.join("switchx.sqlite"))?
-        .provider(&id)?
-        .ok_or("provider was not found")?;
+    let source = Store::open_read_only(&data.join("switchx.sqlite"))?;
+    let provider = source.provider(&id)?.ok_or("provider was not found")?;
+    let key = source.provider_api_key(&id)?.ok_or(
+        "provider key is not stored in SQLite; open SwitchX to migrate legacy credentials first",
+    )?;
+    drop(source);
     let helper = std::env::current_exe()?
         .parent()
         .unwrap()
@@ -53,7 +56,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     std::fs::create_dir(&state)?;
     let config = home.join("config.toml");
     std::fs::write(&config, ORIGINAL_CONFIG)?;
-    let result = run(&home, &state, &provider, &helper, &suffix).await;
+    let result = run(&home, &state, &provider, &key, &helper, &suffix).await;
     if state.join("direct-journal.json").exists() {
         let restored = direct_config::restore(&config, &state).map_err(|_| {
             format!(
@@ -81,23 +84,21 @@ async fn run(
     home: &Path,
     state: &Path,
     provider: &ProviderRecord,
+    key: &Secret,
     helper: &Path,
     suffix: &str,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    let credentials = CredentialStore::new(PROVIDER_KEY_SERVICE)?;
-    let secret = credentials.get(
-        provider
-            .credential_ref
-            .as_deref()
-            .ok_or("provider has no credential reference")?,
-    )?;
-    direct::check_models(provider, secret.expose()).await?;
-    drop(secret);
+    let store = Store::open(&state.join("switchx.sqlite"))?;
+    store.put_provider_with_models_options_and_key(provider, &[], None, key)?;
+    drop(store);
+    direct::check_models(provider, key.expose()).await?;
     println!("Real upstream /models contains the selected model");
     PreparedDirectSwitch::inspect(&home.join("config.toml"), state, provider, helper)?.apply()?;
     let greeting = format!("SWITCHX_DIRECT_{suffix}");
     live_probe::answer(home, &provider.model_id, &greeting).await?;
-    println!("Codex CLI completed a real direct Responses answer using the keychain helper");
+    println!(
+        "Codex CLI completed a real direct Responses answer using the SQLite credential helper"
+    );
     let marker = format!("SWITCHX_TOOL_{suffix}");
     live_probe::file_round_trip(home, &provider.model_id, &marker).await?;
     println!("Real file tool completed; its result was used in the second-round answer");
