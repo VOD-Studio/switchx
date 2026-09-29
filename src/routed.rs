@@ -36,6 +36,8 @@ struct PreparedRoute {
     publication: Publication,
     models: Vec<ModelRecord>,
     providers: Vec<ProviderRecord>,
+    config_provider_id: String,
+    config_state: app::ProviderConfigState,
 }
 
 struct ActiveRoute {
@@ -99,6 +101,13 @@ impl RouteSession {
             return Err("Codex 配置目录不存在".into());
         }
         let (models, providers) = selected_inputs(state_dir)?;
+        let config_provider_id = models
+            .iter()
+            .find(|model| model.enabled && model.public_id == default_model)
+            .ok_or("默认模型未发布")?
+            .provider_id
+            .clone();
+        let config_state = app::load_provider_config(state_dir, &config_provider_id)?;
         let publication = catalog::publish_saved(&models)?;
         let listener = TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, port))
             .await
@@ -116,6 +125,22 @@ impl RouteSession {
         };
         let switch =
             PreparedSwitch::inspect(&target, state_dir, &publication, address, default_model)?;
+        let remote_direct_only = config_provider_id != chatgpt::PROVIDER_ID
+            && config_state
+                .options
+                .as_ref()
+                .is_some_and(|options| options.remote_compaction);
+        let switch = if let Some(mut options) = config_state.options.clone() {
+            // API routing cannot forward server-state compaction continuations.
+            if remote_direct_only {
+                options.remote_compaction = false;
+            }
+            switch.with_codex_options(&options, &config_state.common)?
+        } else if !config_state.common.is_empty() {
+            switch.with_common_config(&config_state.common)?
+        } else {
+            switch
+        };
         let switch = if uses_chatgpt {
             switch.with_chatgpt_auth(local_token.expose(), &token_reference)?
         } else {
@@ -184,6 +209,18 @@ impl RouteSession {
         } else {
             summary
         };
+        let summary = if config_state.options.is_some() || !config_state.common.is_empty() {
+            format!(
+                "{summary}\nCodex 窗口与通用配置使用默认模型的供应商设置{}",
+                if remote_direct_only {
+                    "；API 上游的远程压缩选项仅在直连时生效。"
+                } else {
+                    "。"
+                }
+            )
+        } else {
+            summary
+        };
         self.prepared = Some(PreparedRoute {
             switch,
             listener,
@@ -200,6 +237,8 @@ impl RouteSession {
             publication,
             models,
             providers,
+            config_provider_id,
+            config_state,
         });
         Ok(summary)
     }
@@ -220,7 +259,11 @@ impl RouteSession {
             return Err("路由目标、端口或默认模型已变化，请重新预览".into());
         }
         let (models, providers) = selected_inputs(state_dir)?;
-        if models != prepared.models || providers != prepared.providers {
+        if models != prepared.models
+            || providers != prepared.providers
+            || app::load_provider_config(state_dir, &prepared.config_provider_id)?
+                != prepared.config_state
+        {
             return Err("上游或模型资料已变化，请重新预览".into());
         }
         if client::cli_path()? != prepared.cli_path
@@ -282,7 +325,10 @@ impl RouteSession {
                 Upstream::with_secret(&provider.base_url, token)?,
             );
         }
-        if selected_inputs(state_dir)? != (models, providers) {
+        if selected_inputs(state_dir)? != (models, providers)
+            || app::load_provider_config(state_dir, &prepared.config_provider_id)?
+                != prepared.config_state
+        {
             return Err("检查期间上游或模型资料已变化，请重新预览".into());
         }
         let local_token = prepared.local_token;

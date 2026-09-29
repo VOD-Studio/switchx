@@ -5,6 +5,7 @@ import {
     ListView,
     Palette,
     ScrollView,
+    TextEdit,
 } from "std-widgets.slint";
 import { Theme } from "tokens.slint";
 import { QuietButton, SurfaceCard, StatusPill } from "components.slint";
@@ -84,6 +85,18 @@ export component AppWindow inherits Window {
     in-out property <string> edit-url: "";
     in-out property <string> edit-model: "";
     in-out property <string> edit-key: "";
+    in-out property <bool> edit-remote-compaction: false;
+    in-out property <bool> edit-use-common-config: true;
+    in-out property <bool> edit-context-1m: false;
+    in-out property <string> edit-compact-limit: "900000";
+    in-out property <string> edit-config-preview: "";
+    in-out property <string> edit-config-error: "";
+    in-out property <bool> common-config-editor-open: false;
+    in-out property <string> common-config-draft: "";
+    in-out property <string> common-config-saved: "";
+    in-out property <string> common-config-error: "";
+    in-out property <string> common-config-message: "";
+    in-out property <string> common-config-current-source: "";
     in property <[ProviderPresetRow]> provider-presets;
     in-out property <string> edit-preset-id: "";
     in-out property <string> edit-preset-url: "";
@@ -164,9 +177,19 @@ export component AppWindow inherits Window {
         if (root.edit-preset-id != "" && root.edit-url != root.edit-preset-url) {
             root.edit-preset-id = "";
         }
+        if (root.editor-open) { root.update-provider-config-preview(); }
     }
+    changed edit-name => { if (root.editor-open) { root.update-provider-config-preview(); } }
+    changed edit-model => { if (root.editor-open) { root.update-provider-config-preview(); } }
+    changed edit-remote-compaction => { if (root.editor-open) { root.update-provider-config-preview(); } }
+    changed edit-use-common-config => { if (root.editor-open) { root.update-provider-config-preview(); } }
+    changed edit-context-1m => { if (root.editor-open) { root.update-provider-config-preview(); } }
+    changed edit-compact-limit => { if (root.editor-open) { root.update-provider-config-preview(); } }
     changed edit-key => { root.reset-model-discovery(); }
-    changed editor-open => { root.reset-model-discovery(); }
+    changed editor-open => {
+        root.reset-model-discovery();
+        if (root.editor-open) { root.update-provider-config-preview(); }
+    }
     changed model-provider-id => { root.reset-model-discovery(); }
     changed model-original-id => { root.reset-model-discovery(); }
     changed model-editor-open => {
@@ -179,6 +202,12 @@ export component AppWindow inherits Window {
     callback refresh-requests();
     callback filter-providers(string);
     callback save-provider(string, string, string, string, string);
+    callback begin-provider-editor(string);
+    callback update-provider-config-preview();
+    callback open-common-config();
+    callback extract-common-config();
+    callback save-common-config();
+    callback cancel-common-config();
     callback delete-provider(string);
     callback check-provider(string);
     callback apply-provider-preset(string);
@@ -355,7 +384,7 @@ export component AppWindow inherits Window {
 
                     Text {
                         text: root.active-page == 0 ? "模型，各就各位。"
-                            : root.active-page == 1 ? "上游供应商"
+                            : root.active-page == 1 ? (root.common-config-editor-open ? "Codex 通用配置" : "上游供应商")
                             : root.active-page == 2 ? "模型路由"
                             : root.active-page == 3 ? "请求与用量"
                             : root.active-page == 4 ? "MCP · Skills"
@@ -651,7 +680,7 @@ export component AppWindow inherits Window {
                 }
             }
 
-            if root.active-page == 1: ScrollView {
+            if root.active-page == 1 && !root.common-config-editor-open: ScrollView {
                 vertical-stretch: 1;
                 VerticalLayout {
                     spacing: 12px;
@@ -694,17 +723,7 @@ export component AppWindow inherits Window {
                             width: 92px;
                             text: "添加上游";
                             enabled: !root.busy && !root.config-managed;
-                            clicked => {
-                                root.edit-id = "";
-                                root.edit-name = "";
-                                root.edit-url = "";
-                                root.edit-model = "";
-                                root.edit-key = "";
-                                root.edit-preset-id = "";
-                                root.edit-preset-url = "";
-                                root.delete-confirm = false;
-                                root.editor-open = true;
-                            }
+                            clicked => { root.begin-provider-editor(""); }
                         }
                     }
 
@@ -725,7 +744,7 @@ export component AppWindow inherits Window {
                     }
 
                     if root.editor-open: SurfaceCard {
-                        height: 302px + (root.edit-id == "" ? 92px : 0px) + (root.edit-preset-id != "" ? 58px : 0px) + (root.discovery-scope == 0 && (root.fetched-models.length > 0 || root.discovery-message != "") ? 68px : 0px);
+                        height: 690px + (root.edit-id == "" ? 92px : 0px) + (root.edit-preset-id != "" ? 58px : 0px) + (root.discovery-scope == 0 && (root.fetched-models.length > 0 || root.discovery-message != "") ? 68px : 0px) + (root.edit-config-error != "" ? 48px : 0px);
                         VerticalLayout {
                             padding: 16px;
                             spacing: 7px;
@@ -890,12 +909,131 @@ export component AppWindow inherits Window {
                                 }
                             }
 
+                            Rectangle {
+                                height: 1px;
+                                background: Theme.border;
+                            }
+
+                            HorizontalLayout {
+                                height: 32px;
+                                spacing: 14px;
+                                Text {
+                                    text: "config.toml (TOML)";
+                                    color: Theme.primary-text;
+                                    font-size: 14px;
+                                    font-weight: 600;
+                                    vertical-alignment: center;
+                                }
+
+                                Rectangle {
+                                    horizontal-stretch: 1;
+                                }
+
+                                CheckBox {
+                                    text: "启用远程压缩";
+                                    checked <=> root.edit-remote-compaction;
+                                    accessible-label: "启用 Codex 远程压缩";
+                                    enabled: !root.busy;
+                                }
+
+                                CheckBox {
+                                    text: "应用通用配置";
+                                    checked <=> root.edit-use-common-config;
+                                    accessible-label: "应用已保存的通用配置";
+                                    enabled: !root.busy;
+                                }
+                            }
+
+                            HorizontalLayout {
+                                height: 32px;
+                                Rectangle {
+                                    horizontal-stretch: 1;
+                                }
+
+                                QuietButton {
+                                    width: 132px;
+                                    horizontal-stretch: 0;
+                                    text: "编辑通用配置";
+                                    enabled: !root.busy && !root.config-managed;
+                                    clicked => { root.open-common-config(); }
+                                }
+                            }
+
+                            HorizontalLayout {
+                                height: 32px;
+                                spacing: 12px;
+                                CheckBox {
+                                    text: "1M 上下文窗口";
+                                    checked <=> root.edit-context-1m;
+                                    accessible-label: "设置一百万 token 上下文窗口";
+                                    enabled: !root.busy;
+                                }
+
+                                Text {
+                                    text: "压缩阈值";
+                                    color: Theme.muted-text;
+                                    vertical-alignment: center;
+                                }
+
+                                LineEdit {
+                                    width: 144px;
+                                    horizontal-stretch: 0;
+                                    text <=> root.edit-compact-limit;
+                                    input-type: number;
+                                    placeholder-text: "900000";
+                                    accessible-label: "自动压缩 token 阈值";
+                                    enabled: root.edit-context-1m && !root.busy;
+                                }
+
+                                Text {
+                                    text: "tokens";
+                                    color: Theme.muted-text;
+                                    vertical-alignment: center;
+                                }
+
+                                Rectangle {
+                                    horizontal-stretch: 1;
+                                }
+                            }
+
+                            TextEdit {
+                                height: 208px;
+                                vertical-stretch: 0;
+                                text: root.edit-config-preview;
+                                read-only: true;
+                                wrap: no-wrap;
+                                font-family: "Menlo";
+                                font-size: 12px;
+                                accessible-label: "Codex config.toml 配置预览";
+                            }
+
+                            if root.edit-config-error != "": Text {
+                                text: root.edit-config-error;
+                                color: Theme.error;
+                                font-size: 12px;
+                                wrap: word-wrap;
+                            }
+
+                            Text {
+                                text: "直连时写入所选 Codex 目录；1M 开关和阈值优先于通用配置。API Key 由系统凭据存储提供。";
+                                color: Theme.muted-text;
+                                font-size: 12px;
+                                wrap: word-wrap;
+                            }
+
+                            Text {
+                                text: "远程压缩仅用于 API 直连，需上游支持 /responses/compact；本地路由使用默认模型的供应商设置。";
+                                color: Theme.muted-text;
+                                font-size: 12px;
+                                wrap: word-wrap;
+                            }
+
                             HorizontalLayout {
                                 spacing: 8px;
                                 QuietButton {
                                     text: "保存";
                                     primary: true;
-                                    enabled: !root.busy;
+                                    enabled: !root.busy && root.edit-config-error == "";
                                     clicked => {
                                         root.save-provider(root.edit-id, root.edit-name, root.edit-url, root.edit-model, root.edit-key);
                                         root.edit-key = "";
@@ -1001,17 +1139,7 @@ export component AppWindow inherits Window {
                                         root.active-page = 5;
                                         return;
                                     }
-                                    root.edit-id = provider.id;
-                                    root.edit-name = provider.name;
-                                    root.edit-url = provider.base-url;
-                                    root.edit-model = provider.model-id;
-                                    root.edit-key = "";
-                                    root.edit-preset-id = provider.preset-id;
-                                    root.edit-preset-url = provider.base-url;
-                                    root.edit-preset-icon = provider.icon;
-                                    root.edit-preset-monochrome = provider.monochrome;
-                                    root.delete-confirm = false;
-                                    root.editor-open = true;
+                                    root.begin-provider-editor(provider.id);
                                 }
                             }
 
@@ -1039,6 +1167,150 @@ export component AppWindow inherits Window {
                                     root.inspect-direct(provider.id, root.config-home);
                                 }
                             }
+                        }
+                    }
+                }
+            }
+
+            if root.active-page == 1 && root.common-config-editor-open: SurfaceCard {
+                vertical-stretch: 1;
+                VerticalLayout {
+                    padding: 18px;
+                    spacing: 12px;
+                    HorizontalLayout {
+                        height: 36px;
+                        Text {
+                            text: "编辑通用配置片段";
+                            color: Theme.primary-text;
+                            font-size: 17px;
+                            font-weight: 600;
+                            vertical-alignment: center;
+                        }
+
+                        Rectangle {
+                            horizontal-stretch: 1;
+                        }
+
+                        QuietButton {
+                            width: 108px;
+                            horizontal-stretch: 0;
+                            text: "返回上游";
+                            enabled: !root.busy;
+                            clicked => { root.cancel-common-config(); }
+                        }
+                    }
+
+                    ScrollView {
+                        vertical-stretch: 1;
+                        VerticalLayout {
+                            spacing: 12px;
+                            SurfaceCard {
+                                height: 132px;
+                                background: Theme.brand-surface;
+                                border-color: Theme.brand;
+                                VerticalLayout {
+                                    padding: 14px;
+                                    spacing: 7px;
+                                    Text {
+                                        text: "什么是通用配置片段？";
+                                        color: Theme.brand;
+                                        font-size: 14px;
+                                        font-weight: 600;
+                                    }
+
+                                    Text {
+                                        text: "用于在不同供应商之间共享插件、Hook、环境变量和其他非敏感 Codex 设置。";
+                                        color: Theme.primary-text;
+                                        font-size: 12px;
+                                        wrap: word-wrap;
+                                    }
+
+                                    Text {
+                                        text: "提取当前配置后检查草稿，点击“保存”，再在上游表单勾选“应用通用配置”。新增插件或 Hook 后可重新提取。";
+                                        color: Theme.muted-text;
+                                        font-size: 12px;
+                                        wrap: word-wrap;
+                                    }
+
+                                    Text {
+                                        text: "提取会排除供应商、认证和 MCP 项。保存片段只更新 SwitchX 本地资料，切换时生效。";
+                                        color: Theme.muted-text;
+                                        font-size: 12px;
+                                    }
+                                }
+                            }
+
+                            if root.common-config-current-source != "": Text {
+                                text: "提取来源：" + root.common-config-current-source;
+                                color: Theme.muted-text;
+                                font-size: 12px;
+                                wrap: word-wrap;
+                            }
+
+                            Text {
+                                text: "config.toml (TOML) · 直连或发布路由时与供应商配置合并";
+                                color: Theme.muted-text;
+                                font-size: 12px;
+                                wrap: word-wrap;
+                            }
+
+                            TextEdit {
+                                height: 208px;
+                                vertical-stretch: 0;
+                                text <=> root.common-config-draft;
+                                placeholder-text: "在此填写可共享的 Codex TOML 配置";
+                                wrap: no-wrap;
+                                font-family: "Menlo";
+                                font-size: 12px;
+                                enabled: !root.busy && !root.config-managed;
+                                accessible-label: "Codex 通用配置片段";
+                            }
+
+                            if root.common-config-error != "": Text {
+                                text: root.common-config-error;
+                                color: Theme.error;
+                                font-size: 12px;
+                                wrap: word-wrap;
+                            }
+
+                            if root.common-config-message != "": Text {
+                                text: root.common-config-message;
+                                color: Theme.muted-text;
+                                font-size: 12px;
+                                wrap: word-wrap;
+                            }
+                        }
+                    }
+
+                    HorizontalLayout {
+                        height: 36px;
+                        spacing: 8px;
+                        QuietButton {
+                            min-width: 194px;
+                            text: "从当前 Codex 配置提取";
+                            enabled: !root.busy && !root.config-managed;
+                            clicked => { root.extract-common-config(); }
+                        }
+
+                        Rectangle {
+                            horizontal-stretch: 1;
+                        }
+
+                        QuietButton {
+                            width: 80px;
+                            horizontal-stretch: 0;
+                            text: "取消";
+                            enabled: !root.busy;
+                            clicked => { root.cancel-common-config(); }
+                        }
+
+                        QuietButton {
+                            width: 92px;
+                            horizontal-stretch: 0;
+                            text: "保存";
+                            primary: true;
+                            enabled: !root.busy && !root.config-managed;
+                            clicked => { root.save-common-config(); }
                         }
                     }
                 }
