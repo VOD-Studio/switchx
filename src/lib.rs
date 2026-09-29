@@ -3,6 +3,7 @@ pub mod app;
 pub mod catalog;
 pub mod chatgpt;
 pub mod client;
+pub mod code_highlight;
 pub mod config;
 pub mod config_overlay;
 pub mod config_transaction;

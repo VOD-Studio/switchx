@@ -1,0 +1,161 @@
+import { ScrollView } from "std-widgets.slint";
+import { Theme } from "tokens.slint";
+
+export struct CodeSpan {
+    text: string,
+    prefix: string,
+    line-text: string,
+    line: int,
+    kind: int,
+}
+
+export global SyntaxHighlighting {
+    pure callback spans(string, string) -> [CodeSpan];
+}
+
+export component CodeEditor inherits Rectangle {
+    in-out property <string> text <=> input.text;
+    in property <string> language: "toml";
+    in property <bool> enabled <=> input.enabled;
+    in property <bool> read-only <=> input.read-only;
+    in property <string> placeholder-text;
+    callback edited(string);
+
+    background: Theme.raised;
+    border-width: 1px;
+    border-color: input.has-focus ? Theme.brand : Theme.border;
+    border-radius: 4px;
+    horizontal-stretch: 1;
+    forward-focus: input;
+    opacity: root.enabled ? 1 : 0.6;
+    accessible-role: text-input;
+    accessible-enabled: root.enabled;
+    accessible-read-only: root.read-only;
+    accessible-value <=> root.text;
+    accessible-placeholder-text: root.placeholder-text;
+    accessible-action-set-value(value) => { root.text = value; root.edited(value); }
+    accessible-action-set-selection-offsets(anchor, focus) => { input.set-selection-offsets(anchor, focus); }
+
+    ContextMenuArea {
+        enabled: root.enabled;
+        Menu {
+            MenuItem {
+                title: "剪切";
+                enabled: !root.read-only;
+                activated => { input.cut(); }
+            }
+
+            MenuItem {
+                title: "复制";
+                enabled: !root.text.is-empty;
+                activated => { input.copy(); }
+            }
+
+            MenuItem {
+                title: "粘贴";
+                enabled: !root.read-only;
+                activated => { input.paste(); }
+            }
+
+            MenuItem {
+                title: "全选";
+                enabled: !root.text.is-empty;
+                activated => { input.select-all(); }
+            }
+        }
+
+        scroll := ScrollView {
+            x: 8px;
+            y: 8px;
+            width: parent.width - 16px;
+            height: parent.height - 16px;
+            enabled: root.enabled;
+            content-width: max(self.visible-width, input.preferred-width);
+            content-height: max(self.visible-height, input.preferred-height);
+
+            input := TextInput {
+                width: scroll.content-width;
+                height: scroll.content-height;
+                single-line: false;
+                wrap: no-wrap;
+                font-family: "Menlo";
+                font-size: 12px;
+                color: Theme.primary-text;
+                selection-background-color: Theme.brand-surface;
+                selection-foreground-color: Theme.primary-text;
+                input-method-hints: { capitalization: none, auto-correct: false, auto-complete: false };
+                page-height: scroll.visible-height;
+                accessible-role: none;
+                edited => { root.edited(self.text); }
+                cursor-position-changed(position) => {
+                    if position.x + scroll.content-x < 0px {
+                        scroll.content-x = min(0px, max(scroll.visible-width - self.width, -position.x));
+                    } else if position.x + scroll.content-x > scroll.visible-width - self.text-cursor-width {
+                        scroll.content-x = min(0px, max(scroll.visible-width - self.width, scroll.visible-width - position.x - self.text-cursor-width));
+                    }
+                    if position.y + scroll.content-y < 0px {
+                        scroll.content-y = min(0px, max(scroll.visible-height - self.height, -position.y));
+                    } else if position.y + scroll.content-y > scroll.visible-height - root.line-height {
+                        scroll.content-y = min(0px, max(scroll.visible-height - self.height, scroll.visible-height - position.y - root.line-height));
+                    }
+                }
+            }
+
+            for span in SyntaxHighlighting.spans(root.text, root.language): Rectangle {
+                // Empty Text has a one-character preferred width in Slint.
+                x: span.prefix == "" ? 0px : prefix.preferred-width;
+                y: span.line * root.line-height;
+                width: end.preferred-width - self.x;
+                height: root.line-height;
+                clip: true;
+                // Plain Text passes mouse events through to the native input.
+                // Show native uncommitted IME text without the overlay.
+                visible: input.preedit-text == "";
+                accessible-role: none;
+
+                Text {
+                    x: -parent.x;
+                    width: input.width;
+                    height: parent.height;
+                    text: span.line-text;
+                    color: span.kind == 1 ? Theme.code-key
+                        : span.kind == 2 ? Theme.code-string
+                        : span.kind == 3 ? Theme.code-number
+                        : span.kind == 4 ? Theme.code-literal
+                        : span.kind == 5 ? Theme.code-comment : Theme.code-section;
+                    font-family: input.font-family;
+                    font-size: input.font-size;
+                    wrap: no-wrap;
+                    vertical-alignment: top;
+                    accessible-role: none;
+                }
+
+                prefix := Text {
+                    text: span.prefix;
+                    font-family: input.font-family;
+                    font-size: input.font-size;
+                    visible: false;
+                    accessible-role: none;
+                }
+
+                end := Text {
+                    text: span.prefix + span.text;
+                    font-family: input.font-family;
+                    font-size: input.font-size;
+                    visible: false;
+                    accessible-role: none;
+                }
+            }
+
+            if root.text == "" && input.preedit-text == "": Text {
+                text: root.placeholder-text;
+                color: Theme.muted-text;
+                font-family: input.font-family;
+                font-size: input.font-size;
+                accessible-role: none;
+            }
+        }
+    }
+
+    private property <length> line-height: input.font-metrics.ascent - input.font-metrics.descent;
+}
