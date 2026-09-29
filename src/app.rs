@@ -57,6 +57,8 @@ pub struct ProviderView {
     pub model_id: String,
     pub credential_status: &'static str,
     pub preset_id: &'static str,
+    pub kind: crate::storage::ProviderKind,
+    pub binding_label: String,
 }
 
 pub struct ModelPreset {
@@ -302,6 +304,7 @@ pub struct Snapshot {
 pub struct ModelView {
     pub provider_id: String,
     pub provider_name: String,
+    pub binding_label: String,
     pub upstream_model: String,
     pub public_id: String,
     pub display_name: String,
@@ -516,6 +519,7 @@ fn model_view(
     ModelView {
         provider_id: provider.id.clone(),
         provider_name: provider.name.clone(),
+        binding_label: binding_label(provider),
         upstream_model: model
             .map(|model| model.upstream_model.clone())
             .unwrap_or_else(|| provider.model_id.clone()),
@@ -569,8 +573,8 @@ fn model_view(
 }
 
 fn provider_view(provider: ProviderRecord, store: &Store, check_credentials: bool) -> ProviderView {
-    let credential_status = if provider.id == crate::chatgpt::PROVIDER_ID {
-        "登录与续期由目标 Codex 管理"
+    let credential_status = if provider.kind == crate::storage::ProviderKind::Chatgpt {
+        "订阅凭据由绑定账号提供"
     } else {
         match store.has_provider_api_key(&provider.id) {
             Ok(true) if !check_credentials => "凭据未检查",
@@ -583,6 +587,8 @@ fn provider_view(provider: ProviderRecord, store: &Store, check_credentials: boo
         .map(|preset| preset.id)
         .unwrap_or("");
     ProviderView {
+        kind: provider.kind,
+        binding_label: binding_label(&provider),
         id: provider.id,
         name: provider.name.clone(),
         endpoint: reqwest::Url::parse(&provider.base_url)
@@ -596,6 +602,16 @@ fn provider_view(provider: ProviderRecord, store: &Store, check_credentials: boo
         model_id: provider.model_id,
         credential_status,
         preset_id,
+    }
+}
+
+fn binding_label(provider: &ProviderRecord) -> String {
+    use crate::storage::AccountBinding;
+    match &provider.account_binding {
+        Some(AccountBinding::Native) => "绑定：原生 Codex 登录".into(),
+        Some(AccountBinding::Default) => "绑定：默认保存账号（发布时固定）".into(),
+        Some(AccountBinding::Fixed(id)) => format!("绑定：保存账号 {id}"),
+        None => String::new(),
     }
 }
 
@@ -633,9 +649,6 @@ fn save_provider_inner(
     options: Option<&CodexOptions>,
 ) -> Result<(), String> {
     ensure_editable(data_dir)?;
-    if id == Some(crate::chatgpt::PROVIDER_ID) {
-        return Err("订阅连接由 Codex 管理；不能改为 API Key 或第三方地址".into());
-    }
     let url = validate_provider(name, base_url, model_id)?;
     let store = open_store(data_dir).map_err(|error| error.message())?;
     let old = match id {
@@ -647,6 +660,12 @@ fn save_provider_inner(
         ),
         None => None,
     };
+    if old
+        .as_ref()
+        .is_some_and(|provider| provider.kind == crate::storage::ProviderKind::Chatgpt)
+    {
+        return Err("请使用订阅连接编辑器修改名称或绑定账号".into());
+    }
     let id = match &old {
         Some(record) => record.id.clone(),
         None => new_id()?,
@@ -658,6 +677,8 @@ fn save_provider_inner(
         Some(Secret::new(key))
     };
     let record = ProviderRecord {
+        kind: crate::storage::ProviderKind::ApiKey,
+        account_binding: None,
         id: id.clone(),
         name: name.trim().into(),
         base_url: url.to_string(),
@@ -877,12 +898,6 @@ pub fn save_fallback(
         .find(|model| model.public_id == public_id)
         .ok_or("请先导入主上游模型资料")?
         .clone();
-    if fallback_id.is_some()
-        && (model.provider_id == crate::chatgpt::PROVIDER_ID
-            || fallback_id == Some(crate::chatgpt::PROVIDER_ID))
-    {
-        return Err("订阅账号不参与自动备用切换，请主动选择目标模型".into());
-    }
     model.fallback_provider_id = fallback_id.map(str::to_owned);
     catalog::validate_fallback(&model, &models)?;
     if let Some(fallback_id) = fallback_id {
@@ -891,6 +906,9 @@ pub fn save_fallback(
                 .provider(id)
                 .map_err(|_| "无法读取上游资料")?
                 .ok_or("上游不存在")?;
+            if provider.kind == crate::storage::ProviderKind::Chatgpt {
+                return Err("订阅账号不参与自动备用切换，请主动选择目标模型".into());
+            }
             validate_provider(&provider.name, &provider.base_url, &model.upstream_model)?;
         }
     }
@@ -920,7 +938,7 @@ pub fn delete_model(data_dir: &Path, public_id: &str) -> Result<(), String> {
 }
 
 pub fn provider_credential(data_dir: &Path, provider: &ProviderRecord) -> Result<Secret, String> {
-    if provider.id == crate::chatgpt::PROVIDER_ID {
+    if provider.kind == crate::storage::ProviderKind::Chatgpt {
         return Err("订阅凭据由目标 Codex 管理，请使用官方登录".into());
     }
     let store = open_store(data_dir).map_err(|error| error.message())?;
@@ -1318,6 +1336,8 @@ mod tests {
         let store = open_store(&path).unwrap();
         for preset in PROVIDER_PRESETS {
             let provider = ProviderRecord {
+                kind: crate::storage::ProviderKind::ApiKey,
+                account_binding: None,
                 id: preset.id.into(),
                 name: preset.name.into(),
                 base_url: preset.base_url.into(),
@@ -1453,6 +1473,8 @@ mod tests {
         let mut models = Vec::new();
         for preset in PROVIDER_PRESETS {
             let provider = ProviderRecord {
+                kind: crate::storage::ProviderKind::ApiKey,
+                account_binding: None,
                 id: preset.id.into(),
                 name: preset.name.into(),
                 base_url: preset.base_url.into(),
@@ -1479,6 +1501,8 @@ mod tests {
         let store = open_store(&path).unwrap();
         store
             .put_provider(&ProviderRecord {
+                kind: crate::storage::ProviderKind::ApiKey,
+                account_binding: None,
                 id: "mock".into(),
                 name: "Mock".into(),
                 base_url: "https://example.invalid/v1".into(),
@@ -1553,6 +1577,8 @@ mod tests {
         let store = open_store(&path).unwrap();
         store
             .put_provider(&ProviderRecord {
+                kind: crate::storage::ProviderKind::ApiKey,
+                account_binding: None,
                 id: "probe".into(),
                 name: "Test Provider".into(),
                 base_url: "https://user:secret@example.invalid/v1?token=private".into(),
@@ -1703,6 +1729,8 @@ mod tests {
             env::temp_dir().join(format!("switchx-ignored-legacy-key-{}", new_id().unwrap()));
         let store = open_store(&path).unwrap();
         let provider = ProviderRecord {
+            kind: crate::storage::ProviderKind::ApiKey,
+            account_binding: None,
             id: "synthetic-unused-legacy-key".into(),
             name: "Mock".into(),
             base_url: "https://example.invalid/v1".into(),
@@ -1808,6 +1836,8 @@ mod tests {
         let store = open_store(&path).unwrap();
         store
             .put_provider(&ProviderRecord {
+                kind: crate::storage::ProviderKind::ApiKey,
+                account_binding: None,
                 id: "mock".into(),
                 name: "Mock".into(),
                 base_url: "https://example.invalid/v1".into(),
@@ -1827,6 +1857,8 @@ mod tests {
         assert!(load_snapshot(&path, false).unwrap().models[0].ready);
         store
             .put_provider(&ProviderRecord {
+                kind: crate::storage::ProviderKind::ApiKey,
+                account_binding: None,
                 id: "backup".into(),
                 name: "Backup".into(),
                 base_url: "https://backup.invalid/v1".into(),

@@ -17,7 +17,7 @@ use crate::{
     credentials::Secret,
     direct,
     routing::{RouterState, RunningRouter, Upstream},
-    storage::{ModelRecord, ProviderRecord},
+    storage::{AccountBinding, ModelRecord, ProviderKind, ProviderRecord, Store},
 };
 
 struct PreparedRoute {
@@ -32,13 +32,23 @@ struct PreparedRoute {
     cli_path: PathBuf,
     token_reference: String,
     local_token: Secret,
-    chatgpt_workspace: Option<chatgpt::Workspace>,
-    managed_account_id: Option<String>,
+    accounts: HashMap<String, ResolvedAccount>,
     publication: Publication,
     models: Vec<ModelRecord>,
     providers: Vec<ProviderRecord>,
     config_provider_id: String,
     config_state: app::ProviderConfigState,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct ResolvedAccount {
+    id: Option<String>,
+    workspace: Option<chatgpt::Workspace>,
+}
+
+struct LocalProbe {
+    discovery: SocketAddr,
+    responses: HashMap<String, SocketAddr>,
 }
 
 struct ActiveRoute {
@@ -51,15 +61,134 @@ struct ActiveRoute {
     cli_path: PathBuf,
     provider_config: Secret,
     token_reference: String,
+    uses_chatgpt: bool,
 }
 
 #[derive(Default)]
 pub struct RouteSession {
     prepared: Option<PreparedRoute>,
     active: Option<ActiveRoute>,
+    account_manager: Option<(PathBuf, crate::accounts::AccountManager)>,
+    local_probe: Option<LocalProbe>,
 }
 
 impl RouteSession {
+    /// Run the complete publishing path against synthetic loopback endpoints.
+    #[doc(hidden)]
+    pub fn for_local_probe(
+        data_dir: &Path,
+        oauth_origin: &str,
+        discovery: SocketAddr,
+        responses: HashMap<String, SocketAddr>,
+    ) -> Result<Self, String> {
+        if discovery.ip() != std::net::IpAddr::V4(std::net::Ipv4Addr::LOCALHOST)
+            || responses
+                .values()
+                .any(|address| address.ip() != std::net::IpAddr::V4(std::net::Ipv4Addr::LOCALHOST))
+        {
+            return Err("测试端点必须是 IPv4 回环地址".into());
+        }
+        let manager = crate::accounts::AccountManager::open_mock(data_dir, oauth_origin)?;
+        Ok(Self {
+            account_manager: Some((data_dir.into(), manager)),
+            local_probe: Some(LocalProbe {
+                discovery,
+                responses,
+            }),
+            ..Self::default()
+        })
+    }
+
+    fn manager(&mut self, data_dir: &Path) -> Result<crate::accounts::AccountManager, String> {
+        if let Some((directory, manager)) = &self.account_manager {
+            if directory != data_dir {
+                return Err("账号数据目录已变化，请重新打开路由".into());
+            }
+            return Ok(manager.clone());
+        }
+        let manager = crate::accounts::AccountManager::open(data_dir)?;
+        self.account_manager = Some((data_dir.into(), manager.clone()));
+        Ok(manager)
+    }
+
+    pub async fn wait_for_accounts(&self) -> Result<(), String> {
+        if let Some((_, manager)) = &self.account_manager {
+            manager.wait_for_idle().await?;
+        }
+        Ok(())
+    }
+
+    /// Close admission even if an external edit removed the recovery journal.
+    pub async fn drain_for_exit(&self) -> Result<(), String> {
+        if let Some(active) = &self.active {
+            active.server.pause();
+        }
+        let result = self.wait_for_accounts().await;
+        if result.is_err()
+            && let Some(active) = &self.active
+        {
+            active.server.resume();
+        }
+        result
+    }
+
+    async fn resolve_accounts(
+        &mut self,
+        state_dir: &Path,
+        home: &Path,
+        cli: &Path,
+        providers: &[ProviderRecord],
+    ) -> Result<HashMap<String, ResolvedAccount>, String> {
+        let subscriptions: Vec<_> = providers
+            .iter()
+            .filter(|provider| provider.kind == ProviderKind::Chatgpt)
+            .collect();
+        if subscriptions.is_empty() {
+            return Ok(HashMap::new());
+        }
+        if subscriptions.len() > 1
+            && subscriptions
+                .iter()
+                .any(|provider| provider.account_binding == Some(AccountBinding::Native))
+        {
+            return Err("同时发布多个订阅连接时，请为每个连接绑定保存的账号".into());
+        }
+        let manager = self.manager(state_dir)?;
+        let mut accounts = HashMap::new();
+        // Resolve saved bindings first; the target login is only the Codex entry identity.
+        for provider in &subscriptions {
+            chatgpt::validate_provider(provider)?;
+            let account = manager
+                .resolve_binding(provider.account_binding.as_ref().unwrap())
+                .await?;
+            let (id, workspace) = if let Some(account) = account {
+                let workspace = if let Some(probe) = &self.local_probe {
+                    manager
+                        .workspace_for_route_mock(&account.id, home, cli, probe.discovery)
+                        .await?
+                } else {
+                    manager.workspace_for_route(&account.id, home, cli).await?
+                };
+                (Some(account.id), Some(workspace))
+            } else {
+                (None, None)
+            };
+            accounts.insert(provider.id.clone(), ResolvedAccount { id, workspace });
+        }
+        let entry_workspace = if let Some(probe) = &self.local_probe {
+            chatgpt::workspace_using_mock(home, cli, probe.discovery).await?
+        } else {
+            chatgpt::workspace_using(home, cli).await?
+        };
+        for resolved in accounts
+            .values_mut()
+            .filter(|resolved| resolved.id.is_none())
+        {
+            resolved.workspace = entry_workspace.clone();
+        }
+        Ok(accounts)
+    }
+
     pub fn is_running(&self) -> bool {
         self.active
             .as_ref()
@@ -80,6 +209,12 @@ impl RouteSession {
         self.active
             .as_ref()
             .and_then(|active| active.server.chatgpt_error())
+    }
+
+    pub fn chatgpt_error_for(&self, provider_id: &str) -> Option<&'static str> {
+        self.active
+            .as_ref()
+            .and_then(|active| active.server.chatgpt_error_for(provider_id))
     }
 
     pub fn discard_preview(&mut self) {
@@ -119,29 +254,17 @@ impl RouteSession {
         let local_token = Secret::new(format!("{}{}", app::new_id()?, app::new_id()?));
         let uses_chatgpt = providers
             .iter()
-            .any(|provider| provider.id == chatgpt::PROVIDER_ID);
-        let managed_account_id = if uses_chatgpt {
-            chatgpt::managed_account(state_dir)?
-        } else {
-            None
-        };
-        if let Some(id) = &managed_account_id {
-            let manager = crate::accounts::AccountManager::open(state_dir)?;
-            if manager.active_id(config_home)?.as_ref() != Some(id) {
-                return Err("所选账号尚未用于此 Codex 目录，请先点击“使用账号”".into());
-            }
-        }
-        let chatgpt_workspace = if uses_chatgpt {
-            chatgpt::workspace(config_home).await?
-        } else {
-            None
-        };
-        if managed_account_id.is_some() && chatgpt_workspace.is_none() {
-            return Err("当前 Codex CLI 未返回工作区路由资料，请更新 CLI 后使用保存的账号".into());
-        }
+            .any(|provider| provider.kind == ProviderKind::Chatgpt);
+        let cli_path = client::cli_path()?;
+        let accounts = self
+            .resolve_accounts(state_dir, config_home, &cli_path, &providers)
+            .await?;
         let switch =
             PreparedSwitch::inspect(&target, state_dir, &publication, address, default_model)?;
-        let remote_direct_only = config_provider_id != chatgpt::PROVIDER_ID
+        let remote_direct_only = providers
+            .iter()
+            .find(|provider| provider.id == config_provider_id)
+            .is_some_and(|provider| provider.kind == ProviderKind::ApiKey)
             && config_state
                 .options
                 .as_ref()
@@ -162,20 +285,6 @@ impl RouteSession {
         } else {
             switch.with_credential_helper(helper, &token_reference)?
         };
-        if managed_account_id.is_some() {
-            let document: toml_edit::DocumentMut = switch
-                .preview
-                .proposed
-                .parse()
-                .map_err(|_| "待发布的 Codex 配置无效")?;
-            if document["cli_auth_credentials_store"].as_str() != Some("file") {
-                return Err(
-                    "保存的账号需要文件登录存储；请移除通用配置中的登录存储覆盖后重新使用账号"
-                        .into(),
-                );
-            }
-        }
-        let cli_path = client::cli_path()?;
         let client_version = client::check_catalog_using(&publication.catalog, &cli_path).await?;
         let mappings = models
             .iter()
@@ -225,7 +334,7 @@ impl RouteSession {
             target.display(),
             switch.preview.changed_fields.join("、"),
             if uses_chatgpt {
-                if managed_account_id.is_some() {
+                if accounts.values().any(|account| account.id.is_some()) {
                     "\n订阅请求固定使用所选保存账号；仅官方模型传递认证。独立本地令牌会写入仅当前用户可读的配置及恢复记录。切换账号请先恢复；切到第三方时请新建会话。"
                 } else {
                     "\n订阅认证由目标 Codex 管理；仅官方模型传递认证。独立本地令牌会写入仅当前用户可读的配置及恢复记录。切换工作区请先恢复；切到第三方时请新建会话。"
@@ -234,13 +343,32 @@ impl RouteSession {
                 ""
             }
         );
-        let summary = if let Some(workspace) = &chatgpt_workspace {
-            format!(
-                "{summary}\n已选工作区的官方目的地：{}；区域约束：{}",
-                workspace.backend_origin, workspace.routing_override
-            )
-        } else {
+        let destinations = accounts
+            .iter()
+            .map(|(provider_id, resolved)| {
+                let provider = providers
+                    .iter()
+                    .find(|provider| &provider.id == provider_id)
+                    .unwrap();
+                let account = resolved.id.as_deref().unwrap_or("原生登录");
+                match &resolved.workspace {
+                    Some(workspace) => format!(
+                        "{} · 账号 {} · 工作区 {} · {} · {}",
+                        provider.name,
+                        account,
+                        workspace.account_id,
+                        workspace.backend_origin,
+                        workspace.routing_override
+                    ),
+                    None => format!("{} · 账号 {}", provider.name, account),
+                }
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+        let summary = if destinations.is_empty() {
             summary
+        } else {
+            format!("{summary}\n{destinations}")
         };
         let summary = if config_state.options.is_some() || !config_state.common.is_empty() {
             format!(
@@ -266,8 +394,7 @@ impl RouteSession {
             cli_path,
             token_reference,
             local_token,
-            chatgpt_workspace,
-            managed_account_id,
+            accounts,
             publication,
             models,
             providers,
@@ -307,35 +434,22 @@ impl RouteSession {
         {
             return Err("Codex CLI 版本已变化，请重新预览".into());
         }
+        let resolved = self
+            .resolve_accounts(state_dir, config_home, &prepared.cli_path, &providers)
+            .await?;
+        if resolved != prepared.accounts {
+            return Err("订阅账号、工作区或区域路由已变化，请重新预览".into());
+        }
+        let uses_chatgpt = !resolved.is_empty();
+        let manager = if uses_chatgpt {
+            Some(self.manager(state_dir)?)
+        } else {
+            None
+        };
         let mut upstreams = HashMap::new();
         for provider in &providers {
-            if provider.id == chatgpt::PROVIDER_ID {
-                chatgpt::validate_provider(provider)?;
-                let managed_id = chatgpt::managed_account(state_dir)?;
-                if managed_id != prepared.managed_account_id {
-                    return Err("订阅账号选择已变化，请重新预览".into());
-                }
-                let manager = managed_id
-                    .as_ref()
-                    .map(|_| crate::accounts::AccountManager::open(state_dir))
-                    .transpose()?;
-                if let (Some(id), Some(manager)) = (&managed_id, &manager) {
-                    if manager.active_id(config_home)?.as_ref() != Some(id) {
-                        return Err("目标 Codex 的登录账号已变化，请重新使用并预览账号".into());
-                    }
-                    let credential = manager.credential(id, config_home).await?;
-                    if prepared
-                        .chatgpt_workspace
-                        .as_ref()
-                        .is_none_or(|workspace| workspace.account_id != credential.workspace_id)
-                    {
-                        return Err("账号与已预览的工作区不一致，请重新预览".into());
-                    }
-                }
-                let workspace = chatgpt::workspace(config_home).await?;
-                if workspace != prepared.chatgpt_workspace {
-                    return Err("订阅工作区或官方区域路由已变化，请重新预览发布".into());
-                }
+            if provider.kind == ProviderKind::Chatgpt {
+                let account = &resolved[&provider.id];
                 let catalog = chatgpt::catalog().await?;
                 for model in models
                     .iter()
@@ -351,17 +465,34 @@ impl RouteSession {
                         ));
                     }
                 }
-                upstreams.insert(
-                    provider.id.clone(),
-                    match (managed_id, manager, workspace) {
-                        (Some(id), Some(manager), Some(workspace)) => {
-                            Upstream::managed_chatgpt(manager, id, config_home.into(), &workspace)?
+                let upstream = match (&account.id, &account.workspace) {
+                    (Some(id), Some(workspace)) => {
+                        if let Some(probe) = &self.local_probe {
+                            let address = *probe
+                                .responses
+                                .get(&provider.id)
+                                .ok_or("缺少订阅测试响应端点")?;
+                            Upstream::managed_chatgpt_mock(
+                                address,
+                                manager.as_ref().unwrap().clone(),
+                                id.clone(),
+                                config_home.into(),
+                                workspace,
+                            )?
+                        } else {
+                            Upstream::managed_chatgpt(
+                                manager.as_ref().unwrap().clone(),
+                                id.clone(),
+                                config_home.into(),
+                                workspace,
+                            )?
                         }
-                        (None, _, Some(workspace)) => Upstream::chatgpt_for_workspace(&workspace)?,
-                        (None, _, None) => Upstream::chatgpt(),
-                        _ => return Err("保存账号的工作区资料缺失，请重新预览".into()),
-                    },
-                );
+                    }
+                    (None, Some(workspace)) => Upstream::chatgpt_for_workspace(workspace)?,
+                    (None, None) => Upstream::chatgpt(),
+                    _ => return Err("保存账号的工作区资料缺失，请重新预览".into()),
+                };
+                upstreams.insert(provider.id.clone(), upstream);
                 continue;
             }
             let token = app::provider_credential(state_dir, provider)?;
@@ -384,19 +515,28 @@ impl RouteSession {
                 Upstream::with_secret(&provider.base_url, token)?,
             );
         }
-        if selected_inputs(state_dir)? != (models, providers)
+        if selected_inputs(state_dir)? != (models.clone(), providers.clone())
             || app::load_provider_config(state_dir, &prepared.config_provider_id)?
                 != prepared.config_state
         {
             return Err("检查期间上游或模型资料已变化，请重新预览".into());
         }
-        if prepared
-            .providers
-            .iter()
-            .any(|provider| provider.id == chatgpt::PROVIDER_ID)
-            && chatgpt::managed_account(state_dir)? != prepared.managed_account_id
-        {
-            return Err("检查期间订阅账号选择已变化，请重新预览".into());
+        // Recheck default/fixed identity immediately before publishing. Refreshes are not identity changes.
+        if uses_chatgpt {
+            for provider in providers
+                .iter()
+                .filter(|provider| provider.kind == ProviderKind::Chatgpt)
+            {
+                let id = manager
+                    .as_ref()
+                    .unwrap()
+                    .resolve_binding(provider.account_binding.as_ref().unwrap())
+                    .await?
+                    .map(|account| account.id);
+                if id != prepared.accounts[&provider.id].id {
+                    return Err("检查期间订阅账号选择已变化，请重新预览".into());
+                }
+            }
         }
         let local_token = prepared.local_token;
         let request_store = app::open_store(state_dir).map_err(|error| error.message())?;
@@ -424,6 +564,10 @@ impl RouteSession {
             upstreams,
         )?
         .with_request_log(request_store, generation);
+        // Keep the guard on API-only publications too: an old subscription
+        // session must not escape its saved context after restoring the route.
+        let state =
+            state.with_session_store(app::open_store(state_dir).map_err(|error| error.message())?);
         let server = RunningRouter::start(prepared.listener, state)?;
         let client = reqwest::Client::builder()
             .no_proxy()
@@ -461,6 +605,7 @@ impl RouteSession {
             cli_path: prepared.cli_path,
             provider_config,
             token_reference: prepared.token_reference,
+            uses_chatgpt,
         });
         if let Err(error) = prepared.switch.apply() {
             // An error after journal publication may follow a successful rename.
@@ -511,6 +656,14 @@ impl RouteSession {
             || !active.catalog_path.is_file()
         {
             return Err("路由配置已被外部修改，请检查配置并重新发布后再启动 Codex".into());
+        }
+        if active.uses_chatgpt {
+            if let Some(probe) = &self.local_probe {
+                chatgpt::workspace_using_mock(config_home, &active.cli_path, probe.discovery)
+                    .await?;
+            } else {
+                chatgpt::workspace_using(config_home, &active.cli_path).await?;
+            }
         }
         client::write_codex_launcher(state_dir, config_home, &active.cli_path).await
     }
@@ -582,7 +735,7 @@ impl RouteSession {
 }
 
 fn delete_local_token(state_dir: &Path, reference: &str) -> Result<(), String> {
-    app::open_store(state_dir)
+    Store::open_recovery(&state_dir.join("switchx.sqlite"))
         .map_err(|_| "路由已停止，但数据库中的本地令牌清理失败")?
         .delete_local_token(reference)
         .map_err(|_| "路由已停止，但数据库中的本地令牌清理失败".into())
@@ -622,11 +775,11 @@ fn selected_inputs(state_dir: &Path) -> Result<(Vec<ModelRecord>, Vec<ProviderRe
             .find(|provider| provider.id == model.provider_id)
             .ok_or("所选模型的上游已不存在")?;
         direct::validate_provider(&provider.name, &provider.base_url, &model.upstream_model)?;
-        if provider.id == chatgpt::PROVIDER_ID {
+        if provider.kind == ProviderKind::Chatgpt {
             chatgpt::validate_provider(provider)?;
             if model.fallback_provider_id.is_some()
                 || models.iter().any(|model| {
-                    model.fallback_provider_id.as_deref() == Some(chatgpt::PROVIDER_ID)
+                    model.fallback_provider_id.as_deref() == Some(provider.id.as_str())
                 })
             {
                 return Err("订阅账号不参与自动备用切换".into());
@@ -634,7 +787,7 @@ fn selected_inputs(state_dir: &Path) -> Result<(Vec<ModelRecord>, Vec<ProviderRe
         }
     }
     for provider in &providers {
-        if provider.id != chatgpt::PROVIDER_ID {
+        if provider.kind == ProviderKind::ApiKey {
             app::provider_credential(state_dir, provider)?;
         }
     }
@@ -646,7 +799,7 @@ mod tests {
     use super::*;
 
     #[tokio::test]
-    async fn managed_preview_requires_explicit_use_and_preserves_native_files() {
+    async fn missing_bound_account_preserves_native_files() {
         let root = std::env::temp_dir().join(format!(
             "switchx-account-preview-{}",
             app::new_id().unwrap()
@@ -676,7 +829,7 @@ mod tests {
             .prepare(&data, &home, 0, &model, &root.join("must-not-run"))
             .await
             .unwrap_err();
-        assert!(error.contains("使用账号"));
+        assert!(error.contains("账号"));
         assert_eq!(std::fs::read(home.join("config.toml")).unwrap(), config);
         assert_eq!(std::fs::read(home.join("auth.json")).unwrap(), auth);
         assert!(!home.join(".switchx-account.json").exists());
@@ -757,6 +910,7 @@ mod tests {
                     .to_string(),
             ),
             token_reference: String::new(),
+            uses_chatgpt: false,
         });
         assert!(
             session
@@ -805,6 +959,35 @@ mod tests {
             assert!(!data.join("launch-codex.command").exists());
         }
         std::fs::write(home.join("config.toml"), original).unwrap();
+        // Exit must close admission even when the journal disappeared externally.
+        let journal_path = data.join("switch-journal.json");
+        let journal = std::fs::read(&journal_path).unwrap();
+        std::fs::remove_file(&journal_path).unwrap();
+        let client = reqwest::Client::builder().no_proxy().build().unwrap();
+        let endpoint = format!("http://{address}/v1/models");
+        assert!(
+            client
+                .get(&endpoint)
+                .header(crate::routing::LOCAL_TOKEN_HEADER, "s".repeat(32))
+                .send()
+                .await
+                .unwrap()
+                .status()
+                .is_success()
+        );
+        session.drain_for_exit().await.unwrap();
+        assert_eq!(
+            client
+                .get(&endpoint)
+                .header(crate::routing::LOCAL_TOKEN_HEADER, "s".repeat(32))
+                .send()
+                .await
+                .unwrap()
+                .status(),
+            reqwest::StatusCode::SERVICE_UNAVAILABLE
+        );
+        assert!(!journal_path.exists());
+        std::fs::write(journal_path, journal).unwrap();
         session.active.take().unwrap().server.stop().await;
         config_transaction::restore(&home.join("config.toml"), &data).unwrap();
         std::fs::remove_dir_all(root).unwrap();
@@ -859,6 +1042,31 @@ mod tests {
                 .unwrap()
                 .contains(token.expose())
         );
+        let legacy = rusqlite::Connection::open(data.join("switchx.sqlite")).unwrap();
+        legacy
+            .execute_batch(
+                "ALTER TABLE providers DROP COLUMN account_binding;
+             ALTER TABLE providers DROP COLUMN kind;
+             DROP TABLE session_bindings;
+             PRAGMA user_version = 8;",
+            )
+            .unwrap();
+        assert!(Store::needs_recovery_before_migration(&data.join("switchx.sqlite")).unwrap());
+        assert!(app::open_store(&data).is_err());
+        let legacy_bytes = std::fs::read(data.join("switchx.sqlite")).unwrap();
+        assert_eq!(
+            Store::open_credentials_read_only(&data.join("switchx.sqlite"))
+                .unwrap()
+                .local_token(&reference)
+                .unwrap()
+                .unwrap()
+                .expose(),
+            token.expose()
+        );
+        assert_eq!(
+            std::fs::read(data.join("switchx.sqlite")).unwrap(),
+            legacy_bytes
+        );
         std::fs::write(
             &config_path,
             applied.replace("model = \"sx-test\"", "model = \"external\""),
@@ -867,6 +1075,12 @@ mod tests {
         let mut session = RouteSession::default();
         assert!(session.restore(&data, &home).await.is_err());
         assert!(config_transaction::recovery(&data).unwrap().is_some());
+        assert_eq!(
+            legacy
+                .query_row("PRAGMA user_version", [], |row| row.get::<_, i64>(0))
+                .unwrap(),
+            8
+        );
         assert_eq!(
             store.local_token(&reference).unwrap().unwrap().expose(),
             token.expose()
@@ -899,6 +1113,14 @@ mod tests {
         assert!(config_transaction::recovery(&data).unwrap().is_none());
         assert!(store.local_token(&reference).unwrap().is_none());
         assert_eq!(
+            legacy
+                .query_row("PRAGMA user_version", [], |row| row.get::<_, i64>(0))
+                .unwrap(),
+            8
+        );
+        drop(legacy);
+        assert!(app::open_store(&data).is_ok());
+        assert_eq!(
             store
                 .local_token(&other_reference)
                 .unwrap()
@@ -922,6 +1144,8 @@ mod tests {
             store
                 .put_provider_with_models_options_and_key(
                     &ProviderRecord {
+                        kind: crate::storage::ProviderKind::ApiKey,
+                        account_binding: None,
                         id: id.into(),
                         name: id.into(),
                         base_url: "https://example.invalid/v1".into(),

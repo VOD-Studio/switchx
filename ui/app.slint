@@ -17,6 +17,9 @@ export struct ProviderRow {
     base-url: string,
     model-id: string,
     credential-status: string,
+    auth-error: string,
+    is-subscription: bool,
+    binding-label: string,
     preset-id: string,
     icon: image,
     monochrome: bool,
@@ -35,6 +38,8 @@ export struct AccountRow {
     workspace: string,
     is-default: bool,
     is-active: bool,
+    bound-provider-count: int,
+    bound-provider-names: string,
 }
 
 export struct ModelRow {
@@ -52,6 +57,8 @@ export struct ModelRow {
     included: bool,
     fallback-provider-id: string,
     fallback-label: string,
+    binding-label: string,
+    is-subscription: bool,
 }
 
 export struct RequestRow {
@@ -78,6 +85,7 @@ export component AppWindow inherits Window {
     in-out property <bool> drawer-open: false;
     in-out property <bool> loading: true;
     in-out property <bool> busy: false;
+    in-out property <bool> recovery-only: false;
     in-out property <string> error-code: "";
     in-out property <string> error-message: "";
     in-out property <string> error-action: "";
@@ -87,6 +95,13 @@ export component AppWindow inherits Window {
     in-out property <[ProviderRow]> filtered-providers: [];
     in-out property <string> provider-query: "";
     in-out property <bool> editor-open: false;
+    in-out property <bool> subscription-editor-open: false;
+    in-out property <string> subscription-id: "";
+    in-out property <string> subscription-name: "";
+    in-out property <string> subscription-binding-label: "";
+    in-out property <[string]> subscription-account-ids: [];
+    in-out property <[string]> subscription-account-options: [];
+    in-out property <int> subscription-account-choice: 0;
     in-out property <bool> delete-confirm: false;
     in-out property <string> edit-id: "";
     in-out property <string> edit-name: "";
@@ -127,6 +142,7 @@ export component AppWindow inherits Window {
     in-out property <string> delete-account-id: "";
     in-out property <bool> delete-account-confirm: false;
     property <string> delete-account-label: "";
+    property <string> delete-account-references: "";
     in-out property <bool> chatgpt-login-pending: false;
     in-out property <string> chatgpt-login-id: "";
     in-out property <string> route-auth-error: "";
@@ -219,6 +235,8 @@ export component AppWindow inherits Window {
     callback filter-providers(string);
     callback save-provider(string, string, string, string, string);
     callback begin-provider-editor(string);
+    callback begin-subscription-editor(string);
+    callback save-subscription(string, string, string);
     callback update-provider-config-preview();
     callback open-common-config();
     callback extract-common-config();
@@ -747,7 +765,7 @@ export component AppWindow inherits Window {
                     HorizontalLayout {
                         spacing: 12px;
                         Text {
-                            text: "API Key 随上游保存在本机；ChatGPT 账号可在“配置与恢复”管理。";
+                            text: "API Key 随上游保存；每个 ChatGPT 订阅连接可独立绑定已保存的账号。";
                             color: Theme.muted-text;
                             font-size: 13px;
                             vertical-alignment: center;
@@ -756,7 +774,109 @@ export component AppWindow inherits Window {
                         QuietButton {
                             text: "添加 ChatGPT 订阅";
                             enabled: !root.busy && !root.config-managed && !root.chatgpt-login-pending;
-                            clicked => { root.subscription-action(0); }
+                            clicked => { root.begin-subscription-editor(""); }
+                        }
+                    }
+
+                    if root.config-managed: Text {
+                        text: root.recovery-only ? "旧版资料有配置待恢复。先在“配置与恢复”恢复原配置，再升级并读取上游资料。" : "配置正在管理中。恢复并停止路由后，才能修改上游、模型和账号绑定。";
+                        color: Theme.warning;
+                        font-size: 13px;
+                        wrap: word-wrap;
+                    }
+
+                    if root.subscription-editor-open: SurfaceCard {
+                        height: 330px;
+                        VerticalLayout {
+                            padding: 18px;
+                            spacing: 12px;
+                            Text {
+                                text: root.subscription-id == "" ? "添加 ChatGPT 订阅连接" : "编辑 ChatGPT 订阅连接";
+                                color: Theme.primary-text;
+                                font-size: 17px;
+                                font-weight: 600;
+                            }
+
+                            HorizontalLayout {
+                                spacing: 8px;
+                                Text {
+                                    width: 92px;
+                                    text: "名称";
+                                    color: Theme.muted-text;
+                                    vertical-alignment: center;
+                                }
+
+                                LineEdit {
+                                    text <=> root.subscription-name;
+                                    placeholder-text: "例如 ChatGPT · 工作账号";
+                                    accessible-label: "ChatGPT 订阅连接名称";
+                                    enabled: !root.busy && !root.config-managed;
+                                }
+                            }
+
+                            HorizontalLayout {
+                                spacing: 8px;
+                                Text {
+                                    width: 92px;
+                                    text: "绑定账号";
+                                    color: Theme.muted-text;
+                                    vertical-alignment: center;
+                                }
+
+                                ComboBox {
+                                    model: root.subscription-account-options;
+                                    current-index <=> root.subscription-account-choice;
+                                    accessible-label: "为订阅连接选择已保存账号";
+                                    enabled: !root.busy && !root.config-managed;
+                                }
+
+                                QuietButton {
+                                    text: "管理 ChatGPT 账号";
+                                    enabled: !root.busy;
+                                    clicked => { root.active-page = 5; }
+                                }
+                            }
+
+                            Text {
+                                text: root.subscription-binding-label;
+                                color: Theme.muted-text;
+                                font-size: 12px;
+                                wrap: word-wrap;
+                            }
+
+                            Text {
+                                text: "保存绑定不会修改 Codex 登录。多个订阅连接可同时使用各自的账号；官方模型列表来自 CLI 内置目录，实际权限以请求为准。";
+                                color: Theme.muted-text;
+                                font-size: 12px;
+                                wrap: word-wrap;
+                            }
+
+                            HorizontalLayout {
+                                spacing: 8px;
+                                QuietButton {
+                                    text: "保存订阅连接";
+                                    primary: true;
+                                    enabled: !root.busy && !root.config-managed && root.subscription-name != "" && (root.subscription-id != "" || root.subscription-account-choice > 0);
+                                    clicked => {
+                                        root.save-subscription(root.subscription-id, root.subscription-name, root.subscription-account-ids[root.subscription-account-choice]);
+                                    }
+                                }
+
+                                QuietButton {
+                                    text: "取消";
+                                    enabled: !root.busy;
+                                    clicked => { root.subscription-editor-open = false; }
+                                }
+
+                                if root.subscription-id != "": QuietButton {
+                                    text: root.delete-confirm ? "确认删除上游" : "删除上游";
+                                    enabled: !root.busy && !root.config-managed;
+                                    clicked => {
+                                        if root.delete-confirm { root.delete-provider(root.subscription-id); }
+                                        else { root.delete-confirm = true; }
+                                    }
+                                }
+                            }
                         }
                     }
 
@@ -1103,7 +1223,7 @@ export component AppWindow inherits Window {
                         }
                     }
                     for provider in root.filtered-providers: SurfaceCard {
-                        height: 108px;
+                        height: (provider.is-subscription ? 132px : 108px) + (provider.auth-error == "" ? 0px : 34px);
                         HorizontalLayout {
                             padding: 20px;
                             spacing: 10px;
@@ -1135,6 +1255,19 @@ export component AppWindow inherits Window {
                                     color: Theme.muted-text;
                                     font-size: 12px;
                                 }
+
+                                if provider.is-subscription: Text {
+                                    text: provider.binding-label;
+                                    color: Theme.muted-text;
+                                    font-size: 12px;
+                                    overflow: elide;
+                                }
+                                if provider.auth-error != "": Text {
+                                    text: provider.auth-error;
+                                    color: Theme.error;
+                                    font-size: 12px;
+                                    wrap: word-wrap;
+                                }
                             }
 
                             Rectangle {
@@ -1149,11 +1282,11 @@ export component AppWindow inherits Window {
 
                             QuietButton {
                                 width: 62px;
-                                text: provider.id == "switchx-chatgpt" ? "账号" : "编辑";
-                                enabled: !root.busy && (!root.config-managed || provider.id == "switchx-chatgpt");
+                                text: "编辑";
+                                enabled: !root.busy && !root.config-managed;
                                 clicked => {
-                                    if provider.id == "switchx-chatgpt" {
-                                        root.active-page = 5;
+                                    if provider.is-subscription {
+                                        root.begin-subscription-editor(provider.id);
                                         return;
                                     }
                                     root.begin-provider-editor(provider.id);
@@ -1177,7 +1310,7 @@ export component AppWindow inherits Window {
                             QuietButton {
                                 width: 70px;
                                 text: "直连";
-                                enabled: !root.busy && !root.config-managed && !root.chatgpt-login-pending && provider.id != "switchx-chatgpt";
+                                enabled: !root.busy && !root.config-managed && !root.chatgpt-login-pending && !provider.is-subscription;
                                 clicked => {
                                     root.selected-provider-id = provider.id;
                                     root.active-page = 5;
@@ -1639,7 +1772,7 @@ export component AppWindow inherits Window {
                             }
 
                             Text {
-                                text: "API 模型使用各自的 Key；订阅模型使用目标 Codex 的官方登录。发布后点击“启动 Codex”使用新目录；跨上游切换请新建会话。";
+                                text: "API 模型使用各自的 Key；订阅模型使用各上游绑定的账号。Codex 入口登录单独管理。发布后启动新会话，跨上游切换请新建会话。";
                                 color: Theme.muted-text;
                                 font-size: 12px;
                                 wrap: word-wrap;
@@ -1767,7 +1900,7 @@ export component AppWindow inherits Window {
                                 }
 
                                 Text {
-                                    text: model.detail;
+                                    text: model.detail + (model.binding-label == "" ? "" : " · " + model.binding-label);
                                     color: Theme.muted-text;
                                     font-size: 12px;
                                     overflow: elide;
@@ -1793,7 +1926,7 @@ export component AppWindow inherits Window {
                             QuietButton {
                                 width: 62px;
                                 text: "备用";
-                                enabled: model.ready && !root.busy && !root.config-managed && model.provider-id != "switchx-chatgpt";
+                                enabled: model.ready && !root.busy && !root.config-managed && !model.is-subscription;
                                 clicked => { root.edit-fallback(model.public-id); }
                             }
 
@@ -2023,7 +2156,7 @@ export component AppWindow inherits Window {
                             }
 
                             Text {
-                                text: "账号保存在 SwitchX，切换对新会话生效。也可继续使用 Codex 当前登录。";
+                                text: "账号可绑定到多个订阅上游。写入 Codex 登录只设置客户端入口登录，不改变各上游的绑定。";
                                 color: Theme.muted-text;
                                 font-size: 12px;
                                 wrap: word-wrap;
@@ -2045,7 +2178,7 @@ export component AppWindow inherits Window {
                                 }
 
                                 QuietButton {
-                                    text: "使用默认账号";
+                                    text: "将默认账号写入 Codex";
                                     enabled: !root.busy && !root.chatgpt-login-pending && root.accounts.length > 0;
                                     clicked => { root.account-action(3, ""); }
                                 }
@@ -2053,7 +2186,7 @@ export component AppWindow inherits Window {
 
                             if root.accounts.length == 0: Text {
                                 height: 30px;
-                                text: "尚未保存账号。添加账号或导入当前 Codex 登录后，可在这里切换。";
+                                text: "尚未保存账号。添加或导入后，可为订阅上游选择账号，也可显式设置 Codex 入口登录。";
                                 color: Theme.muted-text;
                                 font-size: 13px;
                                 wrap: word-wrap;
@@ -2084,7 +2217,7 @@ export component AppWindow inherits Window {
                                             }
 
                                             if account.is-active: Text {
-                                                text: "当前使用";
+                                                text: "Codex 入口登录";
                                                 color: Theme.brand;
                                                 font-size: 12px;
                                                 vertical-alignment: center;
@@ -2092,7 +2225,7 @@ export component AppWindow inherits Window {
                                         }
 
                                         Text {
-                                            text: account.workspace == "" ? "ChatGPT 账号" : "工作区：" + account.workspace;
+                                            text: (account.workspace == "" ? "ChatGPT 账号" : "工作区：" + account.workspace) + " · " + account.bound-provider-count + " 个上游引用";
                                             color: Theme.muted-text;
                                             font-size: 12px;
                                             overflow: elide;
@@ -2104,15 +2237,15 @@ export component AppWindow inherits Window {
                                         horizontal-stretch: 0;
                                         text: account.is-default ? "默认账号" : "设为默认";
                                         selected: account.is-default;
-                                        enabled: !root.busy && !root.chatgpt-login-pending && !account.is-default;
+                                        enabled: !root.busy && !root.config-managed && !root.chatgpt-login-pending && !account.is-default;
                                         clicked => { root.account-action(2, account.id); }
                                     }
 
                                     QuietButton {
-                                        width: 80px;
+                                        width: 138px;
                                         horizontal-stretch: 0;
-                                        text: account.is-active && root.selected-account-id == account.id ? "重新使用" : "使用";
-                                        enabled: !root.busy && !root.chatgpt-login-pending;
+                                        text: "写入 Codex 登录";
+                                        enabled: !root.busy && !root.recovery-only && !root.chatgpt-login-pending;
                                         clicked => { root.account-action(3, account.id); }
                                     }
 
@@ -2120,10 +2253,11 @@ export component AppWindow inherits Window {
                                         width: 80px;
                                         horizontal-stretch: 0;
                                         text: "移除";
-                                        enabled: !root.busy && !root.chatgpt-login-pending;
+                                        enabled: !root.busy && !root.config-managed && !root.chatgpt-login-pending;
                                         clicked => {
                                             root.delete-account-id = account.id;
                                             root.delete-account-label = account.label;
+                                            root.delete-account-references = account.bound-provider-names;
                                             root.error-code = "";
                                             root.error-message = "";
                                             root.error-action = "";
@@ -2194,13 +2328,6 @@ export component AppWindow inherits Window {
                             HorizontalLayout {
                                 spacing: 8px;
 
-                                QuietButton {
-                                    text: "跟随 Codex 当前登录";
-                                    selected: root.selected-account-id == "";
-                                    enabled: !root.busy && !root.chatgpt-login-pending;
-                                    clicked => { root.account-action(6, ""); }
-                                }
-
                                 if !root.chatgpt-login-pending: QuietButton {
                                     text: "Codex 原生登录";
                                     enabled: !root.busy;
@@ -2214,7 +2341,7 @@ export component AppWindow inherits Window {
                                 }
 
                                 QuietButton {
-                                    text: "检查并续期";
+                                    text: "检查 Codex 登录";
                                     enabled: !root.busy && !root.chatgpt-login-pending;
                                     clicked => { root.subscription-action(2); }
                                 }
@@ -2248,7 +2375,7 @@ export component AppWindow inherits Window {
                             }
 
                             Text {
-                                text: "ChatGPT 账号可在上方保存和切换，也可跟随 Codex 原生登录。";
+                                text: "固定账号由每个订阅上游分别选择。Codex 原生登录只设置入口登录；旧的跟随登录连接仍使用该入口身份。";
                                 color: Theme.muted-text;
                                 font-size: 13px;
                                 wrap: word-wrap;
@@ -2441,7 +2568,7 @@ export component AppWindow inherits Window {
         x: (root.width - self.width) / 2;
         y: (root.height - self.height) / 2;
         width: 480px;
-        height: root.error-code == "" ? 272px : 332px;
+        height: (root.error-code == "" ? 272px : 332px) + (root.delete-account-references == "" ? 0px : 64px);
         VerticalLayout {
             padding: 24px;
             spacing: 14px;
@@ -2460,8 +2587,15 @@ export component AppWindow inherits Window {
             }
 
             Text {
-                text: "将移除此账号在 SwitchX 中保存的登录信息。若正在使用此账号，会先停止路由并恢复配置。Codex 配置目录会保留。";
+                text: root.delete-account-references == "" ? "将移除此账号在 SwitchX 中保存的登录信息。Codex 配置目录会保留。" : "此账号仍被上游引用。请先重新绑定或删除关联上游，再移除账号。";
                 color: Theme.muted-text;
+                font-size: 13px;
+                wrap: word-wrap;
+            }
+
+            if root.delete-account-references != "": Text {
+                text: "关联上游：" + root.delete-account-references;
+                color: Theme.warning;
                 font-size: 13px;
                 wrap: word-wrap;
             }
@@ -2491,7 +2625,7 @@ export component AppWindow inherits Window {
                 QuietButton {
                     text: "确认移除";
                     primary: true;
-                    enabled: !root.busy && !root.chatgpt-login-pending && root.delete-account-id != "";
+                    enabled: !root.busy && !root.config-managed && !root.chatgpt-login-pending && root.delete-account-id != "" && root.delete-account-references == "";
                     clicked => { root.account-action(4, root.delete-account-id); }
                 }
             }

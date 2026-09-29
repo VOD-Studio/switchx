@@ -16,7 +16,7 @@ use tokio::{
 
 use crate::{
     app, catalog, client,
-    storage::{ModelRecord, ProviderRecord},
+    storage::{AccountBinding, ModelRecord, ProviderKind, ProviderRecord},
 };
 
 // The explicit provider identity selects authentication, never the model name or URL.
@@ -44,6 +44,7 @@ pub fn account_binding(data_dir: &Path) -> Result<Option<String>, String> {
 }
 
 pub fn bind_managed_account(data_dir: &Path, id: Option<&str>) -> Result<(), String> {
+    app::ensure_editable(data_dir)?;
     app::open_store(data_dir)
         .map_err(|_| "无法读取订阅账号绑定")?
         .bind_chatgpt_account(id)
@@ -91,7 +92,7 @@ impl Workspace {
         Ok(())
     }
 
-    fn from_reply(reply: &Value) -> Result<Option<Self>, String> {
+    pub(crate) fn from_reply(reply: &Value) -> Result<Option<Self>, String> {
         let value = &reply["workspaceRouting"];
         // Older CLIs omit this field; accept the snake_case form used by some releases.
         let value = if value.is_null() {
@@ -151,7 +152,8 @@ impl AccountStatus {
 }
 
 pub fn validate_provider(provider: &ProviderRecord) -> Result<(), String> {
-    if provider.id != PROVIDER_ID
+    if provider.kind != crate::storage::ProviderKind::Chatgpt
+        || provider.account_binding.is_none()
         || provider.base_url != BASE_URL
         || provider.credential_ref.is_some()
     {
@@ -161,7 +163,11 @@ pub fn validate_provider(provider: &ProviderRecord) -> Result<(), String> {
 }
 
 fn command(home: &Path) -> Command {
-    let mut command = Command::new(client::cli_executable());
+    command_using(home, &client::cli_executable())
+}
+
+fn command_using(home: &Path, cli_path: &Path) -> Command {
+    let mut command = Command::new(cli_path);
     command
         .current_dir(home)
         .env("CODEX_HOME", home)
@@ -188,6 +194,14 @@ impl Session {
             return Err("Codex 配置目录不存在".into());
         }
         Self::spawn(command(home)).await
+    }
+
+    pub async fn start_using(home: &Path, cli_path: &Path) -> Result<Self, String> {
+        client::config_path(home)?;
+        if !home.is_dir() || !cli_path.is_absolute() {
+            return Err("Codex 目录或 CLI 路径无效".into());
+        }
+        Self::spawn(command_using(home, cli_path)).await
     }
 
     async fn spawn(mut command: Command) -> Result<Self, String> {
@@ -448,23 +462,69 @@ pub async fn catalog() -> Result<Vec<Value>, String> {
 }
 
 pub fn save_connection(data_dir: &Path, models: &[Value]) -> Result<(), String> {
-    app::ensure_editable(data_dir)?;
-    let first = models.first().ok_or("官方目录没有模型")?;
     let store = app::open_store(data_dir).map_err(|error| error.message())?;
-    let provider = if let Some(provider) = store
+    let binding = store
         .provider(PROVIDER_ID)
         .map_err(|_| "无法读取订阅连接")?
-    {
-        validate_provider(&provider)?;
-        provider
-    } else {
-        ProviderRecord {
-            id: PROVIDER_ID.into(),
-            name: "ChatGPT 订阅".into(),
-            base_url: BASE_URL.into(),
-            model_id: first["slug"].as_str().ok_or("官方模型 ID 无效")?.into(),
-            credential_ref: None,
+        .and_then(|provider| provider.account_binding)
+        .unwrap_or(AccountBinding::Native);
+    drop(store);
+    save_subscription(data_dir, Some(PROVIDER_ID), "ChatGPT 订阅", binding, models).map(|_| ())
+}
+
+/// Save a separate subscription connection without changing the target Codex login.
+pub fn save_subscription(
+    data_dir: &Path,
+    provider_id: Option<&str>,
+    name: &str,
+    binding: AccountBinding,
+    models: &[Value],
+) -> Result<String, String> {
+    app::ensure_editable(data_dir)?;
+    if name.trim().is_empty() || name.trim().len() > 120 || name.chars().any(char::is_control) {
+        return Err("请输入有效的订阅连接名称".into());
+    }
+    binding.encode().map_err(|_| "订阅账号绑定无效")?;
+    if provider_id.is_none() && !matches!(binding, AccountBinding::Fixed(_)) {
+        return Err("新订阅连接必须选择一个保存的账号".into());
+    }
+    if let AccountBinding::Fixed(id) = &binding {
+        let manager = crate::accounts::AccountManager::open(data_dir)?;
+        if !manager.list()?.iter().any(|account| &account.id == id) {
+            return Err("绑定账号已不存在，请重新选择".into());
         }
+    }
+    let store = app::open_store(data_dir).map_err(|error| error.message())?;
+    let old = provider_id
+        .map(|id| store.provider(id))
+        .transpose()
+        .map_err(|_| "无法读取订阅连接")?
+        .flatten();
+    if let Some(provider) = &old {
+        validate_provider(provider)?;
+    }
+    if provider_id.is_some_and(|id| id != PROVIDER_ID) && old.is_none() {
+        return Err("订阅连接不存在，请刷新后重试".into());
+    }
+    let first = models.first();
+    if old.is_none() && first.is_none() {
+        return Err("官方目录没有模型".into());
+    }
+    let id = match provider_id {
+        Some(id) => id.to_owned(),
+        None => app::new_id()?,
+    };
+    let provider = ProviderRecord {
+        id: id.clone(),
+        name: name.trim().into(),
+        base_url: BASE_URL.into(),
+        model_id: old
+            .as_ref()
+            .map(|provider| provider.model_id.clone())
+            .unwrap_or_else(|| first.unwrap()["slug"].as_str().unwrap_or("").into()),
+        credential_ref: None,
+        kind: ProviderKind::Chatgpt,
+        account_binding: Some(binding),
     };
     let saved = store.models().map_err(|_| "无法读取模型资料")?;
     let mut additions: Vec<ModelRecord> = Vec::new();
@@ -473,39 +533,59 @@ pub fn save_connection(data_dir: &Path, models: &[Value]) -> Result<(), String> 
         let upstream_model = metadata["slug"].as_str().unwrap();
         if saved
             .iter()
-            .any(|model| model.provider_id == PROVIDER_ID && model.upstream_model == upstream_model)
+            .any(|model| model.provider_id == id && model.upstream_model == upstream_model)
         {
             continue;
         }
-        let public_id = format!(
-            "sx-chatgpt-{}",
-            upstream_model
-                .chars()
-                .map(|character| {
-                    if character.is_ascii_alphanumeric() || character == '-' {
-                        character
-                    } else {
-                        '-'
-                    }
-                })
-                .collect::<String>()
-        );
+        let slug: String = upstream_model
+            .chars()
+            .map(|c| {
+                if c.is_ascii_alphanumeric() || c == '-' {
+                    c
+                } else {
+                    '-'
+                }
+            })
+            .collect();
+        let public_id = if id == PROVIDER_ID {
+            format!("sx-chatgpt-{slug}")
+        } else {
+            let prefix = format!("sx-chatgpt-{id}-");
+            let remaining = 64_usize
+                .checked_sub(prefix.len())
+                .filter(|length| *length >= 18)
+                .ok_or("订阅连接 ID 过长，无法生成公开模型 ID")?;
+            if slug.len() <= remaining {
+                format!("{prefix}{slug}")
+            } else {
+                use std::hash::{DefaultHasher, Hash, Hasher};
+                let mut hash = DefaultHasher::new();
+                upstream_model.hash(&mut hash);
+                // IDs are initialized once and retained on subsequent imports.
+                // The suffix distinguishes long slugs while honoring the 64-byte catalog limit.
+                format!(
+                    "{prefix}{}-{:016x}",
+                    slug[..remaining - 17].trim_end_matches('-'),
+                    hash.finish()
+                )
+            }
+        };
         if saved
             .iter()
             .chain(&additions)
             .any(|model| model.public_id == public_id)
         {
             return Err(format!(
-                "官方模型 {upstream_model} 的公开 ID {public_id} 与其他映射冲突；本批未保存，请修改公开 ID 后重试"
+                "官方模型 {upstream_model} 的公开 ID {public_id} 与其他映射冲突；本批未保存"
             ));
         }
         let model = ModelRecord {
-            provider_id: PROVIDER_ID.into(),
+            provider_id: id.clone(),
             public_id,
-            display_name: format!("{upstream_model}/ChatGPT"),
+            display_name: format!("{upstream_model}/{}", provider.name),
             upstream_model: upstream_model.into(),
             metadata: metadata.to_string(),
-            enabled: saved.iter().all(|model| model.provider_id != PROVIDER_ID)
+            enabled: saved.iter().all(|model| model.provider_id != id)
                 && upstream_model == provider.model_id,
             fallback_provider_id: None,
         };
@@ -517,7 +597,8 @@ pub fn save_connection(data_dir: &Path, models: &[Value]) -> Result<(), String> 
     }
     store
         .put_provider_with_models(&provider, &additions)
-        .map_err(|_| "无法保存订阅连接和官方模型资料".into())
+        .map_err(|_| "无法保存订阅连接和官方模型资料")?;
+    Ok(id)
 }
 
 pub async fn require_login(home: &Path) -> Result<(), String> {
@@ -527,22 +608,9 @@ pub async fn require_login(home: &Path) -> Result<(), String> {
 
 pub fn deselect_models(data_dir: &Path) -> Result<(), String> {
     app::ensure_editable(data_dir)?;
-    let store = app::open_store(data_dir).map_err(|error| error.message())?;
-    let Some(provider) = store
-        .provider(PROVIDER_ID)
-        .map_err(|_| "无法读取订阅连接")?
-    else {
-        return Ok(());
-    };
-    validate_provider(&provider)?;
-    let mut models = store.models().map_err(|_| "无法读取订阅模型")?;
-    models.retain(|model| model.provider_id == PROVIDER_ID && model.enabled);
-    for model in &mut models {
-        model.enabled = false;
-    }
-    // Preserve every API mapping and update all subscription choices in one transaction.
-    store
-        .put_provider_with_models(&provider, &models)
+    app::open_store(data_dir)
+        .map_err(|error| error.message())?
+        .deselect_subscription_models()
         .map_err(|_| "无法取消订阅模型选择；本批未保存".into())
 }
 
@@ -552,8 +620,34 @@ pub async fn workspace(home: &Path) -> Result<Option<Workspace>, String> {
     Ok(workspace)
 }
 
+pub async fn workspace_using(home: &Path, cli_path: &Path) -> Result<Option<Workspace>, String> {
+    let (status, workspace) = Session::start_using(home, cli_path)
+        .await?
+        .read_account(false)
+        .await?;
+    status.require_chatgpt()?;
+    Ok(workspace)
+}
+
+/// Synthetic probes only; discovery overrides cannot point outside IPv4 loopback.
+#[doc(hidden)]
+pub async fn workspace_using_mock(
+    home: &Path,
+    cli_path: &Path,
+    address: std::net::SocketAddr,
+) -> Result<Option<Workspace>, String> {
+    if address.ip() != std::net::IpAddr::V4(std::net::Ipv4Addr::LOCALHOST) {
+        return Err("账号测试发现地址必须是 IPv4 回环地址".into());
+    }
+    let mut command = command_using(home, cli_path);
+    command.args(["-c", &format!("chatgpt_base_url=\"http://{address}\"")]);
+    let (status, workspace) = Session::spawn(command).await?.read_account(false).await?;
+    status.require_chatgpt()?;
+    Ok(workspace)
+}
+
 pub async fn save_mapping(data_dir: &Path, input: app::ModelInput<'_>) -> Result<(), String> {
-    if input.provider_id != PROVIDER_ID {
+    if app::load_provider(data_dir, input.provider_id)?.kind != ProviderKind::Chatgpt {
         return Err("官方模型资料只能用于订阅连接".into());
     }
     let source = catalog()
@@ -570,6 +664,151 @@ mod tests {
     use super::*;
 
     #[test]
+    fn separate_subscription_connections_keep_accounts_and_model_ids_when_renamed_or_rebound() {
+        use base64::Engine;
+        use base64::engine::general_purpose::URL_SAFE_NO_PAD;
+        let root = std::env::temp_dir().join(format!(
+            "switchx-separate-subscriptions-{}",
+            app::new_id().unwrap()
+        ));
+        let data = root.join("data");
+        std::fs::create_dir_all(&data).unwrap();
+        let manager = crate::accounts::AccountManager::open(&data).unwrap();
+        let mut ids = Vec::new();
+        for suffix in ["a", "b"] {
+            let home = root.join(suffix);
+            std::fs::create_dir(&home).unwrap();
+            let mut auth: Value = serde_json::from_str(include_str!(
+                "../tests/fixtures/synthetic-chatgpt-auth.json"
+            ))
+            .unwrap();
+            let claims = json!({"sub":format!("synthetic-{suffix}"),"email":format!("{suffix}@example.invalid"),
+                "https://api.openai.com/auth":{"chatgpt_account_id":format!("workspace-{suffix}"),"chatgpt_plan_type":"plus","user_id":format!("synthetic-{suffix}")},"exp":4102444800_i64});
+            let jwt = format!(
+                "{}.{}.synthetic",
+                URL_SAFE_NO_PAD.encode(r#"{"alg":"RS256"}"#),
+                URL_SAFE_NO_PAD.encode(claims.to_string())
+            );
+            auth["tokens"]["id_token"] = jwt.clone().into();
+            auth["tokens"]["access_token"] = jwt.into();
+            auth["tokens"]["account_id"] = format!("workspace-{suffix}").into();
+            std::fs::write(home.join("auth.json"), auth.to_string()).unwrap();
+            ids.push(manager.import_current(&home).unwrap().id);
+        }
+        let templates: Value =
+            serde_json::from_str(include_str!("../tests/fixtures/synthetic-models.json")).unwrap();
+        let mut models = templates["models"].as_array().unwrap().clone();
+        for slug in [
+            "synthetic-shared-chatgpt-model-long-a",
+            "synthetic-shared-chatgpt-model-long-b",
+        ] {
+            let mut model = models[0].clone();
+            model["slug"] = slug.into();
+            models.push(model);
+        }
+        let a = save_subscription(
+            &data,
+            None,
+            "Team A",
+            AccountBinding::Fixed(ids[0].clone()),
+            &models,
+        )
+        .unwrap();
+        let b = save_subscription(
+            &data,
+            None,
+            "Team B",
+            AccountBinding::Fixed(ids[1].clone()),
+            &models,
+        )
+        .unwrap();
+        assert_ne!(a, b);
+        let store = app::open_store(&data).unwrap();
+        let before = store.models().unwrap();
+        assert_eq!(before.iter().filter(|model| model.enabled).count(), 2);
+        assert!(before.iter().all(|model| model.public_id.len() <= 64));
+        assert_eq!(
+            before
+                .iter()
+                .map(|model| &model.public_id)
+                .collect::<std::collections::HashSet<_>>()
+                .len(),
+            before.len()
+        );
+        for id in [&a, &b] {
+            assert!(
+                before
+                    .iter()
+                    .filter(|model| &model.provider_id == id)
+                    .all(|model| model.public_id.starts_with(&format!("sx-chatgpt-{id}-")))
+            );
+        }
+        drop(store);
+        save_subscription(
+            &data,
+            Some(&a),
+            "Renamed A",
+            AccountBinding::Fixed(ids[1].clone()),
+            &[],
+        )
+        .unwrap();
+        save_subscription(
+            &data,
+            Some(&a),
+            "Renamed A",
+            AccountBinding::Fixed(ids[1].clone()),
+            &models,
+        )
+        .unwrap();
+        let store = app::open_store(&data).unwrap();
+        assert_eq!(store.models().unwrap(), before);
+        assert_eq!(
+            store.provider(&a).unwrap().unwrap().account_binding,
+            Some(AccountBinding::Fixed(ids[1].clone()))
+        );
+        manager.set_default(&ids[0]).unwrap();
+        assert_eq!(
+            store.provider(&a).unwrap().unwrap().account_binding,
+            Some(AccountBinding::Fixed(ids[1].clone()))
+        );
+        assert!(
+            app::save_provider(
+                &data,
+                Some(&a),
+                "Wrong editor",
+                BASE_URL,
+                "same-model",
+                "synthetic-key".into()
+            )
+            .is_err()
+        );
+        assert!(save_subscription(&data, None, "Native", AccountBinding::Native, &models).is_err());
+        assert!(
+            save_subscription(
+                &data,
+                None,
+                "Deleted",
+                AccountBinding::Fixed("missing".into()),
+                &models
+            )
+            .is_err()
+        );
+        let a_model = before.iter().find(|model| model.provider_id == a).unwrap();
+        assert!(app::save_fallback(&data, &a_model.public_id, Some(&b)).is_err());
+        app::delete_provider(&data, &b).unwrap();
+        assert!(store.provider(&b).unwrap().is_none());
+        assert!(store.provider(&a).unwrap().is_some());
+        assert!(
+            store
+                .models()
+                .unwrap()
+                .iter()
+                .all(|model| model.provider_id != b)
+        );
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
     fn official_identity_and_login_links_are_locked() {
         let mut provider = ProviderRecord {
             id: PROVIDER_ID.into(),
@@ -577,6 +816,8 @@ mod tests {
             base_url: BASE_URL.into(),
             model_id: "fixture-model".into(),
             credential_ref: None,
+            kind: ProviderKind::Chatgpt,
+            account_binding: Some(AccountBinding::Native),
         };
         assert!(validate_provider(&provider).is_ok());
         provider.base_url = "https://example.invalid/v1".into();
@@ -856,6 +1097,8 @@ done
             base_url: "https://example.invalid/v1".into(),
             model_id: official[0].upstream_model.clone(),
             credential_ref: None,
+            kind: ProviderKind::ApiKey,
+            account_binding: None,
         };
         let api = ModelRecord {
             provider_id: api_provider.id.clone(),

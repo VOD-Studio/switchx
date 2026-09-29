@@ -1043,6 +1043,8 @@ mod tests {
         assert!(other.apply().unwrap_err().contains("changed"));
         assert!(!other_state.join(JOURNAL_NAME).exists());
         let provider = crate::storage::ProviderRecord {
+            kind: crate::storage::ProviderKind::ApiKey,
+            account_binding: None,
             id: "fixture".into(),
             name: "Fixture".into(),
             base_url: "https://example.invalid/v1".into(),
