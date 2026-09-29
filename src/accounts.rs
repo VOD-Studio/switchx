@@ -16,7 +16,7 @@ use chrono::{DateTime, SecondsFormat, Utc};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use tokio::sync::{Mutex as AsyncMutex, oneshot, watch};
-use zeroize::Zeroize;
+use zeroize::{Zeroize, Zeroizing};
 
 use crate::{app, config_transaction as files, credentials::Secret, storage::AccountBinding};
 
@@ -106,12 +106,18 @@ struct StoredAccount {
     id_token: String,
     authenticated_at_ms: i64,
     token_updated_at_ms: i64,
+    // Dedicated credential editor only; never copied into SQLite or previews.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    auth_json: Option<String>,
 }
 
 impl Drop for StoredAccount {
     fn drop(&mut self) {
         self.refresh_token.zeroize();
         self.id_token.zeroize();
+        if let Some(auth_json) = &mut self.auth_json {
+            auth_json.zeroize();
+        }
     }
 }
 
@@ -131,6 +137,14 @@ impl Drop for CachedToken {
 struct StoreSession {
     state: State,
     expected: Option<Vec<u8>>,
+}
+
+impl Drop for StoreSession {
+    fn drop(&mut self) {
+        if let Some(bytes) = &mut self.expected {
+            bytes.zeroize();
+        }
+    }
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -204,6 +218,7 @@ struct LiveAuth {
     refresh_token: String,
     id_token: String,
     updated_at_ms: Option<i64>,
+    auth_json: String,
 }
 
 impl Drop for LiveAuth {
@@ -211,6 +226,7 @@ impl Drop for LiveAuth {
         self.access_token.zeroize();
         self.refresh_token.zeroize();
         self.id_token.zeroize();
+        self.auth_json.zeroize();
     }
 }
 
@@ -322,6 +338,210 @@ impl AccountManager {
             .store
             .default_account_id
             .clone())
+    }
+
+    /// Credentials are returned only to the explicit auth.json editor, never a preview.
+    /// Reading the selected home does not create files, claim ownership, or renew tokens.
+    pub fn editor_auth(&self, binding: &AccountBinding, home: &Path) -> Result<Secret, String> {
+        if *binding == AccountBinding::Native {
+            return Ok(Secret::new(
+                read_editor_native(home)?
+                    .map_or_else(|| "{}".into(), |live| live.auth_json.clone()),
+            ));
+        }
+        let _operation = self
+            .0
+            .operation
+            .try_lock()
+            .map_err(|_| "账号操作进行中，请稍后重试")?;
+        let (_store_lock, session) = self.begin()?;
+        let id = match binding {
+            AccountBinding::Native => unreachable!(),
+            AccountBinding::Default => session
+                .state
+                .store
+                .default_account_id
+                .as_deref()
+                .ok_or("尚未保存默认 ChatGPT 账号，请添加或选择账号")?,
+            AccountBinding::Fixed(id) => id,
+        };
+        let stored = account(&session.state.store, id)?;
+        if let Some(auth_json) = &stored.auth_json {
+            return Ok(Secret::new(auth_json.clone()));
+        }
+        if let Some(token) = session.state.access.get(id) {
+            return auth_secret(stored, token);
+        }
+        if let Some(live) = read_editor_native(home)?
+            && matches_identity(stored, &live.identity)
+        {
+            return Ok(Secret::new(live.auth_json.clone()));
+        }
+        // Older private stores did not keep access tokens. Open an editable draft
+        // instead of renewing a login merely to display the credential editor.
+        auth_secret(
+            stored,
+            &CachedToken {
+                value: String::new(),
+                expires_at_ms: 0,
+                obtained_at_ms: stored.token_updated_at_ms,
+            },
+        )
+    }
+
+    /// Formatting supports incomplete drafts; saving requires a complete login bundle.
+    pub fn format_editor_auth(raw: &str) -> Result<Secret, String> {
+        if raw.len() > MAX_BYTES {
+            return Err("auth.json 超过大小上限".into());
+        }
+        let mut value: Value =
+            serde_json::from_str(raw).map_err(|_| "auth.json 必须是有效的 JSON 对象")?;
+        let result = if value.is_object() {
+            serde_json::to_string_pretty(&value)
+                .map(Secret::new)
+                .map_err(|_| "无法格式化 auth.json".into())
+        } else {
+            Err("auth.json 必须是有效的 JSON 对象".into())
+        };
+        zeroize_json(&mut value);
+        result
+    }
+
+    /// Offline structure and claimed-identity validation; no token renewal or request.
+    pub fn validate_editor_auth(raw: &str) -> Result<(), String> {
+        parse_editor_auth(raw).map(|_| ())
+    }
+
+    /// Manual edits stay in the private account store. Activating Codex is separate.
+    /// An existing binding may update tokens, but cannot silently change its identity.
+    pub fn save_editor_auth(
+        &self,
+        raw: &str,
+        expected_account_id: Option<&str>,
+    ) -> Result<AccountInfo, String> {
+        self.save_editor_auth_inner(raw, expected_account_id, None, None)
+    }
+
+    /// The editor's original snapshot prevents an old draft overwriting a renewal.
+    pub fn save_editor_auth_if_unchanged(
+        &self,
+        raw: &str,
+        expected_account_id: Option<&str>,
+        expected_raw: &str,
+        native_home: Option<&Path>,
+    ) -> Result<AccountInfo, String> {
+        self.save_editor_auth_inner(raw, expected_account_id, Some(expected_raw), native_home)
+    }
+
+    fn save_editor_auth_inner(
+        &self,
+        raw: &str,
+        expected_account_id: Option<&str>,
+        expected_raw: Option<&str>,
+        native_home: Option<&Path>,
+    ) -> Result<AccountInfo, String> {
+        let live = parse_editor_auth(raw)?;
+        let _operation = self
+            .0
+            .operation
+            .try_lock()
+            .map_err(|_| "账号操作进行中，请稍后重试")?;
+        let (_store_lock, mut session) = self.begin()?;
+        let _home_lock = if let Some(home) = native_home {
+            // Match account/import lock order; an absent home is read without
+            // creating it merely to save a separate managed account.
+            read_editor_native(home)?;
+            let lock = if home.is_dir() {
+                Some(files::lock_config(&home.join("config.toml"))?)
+            } else {
+                None
+            };
+            check_editor_native(home, expected_raw.ok_or("缺少原生登录编辑快照")?)?;
+            lock
+        } else {
+            None
+        };
+        let existing_id = if let Some(id) = expected_account_id {
+            let stored = account(&session.state.store, id)?;
+            if !matches_identity(stored, &live.identity) {
+                return Err("auth.json 的用户或工作区与绑定账号不一致，请选择新账号后保存".into());
+            }
+            if let Some(expected_raw) = expected_raw
+                && !editor_baseline_matches(stored, expected_raw)?
+            {
+                return Err("账号登录资料在编辑期间已变化，请重新打开编辑器".into());
+            }
+            Some(id.to_owned())
+        } else {
+            session
+                .state
+                .store
+                .accounts
+                .values()
+                .find(|stored| matches_identity(stored, &live.identity))
+                .map(|stored| stored.id.clone())
+        };
+        if let Some(stored) = existing_id
+            .as_deref()
+            .and_then(|id| session.state.store.accounts.get(id))
+        {
+            let previous = stored
+                .auth_json
+                .as_deref()
+                .map(|raw| parse_live(raw.as_bytes()))
+                .transpose()?;
+            let previous_time = previous
+                .as_ref()
+                .map_or(Some(stored.token_updated_at_ms), |live| live.updated_at_ms);
+            let changed = stored.refresh_token != live.refresh_token
+                || stored.id_token != live.id_token
+                || previous
+                    .as_ref()
+                    .is_some_and(|previous| previous.access_token != live.access_token);
+            if changed
+                && live
+                    .updated_at_ms
+                    .zip(previous_time)
+                    .is_some_and(|(incoming, current)| incoming < current)
+            {
+                return Err("auth.json 的登录资料早于已保存凭据，请重新获取完整登录资料".into());
+            }
+        }
+        let id = existing_id.clone().map_or_else(app::new_id, Ok)?;
+        let now = Utc::now().timestamp_millis();
+        let updated_at_ms = existing_id
+            .as_deref()
+            .and_then(|id| session.state.store.accounts.get(id))
+            .map_or(now, |stored| {
+                now.max(stored.token_updated_at_ms.saturating_add(1))
+            });
+        session.state.store.accounts.insert(
+            id.clone(),
+            StoredAccount {
+                id: id.clone(),
+                label: live.identity.label.clone(),
+                workspace_id: live.identity.workspace_id.clone(),
+                subject: live.identity.subject.clone(),
+                refresh_token: live.refresh_token.clone(),
+                id_token: live.id_token.clone(),
+                authenticated_at_ms: now,
+                token_updated_at_ms: updated_at_ms,
+                auth_json: Some(live.auth_json.clone()),
+            },
+        );
+        session.state.access.remove(&id);
+        cache_live(&mut session.state, &id, &live);
+        if session.state.store.default_account_id.is_none() {
+            session.state.store.default_account_id = Some(id.clone());
+        }
+        if let Some(home) = native_home {
+            check_editor_native(home, expected_raw.ok_or("缺少原生登录编辑快照")?)?;
+        }
+        self.save(&mut session)?;
+        Ok(info(
+            account(&session.state.store, &id)?,
+            &session.state.store,
+        ))
     }
 
     /// Resolve a provider's choice against the latest account file, not an old UI cache.
@@ -848,13 +1068,17 @@ impl AccountManager {
         if session.state.store.accounts.len() > 256 {
             return Err("保存的 ChatGPT 账号已达 256 个上限；本次账号变更未写入".into());
         }
-        let bytes =
-            serde_json::to_vec_pretty(&session.state.store).map_err(|_| "无法保存账号资料")?;
+        let bytes = Zeroizing::new(
+            serde_json::to_vec_pretty(&session.state.store).map_err(|_| "无法保存账号资料")?,
+        );
         if bytes.len() > MAX_BYTES {
             return Err("账号凭据文件已达大小上限；本次账号变更未写入".into());
         }
         private_replace(&self.0.path, &bytes, &session.expected)?;
-        session.expected = Some(bytes);
+        if let Some(previous) = &mut session.expected {
+            previous.zeroize();
+        }
+        session.expected = Some(bytes.to_vec());
         self.publish(&session.state)
     }
 
@@ -883,6 +1107,7 @@ impl AccountManager {
                 id_token: live.id_token.clone(),
                 authenticated_at_ms: now,
                 token_updated_at_ms: live.updated_at_ms.unwrap_or(now),
+                auth_json: Some(live.auth_json.clone()),
             },
         );
         cache_live(&mut session.state, &id, live);
@@ -951,12 +1176,25 @@ impl AccountManager {
             account.id_token.clone_from(&live.id_token);
             account.label.clone_from(&live.identity.label);
             account.token_updated_at_ms = live.updated_at_ms.unwrap_or(account.token_updated_at_ms);
+            set_auth_snapshot(account, &live.auth_json);
             session.state.access.remove(id);
             cache_live(&mut session.state, id, live);
             self.save(session)?;
         } else {
+            let capture_snapshot = account.auth_json.is_none()
+                || (account.auth_json.as_deref() != Some(&live.auth_json)
+                    && live
+                        .updated_at_ms
+                        .is_some_and(|time| time >= account.token_updated_at_ms));
+            if capture_snapshot {
+                set_auth_snapshot(account, &live.auth_json);
+            }
             cache_live(&mut session.state, id, live);
-            self.publish(&session.state)?;
+            if capture_snapshot {
+                self.save(session)?;
+            } else {
+                self.publish(&session.state)?;
+            }
         }
         Ok(())
     }
@@ -1070,6 +1308,7 @@ impl AccountManager {
                 .unwrap_or(now + 300_000),
             obtained_at_ms: now,
         };
+        update_auth_snapshot(current, &cached)?;
         session.state.access.insert(id.into(), cached.clone());
         self.save(session)?;
         Ok(cached)
@@ -1184,37 +1423,35 @@ impl DeviceLogin {
             None => app::new_id()?,
         };
         let now = Utc::now().timestamp_millis();
-        session.state.store.accounts.insert(
-            id.clone(),
-            StoredAccount {
-                id: id.clone(),
-                label: identity.label,
-                workspace_id: identity.workspace_id,
-                subject: identity.subject,
-                refresh_token: refresh.to_owned(),
-                id_token: tokens
-                    .id_token
-                    .clone()
-                    .ok_or("ChatGPT 登录缺少用户身份资料")?,
-                authenticated_at_ms: now,
-                token_updated_at_ms: existing.as_ref().map_or(now, |stored| {
-                    now.max(stored.token_updated_at_ms.saturating_add(1))
-                }),
-            },
-        );
-        session.state.access.insert(
-            id.clone(),
-            CachedToken {
-                value: tokens.access_token.clone(),
-                expires_at_ms: tokens
-                    .expires_in
-                    .filter(|seconds| *seconds > 0)
-                    .map(|seconds| now + seconds.min(86400) * 1000)
-                    .or_else(|| token_expiry(&tokens.access_token))
-                    .unwrap_or(now + 300_000),
-                obtained_at_ms: now,
-            },
-        );
+        let mut stored = StoredAccount {
+            id: id.clone(),
+            label: identity.label,
+            workspace_id: identity.workspace_id,
+            subject: identity.subject,
+            refresh_token: refresh.to_owned(),
+            id_token: tokens
+                .id_token
+                .clone()
+                .ok_or("ChatGPT 登录缺少用户身份资料")?,
+            authenticated_at_ms: now,
+            token_updated_at_ms: existing.as_ref().map_or(now, |stored| {
+                now.max(stored.token_updated_at_ms.saturating_add(1))
+            }),
+            auth_json: None,
+        };
+        let cached = CachedToken {
+            value: tokens.access_token.clone(),
+            expires_at_ms: tokens
+                .expires_in
+                .filter(|seconds| *seconds > 0)
+                .map(|seconds| now + seconds.min(86400) * 1000)
+                .or_else(|| token_expiry(&tokens.access_token))
+                .unwrap_or(now + 300_000),
+            obtained_at_ms: now,
+        };
+        update_auth_snapshot(&mut stored, &cached)?;
+        session.state.store.accounts.insert(id.clone(), stored);
+        session.state.access.insert(id.clone(), cached);
         if session.state.store.default_account_id.is_none() {
             session.state.store.default_account_id = Some(id.clone());
         }
@@ -1319,6 +1556,15 @@ fn decode_store(bytes: Option<&[u8]>) -> Result<Store, String> {
             return Err("账号资料索引或用户身份无效".into());
         }
         validate_secret(&stored.refresh_token)?;
+        if let Some(auth_json) = &stored.auth_json {
+            let live = parse_live(auth_json.as_bytes())?;
+            if !matches_identity(stored, &live.identity)
+                || stored.refresh_token != live.refresh_token
+                || stored.id_token != live.id_token
+            {
+                return Err("账号 auth.json 与保存身份不一致".into());
+            }
+        }
     }
     if store
         .default_account_id
@@ -1390,30 +1636,106 @@ fn identity(id_token: &str) -> Result<Identity, String> {
 }
 
 fn parse_live(bytes: &[u8]) -> Result<LiveAuth, String> {
-    let auth: Value = serde_json::from_slice(bytes).map_err(|_| "Codex 登录文件格式无效")?;
-    if auth["auth_mode"]
-        .as_str()
-        .is_some_and(|mode| mode != "chatgpt")
-        || !auth["OPENAI_API_KEY"].is_null()
+    if bytes.len() > MAX_BYTES {
+        return Err("Codex 登录文件超过大小上限".into());
+    }
+    let mut auth: Value = serde_json::from_slice(bytes).map_err(|_| "Codex 登录文件格式无效")?;
+    let result = (|| {
+        if !auth.is_object()
+            || auth.get("auth_mode").is_some_and(|mode| mode != "chatgpt")
+            || !auth["OPENAI_API_KEY"].is_null()
+        {
+            return Err("当前 Codex 不是 ChatGPT 文件登录".into());
+        }
+        let tokens = &auth["tokens"];
+        let id_token = field(tokens, "id_token")?;
+        let identity = identity(id_token)?;
+        if field(tokens, "account_id")? != identity.workspace_id {
+            return Err("Codex 登录文件的工作区与用户身份不一致".into());
+        }
+        let access_token = field(tokens, "access_token")?;
+        let refresh_token = field(tokens, "refresh_token")?;
+        let auth_json = serde_json::to_string_pretty(&auth).map_err(|_| "无法生成 auth.json")?;
+        Ok(LiveAuth {
+            identity,
+            id_token: id_token.to_owned(),
+            access_token: access_token.to_owned(),
+            refresh_token: refresh_token.to_owned(),
+            updated_at_ms: auth["last_refresh"]
+                .as_str()
+                .and_then(|value| DateTime::parse_from_rfc3339(value).ok())
+                .map(|date| date.timestamp_millis()),
+            auth_json,
+        })
+    })();
+    zeroize_json(&mut auth);
+    result
+}
+
+fn parse_editor_auth(raw: &str) -> Result<LiveAuth, String> {
+    let live = parse_live(raw.as_bytes())?;
+    if [&live.id_token, &live.access_token, &live.refresh_token]
+        .iter()
+        .any(|token| token.chars().any(char::is_whitespace))
     {
-        return Err("当前 Codex 不是 ChatGPT 文件登录".into());
+        return Err("ChatGPT 登录凭据格式无效".into());
     }
-    let tokens = &auth["tokens"];
-    let id_token = field(tokens, "id_token")?.to_owned();
-    let identity = identity(&id_token)?;
-    if field(tokens, "account_id")? != identity.workspace_id {
-        return Err("Codex 登录文件的工作区与用户身份不一致".into());
+    if live.access_token.contains('.') {
+        let mut claims = jwt_payload(&live.access_token)?;
+        let is_object = claims.is_object();
+        zeroize_json(&mut claims);
+        if !is_object {
+            return Err("ChatGPT 登录凭据格式无效".into());
+        }
     }
-    Ok(LiveAuth {
-        identity,
-        id_token,
-        access_token: field(tokens, "access_token")?.to_owned(),
-        refresh_token: field(tokens, "refresh_token")?.to_owned(),
-        updated_at_ms: auth["last_refresh"]
-            .as_str()
-            .and_then(|value| DateTime::parse_from_rfc3339(value).ok())
-            .map(|date| date.timestamp_millis()),
-    })
+    Ok(live)
+}
+
+fn editor_baseline_matches(stored: &StoredAccount, raw: &str) -> Result<bool, String> {
+    if let Some(current) = &stored.auth_json {
+        return Ok(AccountManager::format_editor_auth(raw)?.expose() == current);
+    }
+    // Legacy drafts may have an empty access_token; their persisted ownership
+    // still consists of the exact saved refresh and ID tokens.
+    let mut value: Value = serde_json::from_str(raw).map_err(|_| "编辑器的原始登录资料无效")?;
+    let matches = value["tokens"]["refresh_token"].as_str() == Some(&stored.refresh_token)
+        && value["tokens"]["id_token"].as_str() == Some(&stored.id_token);
+    zeroize_json(&mut value);
+    Ok(matches)
+}
+
+fn zeroize_json(value: &mut Value) {
+    match value {
+        Value::String(value) => value.zeroize(),
+        Value::Array(values) => values.iter_mut().for_each(zeroize_json),
+        Value::Object(values) => values.values_mut().for_each(zeroize_json),
+        _ => {}
+    }
+}
+
+fn read_editor_native(home: &Path) -> Result<Option<LiveAuth>, String> {
+    if !home.is_absolute() {
+        return Err("Codex 配置目录必须是绝对路径".into());
+    }
+    if let Ok(metadata) = fs::symlink_metadata(home)
+        && (!metadata.is_dir() || metadata.file_type().is_symlink())
+    {
+        return Err("Codex 配置目录必须是普通目录".into());
+    }
+    let Some(bytes) = read_private(&home.join("auth.json"))? else {
+        return Ok(None);
+    };
+    let bytes = Zeroizing::new(bytes);
+    Ok(parse_live(&bytes).ok())
+}
+
+fn check_editor_native(home: &Path, expected_raw: &str) -> Result<(), String> {
+    let current = read_editor_native(home)?;
+    let current = current.as_ref().map_or("{}", |live| &live.auth_json);
+    if AccountManager::format_editor_auth(expected_raw)?.expose() != current {
+        return Err("Codex 原生登录在编辑期间已变化，请重新打开编辑器".into());
+    }
+    Ok(())
 }
 
 fn token_expiry(token: &str) -> Option<i64> {
@@ -1479,10 +1801,47 @@ fn auth_bytes(account: &StoredAccount, token: &CachedToken) -> Result<Vec<u8>, S
     let refreshed = DateTime::<Utc>::from_timestamp_millis(token.obtained_at_ms)
         .ok_or("账号续期时间无效")?
         .to_rfc3339_opts(SecondsFormat::Millis, true);
-    serde_json::to_vec_pretty(&json!({"auth_mode":"chatgpt", "OPENAI_API_KEY":null,
-        "tokens":{"access_token":token.value,"refresh_token":account.refresh_token,
-        "id_token":account.id_token,"account_id":account.workspace_id},"last_refresh":refreshed}))
-    .map_err(|_| "无法生成 Codex 登录文件".into())
+    let mut auth = account
+        .auth_json
+        .as_deref()
+        .map(serde_json::from_str)
+        .transpose()
+        .map_err(|_| "保存的 auth.json 无效")?
+        .unwrap_or_else(|| json!({}));
+    for (key, value) in [
+        ("access_token", &token.value),
+        ("refresh_token", &account.refresh_token),
+        ("id_token", &account.id_token),
+        ("account_id", &account.workspace_id),
+    ] {
+        zeroize_json(&mut auth["tokens"][key]);
+        auth["tokens"][key] = Value::String(value.clone());
+    }
+    auth["auth_mode"] = "chatgpt".into();
+    auth["OPENAI_API_KEY"] = Value::Null;
+    auth["last_refresh"] = refreshed.into();
+    let result = serde_json::to_vec_pretty(&auth).map_err(|_| "无法生成 Codex 登录文件".into());
+    zeroize_json(&mut auth);
+    result
+}
+
+fn auth_secret(account: &StoredAccount, token: &CachedToken) -> Result<Secret, String> {
+    let bytes = Zeroizing::new(auth_bytes(account, token)?);
+    let raw = std::str::from_utf8(&bytes).map_err(|_| "无法生成 auth.json")?;
+    Ok(Secret::new(raw.to_owned()))
+}
+
+fn set_auth_snapshot(account: &mut StoredAccount, raw: &str) {
+    if let Some(previous) = &mut account.auth_json {
+        previous.zeroize();
+    }
+    account.auth_json = Some(raw.to_owned());
+}
+
+fn update_auth_snapshot(account: &mut StoredAccount, token: &CachedToken) -> Result<(), String> {
+    let raw = auth_secret(account, token)?;
+    set_auth_snapshot(account, raw.expose());
+    Ok(())
 }
 
 fn write_marker(
@@ -1713,6 +2072,293 @@ mod tests {
         fn drop(&mut self) {
             self.task.abort();
         }
+    }
+
+    #[test]
+    fn auth_editor_roundtrips_imported_credentials_and_preserves_bound_identity() {
+        let home = TestHome::new();
+        let manager = AccountManager::open(&home.data()).unwrap();
+        home.seed("user-a", "workspace-a", "synthetic-a", 1_700_000_000_000);
+        let a = manager.import_current(&home.home()).unwrap();
+        let native = fs::read(home.home().join("auth.json")).unwrap();
+        let marker = fs::read(home.home().join(MARKER_NAME)).unwrap();
+        let config = b"# selected home stays unchanged\n";
+        fs::write(home.home().join("config.toml"), config).unwrap();
+
+        let reopened = AccountManager::open(&home.data()).unwrap();
+        for binding in [AccountBinding::Fixed(a.id.clone()), AccountBinding::Default] {
+            let raw = reopened.editor_auth(&binding, &home.home()).unwrap();
+            AccountManager::validate_editor_auth(raw.expose()).unwrap();
+            assert_eq!(
+                serde_json::from_str::<Value>(raw.expose()).unwrap(),
+                serde_json::from_slice::<Value>(&native).unwrap()
+            );
+        }
+        let raw = manager
+            .editor_auth(&AccountBinding::Native, &home.home())
+            .unwrap();
+        assert_eq!(format!("{raw:?}"), "Secret([redacted])");
+        let mut edited: Value = serde_json::from_str(raw.expose()).unwrap();
+        edited["tokens"]["refresh_token"] = "synthetic-edited-a".into();
+        edited["tokens"]["access_token"] = access_token("synthetic-edited-a").into();
+        edited["editor_extra"] = json!({"preserved":true});
+        let raw = Secret::new(edited.to_string());
+        let formatted = AccountManager::format_editor_auth(raw.expose()).unwrap();
+        assert!(formatted.expose().contains('\n'));
+        let saved = manager
+            .save_editor_auth(formatted.expose(), Some(&a.id))
+            .unwrap();
+        assert_eq!(saved.id, a.id);
+        assert!(saved.is_default);
+        assert_eq!(manager.list().unwrap().len(), 1);
+        assert_eq!(fs::read(home.home().join("auth.json")).unwrap(), native);
+        assert_eq!(fs::read(home.home().join(MARKER_NAME)).unwrap(), marker);
+        assert_eq!(fs::read(home.home().join("config.toml")).unwrap(), config);
+        let reopened = AccountManager::open(&home.data()).unwrap();
+        let loaded = reopened
+            .editor_auth(&AccountBinding::Fixed(a.id.clone()), &home.home())
+            .unwrap();
+        assert_eq!(
+            serde_json::from_str::<Value>(loaded.expose()).unwrap(),
+            edited
+        );
+        assert_eq!(
+            reopened
+                .save_editor_auth(loaded.expose(), Some(&a.id))
+                .unwrap()
+                .id,
+            a.id
+        );
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            assert_eq!(
+                fs::metadata(home.data().join(STORE_NAME))
+                    .unwrap()
+                    .permissions()
+                    .mode()
+                    & 0o777,
+                0o600
+            );
+        }
+    }
+
+    #[test]
+    fn auth_editor_validates_complete_login_and_rejects_accidental_identity_changes() {
+        let home = TestHome::new();
+        let manager = AccountManager::open(&home.data()).unwrap();
+        let raw = String::from_utf8(synthetic_auth(
+            "user-a",
+            "workspace-a",
+            "synthetic-a",
+            1_700_000_000_000,
+        ))
+        .unwrap();
+        let a = manager.save_editor_auth(&raw, None).unwrap();
+        assert!(!home.home().join("auth.json").exists());
+        assert!(!home.home().join(MARKER_NAME).exists());
+        let before = fs::read(home.data().join(STORE_NAME)).unwrap();
+        for (subject, workspace) in [("user-b", "workspace-a"), ("user-a", "workspace-b")] {
+            let changed = String::from_utf8(synthetic_auth(
+                subject,
+                workspace,
+                "synthetic-secret-do-not-log",
+                1_700_000_001_000,
+            ))
+            .unwrap();
+            let error = manager.save_editor_auth(&changed, Some(&a.id)).unwrap_err();
+            assert!(error.contains("用户或工作区"));
+            assert!(!error.contains("synthetic-secret-do-not-log"));
+        }
+        let valid: Value = serde_json::from_str(&raw).unwrap();
+        let mut invalid = Vec::new();
+        for field in ["access_token", "refresh_token", "id_token", "account_id"] {
+            let mut value = valid.clone();
+            value["tokens"].as_object_mut().unwrap().remove(field);
+            invalid.push(value);
+        }
+        for (field, value) in [
+            ("access_token", "invalid.jwt.signature"),
+            ("refresh_token", "synthetic whitespace"),
+            ("id_token", "synthetic-secret-do-not-log"),
+            ("account_id", "other-workspace"),
+        ] {
+            let mut invalid_value = valid.clone();
+            invalid_value["tokens"][field] = value.into();
+            invalid.push(invalid_value);
+        }
+        let mut api = valid.clone();
+        api["OPENAI_API_KEY"] = "synthetic-secret-do-not-log".into();
+        invalid.push(api);
+        let mut wrong_mode = valid.clone();
+        wrong_mode["auth_mode"] = "apikey".into();
+        invalid.push(wrong_mode);
+        invalid.extend([json!({}), json!([]), json!("synthetic-secret-do-not-log")]);
+        for value in invalid {
+            let error = manager
+                .save_editor_auth(&value.to_string(), Some(&a.id))
+                .unwrap_err();
+            assert!(!error.contains("synthetic-secret-do-not-log"));
+        }
+        assert!(AccountManager::format_editor_auth("{\"tokens\":{}}").is_ok());
+        assert!(AccountManager::validate_editor_auth("{\"tokens\":{}}").is_err());
+        assert!(AccountManager::format_editor_auth("[]").is_err());
+        assert!(AccountManager::format_editor_auth("{invalid").is_err());
+        assert!(AccountManager::validate_editor_auth(&"x".repeat(MAX_BYTES + 1)).is_err());
+        assert_eq!(fs::read(home.data().join(STORE_NAME)).unwrap(), before);
+    }
+
+    #[test]
+    fn auth_editor_opens_legacy_and_signed_out_drafts_without_renewal_or_home_writes() {
+        let home = TestHome::new();
+        let manager = AccountManager::open(&home.data()).unwrap();
+        let missing_home = home.0.join("missing-home");
+        assert_eq!(
+            manager
+                .editor_auth(&AccountBinding::Native, &missing_home)
+                .unwrap()
+                .expose(),
+            "{}"
+        );
+        assert!(!missing_home.exists());
+        assert!(
+            manager
+                .editor_auth(&AccountBinding::Native, Path::new("relative"))
+                .is_err()
+        );
+        home.seed("user-a", "workspace-a", "synthetic-a", 1_700_000_000_000);
+        let a = manager.import_current(&home.home()).unwrap();
+        let mut legacy: Value =
+            serde_json::from_slice(&fs::read(home.data().join(STORE_NAME)).unwrap()).unwrap();
+        legacy["accounts"][&a.id]
+            .as_object_mut()
+            .unwrap()
+            .remove("auth_json");
+        fs::write(home.data().join(STORE_NAME), legacy.to_string()).unwrap();
+        let reopened = AccountManager::open(&home.data()).unwrap();
+        let reconstructed = reopened
+            .editor_auth(&AccountBinding::Fixed(a.id.clone()), &home.home())
+            .unwrap();
+        AccountManager::validate_editor_auth(reconstructed.expose()).unwrap();
+        let signed_out = b"{\"OPENAI_API_KEY\":\"synthetic-secret-do-not-log\"}";
+        fs::write(home.home().join("auth.json"), signed_out).unwrap();
+        let store_before = fs::read(home.data().join(STORE_NAME)).unwrap();
+        let draft = reopened
+            .editor_auth(&AccountBinding::Fixed(a.id), &home.home())
+            .unwrap();
+        let draft: Value = serde_json::from_str(draft.expose()).unwrap();
+        assert_eq!(draft["tokens"]["access_token"], "");
+        assert_eq!(draft["tokens"]["refresh_token"], "synthetic-a");
+        assert_eq!(draft["tokens"]["account_id"], "workspace-a");
+        assert_eq!(
+            reopened
+                .editor_auth(&AccountBinding::Native, &home.home())
+                .unwrap()
+                .expose(),
+            "{}"
+        );
+        assert_eq!(fs::read(home.home().join("auth.json")).unwrap(), signed_out);
+        assert_eq!(
+            fs::read(home.data().join(STORE_NAME)).unwrap(),
+            store_before
+        );
+    }
+
+    #[test]
+    fn auth_editor_rejects_stale_drafts_after_a_saved_token_rotation() {
+        let home = TestHome::new();
+        let manager = AccountManager::open(&home.data()).unwrap();
+        home.seed("user-a", "workspace-a", "synthetic-old", 1_700_000_000_000);
+        let a = manager.import_current(&home.home()).unwrap();
+        let original = manager
+            .editor_auth(&AccountBinding::Fixed(a.id.clone()), &home.home())
+            .unwrap();
+        let mut edited: Value = serde_json::from_str(original.expose()).unwrap();
+        edited["tokens"]["refresh_token"] = "synthetic-edited-old".into();
+        edited["tokens"]["access_token"] = access_token("synthetic-edited-old").into();
+        let newer = String::from_utf8(synthetic_auth(
+            "user-a",
+            "workspace-a",
+            "synthetic-newer",
+            1_700_000_001_000,
+        ))
+        .unwrap();
+        let external = AccountManager::open(&home.data()).unwrap();
+        external.save_editor_auth(&newer, Some(&a.id)).unwrap();
+        let before = fs::read(home.data().join(STORE_NAME)).unwrap();
+        let edited = Secret::new(edited.to_string());
+        let error = manager
+            .save_editor_auth_if_unchanged(edited.expose(), Some(&a.id), original.expose(), None)
+            .unwrap_err();
+        assert!(error.contains("编辑期间已变化"));
+        assert!(
+            manager
+                .save_editor_auth(edited.expose(), Some(&a.id))
+                .unwrap_err()
+                .contains("早于已保存")
+        );
+        assert_eq!(fs::read(home.data().join(STORE_NAME)).unwrap(), before);
+    }
+
+    #[test]
+    fn auth_editor_guards_changed_native_login_and_never_rewrites_it_on_save() {
+        let home = TestHome::new();
+        let manager = AccountManager::open(&home.data()).unwrap();
+        home.seed("user-a", "workspace-a", "synthetic-old", 1_700_000_000_000);
+        let original = manager
+            .editor_auth(&AccountBinding::Native, &home.home())
+            .unwrap();
+        let mut edited: Value = serde_json::from_str(original.expose()).unwrap();
+        edited["tokens"]["refresh_token"] = "synthetic-edited".into();
+        edited["tokens"]["access_token"] = access_token("synthetic-edited").into();
+        let edited = Secret::new(edited.to_string());
+        home.seed(
+            "user-a",
+            "workspace-a",
+            "synthetic-newer",
+            1_700_000_001_000,
+        );
+        let newer = fs::read(home.home().join("auth.json")).unwrap();
+        let error = manager
+            .save_editor_auth_if_unchanged(
+                edited.expose(),
+                None,
+                original.expose(),
+                Some(&home.home()),
+            )
+            .unwrap_err();
+        assert!(error.contains("原生登录在编辑期间已变化"));
+        assert!(!home.data().join(STORE_NAME).exists());
+        assert_eq!(fs::read(home.home().join("auth.json")).unwrap(), newer);
+        assert!(!home.home().join(MARKER_NAME).exists());
+
+        let reformatted = format!("\n{}\n", original.expose());
+        fs::write(home.home().join("auth.json"), &reformatted).unwrap();
+        manager
+            .save_editor_auth_if_unchanged(
+                edited.expose(),
+                None,
+                original.expose(),
+                Some(&home.home()),
+            )
+            .unwrap();
+        assert_eq!(
+            fs::read_to_string(home.home().join("auth.json")).unwrap(),
+            reformatted
+        );
+        assert!(!home.home().join(MARKER_NAME).exists());
+        let missing = home.0.join("missing-home");
+        let raw = String::from_utf8(synthetic_auth(
+            "user-b",
+            "workspace-b",
+            "synthetic-b",
+            1_700_000_002_000,
+        ))
+        .unwrap();
+        manager
+            .save_editor_auth_if_unchanged(&raw, None, "{}", Some(&missing))
+            .unwrap();
+        assert!(!missing.exists());
     }
 
     #[tokio::test]
@@ -2134,6 +2780,16 @@ for line in sys.stdin:
         assert!(stored.contains("synthetic-verified-a"));
         assert!(!stored.contains("synthetic-foreign-c"));
         let reopened = AccountManager::open(&home.data()).unwrap();
+        let raw = reopened
+            .editor_auth(&AccountBinding::Fixed(a.id.clone()), &home.home())
+            .unwrap();
+        AccountManager::validate_editor_auth(raw.expose()).unwrap();
+        let auth: Value = serde_json::from_str(raw.expose()).unwrap();
+        assert_eq!(auth["tokens"]["refresh_token"], "synthetic-verified-a");
+        assert_eq!(
+            auth["tokens"]["access_token"],
+            access_token("synthetic-verified-a")
+        );
         assert_eq!(reopened.list().unwrap()[0].id, a.id);
         assert_eq!(
             reopened.list().unwrap()[0].label,
@@ -2184,7 +2840,13 @@ for line in sys.stdin:
 
         let stored = fs::read_to_string(home.data().join(STORE_NAME)).unwrap();
         assert!(stored.contains("synthetic-refresh-a-new"));
-        assert!(!stored.contains(&access_token("synthetic-refresh-a-new")));
+        let stored: Value = serde_json::from_str(&stored).unwrap();
+        let auth: Value =
+            serde_json::from_str(stored["accounts"][&a.id]["auth_json"].as_str().unwrap()).unwrap();
+        assert_eq!(
+            auth["tokens"]["access_token"],
+            access_token("synthetic-refresh-a-new")
+        );
         let marker = fs::read_to_string(home.home().join(MARKER_NAME)).unwrap();
         assert!(!marker.contains("token"));
         let stale_instance = AccountManager::open(&home.data()).unwrap();
@@ -2327,6 +2989,17 @@ for line in sys.stdin:
             fs::read_to_string(home.data().join(STORE_NAME))
                 .unwrap()
                 .contains("synthetic-refresh-1")
+        );
+        let reopened = AccountManager::open(&home.data()).unwrap();
+        let raw = reopened
+            .editor_auth(&AccountBinding::Fixed(first.id.clone()), &home.home())
+            .unwrap();
+        AccountManager::validate_editor_auth(raw.expose()).unwrap();
+        let auth: Value = serde_json::from_str(raw.expose()).unwrap();
+        assert_eq!(auth["tokens"]["refresh_token"], "synthetic-refresh-1");
+        assert_eq!(
+            auth["tokens"]["access_token"],
+            access_token("synthetic-refresh-1")
         );
         let before = fs::read(home.data().join(STORE_NAME)).unwrap();
         let login = manager.start_login().await.unwrap();

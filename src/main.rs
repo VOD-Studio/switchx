@@ -38,11 +38,24 @@ enum Command {
         id: String,
         home: String,
     },
-    BeginSubscriptionEditor(String),
+    BeginSubscriptionEditor {
+        id: String,
+        home: String,
+        generation: i32,
+    },
+    LoadSubscriptionAuth {
+        provider_id: String,
+        account_id: String,
+        home: String,
+        generation: i32,
+    },
+    CancelSubscriptionEditor,
     SaveSubscription {
         id: String,
         name: String,
         account_id: String,
+        auth: Secret,
+        options: CodexOptions,
     },
     OpenCommonConfig(String),
     ExtractCommonConfig(String),
@@ -105,6 +118,44 @@ enum Command {
     },
     CancelRoutePreview,
     Quit,
+}
+
+struct SubscriptionAuthDraft {
+    provider_id: String,
+    binding: AccountBinding,
+    account_id: Option<String>,
+    contents: Secret,
+    home: PathBuf,
+}
+
+fn subscription_binding(account_id: &str) -> AccountBinding {
+    match account_id {
+        "" => AccountBinding::Native,
+        "@default" => AccountBinding::Default,
+        id => AccountBinding::Fixed(id.into()),
+    }
+}
+
+fn subscription_auth_draft(
+    data_dir: &Path,
+    provider_id: &str,
+    binding: AccountBinding,
+    home: &Path,
+) -> Result<SubscriptionAuthDraft, String> {
+    let manager = AccountManager::open(data_dir)?;
+    let account_id = match &binding {
+        AccountBinding::Native => None,
+        AccountBinding::Default => manager.default_id()?,
+        AccountBinding::Fixed(id) => Some(id.clone()),
+    };
+    let contents = manager.editor_auth(&binding, home)?;
+    Ok(SubscriptionAuthDraft {
+        provider_id: provider_id.into(),
+        binding,
+        account_id,
+        contents,
+        home: home.into(),
+    })
 }
 
 fn matching_providers(providers: &ModelRc<ProviderRow>, query: &str) -> Vec<ProviderRow> {
@@ -356,12 +407,78 @@ fn editor_codex_options(app: &AppWindow) -> Result<CodexOptions, String> {
         } else {
             900_000
         },
+        config_toml: app
+            .get_subscription_editor_open()
+            .then(|| app.get_edit_config_preview().to_string()),
     };
     options.validate()?;
     Ok(options)
 }
 
+fn set_subscription_config(app: &AppWindow, config: Result<String, String>) {
+    match config {
+        Ok(config) => {
+            let base = CodexOptions {
+                use_common_config: app.get_edit_use_common_config(),
+                ..CodexOptions::default()
+            };
+            match provider_config::subscription_options_from_config(&base, &config) {
+                Ok(options) => {
+                    app.set_config_editor_updating(true);
+                    app.set_edit_config_preview(config.into());
+                    app.set_edit_context_1m(options.context_1m);
+                    app.set_edit_compact_limit(options.compact_limit.to_string().into());
+                    app.set_edit_config_error("".into());
+                    app.set_config_editor_updating(false);
+                }
+                Err(error) => app.set_edit_config_error(error.into()),
+            }
+        }
+        Err(error) => app.set_edit_config_error(error.into()),
+    }
+}
+
+fn update_subscription_common(app: &AppWindow) {
+    if app.get_config_editor_updating() || !app.get_subscription_editor_open() {
+        return;
+    }
+    set_subscription_config(
+        app,
+        provider_config::set_subscription_common(
+            app.get_edit_config_preview().as_str(),
+            app.get_common_config_saved().as_str(),
+            app.get_edit_use_common_config(),
+        ),
+    );
+}
+
+fn update_subscription_context(app: &AppWindow) {
+    if app.get_config_editor_updating() || !app.get_subscription_editor_open() {
+        return;
+    }
+    let result = (|| {
+        let limit = if app.get_edit_context_1m() {
+            app.get_edit_compact_limit()
+                .trim()
+                .parse()
+                .map_err(|_| "压缩阈值须为小于 1000000 的正整数")?
+        } else {
+            900_000
+        };
+        provider_config::set_subscription_context(
+            app.get_edit_config_preview().as_str(),
+            app.get_edit_context_1m(),
+            limit,
+        )
+    })();
+    set_subscription_config(app, result);
+}
+
 fn update_provider_config_preview(app: &AppWindow) {
+    if app.get_subscription_editor_open() {
+        set_subscription_config(app, Ok(app.get_edit_config_preview().to_string()));
+        return;
+    }
     if !app.get_editor_open() {
         return;
     }
@@ -387,6 +504,40 @@ fn update_provider_config_preview(app: &AppWindow) {
             app.set_edit_config_error(error.into());
             app.set_edit_config_preview("".into());
         }
+    }
+}
+
+fn replace_common_config(app: &AppWindow, common: String) {
+    let previous = app.get_common_config_saved();
+    let draft = if app.get_subscription_editor_open()
+        && app.get_edit_use_common_config()
+        && previous.as_str() != common
+    {
+        Some(
+            provider_config::set_subscription_common(
+                app.get_edit_config_preview().as_str(),
+                previous.as_str(),
+                false,
+            )
+            .and_then(|config| {
+                provider_config::subscription_editor_config(
+                    "",
+                    &CodexOptions {
+                        config_toml: Some(config),
+                        ..CodexOptions::default()
+                    },
+                    &common,
+                )
+            }),
+        )
+    } else {
+        None
+    };
+    app.set_common_config_saved(common.into());
+    if let Some(draft) = draft {
+        set_subscription_config(app, draft);
+    } else {
+        update_provider_config_preview(app);
     }
 }
 
@@ -452,13 +603,15 @@ fn show_subscription_editor(
     app: &AppWindow,
     provider: Option<ProviderRecord>,
     accounts: Vec<switchx::accounts::AccountInfo>,
+    config: String,
+    options: CodexOptions,
+    common: String,
+    auth: Secret,
 ) {
+    app.set_subscription_editor_open(false);
+    app.set_config_editor_updating(true);
     let mut ids = vec![slint::SharedString::default()];
-    let mut options = vec![slint::SharedString::from(if provider.is_some() {
-        "保留现有绑定"
-    } else {
-        "请选择已保存账号"
-    })];
+    let mut account_options = vec![slint::SharedString::from("跟随 Codex 登录")];
     let selected = provider
         .as_ref()
         .and_then(|provider| match &provider.account_binding {
@@ -466,12 +619,20 @@ fn show_subscription_editor(
             _ => None,
         });
     let mut choice = 0;
+    if provider
+        .as_ref()
+        .is_some_and(|provider| provider.account_binding == Some(AccountBinding::Default))
+    {
+        ids.push("@default".into());
+        account_options.push("跟随默认保存账号".into());
+        choice = 1;
+    }
     for account in accounts {
         if selected == Some(account.id.as_str()) {
             choice = ids.len() as i32;
         }
         ids.push(account.id.into());
-        options.push(format!("{} · {}", account.label, account.workspace_id).into());
+        account_options.push(format!("{} · {}", account.label, account.workspace_id).into());
     }
     app.set_subscription_id(
         provider
@@ -494,22 +655,32 @@ fn show_subscription_editor(
                 "原绑定账号已移除；请明确选择其他账号".into()
             }
             Some(AccountBinding::Native) | None if provider.is_some() => {
-                "现有绑定：跟随 Codex 当前登录。选择已保存账号后才会改为固定绑定。".into()
+                "跟随所选 Codex 目录的登录；也可选择保存账号或粘贴完整 auth.json。".into()
             }
             Some(AccountBinding::Default) => {
                 "现有绑定：跟随默认账号。选择已保存账号后才会改为固定绑定。".into()
             }
-            _ => "固定绑定不随默认账号或 Codex 入口登录变化。".into(),
+            _ => "选择保存账号时显示其登录 JSON；修改身份请添加其他账号后再改绑。".into(),
         },
     );
     app.set_subscription_account_ids(ModelRc::new(VecModel::from(ids)));
-    app.set_subscription_account_options(ModelRc::new(VecModel::from(options)));
+    app.set_subscription_account_options(ModelRc::new(VecModel::from(account_options)));
     app.set_subscription_account_choice(choice);
     app.set_editor_open(false);
     app.set_edit_key("".into());
     app.set_common_config_editor_open(false);
     app.set_model_editor_open(false);
     app.set_delete_confirm(false);
+    app.set_common_config_saved(common.into());
+    app.set_edit_remote_compaction(false);
+    app.set_edit_use_common_config(options.use_common_config);
+    app.set_edit_context_1m(options.context_1m);
+    app.set_edit_compact_limit(options.compact_limit.to_string().into());
+    app.set_edit_config_preview(config.into());
+    app.set_edit_config_error("".into());
+    app.set_subscription_auth_json(auth.expose().into());
+    app.set_subscription_auth_error("".into());
+    app.set_config_editor_updating(false);
     app.set_subscription_editor_open(true);
     app.set_active_page(1);
     app.set_busy(false);
@@ -739,6 +910,7 @@ async fn worker(
     let mut route_session = RouteSession::default();
     let mut pending_login: Option<(watch::Sender<bool>, tokio::task::JoinHandle<()>)> = None;
     let mut account_home = client::default_home().ok();
+    let mut subscription_auth: Option<SubscriptionAuthDraft> = None;
     while let Some(command) = receiver.recv().await {
         let recovery_only = directory
             .as_ref()
@@ -860,7 +1032,11 @@ async fn worker(
                     Err(error) => show_action(&app, Err(error)),
                 });
             }
-            Command::BeginSubscriptionEditor(id) => {
+            Command::BeginSubscriptionEditor {
+                id,
+                home: target,
+                generation,
+            } => {
                 let result = (|| {
                     let data_dir = directory.as_ref().map_err(|error| error.message())?;
                     if data_dir.join("direct-journal.json").exists()
@@ -877,46 +1053,156 @@ async fn worker(
                         }
                         Some(provider)
                     };
+                    let common = common_config_for_home(data_dir, &target)?;
+                    let options = match &provider {
+                        Some(provider) => {
+                            app::load_provider_config(data_dir, &provider.id)?.options
+                        }
+                        None => None,
+                    }
+                    .map(Ok)
+                    .unwrap_or_else(|| CodexOptions::for_common(&common))?;
+                    let model = provider
+                        .as_ref()
+                        .map_or("", |provider| provider.model_id.as_str());
+                    let config =
+                        provider_config::subscription_editor_config(model, &options, &common)?;
+                    let options =
+                        provider_config::subscription_options_from_config(&options, &config)?;
+                    let binding = provider
+                        .as_ref()
+                        .and_then(|provider| provider.account_binding.clone())
+                        .unwrap_or(AccountBinding::Native);
+                    let draft = subscription_auth_draft(data_dir, &id, binding, &home(&target)?)?;
+                    let auth = Secret::new(draft.contents.expose().to_owned());
+                    subscription_auth = Some(draft);
                     let accounts = AccountManager::open(data_dir)?.list()?;
-                    Ok::<_, String>((provider, accounts))
+                    Ok::<_, String>((provider, accounts, config, options, common, auth))
                 })();
-                let _ = weak.upgrade_in_event_loop(move |app| match result {
-                    Ok((provider, accounts)) => show_subscription_editor(&app, provider, accounts),
-                    Err(error) => show_action(&app, Err(error)),
+                let _ = weak.upgrade_in_event_loop(move |app| {
+                    if app.get_subscription_editor_generation() != generation {
+                        return;
+                    }
+                    app.set_subscription_editor_pending(false);
+                    match result {
+                        Ok((provider, accounts, config, options, common, auth)) => {
+                            show_subscription_editor(
+                                &app, provider, accounts, config, options, common, auth,
+                            )
+                        }
+                        Err(error) => show_action(&app, Err(error)),
+                    }
                 });
+            }
+            Command::LoadSubscriptionAuth {
+                provider_id,
+                account_id,
+                home: target,
+                generation,
+            } => {
+                subscription_auth = None;
+                let result = (|| {
+                    let data_dir = directory.as_ref().map_err(|error| error.message())?;
+                    app::ensure_editable(data_dir)?;
+                    let draft = subscription_auth_draft(
+                        data_dir,
+                        &provider_id,
+                        subscription_binding(&account_id),
+                        &home(&target)?,
+                    )?;
+                    let auth = Secret::new(draft.contents.expose().to_owned());
+                    subscription_auth = Some(draft);
+                    Ok::<_, String>(auth)
+                })();
+                let _ = weak.upgrade_in_event_loop(move |app| {
+                    if app.get_subscription_editor_generation() != generation
+                        || !app.get_subscription_editor_open()
+                    {
+                        return;
+                    }
+                    app.set_subscription_editor_pending(false);
+                    app.set_busy(false);
+                    match result {
+                        Ok(auth) => {
+                            app.set_subscription_auth_json(auth.expose().into());
+                            app.set_subscription_auth_error("".into());
+                        }
+                        Err(error) => {
+                            app.set_subscription_auth_json("".into());
+                            app.set_subscription_auth_error(error.into());
+                        }
+                    }
+                });
+            }
+            Command::CancelSubscriptionEditor => {
+                subscription_auth = None;
+                let _ = weak.upgrade_in_event_loop(|app| app.set_busy(false));
             }
             Command::SaveSubscription {
                 id,
                 name,
                 account_id,
+                auth,
+                options,
             } => {
                 let result = async {
                     let data_dir = directory.as_ref().map_err(|error| error.message())?;
-                    let binding = if account_id.is_empty() {
-                        if id.is_empty() {
-                            return Err("请选择已保存的 ChatGPT 账号".into());
-                        }
-                        app::load_provider(data_dir, &id)?
-                            .account_binding
-                            .unwrap_or(AccountBinding::Native)
-                    } else {
-                        AccountBinding::Fixed(account_id)
-                    };
+                    app::ensure_editable(data_dir)?;
+                    chatgpt::validate_subscription_name(&name)?;
+                    let mut binding = subscription_binding(&account_id);
+                    let draft = subscription_auth
+                        .as_ref()
+                        .filter(|draft| draft.provider_id == id && draft.binding == binding)
+                        .ok_or("账号选择已变化，请重新打开订阅编辑器")?;
                     let models = if id.is_empty() {
                         chatgpt::catalog().await?
                     } else {
                         Vec::new()
                     };
-                    chatgpt::save_subscription(
+                    let common = app::load_common_config(data_dir)?;
+                    chatgpt::validate_subscription_options(
+                        data_dir,
+                        (!id.is_empty()).then_some(id.as_str()),
+                        &models,
+                        &options,
+                        &common,
+                    )?;
+                    let changed = serde_json::from_str::<serde_json::Value>(auth.expose()).ok()
+                        != serde_json::from_str::<serde_json::Value>(draft.contents.expose()).ok();
+                    if changed {
+                        AccountManager::validate_editor_auth(auth.expose())?;
+                        let manager = AccountManager::open(data_dir)?;
+                        if binding == AccountBinding::Default
+                            && manager.default_id()? != draft.account_id
+                        {
+                            return Err("默认账号在编辑期间已变化，请重新打开编辑器".into());
+                        }
+                        let account = manager.save_editor_auth_if_unchanged(
+                            auth.expose(),
+                            draft.account_id.as_deref(),
+                            draft.contents.expose(),
+                            (binding == AccountBinding::Native).then_some(draft.home.as_path()),
+                        )?;
+                        binding = AccountBinding::Fixed(account.id);
+                    }
+                    let saved = chatgpt::save_subscription_with_codex_options(
                         data_dir,
                         (!id.is_empty()).then_some(id.as_str()),
                         &name,
                         binding,
                         &models,
-                    )
+                        &options,
+                        &common,
+                    );
+                    if changed {
+                        saved.map_err(|error| format!("账号凭据已保存，订阅连接尚未保存：{error}"))
+                    } else {
+                        saved
+                    }
                 }
                 .await;
                 if result.is_ok() {
+                    subscription_auth = None;
                     prepared = None;
                     route_session.discard_preview();
                 }
@@ -941,7 +1227,9 @@ async fn worker(
                     }
                     show_action(
                         &app,
-                        result.map(|_| "订阅连接与账号绑定已保存；Codex 入口登录保持不变".into()),
+                        result.map(|_| {
+                            "订阅连接、登录资料与 Codex 配置已保存；下次开启路由时应用".into()
+                        }),
                     );
                 });
             }
@@ -954,14 +1242,13 @@ async fn worker(
                     app.set_busy(false);
                     match result {
                         Ok(common) => {
-                            app.set_common_config_saved(common.clone().into());
+                            replace_common_config(&app, common.clone());
                             app.set_common_config_draft(common.into());
                             app.set_common_config_error("".into());
                             app.set_common_config_message("".into());
                             app.set_common_config_current_source(
                                 "供应商表单当前 config.toml".into(),
                             );
-                            update_provider_config_preview(&app);
                             app.set_common_config_editor_open(true);
                         }
                         Err(error) => show_action(&app, Err(error)),
@@ -984,7 +1271,7 @@ async fn worker(
                             app.set_common_config_current_source(
                                 "供应商表单当前 config.toml".into(),
                             );
-                            app.set_common_config_saved(snippet.clone().into());
+                            replace_common_config(&app, snippet.clone());
                             app.set_common_config_draft(snippet.into());
                             app.set_common_config_error("".into());
                             app.set_common_config_message(
@@ -992,7 +1279,6 @@ async fn worker(
                             );
                             app.set_direct_preview_ready(false);
                             app.set_route_preview_ready(false);
-                            update_provider_config_preview(&app);
                             show_action(&app, Ok("已从供应商表单提取并保存 Codex 通用配置".into()));
                         }
                         Err(error) => {
@@ -1015,12 +1301,11 @@ async fn worker(
                     app.set_busy(false);
                     match result {
                         Ok(()) => {
-                            app.set_common_config_saved(snippet.into());
+                            replace_common_config(&app, snippet);
                             app.set_common_config_error("".into());
                             app.set_common_config_editor_open(false);
                             app.set_direct_preview_ready(false);
                             app.set_route_preview_ready(false);
-                            update_provider_config_preview(&app);
                             show_action(&app, Ok("Codex 通用配置已保存；勾选应用通用配置的供应商将在下次切换时使用。".into()));
                         }
                         Err(error) => app.set_common_config_error(error.into()),
@@ -2328,10 +2613,17 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let weak = app.as_weak();
     app.on_begin_subscription_editor(move |id| {
         if let Some(app) = weak.upgrade() {
+            let generation = app.get_subscription_editor_generation().wrapping_add(1);
+            app.set_subscription_editor_generation(generation);
+            app.set_subscription_editor_pending(true);
             queue(
                 &app,
                 &callback_sender,
-                Command::BeginSubscriptionEditor(id.into()),
+                Command::BeginSubscriptionEditor {
+                    id: id.into(),
+                    home: app.get_config_home().into(),
+                    generation,
+                },
             );
         }
     });
@@ -2339,6 +2631,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let weak = app.as_weak();
     app.on_save_subscription(move |id, name, account_id| {
         if let Some(app) = weak.upgrade() {
+            let options = match editor_codex_options(&app) {
+                Ok(options) => options,
+                Err(error) => {
+                    app.set_edit_config_error(error.into());
+                    return;
+                }
+            };
             queue(
                 &app,
                 &callback_sender,
@@ -2346,8 +2645,98 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     id: id.into(),
                     name: name.into(),
                     account_id: account_id.into(),
+                    auth: Secret::new(app.get_subscription_auth_json().to_string()),
+                    options,
                 },
             );
+        }
+    });
+    let callback_sender = sender.clone();
+    let weak = app.as_weak();
+    app.on_cancel_subscription_editor(move || {
+        if let Some(app) = weak.upgrade() {
+            app.set_subscription_editor_generation(
+                app.get_subscription_editor_generation().wrapping_add(1),
+            );
+            app.set_subscription_editor_pending(false);
+            app.set_subscription_editor_open(false);
+            app.set_common_config_editor_open(false);
+            let _ = callback_sender.try_send(Command::CancelSubscriptionEditor);
+        }
+    });
+    let callback_sender = sender.clone();
+    let weak = app.as_weak();
+    app.on_load_subscription_auth(move || {
+        if let Some(app) = weak.upgrade() {
+            let generation = app.get_subscription_editor_generation().wrapping_add(1);
+            app.set_subscription_editor_generation(generation);
+            app.set_subscription_editor_pending(true);
+            let account_id = app
+                .get_subscription_account_ids()
+                .row_data(app.get_subscription_account_choice() as usize)
+                .unwrap_or_default();
+            app.set_subscription_binding_label(
+                match account_id.as_str() {
+                    "" => "跟随所选 Codex 目录的登录；修改 JSON 后将保存为独立绑定账号。",
+                    "@default" => "跟随默认保存账号；修改 JSON 后固定绑定本次编辑的账号。",
+                    _ => "选择保存账号时显示其登录 JSON；修改身份请添加其他账号后再改绑。",
+                }
+                .into(),
+            );
+            app.set_subscription_auth_json("".into());
+            queue(
+                &app,
+                &callback_sender,
+                Command::LoadSubscriptionAuth {
+                    provider_id: app.get_subscription_id().into(),
+                    account_id: account_id.into(),
+                    home: app.get_config_home().into(),
+                    generation,
+                },
+            );
+        }
+    });
+    let weak = app.as_weak();
+    app.on_format_subscription_auth(move || {
+        if let Some(app) = weak.upgrade() {
+            match AccountManager::format_editor_auth(app.get_subscription_auth_json().as_str()) {
+                Ok(auth) => {
+                    app.set_subscription_auth_json(auth.expose().into());
+                    app.set_subscription_auth_error("".into());
+                }
+                Err(error) => app.set_subscription_auth_error(error.into()),
+            }
+        }
+    });
+    let weak = app.as_weak();
+    app.on_subscription_auth_edited(move || {
+        if let Some(app) = weak.upgrade() {
+            app.set_subscription_auth_error(
+                AccountManager::validate_editor_auth(app.get_subscription_auth_json().as_str())
+                    .err()
+                    .unwrap_or_default()
+                    .into(),
+            );
+        }
+    });
+    let weak = app.as_weak();
+    app.on_subscription_config_edited(move || {
+        if let Some(app) = weak.upgrade()
+            && !app.get_config_editor_updating()
+        {
+            set_subscription_config(&app, Ok(app.get_edit_config_preview().to_string()));
+        }
+    });
+    let weak = app.as_weak();
+    app.on_update_subscription_context(move || {
+        if let Some(app) = weak.upgrade() {
+            update_subscription_context(&app);
+        }
+    });
+    let weak = app.as_weak();
+    app.on_update_subscription_common(move || {
+        if let Some(app) = weak.upgrade() {
+            update_subscription_common(&app);
         }
     });
     let weak = app.as_weak();
@@ -2856,6 +3245,15 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         &sender,
         Command::InspectConfig(app.get_config_home().to_string()),
     );
+    let weak = app.as_weak();
+    app.window().on_close_requested(move || {
+        if let Some(app) = weak.upgrade()
+            && (app.get_subscription_editor_open() || app.get_subscription_editor_pending())
+        {
+            app.invoke_cancel_subscription_editor();
+        }
+        slint::CloseRequestResponse::HideWindow
+    });
     let result = app.run();
     #[cfg(target_os = "macos")]
     macos::clear_quit_handler();

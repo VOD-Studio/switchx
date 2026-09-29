@@ -480,14 +480,129 @@ pub fn save_subscription(
     binding: AccountBinding,
     models: &[Value],
 ) -> Result<String, String> {
-    app::ensure_editable(data_dir)?;
+    save_subscription_inner(data_dir, provider_id, name, binding, models, None)
+}
+
+pub fn save_subscription_with_codex_options(
+    data_dir: &Path,
+    provider_id: Option<&str>,
+    name: &str,
+    binding: AccountBinding,
+    models: &[Value],
+    options: &crate::provider_config::CodexOptions,
+    common: &str,
+) -> Result<String, String> {
+    let mut options = match &options.config_toml {
+        Some(config) => crate::provider_config::subscription_options_from_config(options, config)?,
+        None => options.clone(),
+    };
+    options.validate()?;
+    if options.use_common_config {
+        let mut shared = crate::provider_config::validate_common(common)?;
+        // Keep context choices local while other exact shared values remain inherited.
+        shared.remove("model_context_window");
+        shared.remove("model_auto_compact_token_limit");
+        if let Some(config) = &options.config_toml {
+            options.config_toml = Some(crate::provider_config::set_subscription_common(
+                config,
+                &shared.to_string(),
+                false,
+            )?);
+        }
+    }
+    save_subscription_inner(data_dir, provider_id, name, binding, models, Some(&options))
+}
+
+pub fn validate_subscription_name(name: &str) -> Result<(), String> {
     if name.trim().is_empty() || name.trim().len() > 120 || name.chars().any(char::is_control) {
         return Err("请输入有效的订阅连接名称".into());
     }
-    binding.encode().map_err(|_| "订阅账号绑定无效")?;
-    if provider_id.is_none() && !matches!(binding, AccountBinding::Fixed(_)) {
-        return Err("新订阅连接必须选择一个保存的账号".into());
+    Ok(())
+}
+
+/// Check editor contents before saving private auth files, without creating or migrating storage.
+pub fn validate_subscription_options(
+    data_dir: &Path,
+    provider_id: Option<&str>,
+    models: &[Value],
+    options: &crate::provider_config::CodexOptions,
+    common: &str,
+) -> Result<(), String> {
+    options.validate()?;
+    if options.use_common_config {
+        crate::provider_config::validate_common(common)?;
     }
+    app::ensure_editable(data_dir)?;
+    if !data_dir.is_absolute() {
+        return Err("订阅配置的数据目录须为绝对路径".into());
+    }
+    for metadata in models {
+        catalog::validate_metadata(metadata)?;
+    }
+    let path = data_dir.join("switchx.sqlite");
+    let (old, saved) = if path.exists() {
+        let store = crate::storage::Store::open_read_only(&path)
+            .map_err(|_| "无法只读检查订阅连接，请刷新后重试")?;
+        let old = provider_id
+            .map(|id| store.provider(id))
+            .transpose()
+            .map_err(|_| "无法读取订阅连接")?
+            .flatten();
+        let saved = store.models().map_err(|_| "无法读取模型资料")?;
+        (old, saved)
+    } else {
+        (None, Vec::new())
+    };
+    if let Some(provider) = &old {
+        validate_provider(provider)?;
+    }
+    if provider_id.is_some_and(|id| id != PROVIDER_ID) && old.is_none() {
+        return Err("订阅连接不存在，请刷新后重试".into());
+    }
+    if old.is_none() && models.is_empty() {
+        return Err("官方目录没有模型".into());
+    }
+    subscription_model_for_options(provider_id, models, Some(options), old.as_ref(), &saved)?;
+    Ok(())
+}
+
+fn subscription_model_for_options(
+    provider_id: Option<&str>,
+    models: &[Value],
+    options: Option<&crate::provider_config::CodexOptions>,
+    old: Option<&ProviderRecord>,
+    saved: &[ModelRecord],
+) -> Result<Option<String>, String> {
+    let selected = options
+        .and_then(|options| options.config_toml.as_deref())
+        .map(crate::provider_config::subscription_model)
+        .transpose()?
+        .flatten();
+    if let Some(model) = &selected
+        && !models
+            .iter()
+            .any(|metadata| metadata["slug"].as_str() == Some(model.as_str()))
+        && !saved.iter().any(|mapping| {
+            Some(mapping.provider_id.as_str()) == provider_id && mapping.upstream_model == *model
+        })
+        && old.is_none_or(|provider| provider.model_id != *model)
+    {
+        return Err("订阅配置的模型不在官方目录或当前连接映射中，请刷新官方目录后重试".into());
+    }
+    Ok(selected)
+}
+
+fn save_subscription_inner(
+    data_dir: &Path,
+    provider_id: Option<&str>,
+    name: &str,
+    binding: AccountBinding,
+    models: &[Value],
+    options: Option<&crate::provider_config::CodexOptions>,
+) -> Result<String, String> {
+    app::ensure_editable(data_dir)?;
+    validate_subscription_name(name)?;
+    binding.encode().map_err(|_| "订阅账号绑定无效")?;
     if let AccountBinding::Fixed(id) = &binding {
         let manager = crate::accounts::AccountManager::open(data_dir)?;
         if !manager.list()?.iter().any(|account| &account.id == id) {
@@ -506,6 +621,10 @@ pub fn save_subscription(
     if provider_id.is_some_and(|id| id != PROVIDER_ID) && old.is_none() {
         return Err("订阅连接不存在，请刷新后重试".into());
     }
+    for metadata in models {
+        catalog::validate_metadata(metadata)?;
+    }
+    let saved = store.models().map_err(|_| "无法读取模型资料")?;
     let first = models.first();
     if old.is_none() && first.is_none() {
         return Err("官方目录没有模型".into());
@@ -514,22 +633,23 @@ pub fn save_subscription(
         Some(id) => id.to_owned(),
         None => app::new_id()?,
     };
+    let selected_model =
+        subscription_model_for_options(provider_id, models, options, old.as_ref(), &saved)?;
     let provider = ProviderRecord {
         id: id.clone(),
         name: name.trim().into(),
         base_url: BASE_URL.into(),
-        model_id: old
-            .as_ref()
-            .map(|provider| provider.model_id.clone())
-            .unwrap_or_else(|| first.unwrap()["slug"].as_str().unwrap_or("").into()),
+        model_id: selected_model.unwrap_or_else(|| {
+            old.as_ref()
+                .map(|provider| provider.model_id.clone())
+                .unwrap_or_else(|| first.unwrap()["slug"].as_str().unwrap_or("").into())
+        }),
         credential_ref: None,
         kind: ProviderKind::Chatgpt,
         account_binding: Some(binding),
     };
-    let saved = store.models().map_err(|_| "无法读取模型资料")?;
     let mut additions: Vec<ModelRecord> = Vec::new();
     for metadata in models {
-        catalog::validate_metadata(metadata)?;
         let upstream_model = metadata["slug"].as_str().unwrap();
         if saved
             .iter()
@@ -595,9 +715,14 @@ pub fn save_subscription(
         }])?;
         additions.push(model);
     }
-    store
-        .put_provider_with_models(&provider, &additions)
-        .map_err(|_| "无法保存订阅连接和官方模型资料")?;
+    match options {
+        Some(options) => {
+            let options = serde_json::to_string(options).map_err(|_| "无法编码订阅配置")?;
+            store.put_provider_with_models_and_options(&provider, &additions, &options)
+        }
+        None => store.put_provider_with_models(&provider, &additions),
+    }
+    .map_err(|_| "无法保存订阅连接、配置和官方模型资料")?;
     Ok(id)
 }
 
@@ -782,7 +907,7 @@ mod tests {
             )
             .is_err()
         );
-        assert!(save_subscription(&data, None, "Native", AccountBinding::Native, &models).is_err());
+        assert!(save_subscription(&data, None, "Native", AccountBinding::Native, &models).is_ok());
         assert!(
             save_subscription(
                 &data,
@@ -1009,6 +1134,184 @@ done
         save_connection(&path, models).unwrap();
         assert!(store.models().unwrap().iter().all(|model| !model.enabled));
         assert_eq!(store.models().unwrap().len(), models.len());
+        drop(store);
+        std::fs::remove_dir_all(path).unwrap();
+    }
+
+    #[test]
+    fn subscription_raw_toml_and_model_metadata_save_atomically_without_changing_selections() {
+        use crate::provider_config::{CodexOptions, subscription_options_from_config};
+        let path = std::env::temp_dir().join(format!(
+            "switchx-subscription-config-test-{}",
+            app::new_id().unwrap()
+        ));
+        let fixture: Value =
+            serde_json::from_str(include_str!("../tests/fixtures/synthetic-models.json")).unwrap();
+        let models = fixture["models"].as_array().unwrap();
+        let raw = "# authored subscription\nmodel = 'gpt-5.5'\nmodel_reasoning_effort = 'high'\nmodel_context_window = 128000\nmodel_auto_compact_token_limit = 96000\n[mcp_servers.local]\ncommand = 'synthetic-command'\n";
+        let options = subscription_options_from_config(&CodexOptions::default(), raw).unwrap();
+        validate_subscription_options(&path, None, models, &options, "").unwrap();
+        assert!(!path.exists());
+        let id = save_subscription_with_codex_options(
+            &path,
+            None,
+            "Native subscription",
+            AccountBinding::Native,
+            models,
+            &options,
+            "",
+        )
+        .unwrap();
+        let store = app::open_store(&path).unwrap();
+        let provider = store.provider(&id).unwrap().unwrap();
+        assert_eq!(provider.model_id, "gpt-5.5");
+        assert_eq!(provider.account_binding, Some(AccountBinding::Native));
+        let saved_options = CodexOptions::from_saved(&store.provider_codex_options(&id).unwrap())
+            .unwrap()
+            .unwrap();
+        assert_eq!(saved_options.config_toml.as_deref(), Some(raw));
+        assert!(!saved_options.context_1m);
+        assert_eq!(saved_options.compact_limit, 96000);
+        let mappings = store.models().unwrap();
+        assert_eq!(mappings.iter().filter(|model| model.enabled).count(), 1);
+        assert_eq!(
+            mappings
+                .iter()
+                .find(|model| model.enabled)
+                .unwrap()
+                .upstream_model,
+            "gpt-5.5"
+        );
+        let updated = subscription_options_from_config(
+            &options,
+            "model = 'deepseek-flash'\nmodel_reasoning_effort = 'max'\n",
+        )
+        .unwrap();
+        save_subscription_with_codex_options(
+            &path,
+            Some(&id),
+            "Renamed",
+            AccountBinding::Native,
+            &[],
+            &updated,
+            "",
+        )
+        .unwrap();
+        assert_eq!(
+            store.provider(&id).unwrap().unwrap().model_id,
+            "deepseek-flash"
+        );
+        assert_eq!(store.models().unwrap(), mappings);
+        let last_options = store.provider_codex_options(&id).unwrap();
+        save_subscription(
+            &path,
+            Some(&id),
+            "Renamed again",
+            AccountBinding::Native,
+            &[],
+        )
+        .unwrap();
+        assert_eq!(store.provider_codex_options(&id).unwrap(), last_options);
+        let last_provider = store.provider(&id).unwrap().unwrap();
+        for config in [
+            "model = 'unknown-official'",
+            "[env]\nOPENAI_API_KEY = 'synthetic-secret'",
+            "[broken",
+        ] {
+            let invalid = CodexOptions {
+                config_toml: Some(config.into()),
+                ..Default::default()
+            };
+            assert!(validate_subscription_options(&path, Some(&id), &[], &invalid, "").is_err());
+            assert!(
+                save_subscription_with_codex_options(
+                    &path,
+                    Some(&id),
+                    "Should not save",
+                    AccountBinding::Native,
+                    &[],
+                    &invalid,
+                    "",
+                )
+                .is_err()
+            );
+            assert_eq!(store.provider(&id).unwrap().unwrap(), last_provider);
+            assert_eq!(store.provider_codex_options(&id).unwrap(), last_options);
+            assert_eq!(store.models().unwrap(), mappings);
+        }
+        drop(store);
+        std::fs::remove_dir_all(path).unwrap();
+    }
+
+    #[test]
+    fn subscription_inherits_updated_common_settings_while_retaining_authored_overrides_and_context()
+     {
+        use crate::provider_config::{
+            CodexOptions, subscription_editor_config, subscription_options_from_config,
+        };
+        let path = std::env::temp_dir().join(format!(
+            "switchx-subscription-common-test-{}",
+            app::new_id().unwrap()
+        ));
+        let fixture: Value =
+            serde_json::from_str(include_str!("../tests/fixtures/synthetic-models.json")).unwrap();
+        let models = fixture["models"].as_array().unwrap();
+        let common = "approval_policy = 'on-request'\nmodel_context_window = 1000000\nmodel_auto_compact_token_limit = 900000\n[features]\nhooks = false\nmemories = true\n";
+        let effective = "# authored override\nmodel = 'gpt-5.5'\napproval_policy = 'never' # own policy\nmodel_context_window = 1000000\nmodel_auto_compact_token_limit = 900000\n[features]\nhooks = false\nmemories = true\n";
+        let options =
+            subscription_options_from_config(&CodexOptions::default(), effective).unwrap();
+        let id = save_subscription_with_codex_options(
+            &path,
+            None,
+            "Inherited",
+            AccountBinding::Native,
+            models,
+            &options,
+            common,
+        )
+        .unwrap();
+        let store = app::open_store(&path).unwrap();
+        let options = CodexOptions::from_saved(&store.provider_codex_options(&id).unwrap())
+            .unwrap()
+            .unwrap();
+        let authored: toml_edit::DocumentMut =
+            options.config_toml.as_deref().unwrap().parse().unwrap();
+        assert!(authored.get("features").is_none());
+        assert_eq!(authored["approval_policy"].as_str(), Some("never"));
+        assert_eq!(authored["model_context_window"].as_integer(), Some(1000000));
+        let updated_common = "approval_policy = 'on-request'\nmodel_context_window = 256000\nmodel_auto_compact_token_limit = 128000\n[features]\nhooks = true\nmemories = false\nchronicle = true\n";
+        store.put_common_codex_config(updated_common).unwrap();
+        let rendered = subscription_editor_config("gpt-5.5", &options, updated_common).unwrap();
+        assert!(rendered.contains("# authored override"));
+        assert!(rendered.contains("# own policy"));
+        let document: toml_edit::DocumentMut = rendered.parse().unwrap();
+        assert_eq!(document["features"]["hooks"].as_bool(), Some(true));
+        assert_eq!(document["features"]["memories"].as_bool(), Some(false));
+        assert_eq!(document["approval_policy"].as_str(), Some("never"));
+        assert_eq!(document["model_context_window"].as_integer(), Some(1000000));
+        let mut applied: toml_edit::DocumentMut =
+            "model = 'sx-managed'\n[model_providers.router]\nname = 'Router'\n"
+                .parse()
+                .unwrap();
+        crate::provider_config::apply_to_document(&mut applied, &options, updated_common, "router")
+            .unwrap();
+        assert_eq!(applied["features"]["hooks"].as_bool(), Some(true));
+        assert_eq!(applied["features"]["chronicle"].as_bool(), Some(true));
+        assert_eq!(applied["approval_policy"].as_str(), Some("never"));
+        assert_eq!(applied["model"].as_str(), Some("sx-managed"));
+        assert_eq!(applied["model_context_window"].as_integer(), Some(1000000));
+        let off = subscription_options_from_config(&options, "model = 'gpt-5.5'\n").unwrap();
+        let reopened = subscription_editor_config("gpt-5.5", &off, common).unwrap();
+        assert!(
+            reopened
+                .parse::<toml_edit::DocumentMut>()
+                .unwrap()
+                .get("model_context_window")
+                .is_none()
+        );
+        crate::provider_config::apply_to_document(&mut applied, &off, common, "router").unwrap();
+        assert!(applied.get("model_context_window").is_none());
+        assert!(applied.get("model_auto_compact_token_limit").is_none());
         drop(store);
         std::fs::remove_dir_all(path).unwrap();
     }

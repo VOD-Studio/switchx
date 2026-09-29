@@ -635,6 +635,7 @@ mod tests {
             use_common_config: true,
             context_1m: true,
             compact_limit: 875000,
+            ..Default::default()
         };
         let common = "approval_policy = \"never\"\nmodel_auto_compact_token_limit = 12\n\n[features]\nhooks = true\nmemories = true\n\n[tui]\nnotifications = true\n";
         let prepared = PreparedDirectSwitch::inspect(

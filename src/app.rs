@@ -948,7 +948,7 @@ pub fn provider_credential(data_dir: &Path, provider: &ProviderRecord) -> Result
         .ok_or_else(|| "上游未配置 API Key，请重新输入".into())
 }
 
-pub(crate) fn ensure_editable(data_dir: &Path) -> Result<(), String> {
+pub fn ensure_editable(data_dir: &Path) -> Result<(), String> {
     if data_dir.join("direct-journal.json").exists()
         || data_dir.join("switch-journal.json").exists()
     {
