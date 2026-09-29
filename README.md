@@ -42,7 +42,7 @@ M1 收口检查（2026-09-24，macOS 调试 bundle，隔离的 `SWITCHX_DATA_DIR
 
 原生“上游供应商”页面现可添加、编辑、删除 Responses 上游，保存名称、API 地址、模型 ID 和 API Key。API Key 按用户选择以明文 JSON 存在 SQLite `providers.settings_config` 的 `auth.OPENAI_API_KEY` 字段，编辑输入保持密码形式，留空保留已有 Key；列表、状态、TOML 预览和恢复 journal 不显示或保存 Key。数据库及其副本包含凭据，本版不提供数据库加密或凭据同步。旧记录迁移后保留上游资料，缺少模型 ID 或凭据时可重新输入。输入地址只允许 HTTPS 或 `127.0.0.1` HTTP，拒绝 URL 内的用户名、密码、查询参数与片段。“检查”读取上游 `/models` 并核对所选 ID；它不发送推理请求，也不证明工具调用兼容。直连生效期间暂不允许编辑或删除上游，避免已配置的客户端拿到另一上游的 Key。
 
-SQLite 自动升级至 v8。旧版系统凭据库中的 API Key 先读取并保存到数据库，成功后才清理 SwitchX 拥有的旧条目；读取或保存失败保留旧凭据，缺失的 Key 可在编辑表单中补填。迁移不会清理其他应用条目，本地路由令牌继续保存在系统凭据库。此存储变更的验证使用合成凭据与临时数据库，不代表真实旧 Key 迁移或跨平台运行已验收。
+SQLite 自动升级至 v8，保留原有资料。API Key 仅从 SQLite 读取，不再支持旧钥匙串 Key 迁移或旧版两参数 credential helper；数据库中缺少 Key 时须在编辑表单重新输入。不会读取或清理旧 API Key 钥匙串条目；已有旧 helper 配置须先恢复，再重新预览应用。本地路由令牌继续保存在系统凭据库。验证使用合成凭据与临时数据库，跨平台运行尚待验收。
 
 “配置与恢复”页面可选择绝对路径的 Codex 配置目录、读取当前配置、将当前自定义上游的**元数据**填入新建表单，以及查看 `codex login status` 报告的 ChatGPT 登录、API Key 登录或未知状态。“导入当前上游”不复制原配置中的凭据，也不读取 `auth.json`；新建上游须重新输入自己的 API Key。ChatGPT 账号另有明确的“导入当前 Codex 账号”入口，见下文。`SWITCHX_CODEX_CLI` 可指向要检查的 CLI；默认优先使用本机 ChatGPT.app 内的 CLI。
 

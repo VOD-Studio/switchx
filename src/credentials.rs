@@ -3,7 +3,6 @@ use std::fmt;
 use keyring::{Entry, Error as KeyringError};
 use zeroize::Zeroize;
 
-pub const PROVIDER_KEY_SERVICE: &str = "dev.switchx.provider-key";
 pub const ROUTER_TOKEN_SERVICE: &str = "dev.switchx.local-token";
 
 pub struct Secret(String);
@@ -112,7 +111,7 @@ mod tests {
 
     #[test]
     fn rejects_bad_references_and_redacts_debug_output() {
-        let store = CredentialStore::new(PROVIDER_KEY_SERVICE).unwrap();
+        let store = CredentialStore::new(ROUTER_TOKEN_SERVICE).unwrap();
         assert_eq!(
             store.get("../outside").unwrap_err(),
             CredentialError::InvalidReference
