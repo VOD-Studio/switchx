@@ -12,6 +12,7 @@ use switchx::{
     credentials::{CredentialStore, PROVIDER_KEY_SERVICE, ROUTER_TOKEN_SERVICE, Secret},
     direct,
     direct_config::{self, PreparedDirectSwitch},
+    provider_config::{self, CodexOptions},
     routed::RouteSession,
     storage::ProviderRecord,
 };
@@ -30,7 +31,12 @@ enum Command {
         url: String,
         model: String,
         key: String,
+        options: CodexOptions,
     },
+    BeginProviderEditor(String),
+    OpenCommonConfig(String),
+    ExtractCommonConfig(String),
+    SaveCommonConfig(String),
     Delete(String),
     Check(String, String),
     FetchModels {
@@ -223,6 +229,110 @@ fn show_action(app: &AppWindow, result: Result<String, String>) {
     }
 }
 
+fn editor_codex_options(app: &AppWindow) -> Result<CodexOptions, String> {
+    let options = CodexOptions {
+        remote_compaction: app.get_edit_remote_compaction(),
+        use_common_config: app.get_edit_use_common_config(),
+        context_1m: app.get_edit_context_1m(),
+        compact_limit: if app.get_edit_context_1m() {
+            app.get_edit_compact_limit()
+                .trim()
+                .parse()
+                .map_err(|_| "压缩阈值须为小于 1000000 的正整数")?
+        } else {
+            900_000
+        },
+    };
+    options.validate()?;
+    Ok(options)
+}
+
+fn update_provider_config_preview(app: &AppWindow) {
+    if !app.get_editor_open() {
+        return;
+    }
+    let result = (|| {
+        let options = editor_codex_options(app)?;
+        let helper = std::env::current_exe().map_err(|_| "无法定位 SwitchX 凭据程序")?;
+        provider_config::preview(
+            app.get_edit_name().as_str(),
+            app.get_edit_url().as_str(),
+            app.get_edit_model().as_str(),
+            app.get_edit_id().as_str(),
+            &helper,
+            &options,
+            app.get_common_config_saved().as_str(),
+        )
+    })();
+    match result {
+        Ok(preview) => {
+            app.set_edit_config_preview(preview.into());
+            app.set_edit_config_error("".into());
+        }
+        Err(error) => {
+            app.set_edit_config_error(error.into());
+            app.set_edit_config_preview("".into());
+        }
+    }
+}
+
+fn show_provider_editor(
+    app: &AppWindow,
+    provider: Option<ProviderRecord>,
+    options: CodexOptions,
+    common: String,
+) {
+    app.set_editor_open(false);
+    app.set_common_config_editor_open(false);
+    app.set_common_config_saved(common.into());
+    let preset = provider
+        .as_ref()
+        .and_then(|provider| app::provider_preset(&provider.base_url));
+    let brand = app
+        .get_provider_presets()
+        .iter()
+        .find(|row| preset.is_some_and(|preset| row.id == preset.id))
+        .unwrap_or_default();
+    app.set_edit_id(
+        provider
+            .as_ref()
+            .map_or("", |provider| provider.id.as_str())
+            .into(),
+    );
+    app.set_edit_name(
+        provider
+            .as_ref()
+            .map_or("", |provider| provider.name.as_str())
+            .into(),
+    );
+    app.set_edit_preset_url(preset.map_or("", |preset| preset.base_url).into());
+    app.set_edit_url(
+        provider
+            .as_ref()
+            .map_or("", |provider| provider.base_url.as_str())
+            .into(),
+    );
+    app.set_edit_model(
+        provider
+            .as_ref()
+            .map_or("", |provider| provider.model_id.as_str())
+            .into(),
+    );
+    app.set_edit_key("".into());
+    app.set_edit_preset_id(brand.id);
+    app.set_edit_preset_icon(brand.icon);
+    app.set_edit_preset_monochrome(brand.monochrome);
+    app.set_edit_remote_compaction(options.remote_compaction);
+    app.set_edit_use_common_config(options.use_common_config);
+    app.set_edit_context_1m(options.context_1m);
+    app.set_edit_compact_limit(options.compact_limit.to_string().into());
+    app.set_edit_config_error("".into());
+    app.set_delete_confirm(false);
+    app.set_busy(false);
+    app.set_editor_open(true);
+    update_provider_config_preview(app);
+}
+
 fn open_provider_link(url: &str) -> Result<(), String> {
     #[cfg(target_os = "macos")]
     let mut command = std::process::Command::new("open");
@@ -399,7 +509,11 @@ async fn worker(
     weak: slint::Weak<AppWindow>,
     directory: Result<PathBuf, AppError>,
 ) -> Result<(), String> {
-    let mut prepared: Option<(PreparedDirectSwitch, ProviderRecord)> = None;
+    let mut prepared: Option<(
+        PreparedDirectSwitch,
+        ProviderRecord,
+        app::ProviderConfigState,
+    )> = None;
     let mut route_session = RouteSession::default();
     let mut pending_login: Option<(watch::Sender<bool>, tokio::task::JoinHandle<()>)> = None;
     while let Some(command) = receiver.recv().await {
@@ -447,24 +561,122 @@ async fn worker(
                     .and_then(|path| load_snapshot(path, check_credentials));
                 let _ = weak.upgrade_in_event_loop(move |app| show_result(&app, result));
             }
+            Command::BeginProviderEditor(id) => {
+                let result = (|| {
+                    let data_dir = directory.as_ref().map_err(|error| error.message())?;
+                    let common = app::load_common_config(data_dir)?;
+                    let (provider, options) = if id.is_empty() {
+                        (None, CodexOptions::for_common(&common)?)
+                    } else {
+                        let provider = app::load_provider(data_dir, &id)?;
+                        if provider.id == chatgpt::PROVIDER_ID {
+                            return Err("订阅连接由目标 Codex 管理".into());
+                        }
+                        let state = app::load_provider_config(data_dir, &id)?;
+                        let options = state
+                            .options
+                            .map(Ok)
+                            .unwrap_or_else(|| CodexOptions::for_common(&common))?;
+                        (Some(provider), options)
+                    };
+                    Ok::<_, String>((provider, options, common))
+                })();
+                let _ = weak.upgrade_in_event_loop(move |app| match result {
+                    Ok((provider, options, common)) => {
+                        show_provider_editor(&app, provider, options, common)
+                    }
+                    Err(error) => show_action(&app, Err(error)),
+                });
+            }
+            Command::OpenCommonConfig(target) => {
+                let result = directory
+                    .as_ref()
+                    .map_err(|error| error.message().to_owned())
+                    .and_then(|path| app::load_common_config(path));
+                let _ = weak.upgrade_in_event_loop(move |app| {
+                    app.set_busy(false);
+                    match result {
+                        Ok(common) => {
+                            app.set_common_config_saved(common.clone().into());
+                            app.set_common_config_draft(common.into());
+                            app.set_common_config_error("".into());
+                            app.set_common_config_message("".into());
+                            app.set_common_config_current_source(
+                                Path::new(&target)
+                                    .join("config.toml")
+                                    .display()
+                                    .to_string()
+                                    .into(),
+                            );
+                            app.set_common_config_editor_open(true);
+                        }
+                        Err(error) => show_action(&app, Err(error)),
+                    }
+                });
+            }
+            Command::ExtractCommonConfig(target) => {
+                let source = Path::new(&target).join("config.toml").display().to_string();
+                let result = (|| provider_config::extract_from_home(&home(&target)?))();
+                let _ = weak.upgrade_in_event_loop(move |app| {
+                    app.set_busy(false);
+                    match result {
+                        Ok(snippet) => {
+                            app.set_common_config_current_source(source.into());
+                            app.set_common_config_draft(snippet.into());
+                            app.set_common_config_error("".into());
+                            app.set_common_config_message(
+                                "已提取非敏感配置到草稿；点击保存后生效。".into(),
+                            );
+                        }
+                        Err(error) => app.set_common_config_error(error.into()),
+                    }
+                });
+            }
+            Command::SaveCommonConfig(snippet) => {
+                let result = directory
+                    .as_ref()
+                    .map_err(|error| error.message().to_owned())
+                    .and_then(|path| app::save_common_config(path, &snippet));
+                if result.is_ok() {
+                    prepared = None;
+                    route_session.discard_preview();
+                }
+                let _ = weak.upgrade_in_event_loop(move |app| {
+                    app.set_busy(false);
+                    match result {
+                        Ok(()) => {
+                            app.set_common_config_saved(snippet.into());
+                            app.set_common_config_error("".into());
+                            app.set_common_config_editor_open(false);
+                            app.set_direct_preview_ready(false);
+                            app.set_route_preview_ready(false);
+                            update_provider_config_preview(&app);
+                            show_action(&app, Ok("Codex 通用配置已保存；勾选应用通用配置的供应商将在下次切换时使用。".into()));
+                        }
+                        Err(error) => app.set_common_config_error(error.into()),
+                    }
+                });
+            }
             Command::Save {
                 id,
                 name,
                 url,
                 model,
                 key,
+                options,
             } => {
                 let result = directory
                     .as_ref()
                     .map_err(|error| error.message().to_owned())
                     .and_then(|path| {
-                        app::save_provider(
+                        app::save_provider_with_codex_options(
                             path,
                             (!id.is_empty()).then_some(id.as_str()),
                             &name,
                             &url,
                             &model,
                             key,
+                            &options,
                         )
                     });
                 if result.is_ok() {
@@ -618,19 +830,27 @@ async fn worker(
                     let target = client::config_path(&home(&target)?)?;
                     let helper = std::env::current_exe()
                         .map_err(|_| "无法定位 SwitchX credential helper")?;
+                    let state = app::load_provider_config(data_dir, &id)?;
                     let prepared =
                         PreparedDirectSwitch::inspect(&target, data_dir, &provider, &helper)?;
-                    Ok::<_, String>((prepared, provider))
+                    let prepared = if let Some(options) = &state.options {
+                        prepared.with_codex_options(options, &state.common)?
+                    } else if !state.common.is_empty() {
+                        prepared.with_common_config(&state.common)?
+                    } else {
+                        prepared
+                    };
+                    Ok::<_, String>((prepared, provider, state))
                 })();
                 match result {
-                    Ok((switch, provider)) => {
+                    Ok((switch, provider, state)) => {
                         let summary = format!(
                             "目标：{} · 模型：{} · 受管变更：{}",
                             provider.name,
                             provider.model_id,
                             switch.changes.join("、")
                         );
-                        prepared = Some((switch, provider));
+                        prepared = Some((switch, provider, state));
                         let _ = weak.upgrade_in_event_loop(move |app| {
                             app.set_busy(false);
                             app.set_direct_preview(summary.into());
@@ -649,7 +869,7 @@ async fn worker(
             }
             Command::ApplyDirect(target) => {
                 let result = match prepared.take() {
-                    Some((switch, selected)) => {
+                    Some((switch, selected, selected_config)) => {
                         let checked = (|| {
                             let target_path = client::config_path(&home(&target)?)?;
                             if target_path != switch.target() {
@@ -657,7 +877,10 @@ async fn worker(
                             }
                             let data_dir = directory.as_ref().map_err(|error| error.message())?;
                             let latest = app::load_provider(data_dir, &selected.id)?;
-                            if latest != selected {
+                            if latest != selected
+                                || app::load_provider_config(data_dir, &selected.id)?
+                                    != selected_config
+                            {
                                 return Err("上游资料已变化，请重新预览".into());
                             }
                             let token = credential(&latest)?;
@@ -763,17 +986,23 @@ async fn worker(
                 });
             }
             Command::ImportCurrent(target) => {
-                let result = home(&target).and_then(|path| client::import_candidate(&path));
+                let result = (|| {
+                    let candidate = client::import_candidate(&home(&target)?)?;
+                    let data_dir = directory.as_ref().map_err(|error| error.message())?;
+                    let common = app::load_common_config(data_dir)?;
+                    let options = CodexOptions::for_common(&common)?;
+                    Ok::<_, String>((candidate, options, common))
+                })();
                 let _ = weak.upgrade_in_event_loop(move |app| match result {
-                    Ok(candidate) => {
-                        app.set_edit_id("".into());
-                        app.set_edit_preset_id("".into());
-                        app.set_edit_preset_url("".into());
-                        app.set_edit_name(candidate.name.into());
-                        app.set_edit_url(candidate.base_url.into());
-                        app.set_edit_model(candidate.model_id.into());
-                        app.set_edit_key("".into());
-                        app.set_editor_open(true);
+                    Ok((candidate, options, common)) => {
+                        let provider = ProviderRecord {
+                            id: String::new(),
+                            name: candidate.name,
+                            base_url: candidate.base_url,
+                            model_id: candidate.model_id,
+                            credential_ref: None,
+                        };
+                        show_provider_editor(&app, Some(provider), options, common);
                         app.set_active_page(1);
                         show_action(
                             &app,
@@ -1375,6 +1604,68 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             filter_providers(&app, &query);
         }
     });
+    let callback_sender = sender.clone();
+    let weak = app.as_weak();
+    app.on_begin_provider_editor(move |id| {
+        if let Some(app) = weak.upgrade() {
+            queue(
+                &app,
+                &callback_sender,
+                Command::BeginProviderEditor(id.into()),
+            );
+        }
+    });
+    let weak = app.as_weak();
+    app.on_update_provider_config_preview(move || {
+        if let Some(app) = weak.upgrade() {
+            update_provider_config_preview(&app);
+        }
+    });
+    let callback_sender = sender.clone();
+    let weak = app.as_weak();
+    app.on_open_common_config(move || {
+        if let Some(app) = weak.upgrade() {
+            queue(
+                &app,
+                &callback_sender,
+                Command::OpenCommonConfig(app.get_config_home().into()),
+            );
+        }
+    });
+    let callback_sender = sender.clone();
+    let weak = app.as_weak();
+    app.on_extract_common_config(move || {
+        if let Some(app) = weak.upgrade() {
+            queue(
+                &app,
+                &callback_sender,
+                Command::ExtractCommonConfig(app.get_config_home().into()),
+            );
+        }
+    });
+    let callback_sender = sender.clone();
+    let weak = app.as_weak();
+    app.on_save_common_config(move || {
+        if let Some(app) = weak.upgrade() {
+            queue(
+                &app,
+                &callback_sender,
+                Command::SaveCommonConfig(app.get_common_config_draft().into()),
+            );
+        }
+    });
+    let weak = app.as_weak();
+    app.on_cancel_common_config(move || {
+        if let Some(app) = weak.upgrade() {
+            if app.get_busy() {
+                return;
+            }
+            app.set_common_config_draft(app.get_common_config_saved());
+            app.set_common_config_error("".into());
+            app.set_common_config_message("".into());
+            app.set_common_config_editor_open(false);
+        }
+    });
     let weak = app.as_weak();
     app.on_apply_provider_preset(move |id| {
         let Some(app) = weak.upgrade() else {
@@ -1431,6 +1722,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let weak = app.as_weak();
     app.on_save_provider(move |id, name, url, model, key| {
         if let Some(app) = weak.upgrade() {
+            let options = match editor_codex_options(&app) {
+                Ok(options) => options,
+                Err(error) => {
+                    app.set_edit_config_error(error.into());
+                    return;
+                }
+            };
             queue(
                 &app,
                 &callback_sender,
@@ -1440,6 +1738,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     url: url.into(),
                     model: model.into(),
                     key: key.into(),
+                    options,
                 },
             );
         }
