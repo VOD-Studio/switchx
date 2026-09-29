@@ -14,6 +14,7 @@ use toml_edit::{Array, DocumentMut, Item, Table, Value, table, value};
 use crate::{
     catalog::Publication,
     config::{PROVIDER_ID, Preview, preview_route},
+    config_overlay::Overlay,
     direct::helper_is_usable,
 };
 
@@ -63,6 +64,8 @@ struct Journal {
     before_providers_table: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     local_token_reference: Option<String>,
+    #[serde(default)]
+    overlay: Overlay,
 }
 
 pub struct Recovery {
@@ -164,6 +167,7 @@ impl PreparedSwitch {
                 .then(|| HeaderDecor::from_table(applied["model_providers"].as_table().unwrap())),
             before_providers_table: before.as_table().contains_key("model_providers"),
             local_token_reference: None,
+            overlay: Overlay::default(),
         };
         let catalog = serde_json::to_vec_pretty(&publication.catalog)
             .map_err(|_| "could not serialize model catalog")?;
@@ -176,6 +180,63 @@ impl PreparedSwitch {
             journal,
             preview,
         })
+    }
+
+    pub fn with_codex_options(
+        self,
+        options: &crate::provider_config::CodexOptions,
+        common: &str,
+    ) -> Result<Self, String> {
+        self.with_document_update(|document| {
+            crate::provider_config::apply_to_document(document, options, common, PROVIDER_ID)
+        })
+    }
+
+    pub fn with_common_config(self, common: &str) -> Result<Self, String> {
+        self.with_document_update(|document| {
+            crate::provider_config::apply_common_to_document(document, common)
+        })
+    }
+
+    fn with_document_update(
+        mut self,
+        update: impl FnOnce(&mut DocumentMut) -> Result<(), String>,
+    ) -> Result<Self, String> {
+        let current = self
+            .original
+            .as_deref()
+            .map(std::str::from_utf8)
+            .transpose()
+            .map_err(|_| "Codex config is not UTF-8")?
+            .unwrap_or("");
+        let before: DocumentMut = current.parse().map_err(|_| "invalid Codex TOML")?;
+        let mut document: DocumentMut = self
+            .preview
+            .proposed
+            .parse()
+            .map_err(|_| "invalid generated config")?;
+        update(&mut document)?;
+        self.preview.proposed = document.to_string();
+        let applied: DocumentMut = self
+            .preview
+            .proposed
+            .parse()
+            .map_err(|_| "invalid generated config")?;
+        let previous_paths = self.journal.overlay.paths();
+        self.preview
+            .changed_fields
+            .retain(|path| !previous_paths.contains(path));
+        self.journal.overlay = Overlay::between(&before, &applied)?;
+        for path in self.journal.overlay.paths() {
+            if !self.preview.changed_fields.contains(&path) {
+                self.preview.changed_fields.push(path);
+            }
+        }
+        let provider = &applied["model_providers"][PROVIDER_ID];
+        self.journal.applied_provider = provider.to_string();
+        self.journal.applied_provider_header =
+            HeaderDecor::from_table(provider.as_table().ok_or("invalid generated provider")?);
+        Ok(self)
     }
 
     pub fn catalog_path(&self) -> &Path {
@@ -444,6 +505,7 @@ pub fn restore(config_path: &Path, state_dir: &Path) -> Result<RestoreResult, St
         document.as_table_mut().remove("model_providers");
         changed = true;
     }
+    changed |= journal.overlay.restore(&mut document, &mut conflicts)?;
     if changed
         && !journal.config_existed
         && document.to_string().trim().is_empty()
@@ -938,5 +1000,133 @@ mod tests {
                 .conflicts
                 .is_empty()
         );
+    }
+
+    #[test]
+    fn routed_codex_options_preserve_external_leaf_edits_and_retry_conflicts() {
+        let home = TestHome::new();
+        let original = "model = \"old\"\napproval_policy = \"on-request\" # keep-preference\n\n[features]\nhooks = false\n";
+        fs::write(home.config(), original).unwrap();
+        let options = crate::provider_config::CodexOptions {
+            remote_compaction: true,
+            use_common_config: true,
+            context_1m: true,
+            compact_limit: 900000,
+        };
+        let common = "approval_policy = \"never\"\n\n[features]\nhooks = true\nmemories = true\n\n[tui]\nnotifications = true\n";
+        let reference = format!("router-{}", "b".repeat(32));
+        let prepared = inspect(&home)
+            .with_codex_options(&options, common)
+            .unwrap()
+            .with_credential_helper(&std::env::current_exe().unwrap(), &reference)
+            .unwrap();
+        assert!(
+            prepared
+                .preview
+                .changed_fields
+                .contains(&"features.hooks".into())
+        );
+        let mut active: DocumentMut = prepared.preview.proposed.parse().unwrap();
+        assert_eq!(
+            active["model_providers"][PROVIDER_ID]["name"].as_str(),
+            Some("OpenAI")
+        );
+        prepared.apply().unwrap();
+        active["features"]["memories"] = value(false);
+        active["features"]["external"] = value(true);
+        active["model_context_window"] = value(777777);
+        fs::write(home.config(), active.to_string()).unwrap();
+        let result = restore(&home.config(), &home.state()).unwrap();
+        assert_eq!(
+            result.conflicts,
+            ["features.memories", "model_context_window"]
+        );
+        let text = fs::read_to_string(home.config()).unwrap();
+        let mut restored: DocumentMut = text.parse().unwrap();
+        assert_eq!(restored["approval_policy"].as_str(), Some("on-request"));
+        assert!(text.contains("# keep-preference"));
+        assert_eq!(restored["features"]["hooks"].as_bool(), Some(false));
+        assert_eq!(restored["features"]["external"].as_bool(), Some(true));
+        assert!(restored.as_table().get("tui").is_none());
+        assert!(!text.contains("switchx_router"));
+        assert!(home.state().join(JOURNAL_NAME).exists());
+        restored["features"]
+            .as_table_mut()
+            .unwrap()
+            .remove("memories");
+        restored.as_table_mut().remove("model_context_window");
+        fs::write(home.config(), restored.to_string()).unwrap();
+        assert!(
+            restore(&home.config(), &home.state())
+                .unwrap()
+                .conflicts
+                .is_empty()
+        );
+        assert!(!home.state().join(JOURNAL_NAME).exists());
+    }
+
+    #[test]
+    fn routed_options_restore_absent_config_and_legacy_journals() {
+        let home = TestHome::new();
+        let options = crate::provider_config::CodexOptions {
+            use_common_config: true,
+            context_1m: true,
+            ..Default::default()
+        };
+        inspect(&home)
+            .with_codex_options(&options, "[features]\nhooks = true\n")
+            .unwrap()
+            .apply()
+            .unwrap();
+        assert!(
+            restore(&home.config(), &home.state())
+                .unwrap()
+                .conflicts
+                .is_empty()
+        );
+        assert!(!home.config().exists());
+
+        let original = "model = \"old\"\n";
+        fs::write(home.config(), original).unwrap();
+        inspect(&home).apply().unwrap();
+        let path = home.state().join(JOURNAL_NAME);
+        let mut old: serde_json::Value = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+        old.as_object_mut().unwrap().remove("overlay");
+        fs::write(path, serde_json::to_vec(&old).unwrap()).unwrap();
+        assert!(
+            restore(&home.config(), &home.state())
+                .unwrap()
+                .conflicts
+                .is_empty()
+        );
+        assert_eq!(fs::read_to_string(home.config()).unwrap(), original);
+    }
+
+    #[test]
+    fn legacy_routed_common_config_preserves_existing_window_settings() {
+        let home = TestHome::new();
+        let original = "model_context_window = 262144\nmodel_auto_compact_token_limit = 200000\n";
+        fs::write(home.config(), original).unwrap();
+        let prepared = inspect(&home)
+            .with_common_config("[features]\nhooks = true\n")
+            .unwrap();
+        let proposed: DocumentMut = prepared.preview.proposed.parse().unwrap();
+        assert_eq!(proposed["model_context_window"].as_integer(), Some(262144));
+        assert_eq!(
+            proposed["model_auto_compact_token_limit"].as_integer(),
+            Some(200000)
+        );
+        assert_eq!(
+            proposed["model_providers"][PROVIDER_ID]["name"].as_str(),
+            Some("SwitchX Router")
+        );
+        prepared.apply().unwrap();
+        assert!(
+            restore(&home.config(), &home.state())
+                .unwrap()
+                .conflicts
+                .is_empty()
+        );
+        assert_eq!(fs::read_to_string(home.config()).unwrap(), original);
     }
 }

@@ -7,6 +7,7 @@ use crate::{
     catalog,
     credentials::{CredentialError, CredentialStore, PROVIDER_KEY_SERVICE, Secret},
     direct::validate_provider,
+    provider_config::{self, CodexOptions},
     storage::{ModelRecord, ProviderRecord, RequestStatus, Store},
 };
 
@@ -620,6 +621,31 @@ pub fn save_provider(
     model_id: &str,
     key: String,
 ) -> Result<(), String> {
+    save_provider_inner(data_dir, id, name, base_url, model_id, key, None)
+}
+
+pub fn save_provider_with_codex_options(
+    data_dir: &Path,
+    id: Option<&str>,
+    name: &str,
+    base_url: &str,
+    model_id: &str,
+    key: String,
+    options: &CodexOptions,
+) -> Result<(), String> {
+    options.validate()?;
+    save_provider_inner(data_dir, id, name, base_url, model_id, key, Some(options))
+}
+
+fn save_provider_inner(
+    data_dir: &Path,
+    id: Option<&str>,
+    name: &str,
+    base_url: &str,
+    model_id: &str,
+    key: String,
+    options: Option<&CodexOptions>,
+) -> Result<(), String> {
     ensure_editable(data_dir)?;
     if id == Some(crate::chatgpt::PROVIDER_ID) {
         return Err("订阅连接由 Codex 管理；不能改为 API Key 或第三方地址".into());
@@ -676,7 +702,14 @@ pub fn save_provider(
             .put(&reference, &Secret::new(key))
             .map_err(|_| "无法保存 API Key 到系统凭据存储")?;
     }
-    if store.put_provider_with_models(&record, &defaults).is_err() {
+    let saved = match options {
+        Some(options) => {
+            let options = serde_json::to_string(options).map_err(|_| "无法序列化 Codex 选项")?;
+            store.put_provider_with_models_and_options(&record, &defaults, &options)
+        }
+        None => store.put_provider_with_models(&record, &defaults),
+    };
+    if saved.is_err() {
         if changing_key {
             if let Some(previous_secret) = &previous_secret {
                 let _ = credentials.put(&reference, previous_secret);
@@ -961,6 +994,50 @@ pub fn load_provider(data_dir: &Path, id: &str) -> Result<ProviderRecord, String
         .provider(id)
         .map_err(|_| "无法读取上游资料".to_owned())?
         .ok_or_else(|| "上游不存在，请刷新后重试".into())
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ProviderConfigState {
+    pub options: Option<CodexOptions>,
+    pub common: String,
+}
+
+pub fn load_provider_config(data_dir: &Path, id: &str) -> Result<ProviderConfigState, String> {
+    let store = open_store(data_dir).map_err(|error| error.message())?;
+    let options = store
+        .provider_codex_options(id)
+        .map_err(|_| "无法读取供应商 Codex 选项")?;
+    let options = CodexOptions::from_saved(&options)?;
+    let common = if options
+        .as_ref()
+        .is_none_or(|options| options.use_common_config)
+    {
+        store
+            .common_codex_config()
+            .map_err(|_| "无法读取 Codex 通用配置")?
+    } else {
+        String::new()
+    };
+    if !common.is_empty() {
+        provider_config::validate_common(&common)?;
+    }
+    Ok(ProviderConfigState { options, common })
+}
+
+pub fn load_common_config(data_dir: &Path) -> Result<String, String> {
+    open_store(data_dir)
+        .map_err(|error| error.message())?
+        .common_codex_config()
+        .map_err(|_| "无法读取 Codex 通用配置".into())
+}
+
+pub fn save_common_config(data_dir: &Path, snippet: &str) -> Result<(), String> {
+    ensure_editable(data_dir)?;
+    provider_config::validate_common(snippet)?;
+    open_store(data_dir)
+        .map_err(|error| error.message())?
+        .put_common_codex_config(snippet)
+        .map_err(|_| "无法保存 Codex 通用配置".into())
 }
 
 pub fn new_id() -> Result<String, String> {
