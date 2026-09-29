@@ -20,6 +20,7 @@ use axum::{
 };
 use futures_util::StreamExt;
 use reqwest::{Client, Url, redirect::Policy};
+use serde::Deserialize;
 use serde_json::{Value, json};
 use subtle::ConstantTimeEq;
 use tokio::{
@@ -32,7 +33,7 @@ use crate::{
     catalog::Publication,
     credentials::Secret,
     requests::{REQUEST_ID_HEADER, RequestLog, RequestTracker, ResponseObserver},
-    storage::{RequestStatus, Store},
+    storage::{RequestStatus, SessionAuthContext, Store},
 };
 
 pub const LOCAL_TOKEN_HEADER: &str = "x-switchx-local-token";
@@ -173,6 +174,69 @@ impl Upstream {
         !matches!(self.auth, UpstreamAuth::ApiKey(_))
     }
 
+    fn session_context(
+        &self,
+        provider_id: &str,
+        headers: &HeaderMap,
+    ) -> Result<SessionAuthContext, &'static str> {
+        let mut context = SessionAuthContext {
+            provider_id: provider_id.into(),
+            account_id: None,
+            workspace_id: None,
+            backend_origin: None,
+            routing_override: None,
+        };
+        let (account, routing_override) = match &self.auth {
+            UpstreamAuth::ApiKey(_) => return Ok(context),
+            UpstreamAuth::Chatgpt {
+                account,
+                routing_override,
+            } => (account, routing_override),
+            UpstreamAuth::ManagedChatgpt {
+                id,
+                account,
+                routing_override,
+                ..
+            } => {
+                context.account_id = Some(id.clone());
+                (account, routing_override)
+            }
+        };
+        let pinned = account.lock().map_err(|_| "chatgpt_account_unavailable")?;
+        let workspace = match pinned.as_ref() {
+            Some(value) => value,
+            None => single_header(headers, crate::chatgpt::ACCOUNT_HEADER)
+                .map_err(|_| "chatgpt_account_required")?
+                .ok_or("chatgpt_account_required")?,
+        };
+        let workspace = workspace.to_str().map_err(|_| "chatgpt_account_required")?;
+        if workspace.is_empty()
+            || workspace.len() > 256
+            || !workspace
+                .bytes()
+                .all(|byte| byte.is_ascii_alphanumeric() || b"-_".contains(&byte))
+        {
+            return Err("chatgpt_account_required");
+        }
+        context.workspace_id = Some(workspace.into());
+        context.backend_origin = Some(self.responses_url.origin().ascii_serialization());
+        let routing = match routing_override.as_ref() {
+            Some(value) => Some(value),
+            None => single_header(headers, "x-openai-account-routing-override")
+                .map_err(|_| "chatgpt_account_changed")?,
+        };
+        let routing = routing
+            .map(|value| value.to_str())
+            .transpose()
+            .map_err(|_| "chatgpt_account_changed")?
+            .unwrap_or("NO_CONSTRAINT");
+        if !matches!(routing, "NO_CONSTRAINT" | "us" | "us_cr") {
+            return Err("chatgpt_account_changed");
+        }
+        context.routing_override = Some(routing.into());
+        Ok(context)
+    }
+
     async fn authenticated_headers(
         &self,
         headers: &HeaderMap,
@@ -187,7 +251,7 @@ impl Upstream {
         } = &self.auth
         {
             let credential = manager
-                .credential(id, home)
+                .credential_for_route_with_native_sync(id, home)
                 .await
                 .map_err(|_| "chatgpt_auth_required")?;
             let expected = account.lock().map_err(|_| "chatgpt_account_unavailable")?;
@@ -304,6 +368,8 @@ impl Upstream {
                     "openai-beta",
                     "originator",
                     "version",
+                    "session-id",
+                    "thread-id",
                     "session_id",
                     "x-client-request-id",
                     "x-codex-turn-metadata",
@@ -333,7 +399,9 @@ pub struct RouterState {
     accepting: Arc<AtomicBool>,
     cancel: watch::Sender<bool>,
     request_log: Option<Arc<RequestLog>>,
+    session_store: Option<Mutex<Store>>,
     chatgpt_error: Arc<AtomicU8>,
+    chatgpt_errors: Arc<Mutex<HashMap<String, u8>>>,
     uses_chatgpt: bool,
 }
 
@@ -386,7 +454,9 @@ impl RouterState {
             accepting: Arc::new(AtomicBool::new(true)),
             cancel: watch::channel(false).0,
             request_log: None,
+            session_store: None,
             chatgpt_error: Arc::new(AtomicU8::new(0)),
+            chatgpt_errors: Arc::new(Mutex::new(HashMap::new())),
             uses_chatgpt,
         })
     }
@@ -394,6 +464,25 @@ impl RouterState {
     pub fn with_request_log(mut self, store: Store, generation: String) -> Self {
         self.request_log = Some(Arc::new(RequestLog::new(store, generation)));
         self
+    }
+
+    pub fn with_session_store(mut self, store: Store) -> Self {
+        self.session_store = Some(Mutex::new(store));
+        self
+    }
+
+    fn set_chatgpt_error(&self, provider_id: &str, code: u8) {
+        if let Ok(mut errors) = self.chatgpt_errors.lock() {
+            if code == 0 {
+                errors.remove(provider_id);
+            } else {
+                errors.insert(provider_id.into(), code);
+            }
+            self.chatgpt_error.store(
+                errors.values().copied().max().unwrap_or(0),
+                Ordering::Relaxed,
+            );
+        }
     }
 }
 
@@ -404,6 +493,7 @@ pub struct RunningRouter {
     task: JoinHandle<()>,
     request_log: Option<Arc<RequestLog>>,
     chatgpt_error: Arc<AtomicU8>,
+    chatgpt_errors: Arc<Mutex<HashMap<String, u8>>>,
 }
 
 impl RunningRouter {
@@ -420,6 +510,7 @@ impl RunningRouter {
         let cancel = state.cancel.clone();
         let request_log = state.request_log.clone();
         let chatgpt_error = state.chatgpt_error.clone();
+        let chatgpt_errors = state.chatgpt_errors.clone();
         let (shutdown, stopped) = oneshot::channel();
         let task = tokio::spawn(async move {
             let _ = axum::serve(listener, router(state))
@@ -435,6 +526,7 @@ impl RunningRouter {
             task,
             request_log,
             chatgpt_error,
+            chatgpt_errors,
         })
     }
 
@@ -453,12 +545,12 @@ impl RunningRouter {
     }
 
     pub fn chatgpt_error(&self) -> Option<&'static str> {
-        match self.chatgpt_error.load(Ordering::Relaxed) {
-            1 => Some("官方认证被拒绝；Codex 会尝试续期，仍失败时请恢复并重新登录"),
-            2 => Some("官方账号没有此模型或工作区权限，请检查订阅与模型选择"),
-            3 => Some("官方工作区已变化，请恢复并重新发布路由"),
-            _ => None,
-        }
+        chatgpt_error_message(self.chatgpt_error.load(Ordering::Relaxed))
+    }
+
+    pub fn chatgpt_error_for(&self, provider_id: &str) -> Option<&'static str> {
+        let code = self.chatgpt_errors.lock().ok()?.get(provider_id).copied()?;
+        chatgpt_error_message(code)
     }
 
     pub fn resume(&self) {
@@ -487,6 +579,98 @@ impl Drop for RunningRouter {
     fn drop(&mut self) {
         self.cancel.send_replace(true);
         self.task.abort();
+    }
+}
+
+fn chatgpt_error_message(code: u8) -> Option<&'static str> {
+    match code {
+        1 => Some("官方认证被拒绝；Codex 会尝试续期，仍失败时请恢复并重新登录"),
+        2 => Some("官方账号没有此模型或工作区权限，请检查订阅与模型选择"),
+        3 => Some("官方工作区已变化，请恢复并重新发布路由"),
+        _ => None,
+    }
+}
+
+fn single_header<'a>(
+    headers: &'a HeaderMap,
+    name: &str,
+) -> Result<Option<&'a HeaderValue>, &'static str> {
+    let mut values = headers.get_all(name).iter();
+    let first = values.next();
+    if values.next().is_some() {
+        return Err("invalid_session");
+    }
+    Ok(first)
+}
+
+fn session_uuid(value: &str) -> Result<String, &'static str> {
+    if value.len() != 36
+        || !value.bytes().enumerate().all(|(index, byte)| {
+            if matches!(index, 8 | 13 | 18 | 23) {
+                byte == b'-'
+            } else {
+                byte.is_ascii_hexdigit()
+            }
+        })
+    {
+        return Err("invalid_session");
+    }
+    Ok(value.to_ascii_lowercase())
+}
+
+fn header_session_id(headers: &HeaderMap, name: &str) -> Result<Option<String>, &'static str> {
+    single_header(headers, name)?
+        .map(|value| session_uuid(value.to_str().map_err(|_| "invalid_session")?))
+        .transpose()
+}
+
+fn session_id(headers: &HeaderMap) -> Result<String, &'static str> {
+    let current = header_session_id(headers, "session-id")?;
+    let legacy = header_session_id(headers, "session_id")?;
+    if current.is_some() && legacy.is_some() && current != legacy {
+        return Err("session_header_conflict");
+    }
+    let session = current.or(legacy).ok_or("session_required")?;
+    // thread-id can identify a child agent while session-id identifies its root tree.
+    let _ = header_session_id(headers, "thread-id")?;
+    if let Some(alias) = header_session_id(headers, "x-codex-session-id")?
+        && alias != session
+    {
+        return Err("session_header_conflict");
+    }
+    if let Some(metadata) = single_header(headers, "x-codex-turn-metadata")? {
+        #[derive(Deserialize)]
+        struct Metadata {
+            session_id: Option<String>,
+        }
+        if metadata.as_bytes().len() > 16 * 1024 {
+            return Err("invalid_session");
+        }
+        // Deserialize the identity field directly so duplicate session_id keys are rejected.
+        let metadata: Metadata =
+            serde_json::from_slice(metadata.as_bytes()).map_err(|_| "invalid_session")?;
+        if let Some(id) = metadata.session_id
+            && session_uuid(&id)? != session
+        {
+            return Err("session_header_conflict");
+        }
+    }
+    Ok(session)
+}
+
+fn opaque_input(value: &Value) -> bool {
+    match value {
+        Value::Array(values) => values.iter().any(opaque_input),
+        Value::Object(object) => {
+            object
+                .get("type")
+                .is_some_and(|value| value == "compaction")
+                || ["encrypted_content", "encrypted_function_args"]
+                    .iter()
+                    .any(|key| object.get(*key).is_some_and(|value| !value.is_null()))
+                || object.values().any(opaque_input)
+        }
+        _ => false,
     }
 }
 
@@ -742,6 +926,89 @@ async fn forward(
     tracker.record.provider_id = Some(binding.provider_id.clone());
     tracker.record.upstream_model = Some(binding.upstream_model.clone());
     let official = state.upstreams[&binding.provider_id].is_chatgpt();
+    if object
+        .get("previous_response_id")
+        .is_some_and(|value| !value.is_null())
+        || object
+            .get("conversation")
+            .is_some_and(|value| !value.is_null())
+    {
+        return request_error(
+            &mut tracker,
+            StatusCode::UNPROCESSABLE_ENTITY,
+            "unsupported_capability",
+            "server-side state continuation is not available; start a new session",
+        );
+    }
+    if let Some(store) = &state.session_store {
+        let session = match session_id(&headers) {
+            Ok(session) => session,
+            Err(code) => {
+                return request_error(
+                    &mut tracker,
+                    StatusCode::BAD_REQUEST,
+                    code,
+                    "a single consistent Codex session ID is required; start a supported Codex session",
+                );
+            }
+        };
+        let context = match state.upstreams[&binding.provider_id]
+            .session_context(&binding.provider_id, &headers)
+        {
+            Ok(context) => context,
+            Err(code) => {
+                return request_error(
+                    &mut tracker,
+                    StatusCode::UNAUTHORIZED,
+                    code,
+                    "the selected account context is unavailable; restore and republish the route",
+                );
+            }
+        };
+        let routing_hint = match single_header(&headers, "x-codex-routing-hint") {
+            Ok(value) => value,
+            Err(code) => {
+                return request_error(
+                    &mut tracker,
+                    StatusCode::BAD_REQUEST,
+                    code,
+                    "a single consistent routing hint is required",
+                );
+            }
+        };
+        // Codex 0.158 sends this model-only hint even on a new root session.
+        let opaque_hint = routing_hint.is_some_and(|value| {
+            value.to_str().ok() != Some(format!("model={public_id}").as_str())
+        });
+        let allow_new = !compact
+            && !object.get("input").is_some_and(opaque_input)
+            && !headers.contains_key("x-codex-turn-state")
+            && !opaque_hint;
+        let registered = store.lock().map_err(|_| ()).and_then(|store| {
+            store
+                .bind_session(&session, &context, allow_new)
+                .map_err(|_| ())
+        });
+        match registered {
+            Ok(true) => {}
+            Ok(false) => {
+                return request_error(
+                    &mut tracker,
+                    StatusCode::CONFLICT,
+                    "session_context_mismatch",
+                    "the session account context is unknown or changed; start a new session",
+                );
+            }
+            Err(()) => {
+                return request_error(
+                    &mut tracker,
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    "session_store_unavailable",
+                    "could not verify the session account context",
+                );
+            }
+        }
+    }
     if compact && !official {
         return request_error(
             &mut tracker,
@@ -770,13 +1037,13 @@ async fn forward(
         Ok(headers) => headers,
         Err(code) => {
             if official {
-                state.chatgpt_error.store(
+                state.set_chatgpt_error(
+                    &binding.provider_id,
                     if code == "chatgpt_account_changed" {
                         3
                     } else {
                         1
                     },
-                    Ordering::Relaxed,
                 );
             }
             return request_error(
@@ -787,22 +1054,7 @@ async fn forward(
             );
         }
     };
-    if object
-        .get("previous_response_id")
-        .is_some_and(|v| !v.is_null())
-        || object.get("conversation").is_some_and(|v| !v.is_null())
-        || (!official
-            && object
-                .get("input")
-                .and_then(Value::as_array)
-                .is_some_and(|items| {
-                    items.iter().any(|item| {
-                        item.get("encrypted_content")
-                            .is_some_and(|value| !value.is_null())
-                            || item["type"] == "compaction"
-                    })
-                }))
-    {
+    if !official && object.get("input").is_some_and(opaque_input) {
         return request_error(
             &mut tracker,
             StatusCode::UNPROCESSABLE_ENTITY,
@@ -906,17 +1158,17 @@ async fn forward(
     tracker.record.headers_ms = Some(tracker.elapsed_ms());
     if !status.is_success() {
         let code = if official && status == StatusCode::UNAUTHORIZED {
-            state.chatgpt_error.store(1, Ordering::Relaxed);
+            state.set_chatgpt_error(&binding.provider_id, 1);
             "chatgpt_unauthorized"
         } else if official && status == StatusCode::FORBIDDEN {
-            state.chatgpt_error.store(2, Ordering::Relaxed);
+            state.set_chatgpt_error(&binding.provider_id, 2);
             "chatgpt_forbidden"
         } else {
             "upstream_http_error"
         };
         tracker.finish(RequestStatus::Failed, Some(code));
     } else if official {
-        state.chatgpt_error.store(0, Ordering::Relaxed);
+        state.set_chatgpt_error(&binding.provider_id, 0);
     }
     let content_type = upstream_response
         .headers()
@@ -1368,20 +1620,10 @@ mod tests {
             state
         }
 
-        fn assert_unchanged_and_unlocked(&self) {
-            self.manager
-                .set_default(&self.id)
-                .expect("cancelled refresh must release the account operation and file lock");
-            self.manager
-                .sync_current(&self.home)
-                .expect("cancelled refresh must release the Codex config lock");
+        fn assert_native_and_model_unchanged(&self) {
             assert_eq!(
                 fs::read(self.home.join("auth.json")).unwrap(),
                 self.original_auth
-            );
-            assert_eq!(
-                fs::read(self.directory.join("data/codex_oauth_auth.json")).unwrap(),
-                self.original_store
             );
             assert_eq!(self.model_calls.load(Ordering::SeqCst), 0);
         }
@@ -1392,7 +1634,27 @@ mod tests {
                 .await
                 .unwrap()
                 .unwrap();
-            self.assert_unchanged_and_unlocked();
+            self.manager.wait_for_idle().await.unwrap();
+            self.manager
+                .set_default(&self.id)
+                .expect("completed refresh must release the account operation and file lock");
+            self.manager
+                .sync_current(&self.home)
+                .expect("completed refresh must release the Codex config lock");
+            assert_eq!(self.model_calls.load(Ordering::SeqCst), 0);
+            let native: Value =
+                serde_json::from_slice(&fs::read(self.home.join("auth.json")).unwrap()).unwrap();
+            assert_eq!(
+                native["tokens"]["refresh_token"],
+                "synthetic-uncommitted-refresh"
+            );
+            let saved = fs::read(self.directory.join("data/codex_oauth_auth.json")).unwrap();
+            assert_ne!(saved, self.original_store);
+            assert!(
+                String::from_utf8(saved)
+                    .unwrap()
+                    .contains("synthetic-uncommitted-refresh")
+            );
         }
     }
 
@@ -1437,12 +1699,12 @@ mod tests {
             serde_json::from_slice::<Value>(&body).unwrap()["error"]["code"],
             "upstream_timeout"
         );
-        fixture.assert_unchanged_and_unlocked();
+        fixture.assert_native_and_model_unchanged();
         fixture.finish_abandoned_refresh().await;
     }
 
     #[tokio::test]
-    async fn stopping_the_router_cancels_managed_refresh_without_writing_credentials() {
+    async fn stopping_the_router_preserves_a_detached_managed_refresh() {
         let mut fixture = RefreshFixture::new().await;
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let address = listener.local_addr().unwrap();
@@ -1486,7 +1748,7 @@ mod tests {
         assert_eq!(records.len(), 1);
         assert_eq!(records[0].status, RequestStatus::Interrupted);
         assert_eq!(records[0].error_code.as_deref(), Some("router_stopping"));
-        fixture.assert_unchanged_and_unlocked();
+        fixture.assert_native_and_model_unchanged();
         fixture.finish_abandoned_refresh().await;
     }
 }

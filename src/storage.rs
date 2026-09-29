@@ -1,10 +1,63 @@
-use std::path::Path;
+use std::{path::Path, time::Duration};
 
 use rusqlite::{Connection, OpenFlags, Result, params};
 
 use crate::credentials::Secret;
 
-const SCHEMA_VERSION: i64 = 8;
+const SCHEMA_VERSION: i64 = 9;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ProviderKind {
+    ApiKey,
+    Chatgpt,
+}
+
+impl ProviderKind {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::ApiKey => "api_key",
+            Self::Chatgpt => "chatgpt",
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum AccountBinding {
+    Native,
+    Default,
+    Fixed(String),
+}
+
+impl AccountBinding {
+    pub fn encode(&self) -> Result<String> {
+        match self {
+            Self::Native => Ok("native".into()),
+            Self::Default => Ok("default".into()),
+            Self::Fixed(id) if valid_account_id(id) => Ok(format!("fixed:{id}")),
+            Self::Fixed(_) => Err(rusqlite::Error::InvalidQuery),
+        }
+    }
+
+    pub fn decode(value: &str) -> Result<Self> {
+        match value {
+            "native" => Ok(Self::Native),
+            "default" => Ok(Self::Default),
+            _ => value
+                .strip_prefix("fixed:")
+                .filter(|id| valid_account_id(id))
+                .map(|id| Self::Fixed(id.into()))
+                .ok_or(rusqlite::Error::InvalidQuery),
+        }
+    }
+}
+
+fn valid_account_id(id: &str) -> bool {
+    !id.is_empty()
+        && id.len() <= 128
+        && id
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || byte == b'-')
+}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ProviderRecord {
@@ -14,6 +67,17 @@ pub struct ProviderRecord {
     pub model_id: String,
     // Historical metadata only; provider API keys are read from settings_config.
     pub credential_ref: Option<String>,
+    pub kind: ProviderKind,
+    pub account_binding: Option<AccountBinding>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct SessionAuthContext {
+    pub provider_id: String,
+    pub account_id: Option<String>,
+    pub workspace_id: Option<String>,
+    pub backend_origin: Option<String>,
+    pub routing_override: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -79,6 +143,41 @@ pub struct Store {
 }
 
 impl Store {
+    /// Old recovery journals must be settled before changing their database schema.
+    pub fn needs_recovery_before_migration(path: &Path) -> Result<bool> {
+        if !path.exists() {
+            return Ok(false);
+        }
+        let connection = Connection::open_with_flags(path, OpenFlags::SQLITE_OPEN_READ_ONLY)?;
+        let version: i64 = connection.query_row("PRAGMA user_version", [], |row| row.get(0))?;
+        let parent = path.parent().ok_or(rusqlite::Error::InvalidQuery)?;
+        Ok(version < SCHEMA_VERSION
+            && ["direct-journal.json", "switch-journal.json"]
+                .iter()
+                .any(|name| parent.join(name).exists()))
+    }
+
+    /// Only the stable credential columns are available through this opener.
+    pub fn open_credentials_read_only(path: &Path) -> Result<Self> {
+        Self::open_compatible(path, OpenFlags::SQLITE_OPEN_READ_ONLY)
+    }
+
+    /// Recovery may delete its own token without creating or migrating the database.
+    pub fn open_recovery(path: &Path) -> Result<Self> {
+        Self::open_compatible(path, OpenFlags::SQLITE_OPEN_READ_WRITE)
+    }
+
+    fn open_compatible(path: &Path, flags: OpenFlags) -> Result<Self> {
+        let connection = Connection::open_with_flags(path, flags)?;
+        let version: i64 = connection.query_row("PRAGMA user_version", [], |row| row.get(0))?;
+        if !matches!(version, 8 | SCHEMA_VERSION) {
+            return Err(rusqlite::Error::InvalidQuery);
+        }
+        connection.prepare("SELECT settings_config FROM providers LIMIT 0")?;
+        connection.prepare("SELECT key, value FROM app_settings LIMIT 0")?;
+        Ok(Self { connection })
+    }
+
     /// Inspect current metadata without creating, migrating or writing the source database.
     pub fn open_read_only(path: &Path) -> Result<Self> {
         let connection = Connection::open_with_flags(path, OpenFlags::SQLITE_OPEN_READ_ONLY)?;
@@ -90,7 +189,11 @@ impl Store {
     }
 
     pub fn open(path: &Path) -> Result<Self> {
+        if Self::needs_recovery_before_migration(path)? {
+            return Err(rusqlite::Error::InvalidQuery);
+        }
         let connection = Connection::open(path)?;
+        connection.busy_timeout(Duration::from_secs(5))?;
         let version: i64 = connection.query_row("PRAGMA user_version", [], |row| row.get(0))?;
         if version > SCHEMA_VERSION {
             return Err(rusqlite::Error::InvalidQuery);
@@ -208,7 +311,76 @@ impl Store {
                  COMMIT;",
             )?;
         }
+        if version < 9 {
+            use rusqlite::OptionalExtension;
+            let legacy: Option<String> = connection
+                .query_row(
+                    "SELECT value FROM app_settings WHERE key = 'chatgpt_account_binding'",
+                    [],
+                    |row| row.get(0),
+                )
+                .optional()?;
+            let binding = match legacy.as_deref() {
+                None => AccountBinding::Native,
+                Some("default") => AccountBinding::Default,
+                Some(id) => AccountBinding::Fixed(id.into()),
+            }
+            .encode()?;
+            let transaction = connection.unchecked_transaction()?;
+            transaction.execute_batch(
+                "ALTER TABLE providers ADD COLUMN kind TEXT NOT NULL DEFAULT 'api_key'
+                    CHECK (kind IN ('api_key', 'chatgpt'));
+                 ALTER TABLE providers ADD COLUMN account_binding TEXT
+                    CHECK ((kind = 'api_key' AND account_binding IS NULL)
+                        OR (kind = 'chatgpt' AND account_binding IS NOT NULL));
+                 CREATE TABLE session_bindings (
+                    session_id TEXT PRIMARY KEY NOT NULL,
+                    context TEXT NOT NULL
+                 );",
+            )?;
+            let migrated = transaction.execute(
+                "UPDATE providers SET kind = 'chatgpt', account_binding = ?1 WHERE id = 'switchx-chatgpt'",
+                [&binding],
+            )?;
+            if migrated != 0 {
+                transaction.execute(
+                    "DELETE FROM app_settings WHERE key = 'chatgpt_account_binding'",
+                    [],
+                )?;
+            }
+            transaction.pragma_update(None, "user_version", SCHEMA_VERSION)?;
+            transaction.commit()?;
+        }
         Ok(Self { connection })
+    }
+
+    /// The first request atomically pins a root session; later requests must match.
+    pub fn bind_session(
+        &self,
+        session_id: &str,
+        context: &SessionAuthContext,
+        allow_new: bool,
+    ) -> Result<bool> {
+        use rusqlite::OptionalExtension;
+        let context = serde_json::to_string(context).map_err(|_| rusqlite::Error::InvalidQuery)?;
+        let transaction = self.connection.unchecked_transaction()?;
+        if allow_new {
+            transaction.execute(
+                "INSERT INTO session_bindings (session_id, context) VALUES (?1, ?2)
+                 ON CONFLICT(session_id) DO NOTHING",
+                params![session_id, context],
+            )?;
+        }
+        let stored: Option<String> = transaction
+            .query_row(
+                "SELECT context FROM session_bindings WHERE session_id = ?1",
+                [session_id],
+                |row| row.get(0),
+            )
+            .optional()?;
+        let matches = stored.as_deref() == Some(context.as_str());
+        transaction.commit()?;
+        Ok(matches)
     }
 
     pub fn put_request(&self, record: &RequestRecord) -> Result<()> {
@@ -329,14 +501,67 @@ impl Store {
         key: Option<&Secret>,
         require_existing_key: bool,
     ) -> Result<()> {
+        let binding = match (provider.kind, &provider.account_binding) {
+            (ProviderKind::ApiKey, None) => None,
+            (ProviderKind::Chatgpt, Some(binding))
+                if key.is_none() && !require_existing_key && provider.credential_ref.is_none() =>
+            {
+                Some(binding.encode()?)
+            }
+            _ => return Err(rusqlite::Error::InvalidQuery),
+        };
         let transaction = self.connection.unchecked_transaction()?;
+        use rusqlite::OptionalExtension;
+        let saved_kind: Option<String> = transaction
+            .query_row(
+                "SELECT kind FROM providers WHERE id = ?1",
+                [&provider.id],
+                |row| row.get(0),
+            )
+            .optional()?;
+        if saved_kind
+            .as_deref()
+            .is_some_and(|kind| kind != provider.kind.as_str())
+        {
+            return Err(rusqlite::Error::InvalidQuery);
+        }
+        // A legacy binding with no old provider survives until that provider is first created.
+        let binding = if provider.id == "switchx-chatgpt" && provider.kind == ProviderKind::Chatgpt
+        {
+            let pending: Option<String> = transaction
+                .query_row(
+                    "SELECT value FROM app_settings WHERE key = 'chatgpt_account_binding'",
+                    [],
+                    |row| row.get(0),
+                )
+                .optional()?;
+            if let Some(pending) = pending {
+                let binding = if pending == "default" {
+                    AccountBinding::Default
+                } else {
+                    AccountBinding::Fixed(pending)
+                }
+                .encode()?;
+                transaction.execute(
+                    "DELETE FROM app_settings WHERE key = 'chatgpt_account_binding'",
+                    [],
+                )?;
+                Some(binding)
+            } else {
+                binding
+            }
+        } else {
+            binding
+        };
         transaction.execute(
-            "INSERT INTO providers (id, name, base_url, model_id, credential_ref)
-             VALUES (?1, ?2, ?3, ?4, ?5)
+            "INSERT INTO providers (id, name, base_url, model_id, credential_ref, kind, account_binding)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
              ON CONFLICT(id) DO UPDATE SET
                 name = excluded.name,
                 base_url = excluded.base_url,
                 model_id = excluded.model_id,
+                kind = excluded.kind,
+                account_binding = excluded.account_binding,
                 credential_ref = CASE WHEN json_valid(providers.settings_config)
                     THEN CASE WHEN json_type(providers.settings_config, '$.auth.OPENAI_API_KEY') = 'text'
                         THEN NULL ELSE excluded.credential_ref END
@@ -346,7 +571,9 @@ impl Store {
                 provider.name,
                 provider.base_url,
                 provider.model_id,
-                provider.credential_ref
+                provider.credential_ref,
+                provider.kind.as_str(),
+                binding
             ],
         )?;
         if let Some(options) = options {
@@ -480,6 +707,14 @@ impl Store {
     /// `default` resolves the managed account default when preparing a new route.
     pub fn chatgpt_account_binding(&self) -> Result<Option<String>> {
         use rusqlite::OptionalExtension;
+        if let Some(provider) = self.provider("switchx-chatgpt")? {
+            return Ok(match provider.account_binding {
+                Some(AccountBinding::Native) => None,
+                Some(AccountBinding::Default) => Some("default".into()),
+                Some(AccountBinding::Fixed(id)) => Some(id),
+                None => return Err(rusqlite::Error::InvalidQuery),
+            });
+        }
         self.connection
             .query_row(
                 "SELECT value FROM app_settings WHERE key = 'chatgpt_account_binding'",
@@ -490,6 +725,19 @@ impl Store {
     }
 
     pub fn bind_chatgpt_account(&self, account: Option<&str>) -> Result<()> {
+        let binding = match account {
+            None => AccountBinding::Native,
+            Some("default") => AccountBinding::Default,
+            Some(id) => AccountBinding::Fixed(id.into()),
+        };
+        let encoded = binding.encode()?;
+        if self.provider("switchx-chatgpt")?.is_some() {
+            self.connection.execute(
+                "UPDATE providers SET account_binding = ?1 WHERE id = 'switchx-chatgpt' AND kind = 'chatgpt'",
+                [encoded],
+            )?;
+            return Ok(());
+        }
         if let Some(account) = account {
             if account.is_empty()
                 || account.len() > 128
@@ -553,36 +801,18 @@ impl Store {
 
     pub fn providers(&self) -> Result<Vec<ProviderRecord>> {
         let mut statement = self.connection.prepare(
-            "SELECT id, name, base_url, model_id, credential_ref FROM providers ORDER BY name, id",
+            "SELECT id, name, base_url, model_id, credential_ref, kind, account_binding FROM providers ORDER BY name, id",
         )?;
-        statement
-            .query_map([], |row| {
-                Ok(ProviderRecord {
-                    id: row.get(0)?,
-                    name: row.get(1)?,
-                    base_url: row.get(2)?,
-                    model_id: row.get(3)?,
-                    credential_ref: row.get(4)?,
-                })
-            })?
-            .collect()
+        statement.query_map([], provider_from_row)?.collect()
     }
 
     pub fn provider(&self, id: &str) -> Result<Option<ProviderRecord>> {
         use rusqlite::OptionalExtension;
         self.connection
             .query_row(
-                "SELECT id, name, base_url, model_id, credential_ref FROM providers WHERE id = ?1",
+                "SELECT id, name, base_url, model_id, credential_ref, kind, account_binding FROM providers WHERE id = ?1",
                 [id],
-                |row| {
-                    Ok(ProviderRecord {
-                        id: row.get(0)?,
-                        name: row.get(1)?,
-                        base_url: row.get(2)?,
-                        model_id: row.get(3)?,
-                        credential_ref: row.get(4)?,
-                    })
-                },
+                provider_from_row,
             )
             .optional()
     }
@@ -657,6 +887,15 @@ impl Store {
         )? != 0)
     }
 
+    pub fn deselect_subscription_models(&self) -> Result<()> {
+        self.connection.execute(
+            "UPDATE published_models SET enabled = 0 WHERE provider_id IN
+                (SELECT id FROM providers WHERE kind = 'chatgpt')",
+            [],
+        )?;
+        Ok(())
+    }
+
     pub fn models(&self) -> Result<Vec<ModelRecord>> {
         let mut statement = self.connection.prepare(
             "SELECT provider_id, public_id, display_name, upstream_model, metadata, enabled, fallback_provider_id
@@ -676,6 +915,30 @@ impl Store {
             })?
             .collect()
     }
+}
+
+fn provider_from_row(row: &rusqlite::Row<'_>) -> Result<ProviderRecord> {
+    let kind: String = row.get(5)?;
+    let kind = match kind.as_str() {
+        "api_key" => ProviderKind::ApiKey,
+        "chatgpt" => ProviderKind::Chatgpt,
+        _ => return Err(rusqlite::Error::InvalidQuery),
+    };
+    let binding: Option<String> = row.get(6)?;
+    let account_binding = match (kind, binding) {
+        (ProviderKind::ApiKey, None) => None,
+        (ProviderKind::Chatgpt, Some(binding)) => Some(AccountBinding::decode(&binding)?),
+        _ => return Err(rusqlite::Error::InvalidQuery),
+    };
+    Ok(ProviderRecord {
+        id: row.get(0)?,
+        name: row.get(1)?,
+        base_url: row.get(2)?,
+        model_id: row.get(3)?,
+        credential_ref: row.get(4)?,
+        kind,
+        account_binding,
+    })
 }
 
 fn local_token_key(reference: &str) -> Result<String> {
@@ -732,6 +995,277 @@ fn settings_with_key(settings: &str, key: &Secret) -> Result<String> {
 mod tests {
     use super::*;
 
+    fn downgrade_to_v8(store: &Store) {
+        store
+            .connection
+            .execute_batch(
+                "ALTER TABLE providers DROP COLUMN account_binding;
+             ALTER TABLE providers DROP COLUMN kind;
+             DROP TABLE session_bindings;
+             PRAGMA user_version = 8;",
+            )
+            .unwrap();
+    }
+
+    #[test]
+    fn v8_binding_migration_preserves_legacy_models_and_consumes_only_once() {
+        for binding in [
+            AccountBinding::Native,
+            AccountBinding::Default,
+            AccountBinding::Fixed("saved-a".into()),
+        ] {
+            let path = std::env::temp_dir().join(format!(
+                "switchx-binding-migration-{}.sqlite",
+                crate::app::new_id().unwrap()
+            ));
+            let store = Store::open(&path).unwrap();
+            let provider = ProviderRecord {
+                id: "switchx-chatgpt".into(),
+                name: "Legacy".into(),
+                base_url: crate::chatgpt::BASE_URL.into(),
+                model_id: "same-model".into(),
+                credential_ref: None,
+                kind: ProviderKind::Chatgpt,
+                account_binding: Some(AccountBinding::Native),
+            };
+            let model = ModelRecord {
+                provider_id: provider.id.clone(),
+                public_id: "sx-chatgpt-same-model".into(),
+                display_name: "Legacy model".into(),
+                upstream_model: "same-model".into(),
+                metadata: "{}".into(),
+                enabled: true,
+                fallback_provider_id: None,
+            };
+            store
+                .put_provider_with_models(&provider, std::slice::from_ref(&model))
+                .unwrap();
+            downgrade_to_v8(&store);
+            let legacy = match &binding {
+                AccountBinding::Native => None,
+                AccountBinding::Default => Some("default"),
+                AccountBinding::Fixed(id) => Some(id.as_str()),
+            };
+            if let Some(value) = legacy {
+                store
+                    .connection
+                    .execute(
+                        "INSERT INTO app_settings VALUES ('chatgpt_account_binding', ?1)",
+                        [value],
+                    )
+                    .unwrap();
+            }
+            drop(store);
+            let store = Store::open(&path).unwrap();
+            assert_eq!(
+                store
+                    .provider(&provider.id)
+                    .unwrap()
+                    .unwrap()
+                    .account_binding,
+                Some(binding.clone())
+            );
+            assert_eq!(store.models().unwrap(), [model]);
+            assert!(!store.connection.query_row("SELECT EXISTS(SELECT 1 FROM app_settings WHERE key='chatgpt_account_binding')", [], |row| row.get::<_,bool>(0)).unwrap());
+            drop(store);
+            assert_eq!(
+                Store::open(&path)
+                    .unwrap()
+                    .provider(&provider.id)
+                    .unwrap()
+                    .unwrap()
+                    .account_binding,
+                Some(binding)
+            );
+            std::fs::remove_file(path).unwrap();
+        }
+    }
+
+    #[test]
+    fn pending_legacy_binding_is_consumed_atomically_on_first_old_connection() {
+        let store = Store::open(Path::new(":memory:")).unwrap();
+        store.bind_chatgpt_account(Some("saved-a")).unwrap();
+        let provider = ProviderRecord {
+            id: "switchx-chatgpt".into(),
+            name: "Legacy".into(),
+            base_url: crate::chatgpt::BASE_URL.into(),
+            model_id: "same-model".into(),
+            credential_ref: None,
+            kind: ProviderKind::Chatgpt,
+            account_binding: Some(AccountBinding::Native),
+        };
+        let wrong_model = ModelRecord {
+            provider_id: "missing".into(),
+            public_id: "sx-test".into(),
+            display_name: "Test".into(),
+            upstream_model: "same-model".into(),
+            metadata: "{}".into(),
+            enabled: true,
+            fallback_provider_id: None,
+        };
+        assert!(
+            store
+                .put_provider_with_models(&provider, &[wrong_model])
+                .is_err()
+        );
+        assert!(store.provider(&provider.id).unwrap().is_none());
+        assert_eq!(
+            store.chatgpt_account_binding().unwrap().as_deref(),
+            Some("saved-a")
+        );
+        store.put_provider(&provider).unwrap();
+        assert_eq!(
+            store
+                .provider(&provider.id)
+                .unwrap()
+                .unwrap()
+                .account_binding,
+            Some(AccountBinding::Fixed("saved-a".into()))
+        );
+        store.bind_chatgpt_account(None).unwrap();
+        store.put_provider(&provider).unwrap();
+        assert_eq!(
+            store
+                .provider(&provider.id)
+                .unwrap()
+                .unwrap()
+                .account_binding,
+            Some(AccountBinding::Native)
+        );
+    }
+
+    #[test]
+    fn v8_journals_defer_migration_but_credentials_and_recovery_remain_usable() {
+        for journal in ["direct-journal.json", "switch-journal.json"] {
+            let directory = std::env::temp_dir().join(format!(
+                "switchx-legacy-recovery-{}",
+                crate::app::new_id().unwrap()
+            ));
+            std::fs::create_dir(&directory).unwrap();
+            let path = directory.join("switchx.sqlite");
+            let store = Store::open(&path).unwrap();
+            let provider = api_provider();
+            let key = Secret::new("synthetic-api-key".into());
+            let reference = format!("router-{}", "a".repeat(32));
+            let token = Secret::new("b".repeat(64));
+            store
+                .put_provider_with_models_options_and_key(&provider, &[], None, &key)
+                .unwrap();
+            store.put_local_token(&reference, &token).unwrap();
+            downgrade_to_v8(&store);
+            drop(store);
+            std::fs::write(directory.join(journal), b"synthetic recovery marker").unwrap();
+            let before = std::fs::read(&path).unwrap();
+            assert!(Store::needs_recovery_before_migration(&path).unwrap());
+            assert!(Store::open(&path).is_err());
+            let readonly = Store::open_credentials_read_only(&path).unwrap();
+            assert_eq!(
+                readonly
+                    .provider_api_key(&provider.id)
+                    .unwrap()
+                    .unwrap()
+                    .expose(),
+                key.expose()
+            );
+            assert_eq!(
+                readonly.local_token(&reference).unwrap().unwrap().expose(),
+                token.expose()
+            );
+            assert!(readonly.delete_local_token(&reference).is_err());
+            drop(readonly);
+            assert_eq!(std::fs::read(&path).unwrap(), before);
+            let recovery = Store::open_recovery(&path).unwrap();
+            recovery.delete_local_token(&reference).unwrap();
+            assert_eq!(
+                recovery
+                    .connection
+                    .query_row("PRAGMA user_version", [], |row| row.get::<_, i64>(0))
+                    .unwrap(),
+                8
+            );
+            drop(recovery);
+            std::fs::remove_file(directory.join(journal)).unwrap();
+            let store = Store::open(&path).unwrap();
+            assert!(store.local_token(&reference).unwrap().is_none());
+            assert_eq!(
+                store.provider(&provider.id).unwrap().unwrap().kind,
+                ProviderKind::ApiKey
+            );
+            std::fs::remove_dir_all(directory).unwrap();
+        }
+        let missing = std::env::temp_dir().join(format!(
+            "switchx-missing-db-{}",
+            crate::app::new_id().unwrap()
+        ));
+        assert!(Store::open_credentials_read_only(&missing).is_err());
+        assert!(Store::open_recovery(&missing).is_err());
+        assert!(!missing.exists());
+    }
+
+    #[test]
+    fn invalid_bindings_and_provider_kinds_never_fall_back_to_native() {
+        for value in ["", "fixed:", "other", "fixed:bad/value"] {
+            assert!(AccountBinding::decode(value).is_err());
+        }
+        let store = Store::open(Path::new(":memory:")).unwrap();
+        let mut provider = api_provider();
+        provider.account_binding = Some(AccountBinding::Native);
+        assert!(store.put_provider(&provider).is_err());
+        provider.account_binding = None;
+        provider.kind = ProviderKind::Chatgpt;
+        assert!(store.put_provider(&provider).is_err());
+        assert!(store.providers().unwrap().is_empty());
+    }
+
+    #[test]
+    fn persistent_session_context_is_atomic_and_survives_provider_deletion() {
+        let path = std::env::temp_dir().join(format!(
+            "switchx-session-store-{}.sqlite",
+            crate::app::new_id().unwrap()
+        ));
+        let store = Store::open(&path).unwrap();
+        let a = SessionAuthContext {
+            provider_id: "a".into(),
+            account_id: Some("saved-a".into()),
+            workspace_id: Some("workspace-a".into()),
+            backend_origin: Some("https://chatgpt.com".into()),
+            routing_override: Some("NO_CONSTRAINT".into()),
+        };
+        let mut b = a.clone();
+        b.provider_id = "b".into();
+        assert!(!store.bind_session("unknown", &a, false).unwrap());
+        let (left, right) = std::thread::scope(|scope| {
+            let path = &path;
+            let a = &a;
+            let b = &b;
+            let left = scope.spawn(move || {
+                Store::open(path)
+                    .unwrap()
+                    .bind_session("root", a, true)
+                    .unwrap()
+            });
+            let right = scope.spawn(move || {
+                Store::open(path)
+                    .unwrap()
+                    .bind_session("root", b, true)
+                    .unwrap()
+            });
+            (left.join().unwrap(), right.join().unwrap())
+        });
+        assert_ne!(left, right);
+        let winner = if left { &a } else { &b };
+        assert!(store.bind_session("root", winner, false).unwrap());
+        drop(store);
+        let store = Store::open(&path).unwrap();
+        assert!(store.bind_session("root", winner, false).unwrap());
+        assert!(
+            !store
+                .bind_session("root", if left { &b } else { &a }, true)
+                .unwrap()
+        );
+        std::fs::remove_file(path).unwrap();
+    }
+
     #[test]
     fn local_tokens_persist_and_delete_only_the_selected_reference() {
         let path = std::env::temp_dir().join(format!(
@@ -777,7 +1311,7 @@ mod tests {
                 .connection
                 .query_row("PRAGMA user_version", [], |row| row.get::<_, i64>(0))
                 .unwrap(),
-            8
+            SCHEMA_VERSION
         );
         drop(store);
         std::fs::remove_file(path).unwrap();
@@ -829,6 +1363,8 @@ mod tests {
 
     fn api_provider() -> ProviderRecord {
         ProviderRecord {
+            kind: crate::storage::ProviderKind::ApiKey,
+            account_binding: None,
             id: "synthetic-api".into(),
             name: "Synthetic API".into(),
             base_url: "https://example.invalid/v1".into(),
@@ -1168,7 +1704,7 @@ mod tests {
         store
             .connection
             .execute_batch(
-                "ALTER TABLE providers DROP COLUMN settings_config; PRAGMA user_version = 7;",
+                "ALTER TABLE providers DROP COLUMN settings_config; ALTER TABLE providers DROP COLUMN account_binding; ALTER TABLE providers DROP COLUMN kind; DROP TABLE session_bindings; PRAGMA user_version = 7;",
             )
             .unwrap();
         drop(store);
@@ -1247,6 +1783,8 @@ mod tests {
     fn provider_and_models_roll_back_together_on_model_conflict() {
         let store = Store::open(Path::new(":memory:")).unwrap();
         let provider = ProviderRecord {
+            kind: crate::storage::ProviderKind::ApiKey,
+            account_binding: None,
             id: "primary".into(),
             name: "Original".into(),
             base_url: "https://example.invalid/v1".into(),
@@ -1309,6 +1847,8 @@ mod tests {
             crate::app::new_id().unwrap()
         ));
         let provider = ProviderRecord {
+            kind: crate::storage::ProviderKind::ApiKey,
+            account_binding: None,
             id: "primary".into(),
             name: "Primary".into(),
             base_url: "https://example.invalid/v1".into(),
@@ -1358,6 +1898,8 @@ mod tests {
         ));
         let store = Store::open(&path).unwrap();
         let provider = ProviderRecord {
+            kind: crate::storage::ProviderKind::ApiKey,
+            account_binding: None,
             id: "primary".into(),
             name: "Primary".into(),
             base_url: "https://example.invalid/v1".into(),
@@ -1382,7 +1924,7 @@ mod tests {
                 "INSERT INTO request_records (id, started_at_ms, generation, duration_ms, status)
                     VALUES ('v6-request', 1, 'old-generation', 3, 'completed');
                  ALTER TABLE providers DROP COLUMN codex_options;
-                 ALTER TABLE providers DROP COLUMN settings_config;
+                 ALTER TABLE providers DROP COLUMN settings_config; ALTER TABLE providers DROP COLUMN account_binding; ALTER TABLE providers DROP COLUMN kind; DROP TABLE session_bindings;
                  DROP TABLE app_settings;
                  PRAGMA user_version = 6;",
             )
@@ -1415,6 +1957,8 @@ mod tests {
         for id in ["primary", "backup"] {
             store
                 .put_provider(&ProviderRecord {
+                    kind: crate::storage::ProviderKind::ApiKey,
+                    account_binding: None,
                     id: id.into(),
                     name: id.into(),
                     base_url: "https://example.invalid/v1".into(),
@@ -1444,7 +1988,7 @@ mod tests {
              DROP TABLE published_models;
              ALTER TABLE old_models RENAME TO published_models;
              ALTER TABLE providers DROP COLUMN codex_options;
-             ALTER TABLE providers DROP COLUMN settings_config;
+             ALTER TABLE providers DROP COLUMN settings_config; ALTER TABLE providers DROP COLUMN account_binding; ALTER TABLE providers DROP COLUMN kind; DROP TABLE session_bindings;
              DROP TABLE app_settings;
              PRAGMA user_version = 5;"
         ).unwrap();
@@ -1508,6 +2052,8 @@ mod tests {
         assert!(!path.exists());
         let store = Store::open(&path).unwrap();
         let provider = ProviderRecord {
+            kind: crate::storage::ProviderKind::ApiKey,
+            account_binding: None,
             id: "read-only".into(),
             name: "Read only".into(),
             base_url: "https://example.invalid".into(),
@@ -1543,6 +2089,8 @@ mod tests {
         for id in ["primary", "backup"] {
             store
                 .put_provider(&ProviderRecord {
+                    kind: crate::storage::ProviderKind::ApiKey,
+                    account_binding: None,
                     id: id.into(),
                     name: id.into(),
                     base_url: "https://example.invalid".into(),
@@ -1569,7 +2117,7 @@ mod tests {
                  ALTER TABLE published_models DROP COLUMN fallback_provider_id;
                  ALTER TABLE request_records DROP COLUMN fallback_from;
                  ALTER TABLE providers DROP COLUMN codex_options;
-                 ALTER TABLE providers DROP COLUMN settings_config;
+                 ALTER TABLE providers DROP COLUMN settings_config; ALTER TABLE providers DROP COLUMN account_binding; ALTER TABLE providers DROP COLUMN kind; DROP TABLE session_bindings;
                  DROP TABLE app_settings;
                  PRAGMA user_version = 4;",
             )
@@ -1606,11 +2154,13 @@ mod tests {
         let store = Store::open(&path).unwrap();
         store
             .connection
-            .execute_batch("DROP TABLE request_records; ALTER TABLE published_models DROP COLUMN fallback_provider_id; ALTER TABLE providers DROP COLUMN codex_options; ALTER TABLE providers DROP COLUMN settings_config; DROP TABLE app_settings; PRAGMA user_version = 3;")
+            .execute_batch("DROP TABLE request_records; ALTER TABLE published_models DROP COLUMN fallback_provider_id; ALTER TABLE providers DROP COLUMN codex_options; ALTER TABLE providers DROP COLUMN settings_config; ALTER TABLE providers DROP COLUMN account_binding; ALTER TABLE providers DROP COLUMN kind; DROP TABLE session_bindings; DROP TABLE app_settings; PRAGMA user_version = 3;")
             .unwrap();
         drop(store);
         let store = Store::open(&path).unwrap();
         let provider = ProviderRecord {
+            kind: crate::storage::ProviderKind::ApiKey,
+            account_binding: None,
             id: "one".into(),
             name: "One".into(),
             base_url: "https://example.invalid".into(),
@@ -1663,6 +2213,8 @@ mod tests {
                 .as_nanos()
         ));
         let provider = ProviderRecord {
+            kind: crate::storage::ProviderKind::ApiKey,
+            account_binding: None,
             id: "deepseek".into(),
             name: "DeepSeek".into(),
             base_url: "https://api.deepseek.com/".into(),
@@ -1693,7 +2245,7 @@ mod tests {
                     |row| row.get(0),
                 )
                 .unwrap();
-            assert!(!schema.contains("api_key"));
+            assert!(!schema.contains("api_key TEXT"));
             assert!(!schema.contains("password"));
             assert!(store.delete_provider("deepseek").unwrap());
             assert!(store.providers().unwrap().is_empty());

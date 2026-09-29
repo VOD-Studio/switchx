@@ -4,6 +4,7 @@ use axum::{
     Json, Router,
     extract::State,
     http::{HeaderMap, StatusCode, header},
+    response::{IntoResponse, Response},
     routing::post,
 };
 use base64::{Engine, engine::general_purpose::URL_SAFE_NO_PAD};
@@ -217,11 +218,22 @@ async fn shared_codex_home_preserves_each_saved_bundle_and_native_renewal() {
 
 async fn capture(
     State(captured): State<mpsc::Sender<(HeaderMap, Value)>>,
+    uri: axum::http::Uri,
     headers: HeaderMap,
     Json(body): Json<Value>,
-) -> Json<Value> {
+) -> Response {
+    let input = body["input"].as_str().map(str::to_owned);
     captured.send((headers, body)).await.unwrap();
-    Json(json!({"status":"completed","output":[]}))
+    match input.as_deref() {
+        Some("expire") => StatusCode::UNAUTHORIZED.into_response(),
+        Some("denied") => StatusCode::FORBIDDEN.into_response(),
+        _ if uri.path().ends_with("/compact") => Json(json!({
+            "object":"response.compaction",
+            "output":[{"type":"compaction","encrypted_content":"synthetic-compact-state"}],
+        }))
+        .into_response(),
+        _ => Json(json!({"status":"completed","output":[]})).into_response(),
+    }
 }
 
 async fn mock() -> (
@@ -234,6 +246,7 @@ async fn mock() -> (
     let (captured, seen) = mpsc::channel(8);
     let router = Router::new()
         .route("/responses", post(capture))
+        .route("/responses/compact", post(capture))
         .with_state(captured);
     let task = tokio::spawn(async move { axum::serve(listener, router).await.unwrap() });
     (address, seen, task)
@@ -349,13 +362,22 @@ async fn managed_router_isolates_bound_accounts_api_keys_and_removed_bindings() 
     .with_request_log(
         Store::open(&database_path).unwrap(),
         "managed-fixture".into(),
-    );
+    )
+    .with_session_store(Store::open(&database_path).unwrap());
     let running = RunningRouter::start(listener, state).unwrap();
     let client = reqwest::Client::builder().no_proxy().build().unwrap();
     let request = |model: &str| {
         client
             .post(format!("http://{address}/v1/responses"))
             .header(LOCAL_TOKEN_HEADER, LOCAL_TOKEN)
+            .header(
+                "session-id",
+                match model {
+                    "sx-a" => "00000000-0000-0000-0000-000000000001",
+                    "sx-b" => "00000000-0000-0000-0000-000000000002",
+                    _ => "00000000-0000-0000-0000-000000000003",
+                },
+            )
             .bearer_auth("synthetic-untrusted-client-access")
             .header("chatgpt-account-id", "synthetic-workspace-untrusted-client")
             .header("x-openai-account-routing-override", "us")
@@ -467,6 +489,300 @@ async fn managed_router_isolates_bound_accounts_api_keys_and_removed_bindings() 
     ] {
         assert!(!request_database.contains(secret));
         assert!(!provider_database.contains(secret));
+    }
+    official_task.abort();
+    api_task.abort();
+}
+
+#[tokio::test]
+async fn session_context_survives_restart_and_blocks_account_changes_before_forwarding() {
+    const A: &str = "00000000-0000-0000-0000-000000000001";
+    const B: &str = "00000000-0000-0000-0000-000000000002";
+    const NEW: &str = "00000000-0000-0000-0000-000000000003";
+    const CHILD: &str = "00000000-0000-0000-0000-000000000004";
+    let directory = TestDirectory::new();
+    let home = directory.home();
+    let manager = AccountManager::open(&directory.data()).unwrap();
+    directory.write_native(&native_auth("a", "original", "2099-01-01T00:00:00Z"));
+    let account_a = manager.import_current(&home).unwrap();
+    directory.write_native(&native_auth("b", "original", "2099-01-01T00:00:00Z"));
+    let account_b = manager.import_current(&home).unwrap();
+    let (official_address, mut official_seen, official_task) = mock().await;
+    let (api_address, mut api_seen, api_task) = mock().await;
+    let templates =
+        serde_json::from_str(include_str!("../fixtures/synthetic-models.json")).unwrap();
+    let publication = publish(
+        &templates,
+        &[
+            Selection {
+                public_id: "sx-a",
+                display_name: "A",
+                provider_id: "account-a",
+                upstream_model: "gpt-5.5",
+            },
+            Selection {
+                public_id: "sx-a-two",
+                display_name: "A second model",
+                provider_id: "account-a",
+                upstream_model: "deepseek-flash",
+            },
+            Selection {
+                public_id: "sx-b",
+                display_name: "B",
+                provider_id: "account-b",
+                upstream_model: "gpt-5.5",
+            },
+            Selection {
+                public_id: "sx-api",
+                display_name: "API",
+                provider_id: "api",
+                upstream_model: "gpt-5.5",
+            },
+        ],
+    )
+    .unwrap();
+    let database = directory.data().join("session-test.sqlite");
+    let state = |address, rebound: bool| {
+        let (id, workspace) = if rebound {
+            (account_b.id.clone(), workspace("b"))
+        } else {
+            (account_a.id.clone(), workspace("a"))
+        };
+        RouterState::new(
+            address,
+            LOCAL_TOKEN.into(),
+            publication.clone(),
+            HashMap::from([
+                (
+                    "account-a".into(),
+                    Upstream::managed_chatgpt_mock(
+                        official_address,
+                        manager.clone(),
+                        id,
+                        home.clone(),
+                        &workspace,
+                    )
+                    .unwrap(),
+                ),
+                (
+                    "account-b".into(),
+                    Upstream::managed_chatgpt_mock(
+                        official_address,
+                        manager.clone(),
+                        account_b.id.clone(),
+                        home.clone(),
+                        &self::workspace("b"),
+                    )
+                    .unwrap(),
+                ),
+                (
+                    "api".into(),
+                    Upstream::new(&format!("http://{api_address}"), "synthetic-api-key".into())
+                        .unwrap(),
+                ),
+            ]),
+        )
+        .unwrap()
+        .with_session_store(Store::open(&database).unwrap())
+        .with_request_log(Store::open(&database).unwrap(), "session-fixture".into())
+    };
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let running = RunningRouter::start(listener, state(address, false)).unwrap();
+    let client = reqwest::Client::builder().no_proxy().build().unwrap();
+    let request = |address, model: &str, session: Option<&str>, input: Value, compact: bool| {
+        let mut request = client
+            .post(format!(
+                "http://{address}/v1/responses{}",
+                if compact { "/compact" } else { "" }
+            ))
+            .header(LOCAL_TOKEN_HEADER, LOCAL_TOKEN)
+            .header(header::CONTENT_TYPE, "application/json")
+            .body(json!({"model":model,"input":input}).to_string());
+        if let Some(session) = session {
+            request = request.header("session-id", session);
+        }
+        request
+    };
+    for (model, session, expected_workspace) in [("sx-a", A, "a"), ("sx-b", B, "b")] {
+        let response = request(address, model, Some(session), json!("first"), false)
+            .header("thread-id", CHILD)
+            .header(
+                "x-codex-turn-metadata",
+                json!({"session_id":session,"thread_id":CHILD}).to_string(),
+            )
+            .header("x-codex-routing-hint", format!("model={model}"))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        response.bytes().await.unwrap();
+        let (headers, _) = official_seen.recv().await.unwrap();
+        assert_eq!(headers["session-id"], session);
+        assert_eq!(headers["thread-id"], CHILD);
+        assert_eq!(
+            headers["chatgpt-account-id"],
+            workspace(expected_workspace).account_id
+        );
+    }
+    let opaque = json!([{"type":"reasoning","encrypted_content":"synthetic-prior-state"}]);
+    let response = request(address, "sx-a-two", Some(A), opaque.clone(), false)
+        .header("session_id", A)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    response.bytes().await.unwrap();
+    let (headers, body) = official_seen.recv().await.unwrap();
+    assert_eq!(headers["session_id"], A);
+    assert_eq!(body["model"], "deepseek-flash");
+
+    for model in ["sx-b", "sx-api"] {
+        let response = request(address, model, Some(A), json!("switch"), false)
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::CONFLICT);
+    }
+    for response in [
+        request(address, "sx-a", Some(NEW), opaque.clone(), false)
+            .send()
+            .await
+            .unwrap(),
+        request(address, "sx-a", Some(NEW), json!([]), true)
+            .send()
+            .await
+            .unwrap(),
+        request(address, "sx-a", Some(NEW), json!("resume"), false)
+            .header("x-codex-turn-state", "synthetic-prior-state")
+            .send()
+            .await
+            .unwrap(),
+        request(address, "sx-a", Some(NEW), json!("resume"), false)
+            .header("x-codex-routing-hint", "synthetic-prior-hint")
+            .send()
+            .await
+            .unwrap(),
+    ] {
+        assert_eq!(response.status(), StatusCode::CONFLICT);
+    }
+    // Rejected server-state references must not legitimize a previously
+    // unknown root session for a later encrypted continuation.
+    for field in ["previous_response_id", "conversation"] {
+        let mut body = json!({"model":"sx-a","input":"unsupported-state"});
+        body[field] = json!("synthetic-server-state");
+        let response = request(address, "sx-a", Some(NEW), json!([]), false)
+            .body(body.to_string())
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::UNPROCESSABLE_ENTITY);
+        response.bytes().await.unwrap();
+        let response = request(address, "sx-a", Some(NEW), opaque.clone(), false)
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::CONFLICT);
+    }
+    for response in [
+        request(address, "sx-a", None, json!("missing"), false)
+            .send()
+            .await
+            .unwrap(),
+        request(address, "sx-a", Some(A), json!("duplicate"), false)
+            .header("session-id", A)
+            .send()
+            .await
+            .unwrap(),
+        request(address, "sx-a", Some(A), json!("conflict"), false)
+            .header("session_id", B)
+            .send()
+            .await
+            .unwrap(),
+        request(address, "sx-a", Some(A), json!("metadata-conflict"), false)
+            .header("x-codex-turn-metadata", json!({"session_id":B}).to_string())
+            .send()
+            .await
+            .unwrap(),
+    ] {
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    }
+    assert!(official_seen.try_recv().is_err());
+    assert!(api_seen.try_recv().is_err());
+
+    // One successful account must not clear another account's authentication error.
+    let response = request(address, "sx-a", Some(A), json!("expire"), false)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+    response.bytes().await.unwrap();
+    official_seen.recv().await.unwrap();
+    let response = request(address, "sx-b", Some(B), json!("success"), false)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    response.bytes().await.unwrap();
+    official_seen.recv().await.unwrap();
+    assert!(running.chatgpt_error_for("account-a").is_some());
+    assert!(running.chatgpt_error_for("account-b").is_none());
+    assert!(running.chatgpt_error().is_some());
+    running.stop().await;
+
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let resumed_address = listener.local_addr().unwrap();
+    let resumed = RunningRouter::start(listener, state(resumed_address, false)).unwrap();
+    let response = request(resumed_address, "sx-a", Some(A), opaque.clone(), true)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    response.bytes().await.unwrap();
+    let (_, body) = official_seen.recv().await.unwrap();
+    assert_eq!(body["input"], opaque);
+    let response = request(resumed_address, "sx-a", None, json!("legacy"), false)
+        .header("session_id", A)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    response.bytes().await.unwrap();
+    official_seen.recv().await.unwrap();
+    resumed.stop().await;
+
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let rebound_address = listener.local_addr().unwrap();
+    let rebound = RunningRouter::start(listener, state(rebound_address, true)).unwrap();
+    let response = request(rebound_address, "sx-a", Some(A), json!("rebound"), false)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::CONFLICT);
+    let response = request(
+        rebound_address,
+        "sx-a",
+        Some(NEW),
+        json!("new-session"),
+        false,
+    )
+    .send()
+    .await
+    .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    response.bytes().await.unwrap();
+    let (headers, _) = official_seen.recv().await.unwrap();
+    assert_eq!(headers["chatgpt-account-id"], workspace("b").account_id);
+    rebound.stop().await;
+    let stored = String::from_utf8_lossy(&std::fs::read(database).unwrap()).into_owned();
+    for secret in [
+        "synthetic-prior-state",
+        "synthetic-prior-hint",
+        LOCAL_TOKEN,
+        "synthetic-refresh-a-original",
+        "synthetic-refresh-b-original",
+    ] {
+        assert!(!stored.contains(secret));
     }
     official_task.abort();
     api_task.abort();

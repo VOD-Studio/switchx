@@ -496,6 +496,8 @@ mod tests {
 
     fn provider() -> ProviderRecord {
         ProviderRecord {
+            kind: crate::storage::ProviderKind::ApiKey,
+            account_binding: None,
             id: "test-id".into(),
             name: "Mock Responses".into(),
             base_url: "http://127.0.0.1:12345/v1".into(),

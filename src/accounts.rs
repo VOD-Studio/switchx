@@ -4,6 +4,8 @@
 use std::{
     collections::{BTreeMap, HashMap},
     fs::{self, File, OpenOptions, Permissions},
+    future::Future,
+    net::{IpAddr, Ipv4Addr, SocketAddr},
     path::{Path, PathBuf},
     sync::{Arc, Mutex},
     time::Duration,
@@ -13,10 +15,10 @@ use base64::{Engine, engine::general_purpose::URL_SAFE_NO_PAD};
 use chrono::{DateTime, SecondsFormat, Utc};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
-use tokio::sync::{Mutex as AsyncMutex, watch};
+use tokio::sync::{Mutex as AsyncMutex, oneshot, watch};
 use zeroize::Zeroize;
 
-use crate::{app, config_transaction as files, credentials::Secret};
+use crate::{app, config_transaction as files, credentials::Secret, storage::AccountBinding};
 
 const STORE_NAME: &str = "codex_oauth_auth.json";
 const MARKER_NAME: &str = ".switchx-account.json";
@@ -24,6 +26,7 @@ const CLIENT_ID: &str = "app_EMoamEEZ73f0CkXaXp7hrann";
 const REDIRECT_URI: &str = "https://auth.openai.com/deviceauth/callback";
 const MAX_BYTES: usize = 1024 * 1024;
 const REFRESH_BUFFER_MS: i64 = 60_000;
+const REFRESH_TIMEOUT: Duration = Duration::from_secs(30);
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct AccountInfo {
@@ -46,7 +49,7 @@ struct Inner {
     path: PathBuf,
     state: Mutex<State>,
     // ponytail: one operation at a time; use per-account locks if throughput matters.
-    operation: AsyncMutex<()>,
+    operation: Arc<AsyncMutex<()>>,
     client: reqwest::Client,
     endpoints: Endpoints,
 }
@@ -130,6 +133,44 @@ struct StoreSession {
     expected: Option<Vec<u8>>,
 }
 
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum CredentialUse {
+    Native,
+    Preview,
+}
+
+struct CancelOnDrop(watch::Sender<bool>);
+
+impl Drop for CancelOnDrop {
+    fn drop(&mut self) {
+        self.0.send_replace(true);
+    }
+}
+
+struct PrivateCliHome(PathBuf);
+
+impl PrivateCliHome {
+    fn new() -> Result<Self, String> {
+        let path = std::env::temp_dir().join(format!("switchx-account-context-{}", app::new_id()?));
+        let mut builder = fs::DirBuilder::new();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::DirBuilderExt;
+            builder.mode(0o700);
+        }
+        builder
+            .create(&path)
+            .map_err(|_| "无法创建私有账号检查目录")?;
+        Ok(Self(path))
+    }
+}
+
+impl Drop for PrivateCliHome {
+    fn drop(&mut self) {
+        let _ = fs::remove_dir_all(&self.0);
+    }
+}
+
 enum RefreshFailure {
     Rejected,
     Other(String),
@@ -209,8 +250,9 @@ impl AccountManager {
         Self::open_with_endpoints(data_dir, Endpoints::default())
     }
 
-    #[cfg(test)]
-    pub(crate) fn open_mock(data_dir: &Path, origin: &str) -> Result<Self, String> {
+    /// Synthetic local probes only; the product always uses the official endpoints.
+    #[doc(hidden)]
+    pub fn open_mock(data_dir: &Path, origin: &str) -> Result<Self, String> {
         let url = reqwest::Url::parse(origin).map_err(|_| "账号测试地址无效")?;
         if url.scheme() != "http"
             || url.host_str() != Some("127.0.0.1")
@@ -236,7 +278,7 @@ impl AccountManager {
         let path = data_dir.join(STORE_NAME);
         let store = decode_store(read_private(&path)?.as_deref())?;
         let client = reqwest::Client::builder()
-            .timeout(Duration::from_secs(30))
+            .timeout(REFRESH_TIMEOUT)
             .redirect(reqwest::redirect::Policy::none())
             .user_agent("switchx-codex-oauth")
             .build()
@@ -247,7 +289,7 @@ impl AccountManager {
                 store,
                 access: HashMap::new(),
             }),
-            operation: AsyncMutex::new(()),
+            operation: Arc::new(AsyncMutex::new(())),
             client,
             endpoints,
         })))
@@ -280,6 +322,65 @@ impl AccountManager {
             .store
             .default_account_id
             .clone())
+    }
+
+    /// Resolve a provider's choice against the latest account file, not an old UI cache.
+    pub async fn resolve_binding(
+        &self,
+        binding: &AccountBinding,
+    ) -> Result<Option<AccountInfo>, String> {
+        if *binding == AccountBinding::Native {
+            return Ok(None);
+        }
+        let _operation = self.0.operation.lock().await;
+        let (_store_lock, session) = self.begin()?;
+        let id = match binding {
+            AccountBinding::Native => return Ok(None),
+            AccountBinding::Default => session
+                .state
+                .store
+                .default_account_id
+                .as_deref()
+                .ok_or("尚未保存默认 ChatGPT 账号，请添加或选择账号")?,
+            AccountBinding::Fixed(id) => id,
+        };
+        Ok(Some(info(
+            account(&session.state.store, id)?,
+            &session.state.store,
+        )))
+    }
+
+    /// Wait after pausing new work so an already submitted refresh can save its rotation.
+    pub async fn wait_for_idle(&self) -> Result<(), String> {
+        let _operation = self.0.operation.lock().await;
+        Ok(())
+    }
+
+    async fn owned_operation<T, F, Fut>(&self, work: F) -> Result<T, String>
+    where
+        T: Send + 'static,
+        F: FnOnce(Self, watch::Receiver<bool>) -> Fut + Send + 'static,
+        Fut: Future<Output = Result<T, String>> + Send + 'static,
+    {
+        // Waiting for this lock is cancellable. Once submitted, the task owns the
+        // lock until any refresh response has been validated and saved.
+        let operation = self.0.operation.clone().lock_owned().await;
+        let (cancel, receiver) = watch::channel(false);
+        let cancel = CancelOnDrop(cancel);
+        let (sender, result) = oneshot::channel();
+        let manager = self.clone();
+        tokio::spawn(async move {
+            let _operation = operation;
+            let result = if *receiver.borrow() {
+                Err("账号操作已取消".into())
+            } else {
+                work(manager, receiver).await
+            };
+            let _ = sender.send(result);
+        });
+        let result = result.await.map_err(|_| "账号操作未完成，请检查账号状态")?;
+        drop(cancel);
+        result
     }
 
     pub fn set_default(&self, id: &str) -> Result<(), String> {
@@ -384,7 +485,20 @@ impl AccountManager {
     }
 
     pub async fn activate(&self, id: &str, home: &Path) -> Result<(), String> {
-        let _operation = self.0.operation.lock().await;
+        let id = id.to_owned();
+        let home = home.to_path_buf();
+        self.owned_operation(move |manager, cancel| async move {
+            manager.activate_inner(&id, &home, &cancel).await
+        })
+        .await
+    }
+
+    async fn activate_inner(
+        &self,
+        id: &str,
+        home: &Path,
+        cancel: &watch::Receiver<bool>,
+    ) -> Result<(), String> {
         let (_store_lock, mut session) = self.begin()?;
         account(&session.state.store, id)?;
         ensure_directory(home)?;
@@ -403,8 +517,11 @@ impl AccountManager {
             self.sync_snapshot(&mut session, &snapshot)?;
         }
         let token = self
-            .resolve_token(&mut session, id, home, &mut snapshot, false)
+            .resolve_token(&mut session, id, home, &mut snapshot, false, cancel)
             .await?;
+        if *cancel.borrow() {
+            return Err("账号操作已取消；已完成的续期保留在账号存储中".into());
+        }
         let target = account(&session.state.store, id)?;
         let auth_bytes = auth_bytes(target, &token)?;
         let config_path = home.join("config.toml");
@@ -435,11 +552,51 @@ impl AccountManager {
     }
 
     pub async fn credential(&self, id: &str, home: &Path) -> Result<ManagedCredential, String> {
-        self.credential_inner(id, home, false).await
+        self.credential_operation(id, home, false, CredentialUse::Native)
+            .await
     }
 
     pub async fn refresh(&self, id: &str, home: &Path) -> Result<(), String> {
-        self.credential_inner(id, home, true).await.map(|_| ())
+        self.credential_operation(id, home, true, CredentialUse::Native)
+            .await
+            .map(|_| ())
+    }
+
+    /// Preparation can adopt this account's native renewal but never writes the native home.
+    pub async fn credential_for_route(
+        &self,
+        id: &str,
+        native_home: &Path,
+    ) -> Result<ManagedCredential, String> {
+        self.credential_operation(id, native_home, false, CredentialUse::Preview)
+            .await
+    }
+
+    /// Runtime renewal updates native auth only while its exact ownership and bytes still match.
+    pub async fn credential_for_route_with_native_sync(
+        &self,
+        id: &str,
+        native_home: &Path,
+    ) -> Result<ManagedCredential, String> {
+        self.credential_operation(id, native_home, false, CredentialUse::Native)
+            .await
+    }
+
+    async fn credential_operation(
+        &self,
+        id: &str,
+        home: &Path,
+        force: bool,
+        usage: CredentialUse,
+    ) -> Result<ManagedCredential, String> {
+        let id = id.to_owned();
+        let home = home.to_path_buf();
+        self.owned_operation(move |manager, cancel| async move {
+            manager
+                .credential_inner(&id, &home, force, usage, &cancel)
+                .await
+        })
+        .await
     }
 
     async fn credential_inner(
@@ -447,21 +604,56 @@ impl AccountManager {
         id: &str,
         home: &Path,
         force: bool,
+        usage: CredentialUse,
+        cancel: &watch::Receiver<bool>,
     ) -> Result<ManagedCredential, String> {
-        let _operation = self.0.operation.lock().await;
         let (_store_lock, mut session) = self.begin()?;
         account(&session.state.store, id)?;
-        ensure_directory(home)?;
-        let _home_lock = files::lock_config(&home.join("config.toml"))?;
+        if usage == CredentialUse::Native {
+            ensure_directory(home)?;
+        } else if !home.is_absolute()
+            || !fs::symlink_metadata(home)
+                .is_ok_and(|metadata| metadata.is_dir() && !metadata.file_type().is_symlink())
+        {
+            return Err("Codex 配置目录必须是存在的绝对路径普通目录".into());
+        }
+        let _home_lock = if usage == CredentialUse::Native {
+            Some(files::lock_config(&home.join("config.toml"))?)
+        } else {
+            None
+        };
         let mut snapshot = read_home(home, &session.state.store)?;
-        self.sync_snapshot(&mut session, &snapshot)?;
+        if usage == CredentialUse::Preview
+            && snapshot.live.as_ref().is_some_and(|live| {
+                matches_identity(&session.state.store.accounts[id], &live.identity)
+                    && token_expiry(&live.access_token).is_none_or(|expiry| {
+                        expiry <= Utc::now().timestamp_millis() + REFRESH_BUFFER_MS
+                    })
+            })
+        {
+            return Err(
+                "原生登录与绑定账号共用凭据且需要续期或同步；请先检查并续期原生登录，再重新预览"
+                    .into(),
+            );
+        }
+        if snapshot.active_id.as_deref() == Some(id) {
+            self.sync_snapshot(&mut session, &snapshot)?;
+        }
+        if usage == CredentialUse::Preview {
+            self.guard_native_preview(&mut session, id, &snapshot)?;
+        }
         let token = self
-            .resolve_token(&mut session, id, home, &mut snapshot, force)
+            .resolve_token(&mut session, id, home, &mut snapshot, force, cancel)
             .await?;
         let target = account(&session.state.store, id)?;
-        if snapshot.active_id.as_deref() == Some(id) {
+        if usage == CredentialUse::Native && snapshot.active_id.as_deref() == Some(id) {
             let bytes = auth_bytes(target, &token)?;
-            if snapshot.auth.as_deref() != Some(bytes.as_slice()) {
+            let current = read_home(home, &session.state.store)?;
+            if current.active_id.as_deref() == Some(id)
+                && current.auth == snapshot.auth
+                && current.marker_bytes == snapshot.marker_bytes
+                && snapshot.auth.as_deref() != Some(bytes.as_slice())
+            {
                 private_replace(&home.join("auth.json"), &bytes, &snapshot.auth)?;
             }
         }
@@ -469,6 +661,136 @@ impl AccountManager {
             access_token: Secret::new(token.value.clone()),
             workspace_id: target.workspace_id.clone(),
         })
+    }
+
+    fn guard_native_preview(
+        &self,
+        session: &mut StoreSession,
+        id: &str,
+        snapshot: &HomeSnapshot,
+    ) -> Result<(), String> {
+        let stored = account(&session.state.store, id)?;
+        let Some(live) = snapshot
+            .live
+            .as_ref()
+            .filter(|live| matches_identity(stored, &live.identity))
+        else {
+            return Ok(());
+        };
+        // An entry login can share a bundle with this bound account. Preparing
+        // must not rotate it behind an unchanged native auth.json.
+        if live.refresh_token != stored.refresh_token
+            || live.id_token != stored.id_token
+            || token_expiry(&live.access_token)
+                .is_none_or(|expiry| expiry <= Utc::now().timestamp_millis() + REFRESH_BUFFER_MS)
+        {
+            return Err(
+                "原生登录与绑定账号共用凭据且需要续期或同步；请先检查并续期原生登录，再重新预览"
+                    .into(),
+            );
+        }
+        cache_live(&mut session.state, id, live);
+        self.publish(&session.state)
+    }
+
+    /// Discover the selected account's official destination without activating it in Codex.
+    pub async fn workspace_for_route(
+        &self,
+        id: &str,
+        native_home: &Path,
+        cli_path: &Path,
+    ) -> Result<crate::chatgpt::Workspace, String> {
+        self.workspace_operation(id, native_home, cli_path, None)
+            .await
+    }
+
+    /// Synthetic probes only. The returned workspace still passes official HTTPS validation.
+    #[doc(hidden)]
+    pub async fn workspace_for_route_mock(
+        &self,
+        id: &str,
+        native_home: &Path,
+        cli_path: &Path,
+        discovery_address: SocketAddr,
+    ) -> Result<crate::chatgpt::Workspace, String> {
+        if discovery_address.ip() != IpAddr::V4(Ipv4Addr::LOCALHOST) {
+            return Err("账号测试发现地址必须是 IPv4 回环地址".into());
+        }
+        self.workspace_operation(id, native_home, cli_path, Some(discovery_address))
+            .await
+    }
+
+    async fn workspace_operation(
+        &self,
+        id: &str,
+        native_home: &Path,
+        cli_path: &Path,
+        discovery_address: Option<SocketAddr>,
+    ) -> Result<crate::chatgpt::Workspace, String> {
+        if !cli_path.is_absolute() || !cli_path.is_file() {
+            return Err("Codex CLI 必须是存在的绝对路径文件".into());
+        }
+        let id = id.to_owned();
+        let native_home = native_home.to_path_buf();
+        let cli_path = cli_path.to_path_buf();
+        self.owned_operation(move |manager, mut cancel| async move {
+            let native_before = read_private(&native_home.join("auth.json"))?;
+            let credential = manager
+                .credential_inner(&id, &native_home, false, CredentialUse::Preview, &cancel)
+                .await?;
+            if *cancel.borrow() {
+                return Err("账号检查已取消；已完成的续期保留在账号存储中".into());
+            }
+            let context = PrivateCliHome::new()?;
+            {
+                let (_store_lock, session) = manager.begin()?;
+                let stored = account(&session.state.store, &id)?;
+                let token = session
+                    .state
+                    .access
+                    .get(&id)
+                    .ok_or("账号检查缺少登录缓存")?;
+                private_replace(
+                    &context.0.join("auth.json"),
+                    &auth_bytes(stored, token)?,
+                    &None,
+                )?;
+                write_marker(&context.0, &session.state.store, &id, &None)?;
+            }
+            let mut config = "cli_auth_credentials_store = \"file\"\n".to_owned();
+            if let Some(address) = discovery_address {
+                config.push_str(&format!("chatgpt_base_url = \"http://{address}\"\n"));
+            }
+            private_replace(&context.0.join("config.toml"), config.as_bytes(), &None)?;
+            let discovered = tokio::select! {
+                biased;
+                _ = cancel.wait_for(|value| *value) => Err("账号检查已取消".to_owned()),
+                result = crate::chatgpt::workspace_using(&context.0, &cli_path) => result,
+            };
+            // A CLI can renew during account/read. Adopt only this temporary
+            // home's proven identity before its token-bearing files are removed.
+            {
+                let (_store_lock, mut session) = manager.begin()?;
+                let snapshot = read_home(&context.0, &session.state.store)?;
+                if snapshot.active_id.as_deref() != Some(&id) {
+                    return Err("账号检查期间临时登录身份已变化，请重新检查".into());
+                }
+                manager.sync_snapshot(&mut session, &snapshot)?;
+                let native = read_home(&native_home, &session.state.store)?;
+                manager.guard_native_preview(&mut session, &id, &native)?;
+            }
+            if read_private(&native_home.join("auth.json"))? != native_before {
+                return Err("原生登录在账号检查期间已变化，请重新预览".into());
+            }
+            let workspace =
+                discovered?.ok_or("当前 Codex CLI 未返回该账号的工作区路由资料，请更新 CLI")?;
+            workspace.validate()?;
+            if workspace.account_id != credential.workspace_id {
+                return Err("账号与发现的工作区不一致，请重新检查".into());
+            }
+            Ok(workspace)
+        })
+        .await
     }
 
     pub async fn remove(&self, id: &str, home: &Path) -> Result<(), String> {
@@ -646,6 +968,7 @@ impl AccountManager {
         home: &Path,
         snapshot: &mut HomeSnapshot,
         force: bool,
+        cancel: &watch::Receiver<bool>,
     ) -> Result<CachedToken, String> {
         let mut stored = account(&session.state.store, id)?.clone();
         if !force
@@ -654,7 +977,11 @@ impl AccountManager {
         {
             return Ok(cached.clone());
         }
-        let tokens = match self.refresh_tokens(&stored.refresh_token).await {
+        if *cancel.borrow() {
+            return Err("账号操作已取消".into());
+        }
+        let deadline = tokio::time::Instant::now() + REFRESH_TIMEOUT;
+        let tokens = match self.refresh_tokens(&stored.refresh_token, deadline).await {
             Ok(tokens) => tokens,
             Err(RefreshFailure::Other(error)) => return Err(error),
             Err(RefreshFailure::Rejected) => {
@@ -677,12 +1004,15 @@ impl AccountManager {
                 }
                 stored = next;
                 *snapshot = latest;
-                self.refresh_tokens(&stored.refresh_token).await.map_err(
-                    |failure| match failure {
+                if *cancel.borrow() {
+                    return Err("账号操作已取消；已采纳原生客户端的新凭据".into());
+                }
+                self.refresh_tokens(&stored.refresh_token, deadline)
+                    .await
+                    .map_err(|failure| match failure {
                         RefreshFailure::Other(error) => error,
                         RefreshFailure::Rejected => "ChatGPT 账号续期失败；请重新登录该账号".into(),
-                    },
-                )?
+                    })?
             }
         };
         validate_secret(&tokens.access_token)?;
@@ -707,12 +1037,15 @@ impl AccountManager {
             // Do not publish a response for the old native generation. Saving
             // it first could make a newer CLI token look older on the next sync.
             let latest = read_home(home, &session.state.store)?;
-            if latest.active_id.as_deref() == Some(id)
-                && let Some(live) = latest.live.as_ref()
-            {
-                self.adopt_live(session, id, live, true)?;
+            if latest.active_id.as_deref() == Some(id) {
+                if let Some(live) = latest.live.as_ref() {
+                    self.adopt_live(session, id, live, true)?;
+                }
+                return Err("Codex 登录在续期期间已变化，旧续期响应已丢弃，请重试".into());
             }
-            return Err("Codex 登录在续期期间已变化，旧续期响应已丢弃，请重试".into());
+            // A different native login does not own this verified rotation.
+            // Save it for the bound account without touching the foreign login.
+            *snapshot = latest;
         }
         let now = Utc::now()
             .timestamp_millis()
@@ -725,6 +1058,7 @@ impl AccountManager {
             .ok_or("所选 ChatGPT 账号已删除")?;
         current.refresh_token = next_refresh.to_owned();
         current.id_token = next_id.to_owned();
+        current.label = identity.label;
         current.token_updated_at_ms = now;
         let cached = CachedToken {
             value: tokens.access_token.clone(),
@@ -741,11 +1075,22 @@ impl AccountManager {
         Ok(cached)
     }
 
-    async fn refresh_tokens(&self, refresh: &str) -> Result<TokenReply, RefreshFailure> {
+    async fn refresh_tokens(
+        &self,
+        refresh: &str,
+        deadline: tokio::time::Instant,
+    ) -> Result<TokenReply, RefreshFailure> {
+        let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
+        if remaining.is_zero() {
+            return Err(RefreshFailure::Other(
+                "ChatGPT 账号续期超时，请稍后重试".into(),
+            ));
+        }
         let response = self
             .0
             .client
             .post(&self.0.endpoints.token)
+            .timeout(remaining)
             .header("Content-Type", "application/x-www-form-urlencoded")
             .body(form_body(&[
                 ("grant_type", "refresh_token"),
@@ -1368,6 +1713,442 @@ mod tests {
         fn drop(&mut self) {
             self.task.abort();
         }
+    }
+
+    #[tokio::test]
+    async fn provider_bindings_resolve_latest_default_and_deleted_fixed_accounts() {
+        let home = TestHome::new();
+        let manager = AccountManager::open(&home.data()).unwrap();
+        home.seed("user-a", "workspace-a", "synthetic-a", 1_700_000_000_000);
+        let a = manager.import_current(&home.home()).unwrap();
+        home.seed("user-b", "workspace-b", "synthetic-b", 1_700_000_001_000);
+        let b = manager.import_current(&home.home()).unwrap();
+        let stale = AccountManager::open(&home.data()).unwrap();
+        manager.set_default(&b.id).unwrap();
+        assert!(
+            stale
+                .resolve_binding(&AccountBinding::Native)
+                .await
+                .unwrap()
+                .is_none()
+        );
+        assert_eq!(
+            stale
+                .resolve_binding(&AccountBinding::Default)
+                .await
+                .unwrap()
+                .unwrap()
+                .id,
+            b.id
+        );
+        assert_eq!(
+            stale
+                .resolve_binding(&AccountBinding::Fixed(a.id.clone()))
+                .await
+                .unwrap()
+                .unwrap()
+                .id,
+            a.id
+        );
+        manager.remove(&a.id, &home.home()).await.unwrap();
+        assert!(
+            stale
+                .resolve_binding(&AccountBinding::Fixed(a.id))
+                .await
+                .unwrap_err()
+                .contains("已删除")
+        );
+        assert_eq!(
+            fs::read(home.home().join("auth.json")).unwrap(),
+            synthetic_auth("user-b", "workspace-b", "synthetic-b", 1_700_000_001_000)
+        );
+    }
+
+    #[tokio::test]
+    async fn route_preparation_is_native_read_only_and_refuses_shared_bundle_refresh() {
+        let home = TestHome::new();
+        let calls = Arc::new(AtomicUsize::new(0));
+        let server = MockServer::new(Router::new().route(
+            "/token",
+            post({
+                let calls = calls.clone();
+                move || {
+                    let calls = calls.clone();
+                    async move {
+                        calls.fetch_add(1, Ordering::SeqCst);
+                        Json(token_reply(
+                            "user-a",
+                            "workspace-a",
+                            "synthetic-refreshed-a",
+                        ))
+                    }
+                }
+            }),
+        ))
+        .await;
+        let manager =
+            AccountManager::open_with_endpoints(&home.data(), server.endpoints.clone()).unwrap();
+        home.seed("user-a", "workspace-a", "synthetic-a", 1_700_000_000_000);
+        let a = manager.import_current(&home.home()).unwrap();
+        home.seed("user-c", "workspace-c", "synthetic-c", 1_700_000_001_000);
+        let config = b"# unchanged target\ncli_auth_credentials_store = \"file\"\n";
+        fs::write(home.home().join("config.toml"), config).unwrap();
+        let native = fs::read(home.home().join("auth.json")).unwrap();
+        let marker = fs::read(home.home().join(MARKER_NAME)).unwrap();
+        let mut files_before: Vec<_> = fs::read_dir(home.home())
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name())
+            .collect();
+        files_before.sort();
+        // Opening anew loses the in-memory A token and forces only A's saved bundle to refresh.
+        let manager =
+            AccountManager::open_with_endpoints(&home.data(), server.endpoints.clone()).unwrap();
+        let credential = manager
+            .credential_for_route(&a.id, &home.home())
+            .await
+            .unwrap();
+        assert_eq!(
+            credential.access_token.expose(),
+            access_token("synthetic-refreshed-a")
+        );
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+        assert_eq!(fs::read(home.home().join("auth.json")).unwrap(), native);
+        assert_eq!(fs::read(home.home().join(MARKER_NAME)).unwrap(), marker);
+        assert_eq!(fs::read(home.home().join("config.toml")).unwrap(), config);
+        let mut files_after: Vec<_> = fs::read_dir(home.home())
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name())
+            .collect();
+        files_after.sort();
+        assert_eq!(files_after, files_before);
+
+        // Restore the same account as native, with an expired access token. Preparing
+        // must ask for explicit native renewal rather than rotate shared credentials.
+        let mut expired: Value = serde_json::from_slice(&synthetic_auth(
+            "user-a",
+            "workspace-a",
+            "synthetic-refreshed-a",
+            Utc::now().timestamp_millis(),
+        ))
+        .unwrap();
+        expired["tokens"]["access_token"] = jwt(json!({"exp":1})).into();
+        let expired = serde_json::to_vec(&expired).unwrap();
+        fs::write(home.home().join("auth.json"), &expired).unwrap();
+        let stored = fs::read(home.data().join(STORE_NAME)).unwrap();
+        let error = manager
+            .credential_for_route(&a.id, &home.home())
+            .await
+            .unwrap_err();
+        assert!(error.contains("请先检查并续期原生登录"));
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+        assert_eq!(fs::read(home.home().join("auth.json")).unwrap(), expired);
+        assert_eq!(fs::read(home.data().join(STORE_NAME)).unwrap(), stored);
+    }
+
+    #[tokio::test]
+    async fn canceled_waiters_keep_submitted_rotation_and_cancel_queued_work() {
+        let home = TestHome::new();
+        let started = Arc::new(Notify::new());
+        let release = Arc::new(Notify::new());
+        let calls = Arc::new(AtomicUsize::new(0));
+        let server = MockServer::new(Router::new().route(
+            "/token",
+            post({
+                let started = started.clone();
+                let release = release.clone();
+                let calls = calls.clone();
+                move || {
+                    let started = started.clone();
+                    let release = release.clone();
+                    let calls = calls.clone();
+                    async move {
+                        calls.fetch_add(1, Ordering::SeqCst);
+                        started.notify_one();
+                        release.notified().await;
+                        Json(token_reply(
+                            "user-a",
+                            "workspace-a",
+                            "synthetic-owned-rotation",
+                        ))
+                    }
+                }
+            }),
+        ))
+        .await;
+        let manager =
+            AccountManager::open_with_endpoints(&home.data(), server.endpoints.clone()).unwrap();
+        home.seed("user-a", "workspace-a", "synthetic-old", 1_700_000_000_000);
+        let a = manager.import_current(&home.home()).unwrap();
+        let waiter = tokio::spawn({
+            let manager = manager.clone();
+            let id = a.id.clone();
+            let native = home.home();
+            async move { manager.refresh(&id, &native).await }
+        });
+        tokio::time::timeout(Duration::from_secs(2), started.notified())
+            .await
+            .unwrap();
+        let queued = tokio::spawn({
+            let manager = manager.clone();
+            let id = a.id.clone();
+            let native = home.home();
+            async move { manager.refresh(&id, &native).await }
+        });
+        tokio::task::yield_now().await;
+        queued.abort();
+        assert!(queued.await.unwrap_err().is_cancelled());
+        waiter.abort();
+        assert!(waiter.await.unwrap_err().is_cancelled());
+        let mut idle = tokio::spawn({
+            let manager = manager.clone();
+            async move { manager.wait_for_idle().await }
+        });
+        assert!(
+            tokio::time::timeout(Duration::from_millis(20), &mut idle)
+                .await
+                .is_err()
+        );
+        release.notify_one();
+        tokio::time::timeout(Duration::from_secs(2), idle)
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap();
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+        let native: Value =
+            serde_json::from_slice(&fs::read(home.home().join("auth.json")).unwrap()).unwrap();
+        assert_eq!(
+            native["tokens"]["refresh_token"],
+            "synthetic-owned-rotation"
+        );
+        assert!(
+            fs::read_to_string(home.data().join(STORE_NAME))
+                .unwrap()
+                .contains("synthetic-owned-rotation")
+        );
+    }
+
+    #[tokio::test]
+    async fn cancellation_before_owned_task_starts_submits_no_refresh() {
+        let home = TestHome::new();
+        let calls = Arc::new(AtomicUsize::new(0));
+        let server = MockServer::new(Router::new().route(
+            "/token",
+            post({
+                let calls = calls.clone();
+                move || {
+                    let calls = calls.clone();
+                    async move {
+                        calls.fetch_add(1, Ordering::SeqCst);
+                        Json(token_reply(
+                            "user-a",
+                            "workspace-a",
+                            "synthetic-must-not-send",
+                        ))
+                    }
+                }
+            }),
+        ))
+        .await;
+        let manager =
+            AccountManager::open_with_endpoints(&home.data(), server.endpoints.clone()).unwrap();
+        home.seed("user-a", "workspace-a", "synthetic-old", 1_700_000_000_000);
+        let a = manager.import_current(&home.home()).unwrap();
+        let before = fs::read(home.data().join(STORE_NAME)).unwrap();
+        let native = home.home();
+        let mut future = Box::pin(manager.refresh(&a.id, &native));
+        assert!(futures_util::poll!(future.as_mut()).is_pending());
+        drop(future);
+        manager.wait_for_idle().await.unwrap();
+        assert_eq!(calls.load(Ordering::SeqCst), 0);
+        assert_eq!(fs::read(home.data().join(STORE_NAME)).unwrap(), before);
+    }
+
+    #[cfg(unix)]
+    fn workspace_cli(
+        home: &TestHome,
+        origin: &str,
+        override_account: Option<&str>,
+    ) -> (PathBuf, PathBuf) {
+        use std::os::unix::fs::PermissionsExt;
+        let path = home
+            .0
+            .join(format!("workspace-cli-{}", app::new_id().unwrap()));
+        let capture = home
+            .0
+            .join(format!("workspace-capture-{}", app::new_id().unwrap()));
+        let script = r#"#!/usr/bin/python3
+import json, os, pathlib, stat, sys
+for line in sys.stdin:
+    request = json.loads(line)
+    if 'id' not in request:
+        continue
+    result = {}
+    if request['method'] == 'account/read':
+        assert request['params']['refreshToken'] is False
+        home = pathlib.Path(os.environ['CODEX_HOME'])
+        account = json.loads((home / 'auth.json').read_text())['tokens']['account_id']
+        capture = pathlib.Path(__CAPTURE__)
+        staging = capture.with_suffix('.tmp')
+        staging.write_text(json.dumps({'home': str(home), 'workspace': account,
+            'directory_mode': stat.S_IMODE(home.stat().st_mode),
+            'auth_mode': stat.S_IMODE((home / 'auth.json').stat().st_mode),
+            'config': (home / 'config.toml').read_text(),
+            'credentials_in_environment': any(os.environ.get(key) for key in ['OPENAI_API_KEY', 'CODEX_API_KEY', 'CODEX_ACCESS_TOKEN', 'OPENAI_BASE_URL'])}))
+        staging.replace(capture)
+        result = {'account': {'type': 'chatgpt'}, 'workspaceRouting': {
+            'chatgptAccountId': __ACCOUNT__ or account, 'backendOrigin': __ORIGIN__, 'accountRoutingOverride': 'us'}}
+    print(json.dumps({'id': request['id'], 'result': result}), flush=True)
+"#
+            .replace("__CAPTURE__", &serde_json::to_string(capture.to_str().unwrap()).unwrap())
+            .replace("__ACCOUNT__", &override_account.map(|id| serde_json::to_string(id).unwrap()).unwrap_or("None".into()))
+            .replace("__ORIGIN__", &serde_json::to_string(origin).unwrap());
+        fs::write(&path, script).unwrap();
+        fs::set_permissions(&path, Permissions::from_mode(0o700)).unwrap();
+        (path, capture)
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn workspace_discovery_uses_private_account_context_and_validates_destination() {
+        let home = TestHome::new();
+        let manager = AccountManager::open(&home.data()).unwrap();
+        home.seed("user-a", "workspace-a", "synthetic-a", 1_700_000_000_000);
+        let a = manager.import_current(&home.home()).unwrap();
+        home.seed("user-c", "workspace-c", "synthetic-c", 1_700_000_001_000);
+        let native = fs::read(home.home().join("auth.json")).unwrap();
+        let marker = fs::read(home.home().join(MARKER_NAME)).unwrap();
+        let config = b"# original native configuration\n";
+        fs::write(home.home().join("config.toml"), config).unwrap();
+        for (origin, account, valid) in [
+            ("https://us.chatgpt.com", None, true),
+            ("https://chatgpt.com.evil.invalid", None, false),
+            ("https://us.chatgpt.com", Some("workspace-wrong"), false),
+        ] {
+            let (cli, capture) = workspace_cli(&home, origin, account);
+            let result = manager.workspace_for_route(&a.id, &home.home(), &cli).await;
+            assert_eq!(result.is_ok(), valid);
+            if let Ok(workspace) = result {
+                assert_eq!(workspace.account_id, "workspace-a");
+                assert_eq!(workspace.backend_origin, "https://us.chatgpt.com");
+                assert_eq!(workspace.routing_override, "us");
+            }
+            let capture: Value = serde_json::from_slice(&fs::read(capture).unwrap()).unwrap();
+            assert_eq!(capture["workspace"], "workspace-a");
+            assert_eq!(capture["directory_mode"], 0o700);
+            assert_eq!(capture["auth_mode"], 0o600);
+            assert_eq!(capture["config"], "cli_auth_credentials_store = \"file\"\n");
+            assert_eq!(capture["credentials_in_environment"], false);
+            assert!(!Path::new(capture["home"].as_str().unwrap()).exists());
+            assert_eq!(fs::read(home.home().join("auth.json")).unwrap(), native);
+            assert_eq!(fs::read(home.home().join(MARKER_NAME)).unwrap(), marker);
+            assert_eq!(fs::read(home.home().join("config.toml")).unwrap(), config);
+        }
+        assert!(
+            manager
+                .workspace_for_route_mock(
+                    &a.id,
+                    &home.home(),
+                    &workspace_cli(&home, "https://chatgpt.com", None).0,
+                    "192.0.2.1:1234".parse().unwrap()
+                )
+                .await
+                .is_err()
+        );
+        assert!(AccountManager::open_mock(&home.data(), "https://auth.openai.com").is_err());
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn canceled_workspace_discovery_cleans_private_context_before_idle() {
+        let home = TestHome::new();
+        let manager = AccountManager::open(&home.data()).unwrap();
+        home.seed("user-a", "workspace-a", "synthetic-a", 1_700_000_000_000);
+        let a = manager.import_current(&home.home()).unwrap();
+        home.seed("user-c", "workspace-c", "synthetic-c", 1_700_000_001_000);
+        let native = fs::read(home.home().join("auth.json")).unwrap();
+        let (cli, capture) = workspace_cli(&home, "https://chatgpt.com", None);
+        let script = fs::read_to_string(&cli).unwrap().replace(
+            "    print(json.dumps",
+            "    if request['method'] == 'account/read':\n        import time\n        time.sleep(60)\n    print(json.dumps",
+        );
+        fs::write(&cli, script).unwrap();
+        let waiter = tokio::spawn({
+            let manager = manager.clone();
+            let native_home = home.home();
+            async move { manager.workspace_for_route(&a.id, &native_home, &cli).await }
+        });
+        tokio::time::timeout(Duration::from_secs(2), async {
+            while !capture.exists() {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .unwrap();
+        let capture: Value = serde_json::from_slice(&fs::read(capture).unwrap()).unwrap();
+        waiter.abort();
+        assert!(waiter.await.unwrap_err().is_cancelled());
+        tokio::time::timeout(Duration::from_secs(2), manager.wait_for_idle())
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(!Path::new(capture["home"].as_str().unwrap()).exists());
+        assert_eq!(fs::read(home.home().join("auth.json")).unwrap(), native);
+    }
+
+    #[tokio::test]
+    async fn successful_rotation_keeps_foreign_native_login_and_saves_bound_account() {
+        let home = TestHome::new();
+        let now = Utc::now().timestamp_millis();
+        let foreign = synthetic_auth("user-c", "workspace-c", "synthetic-foreign-c", now);
+        let server = MockServer::new(Router::new().route(
+            "/token",
+            post({
+                let native_home = home.home();
+                let foreign = foreign.clone();
+                move || {
+                    let native_home = native_home.clone();
+                    let foreign = foreign.clone();
+                    async move {
+                        fs::write(native_home.join("auth.json"), foreign).unwrap();
+                        let mut reply =
+                            token_reply("user-a", "workspace-a", "synthetic-verified-a");
+                        reply["id_token"] = jwt(
+                            json!({"sub":"user-a", "email":"updated-label@example.invalid",
+                            "https://api.openai.com/auth":{"chatgpt_account_id":"workspace-a"}}),
+                        )
+                        .into();
+                        Json(reply)
+                    }
+                }
+            }),
+        ))
+        .await;
+        let manager =
+            AccountManager::open_with_endpoints(&home.data(), server.endpoints.clone()).unwrap();
+        home.seed("user-a", "workspace-a", "synthetic-old-a", now - 10_000);
+        let a = manager.import_current(&home.home()).unwrap();
+        manager.refresh(&a.id, &home.home()).await.unwrap();
+        assert_eq!(fs::read(home.home().join("auth.json")).unwrap(), foreign);
+        let stored = fs::read_to_string(home.data().join(STORE_NAME)).unwrap();
+        assert!(stored.contains("synthetic-verified-a"));
+        assert!(!stored.contains("synthetic-foreign-c"));
+        let reopened = AccountManager::open(&home.data()).unwrap();
+        assert_eq!(reopened.list().unwrap()[0].id, a.id);
+        assert_eq!(
+            reopened.list().unwrap()[0].label,
+            "updated-label@example.invalid"
+        );
+        assert_eq!(
+            manager
+                .credential_for_route_with_native_sync(&a.id, &home.home())
+                .await
+                .unwrap()
+                .access_token
+                .expose(),
+            access_token("synthetic-verified-a")
+        );
+        assert_eq!(fs::read(home.home().join("auth.json")).unwrap(), foreign);
     }
 
     #[tokio::test]

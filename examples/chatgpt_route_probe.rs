@@ -362,6 +362,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         )?;
         let api_id = format!("probe-api-{}", app::new_id()?);
         store.put_provider(&ProviderRecord {
+            kind: switchx::storage::ProviderKind::ApiKey,
+            account_binding: None,
             id: api_id.clone(),
             name: "Synthetic API".into(),
             base_url: "http://127.0.0.1:1/v1".into(),

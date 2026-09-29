@@ -15,7 +15,7 @@ use switchx::{
     direct_config::{self, PreparedDirectSwitch},
     provider_config::{self, CodexOptions},
     routed::RouteSession,
-    storage::{ProviderRecord, Store},
+    storage::{AccountBinding, ProviderKind, ProviderRecord, Store},
 };
 use tokio::sync::{
     mpsc::{self, error::TrySendError},
@@ -37,6 +37,12 @@ enum Command {
     BeginProviderEditor {
         id: String,
         home: String,
+    },
+    BeginSubscriptionEditor(String),
+    SaveSubscription {
+        id: String,
+        name: String,
+        account_id: String,
     },
     OpenCommonConfig(String),
     ExtractCommonConfig(String),
@@ -141,6 +147,17 @@ fn show_result(app: &AppWindow, result: Result<Snapshot, AppError>) {
                     .models
                     .into_iter()
                     .map(|model| ModelRow {
+                        is_subscription: snapshot.providers.iter().any(|provider| {
+                            provider.id == model.provider_id
+                                && provider.kind == ProviderKind::Chatgpt
+                        }),
+                        binding_label: snapshot
+                            .providers
+                            .iter()
+                            .find(|provider| provider.id == model.provider_id)
+                            .map(|provider| provider.binding_label.clone())
+                            .unwrap_or_default()
+                            .into(),
                         provider_id: model.provider_id.into(),
                         provider_name: model.provider_name.into(),
                         upstream_model: model.upstream_model.into(),
@@ -189,6 +206,9 @@ fn show_result(app: &AppWindow, result: Result<Snapshot, AppError>) {
                         base_url: provider.base_url.into(),
                         model_id: provider.model_id.into(),
                         credential_status: provider.credential_status.into(),
+                        is_subscription: provider.kind == ProviderKind::Chatgpt,
+                        binding_label: provider.binding_label.into(),
+                        auth_error: "".into(),
                         preset_id: brand.id,
                         icon: brand.icon,
                         monochrome: brand.monochrome,
@@ -244,40 +264,62 @@ struct AccountView {
     status: String,
 }
 
+fn provider_account_id(provider: &ProviderRecord, default_id: Option<&str>) -> Option<String> {
+    if provider.kind != ProviderKind::Chatgpt {
+        return None;
+    }
+    match &provider.account_binding {
+        Some(AccountBinding::Fixed(id)) => Some(id.clone()),
+        Some(AccountBinding::Default) => default_id.map(str::to_owned),
+        _ => None,
+    }
+}
+
+fn account_provider_names(
+    providers: &[ProviderRecord],
+    account_id: &str,
+    default_id: Option<&str>,
+) -> Vec<String> {
+    providers
+        .iter()
+        .filter(|provider| provider_account_id(provider, default_id).as_deref() == Some(account_id))
+        .map(|provider| provider.name.clone())
+        .collect()
+}
+
 fn account_view(data_dir: &Path, home: &Path) -> Result<AccountView, String> {
     let manager = AccountManager::open(data_dir)?;
     let active = manager.active_id(home)?;
     let accounts = manager.list()?;
-    let binding = chatgpt::account_binding(data_dir)?;
-    let selected = match &binding {
-        Some(id) if id == "default" => manager.default_id()?.unwrap_or_else(|| "default".into()),
-        Some(id) => id.clone(),
-        None => String::new(),
-    };
-    let status = if binding.is_none() {
-        format!(
-            "已保存 {} 个账号 · 跟随此 Codex 目录的当前登录",
-            accounts.len()
-        )
-    } else if !accounts.iter().any(|account| account.id == selected) {
-        "所选账号已移除或默认账号尚未设置，请重新选择账号".into()
-    } else if active.as_ref() != Some(&selected) {
-        "账号选择与此 Codex 目录的登录不一致，请点击“使用账号”".into()
-    } else {
-        format!(
-            "已保存 {} 个账号 · 此 Codex 目录正在使用所选账号",
-            accounts.len()
-        )
-    };
+    let providers = Store::open_read_only(&data_dir.join("switchx.sqlite"))
+        .map_err(|_| "无法读取上游账号引用")?
+        .providers()
+        .map_err(|_| "无法读取上游账号引用")?;
+    let default_id = manager.default_id()?;
+    let selected = active.clone().unwrap_or_default();
+    let status = format!(
+        "已保存 {} 个账号 · Codex 入口登录{} · 各上游绑定独立管理",
+        accounts.len(),
+        active
+            .as_ref()
+            .and_then(|id| accounts.iter().find(|account| &account.id == id))
+            .map(|account| format!("：{}", account.label))
+            .unwrap_or_else(|| "尚未关联到保存的账号".into())
+    );
     Ok(AccountView {
         rows: accounts
             .into_iter()
-            .map(|account| AccountRow {
-                is_active: active.as_ref() == Some(&account.id),
-                id: account.id.into(),
-                label: account.label.into(),
-                workspace: account.workspace_id.into(),
-                is_default: account.is_default,
+            .map(|account| {
+                let names = account_provider_names(&providers, &account.id, default_id.as_deref());
+                AccountRow {
+                    is_active: active.as_ref() == Some(&account.id),
+                    id: account.id.into(),
+                    label: account.label.into(),
+                    workspace: account.workspace_id.into(),
+                    is_default: account.is_default,
+                    bound_provider_count: names.len() as i32,
+                    bound_provider_names: names.join("、").into(),
+                }
             })
             .collect(),
         selected,
@@ -355,6 +397,7 @@ fn show_provider_editor(
     common: String,
 ) {
     app.set_editor_open(false);
+    app.set_subscription_editor_open(false);
     app.set_common_config_editor_open(false);
     app.set_common_config_saved(common.into());
     let preset = provider
@@ -405,6 +448,73 @@ fn show_provider_editor(
     update_provider_config_preview(app);
 }
 
+fn show_subscription_editor(
+    app: &AppWindow,
+    provider: Option<ProviderRecord>,
+    accounts: Vec<switchx::accounts::AccountInfo>,
+) {
+    let mut ids = vec![slint::SharedString::default()];
+    let mut options = vec![slint::SharedString::from(if provider.is_some() {
+        "保留现有绑定"
+    } else {
+        "请选择已保存账号"
+    })];
+    let selected = provider
+        .as_ref()
+        .and_then(|provider| match &provider.account_binding {
+            Some(AccountBinding::Fixed(id)) => Some(id.as_str()),
+            _ => None,
+        });
+    let mut choice = 0;
+    for account in accounts {
+        if selected == Some(account.id.as_str()) {
+            choice = ids.len() as i32;
+        }
+        ids.push(account.id.into());
+        options.push(format!("{} · {}", account.label, account.workspace_id).into());
+    }
+    app.set_subscription_id(
+        provider
+            .as_ref()
+            .map_or("", |provider| provider.id.as_str())
+            .into(),
+    );
+    app.set_subscription_name(
+        provider
+            .as_ref()
+            .map_or("ChatGPT 订阅", |provider| provider.name.as_str())
+            .into(),
+    );
+    app.set_subscription_binding_label(
+        match provider
+            .as_ref()
+            .and_then(|provider| provider.account_binding.as_ref())
+        {
+            Some(AccountBinding::Fixed(_)) if choice == 0 => {
+                "原绑定账号已移除；请明确选择其他账号".into()
+            }
+            Some(AccountBinding::Native) | None if provider.is_some() => {
+                "现有绑定：跟随 Codex 当前登录。选择已保存账号后才会改为固定绑定。".into()
+            }
+            Some(AccountBinding::Default) => {
+                "现有绑定：跟随默认账号。选择已保存账号后才会改为固定绑定。".into()
+            }
+            _ => "固定绑定不随默认账号或 Codex 入口登录变化。".into(),
+        },
+    );
+    app.set_subscription_account_ids(ModelRc::new(VecModel::from(ids)));
+    app.set_subscription_account_options(ModelRc::new(VecModel::from(options)));
+    app.set_subscription_account_choice(choice);
+    app.set_editor_open(false);
+    app.set_edit_key("".into());
+    app.set_common_config_editor_open(false);
+    app.set_model_editor_open(false);
+    app.set_delete_confirm(false);
+    app.set_subscription_editor_open(true);
+    app.set_active_page(1);
+    app.set_busy(false);
+}
+
 fn open_provider_link(url: &str) -> Result<(), String> {
     #[cfg(target_os = "macos")]
     let mut command = std::process::Command::new("open");
@@ -449,6 +559,30 @@ fn sync_owned_account(data_dir: &Path, home: &Path) -> Result<(), String> {
     // must not adopt that credential into another saved account.
     if manager.active_id(home)?.is_some() {
         manager.sync_current(home)?;
+    }
+    Ok(())
+}
+
+fn ensure_accounts_editable(data_dir: &Path) -> Result<(), String> {
+    if data_dir.join("direct-journal.json").exists()
+        || data_dir.join("switch-journal.json").exists()
+    {
+        return Err("请先恢复并停止路由，再修改默认账号或移除账号".into());
+    }
+    Ok(())
+}
+
+fn ensure_account_unbound(data_dir: &Path, account_id: &str) -> Result<(), String> {
+    let providers = Store::open_read_only(&data_dir.join("switchx.sqlite"))
+        .and_then(|store| store.providers())
+        .map_err(|_| "无法检查账号关联的上游；账号未移除")?;
+    let default_id = AccountManager::open(data_dir)?.default_id()?;
+    let names = account_provider_names(&providers, account_id, default_id.as_deref());
+    if !names.is_empty() {
+        return Err(format!(
+            "此账号仍被上游引用：{}；请先重新绑定或删除这些上游，再移除账号",
+            names.join("、")
+        ));
     }
     Ok(())
 }
@@ -606,6 +740,34 @@ async fn worker(
     let mut pending_login: Option<(watch::Sender<bool>, tokio::task::JoinHandle<()>)> = None;
     let mut account_home = client::default_home().ok();
     while let Some(command) = receiver.recv().await {
+        let recovery_only = directory
+            .as_ref()
+            .ok()
+            .map(|path| Store::needs_recovery_before_migration(&path.join("switchx.sqlite")))
+            .transpose()
+            .map_err(|_| "无法检查数据库升级前的恢复状态")?
+            .unwrap_or(false);
+        if recovery_only
+            && !matches!(
+                command,
+                Command::PollRouteStatus
+                    | Command::InspectConfig(_)
+                    | Command::RestoreConfig(_)
+                    | Command::Quit
+            )
+        {
+            let _ = weak.upgrade_in_event_loop(|app| {
+                app.set_recovery_only(true);
+                app.set_loading(false);
+                app.set_config_managed(true);
+                app.set_active_page(5);
+                show_action(
+                    &app,
+                    Err("旧版资料有配置待恢复；请先恢复原配置，成功后再升级并读取资料。".into()),
+                );
+            });
+            continue;
+        }
         let target = match &command {
             Command::Account { home, .. }
             | Command::Subscription { home, .. }
@@ -679,8 +841,8 @@ async fn worker(
                         (None, CodexOptions::for_common(&common)?)
                     } else {
                         let provider = app::load_provider(data_dir, &id)?;
-                        if provider.id == chatgpt::PROVIDER_ID {
-                            return Err("订阅连接由目标 Codex 管理".into());
+                        if provider.kind == ProviderKind::Chatgpt {
+                            return Err("请使用订阅连接编辑器修改名称和账号绑定".into());
                         }
                         let state = app::load_provider_config(data_dir, &id)?;
                         let options = state
@@ -696,6 +858,91 @@ async fn worker(
                         show_provider_editor(&app, provider, options, common)
                     }
                     Err(error) => show_action(&app, Err(error)),
+                });
+            }
+            Command::BeginSubscriptionEditor(id) => {
+                let result = (|| {
+                    let data_dir = directory.as_ref().map_err(|error| error.message())?;
+                    if data_dir.join("direct-journal.json").exists()
+                        || data_dir.join("switch-journal.json").exists()
+                    {
+                        return Err("请先恢复原配置再编辑订阅连接".into());
+                    }
+                    let provider = if id.is_empty() {
+                        None
+                    } else {
+                        let provider = app::load_provider(data_dir, &id)?;
+                        if provider.kind != ProviderKind::Chatgpt {
+                            return Err("此上游不是 ChatGPT 订阅连接".into());
+                        }
+                        Some(provider)
+                    };
+                    let accounts = AccountManager::open(data_dir)?.list()?;
+                    Ok::<_, String>((provider, accounts))
+                })();
+                let _ = weak.upgrade_in_event_loop(move |app| match result {
+                    Ok((provider, accounts)) => show_subscription_editor(&app, provider, accounts),
+                    Err(error) => show_action(&app, Err(error)),
+                });
+            }
+            Command::SaveSubscription {
+                id,
+                name,
+                account_id,
+            } => {
+                let result = async {
+                    let data_dir = directory.as_ref().map_err(|error| error.message())?;
+                    let binding = if account_id.is_empty() {
+                        if id.is_empty() {
+                            return Err("请选择已保存的 ChatGPT 账号".into());
+                        }
+                        app::load_provider(data_dir, &id)?
+                            .account_binding
+                            .unwrap_or(AccountBinding::Native)
+                    } else {
+                        AccountBinding::Fixed(account_id)
+                    };
+                    let models = if id.is_empty() {
+                        chatgpt::catalog().await?
+                    } else {
+                        Vec::new()
+                    };
+                    chatgpt::save_subscription(
+                        data_dir,
+                        (!id.is_empty()).then_some(id.as_str()),
+                        &name,
+                        binding,
+                        &models,
+                    )
+                }
+                .await;
+                if result.is_ok() {
+                    prepared = None;
+                    route_session.discard_preview();
+                }
+                let snapshot = result
+                    .as_ref()
+                    .ok()
+                    .and_then(|_| directory.as_ref().ok())
+                    .map(|path| load_snapshot(path, false));
+                let accounts = directory
+                    .as_ref()
+                    .ok()
+                    .zip(account_home.as_ref())
+                    .map(|(path, home)| account_view(path, home));
+                let _ = weak.upgrade_in_event_loop(move |app| {
+                    if let Some(snapshot) = snapshot {
+                        show_result(&app, snapshot);
+                        app.set_subscription_editor_open(false);
+                        discard_account_previews(&app);
+                    }
+                    if let Some(accounts) = accounts {
+                        show_accounts(&app, accounts);
+                    }
+                    show_action(
+                        &app,
+                        result.map(|_| "订阅连接与账号绑定已保存；Codex 入口登录保持不变".into()),
+                    );
                 });
             }
             Command::OpenCommonConfig(target) => {
@@ -816,6 +1063,7 @@ async fn worker(
                     if let Some(snapshot) = snapshot {
                         show_result(&app, snapshot);
                         app.set_editor_open(false);
+                        app.set_subscription_editor_open(false);
                         app.set_direct_preview_ready(false);
                         app.set_route_preview_ready(false);
                     }
@@ -841,6 +1089,7 @@ async fn worker(
                         show_result(&app, snapshot);
                         if was_deleted {
                             app.set_editor_open(false);
+                            app.set_subscription_editor_open(false);
                             app.set_direct_preview_ready(false);
                             app.set_route_preview_ready(false);
                         }
@@ -856,13 +1105,32 @@ async fn worker(
                         app::load_provider(path, &id).map(|provider| (path, provider))
                     });
                 let result = match result {
-                    Ok((_, provider)) if provider.id == chatgpt::PROVIDER_ID => match home(&target)
-                    {
-                        Ok(target) => chatgpt::account(&target, false)
-                            .await
-                            .map(|status| status.label().into()),
-                        Err(error) => Err(error),
-                    },
+                    Ok((data_dir, provider)) if provider.kind == ProviderKind::Chatgpt => {
+                        async {
+                            let target = home(&target)?;
+                            let manager = AccountManager::open(data_dir)?;
+                            let account = manager
+                                .resolve_binding(
+                                    provider
+                                        .account_binding
+                                        .as_ref()
+                                        .ok_or("订阅账号绑定缺失")?,
+                                )
+                                .await?;
+                            if let Some(account) = account {
+                                manager.credential(&account.id, &target).await?;
+                                Ok(format!(
+                                    "{}：绑定账号凭据可读取；实际官方请求权限尚未验证",
+                                    provider.name
+                                ))
+                            } else {
+                                let status = chatgpt::account(&target, false).await?;
+                                status.require_chatgpt()?;
+                                Ok(format!("{}：{}", provider.name, status.label()))
+                            }
+                        }
+                        .await
+                    }
                     Ok((data_dir, provider)) => match app::provider_credential(data_dir, &provider)
                     {
                         Ok(token) => direct::check_models(&provider, token.expose()).await.map(
@@ -885,16 +1153,21 @@ async fn worker(
                 provider,
                 url,
                 key,
-                home: target,
+                home: _,
             } => {
                 let result = async {
-                    if provider == chatgpt::PROVIDER_ID {
-                        chatgpt::require_login(&home(&target)?).await?;
-                        return Ok(chatgpt::catalog()
-                            .await?
-                            .iter()
-                            .filter_map(|model| model["slug"].as_str().map(str::to_owned))
-                            .collect::<Vec<_>>());
+                    let data_dir = directory.as_ref().map_err(|error| error.message())?;
+                    let is_subscription = !provider.is_empty()
+                        && app::load_provider(data_dir, &provider)?.kind == ProviderKind::Chatgpt;
+                    if is_subscription {
+                        return Ok((
+                            chatgpt::catalog()
+                                .await?
+                                .iter()
+                                .filter_map(|model| model["slug"].as_str().map(str::to_owned))
+                                .collect::<Vec<_>>(),
+                            true,
+                        ));
                     }
                     let token = if key.expose().is_empty() {
                         let data_dir = directory.as_ref().map_err(|error| error.message())?;
@@ -908,7 +1181,9 @@ async fn worker(
                     } else {
                         key
                     };
-                    direct::fetch_models(&url, token.expose()).await
+                    direct::fetch_models(&url, token.expose())
+                        .await
+                        .map(|models| (models, false))
                 }
                 .await;
                 let _ = weak.upgrade_in_event_loop(move |app| {
@@ -922,11 +1197,11 @@ async fn worker(
                     }
                     app.set_fetching_models(false);
                     match result {
-                        Ok(models) => {
+                        Ok((models, is_subscription)) => {
                             app.set_discovery_message(if models.is_empty() {
                                 "上游返回空列表，可手动填写模型 ID".into()
                             } else {
-                                if provider == chatgpt::PROVIDER_ID {
+                                if is_subscription {
                                     format!(
                                         "已读取 CLI 内置的 {} 个官方模型；账号权限以实际请求为准",
                                         models.len()
@@ -1072,14 +1347,30 @@ async fn worker(
                     .as_ref()
                     .ok()
                     .and_then(|path| client::inspect(Path::new(&target), path).ok());
+                let restored_data = result
+                    .as_ref()
+                    .ok()
+                    .and_then(|_| directory.as_ref().ok())
+                    .map(|data_dir| {
+                        let _ = common_config_for_home(data_dir, &target);
+                        (
+                            load_snapshot(data_dir, false),
+                            home(&target).map(|target| account_view(data_dir, &target)),
+                        )
+                    });
                 let _ = weak.upgrade_in_event_loop(move |app| {
                     app.set_direct_preview_ready(false);
                     app.set_route_preview_ready(false);
                     if let Some(status) = fallback_status { show_config_status(&app, status); }
                     match result {
                         Ok(status) => {
+                            app.set_recovery_only(false);
                             show_config_status(&app, status);
                             show_action(&app, Ok("原配置的受管字段已恢复，本地路由已停止；请重启目标 Codex 客户端".into()));
+                            if let Some((snapshot, accounts)) = restored_data {
+                                show_result(&app, snapshot);
+                                if let Ok(accounts) = accounts { show_accounts(&app, accounts); }
+                            }
                         }
                         Err(error) => show_action(&app, Err(error)),
                     }
@@ -1093,18 +1384,29 @@ async fn worker(
                     let target = managed
                         .and_then(|path| path.parent().map(Path::to_path_buf))
                         .unwrap_or(home(&target)?);
-                    common_config_for_home(data_dir, &target.to_string_lossy())?;
+                    if !recovery_only {
+                        common_config_for_home(data_dir, &target.to_string_lossy())?;
+                    }
                     client::inspect(&target, data_dir).map(|status| (status, target))
                 })();
-                let accounts = result.as_ref().ok().and_then(|(_, target)| {
-                    account_home = Some(target.clone());
-                    directory
+                let accounts =
+                    result
                         .as_ref()
                         .ok()
-                        .map(|data_dir| account_view(data_dir, target))
-                });
+                        .filter(|_| !recovery_only)
+                        .and_then(|(_, target)| {
+                            account_home = Some(target.clone());
+                            directory
+                                .as_ref()
+                                .ok()
+                                .map(|data_dir| account_view(data_dir, target))
+                        });
                 let _ = weak.upgrade_in_event_loop(move |app| match result {
                     Ok((status, target)) => {
+                        app.set_recovery_only(recovery_only);
+                        if recovery_only {
+                            app.set_active_page(5);
+                        }
                         if let Some(accounts) = accounts {
                             show_accounts(&app, accounts);
                         }
@@ -1140,6 +1442,8 @@ async fn worker(
                             base_url: candidate.base_url,
                             model_id: candidate.model_id,
                             credential_ref: None,
+                            kind: ProviderKind::ApiKey,
+                            account_binding: None,
                         };
                         show_provider_editor(&app, Some(provider), options, common);
                         app.set_active_page(1);
@@ -1218,7 +1522,7 @@ async fn worker(
                                     match result {
                                         Ok(account) => app.set_action_message(
                                             format!(
-                                                "已保存账号 {}；点击“使用账号”切换到此账号",
+                                                "已保存账号 {}；可绑定到订阅上游，或显式写入 Codex 登录",
                                                 account.label
                                             )
                                             .into(),
@@ -1234,11 +1538,12 @@ async fn worker(
                             Ok("已打开官方登录页；完成验证码登录后保存账号".into())
                         }
                         2 => {
+                            ensure_accounts_editable(data_dir)?;
                             manager.set_default(&id)?;
                             route_session.discard_preview();
                             let _ = weak
                                 .upgrade_in_event_loop(|app| app.set_route_preview_ready(false));
-                            Ok("已设为默认账号；点击“使用默认账号”才会切换当前登录".into())
+                            Ok("已设为默认账号；固定绑定保持不变，旧的跟随默认账号连接会使用此默认选择".into())
                         }
                         3 => {
                             let use_default = id.is_empty();
@@ -1253,26 +1558,15 @@ async fn worker(
                             let _ =
                                 weak.upgrade_in_event_loop(|app| discard_account_previews(&app));
                             manager.activate(&id, &target_home).await?;
-                            chatgpt::bind_managed_account(
-                                data_dir,
-                                Some(if use_default { "default" } else { &id }),
-                            )?;
                             let _ = weak.upgrade_in_event_loop(|app| {
-                                app.set_auth_status("已使用保存的 ChatGPT 账号".into());
+                                app.set_auth_status("已设置 Codex 入口登录；各上游绑定独立管理".into());
                             });
-                            Ok("账号已写入此 Codex 目录；请新建 Codex 会话，再重新预览路由".into())
+                            Ok("账号已写入 Codex 入口登录；各上游绑定保持不变，请重新发布并启动新会话".into())
                         }
                         4 => {
-                            let selected = chatgpt::managed_account(data_dir).ok().flatten();
-                            if manager.active_id(&target_home)?.as_ref() == Some(&id)
-                                || selected.as_ref() == Some(&id)
-                            {
-                                restore_connections(&mut route_session, data_dir, &target_home)
-                                    .await?;
-                                prepared = None;
-                                let _ = weak
-                                    .upgrade_in_event_loop(|app| discard_account_previews(&app));
-                            }
+                            ensure_accounts_editable(data_dir)?;
+                            ensure_account_unbound(data_dir, &id)?;
+                            prepared = None;
                             route_session.discard_preview();
                             manager.remove(&id, &target_home).await?;
                             let removed_id = id.clone();
@@ -1293,16 +1587,6 @@ async fn worker(
                                 account.label
                             ))
                         }
-                        6 => {
-                            restore_connections(&mut route_session, data_dir, &target_home).await?;
-                            sync_owned_account(data_dir, &target_home)?;
-                            chatgpt::bind_managed_account(data_dir, None)?;
-                            prepared = None;
-                            route_session.discard_preview();
-                            let _ =
-                                weak.upgrade_in_event_loop(|app| discard_account_previews(&app));
-                            Ok("已跟随此 Codex 目录的当前登录；请新建会话并重新预览路由".into())
-                        }
                         _ => Err("未知账号操作".into()),
                     }
                 }
@@ -1315,7 +1599,15 @@ async fn worker(
                         .ok()
                         .and_then(|home| client::inspect(&home, data_dir).ok())
                 });
+                let snapshot = result
+                    .as_ref()
+                    .ok()
+                    .and_then(|_| directory.as_ref().ok())
+                    .map(|path| load_snapshot(path, false));
                 let _ = weak.upgrade_in_event_loop(move |app| {
+                    if let Some(snapshot) = snapshot {
+                        show_result(&app, snapshot);
+                    }
                     if let Some(accounts) = accounts {
                         show_accounts(&app, accounts);
                     }
@@ -1358,7 +1650,6 @@ async fn worker(
                             // Reauthentication is an explicit restore-then-login operation.
                             restore_connections(&mut route_session, data_dir, &target_home).await?;
                             sync_owned_account(data_dir, &target_home)?;
-                            chatgpt::bind_managed_account(data_dir, None)?;
                             prepared = None;
                             route_session.discard_preview();
                             let _ = weak.upgrade_in_event_loop(move |app| {
@@ -1411,12 +1702,7 @@ async fn worker(
                         }
                         2 => {
                             let manager = AccountManager::open(data_dir)?;
-                            if let Some(id) = chatgpt::managed_account(data_dir)? {
-                                if manager.active_id(&target_home)?.as_ref() != Some(&id) {
-                                    return Err(
-                                        "所选账号与此 Codex 目录的登录不一致，请先使用账号".into(),
-                                    );
-                                }
+                            if let Some(id) = manager.active_id(&target_home)? {
                                 manager.refresh(&id, &target_home).await?;
                             }
                             let status = chatgpt::account(&target_home, true).await?;
@@ -1446,7 +1732,11 @@ async fn worker(
                                 .models
                                 .iter()
                                 .find(|model| {
-                                    model.enabled && model.provider_id != chatgpt::PROVIDER_ID
+                                    model.enabled
+                                        && snapshot.providers.iter().any(|provider| {
+                                            provider.id == model.provider_id
+                                                && provider.kind == ProviderKind::ApiKey
+                                        })
                                 })
                                 .ok_or("请先保存并选择至少一个 API 模型；当前路由与配置已保留")?
                                 .public_id
@@ -1536,7 +1826,7 @@ async fn worker(
                                 .then_some(default_reasoning.as_str()),
                         }),
                     };
-                    if provider == chatgpt::PROVIDER_ID {
+                    if app::load_provider(directory, &provider)?.kind == ProviderKind::Chatgpt {
                         chatgpt::save_mapping(directory, input).await
                     } else {
                         app::save_mapping(directory, input)
@@ -1727,9 +2017,6 @@ async fn worker(
                     let _ = task.await;
                 }
                 let result = async {
-                    if let (Ok(directory), Some(home)) = (&directory, &account_home) {
-                        sync_owned_account(directory, home)?;
-                    }
                     if let Ok(directory) = &directory
                         && let Some(recovery) = config_transaction::recovery(directory)?
                     {
@@ -1737,6 +2024,16 @@ async fn worker(
                             .restore(directory, recovery.config_path.parent().unwrap())
                             .await?;
                     }
+                    // Recovery pauses and stops new requests before waiting for
+                    // any detached refresh to save its rotated credentials.
+                    route_session.wait_for_accounts().await?;
+                    if !recovery_only
+                        && let (Ok(directory), Some(home)) = (&directory, &account_home)
+                    {
+                        AccountManager::open(directory)?.wait_for_idle().await?;
+                        sync_owned_account(directory, home)?;
+                    }
+                    route_session.drain_for_exit().await?;
                     Ok::<_, String>(())
                 }
                 .await;
@@ -1755,6 +2052,23 @@ async fn worker(
         let running = route_session.is_running();
         let recording_failed = route_session.recording_failed();
         let chatgpt_error = route_session.chatgpt_error();
+        let provider_errors = directory
+            .as_ref()
+            .ok()
+            .filter(|_| !recovery_only)
+            .and_then(|path| Store::open_read_only(&path.join("switchx.sqlite")).ok())
+            .and_then(|store| store.providers().ok())
+            .unwrap_or_default()
+            .into_iter()
+            .filter(|provider| provider.kind == ProviderKind::Chatgpt)
+            .map(|provider| {
+                let error = route_session
+                    .chatgpt_error_for(&provider.id)
+                    .unwrap_or("")
+                    .to_owned();
+                (provider.id, error)
+            })
+            .collect::<Vec<_>>();
         let address = route_session
             .address()
             .map(|address| format!("http://{address}/v1"))
@@ -1767,6 +2081,27 @@ async fn worker(
                 .as_ref()
                 .is_ok_and(|path| path.join("direct-journal.json").exists());
         let _ = weak.upgrade_in_event_loop(move |app| {
+            let mut changed = false;
+            let rows = app
+                .get_providers()
+                .iter()
+                .map(|mut provider| {
+                    let error = provider_errors
+                        .iter()
+                        .find(|(id, _)| id == provider.id.as_str())
+                        .map(|(_, error)| error.as_str())
+                        .unwrap_or("");
+                    if provider.auth_error != error {
+                        provider.auth_error = error.into();
+                        changed = true;
+                    }
+                    provider
+                })
+                .collect::<Vec<_>>();
+            if changed {
+                app.set_providers(ModelRc::new(VecModel::from(rows)));
+                filter_providers(&app, &app.get_provider_query());
+            }
             app.set_route_running(running);
             app.set_route_auth_error(chatgpt_error.unwrap_or("").into());
             if recording_failed {
@@ -1795,9 +2130,13 @@ async fn worker(
         cancel.send_replace(true);
         let _ = task.await;
     }
-    if let (Ok(directory), Some(home)) = (&directory, &account_home) {
-        sync_owned_account(directory, home)?;
-    }
+    let recovery_only = directory
+        .as_ref()
+        .ok()
+        .map(|path| Store::needs_recovery_before_migration(&path.join("switchx.sqlite")))
+        .transpose()
+        .map_err(|_| "无法检查退出前的恢复状态")?
+        .unwrap_or(false);
     // Also recover when the platform exits the event loop without using our tray.
     if let Ok(directory) = &directory
         && let Some(recovery) = config_transaction::recovery(directory)?
@@ -1806,6 +2145,12 @@ async fn worker(
             .restore(directory, recovery.config_path.parent().unwrap())
             .await?;
     }
+    route_session.wait_for_accounts().await?;
+    if !recovery_only && let (Ok(directory), Some(home)) = (&directory, &account_home) {
+        AccountManager::open(directory)?.wait_for_idle().await?;
+        sync_owned_account(directory, home)?;
+    }
+    route_session.drain_for_exit().await?;
     Ok(())
 }
 
@@ -1840,29 +2185,32 @@ fn credential_from_args(
     if !data_dir.is_absolute() {
         return Err("credential data directory must be absolute".into());
     }
-    let secret = if command == "credential" {
-        let provider = app::load_provider(&data_dir, reference)?;
-        app::provider_credential(&data_dir, &provider)?
-    } else {
-        if !reference
+    if command == "local-token"
+        && !reference
             .strip_prefix("router-")
             .is_some_and(|id| id.len() == 32 && id.bytes().all(|byte| byte.is_ascii_hexdigit()))
-        {
-            return Err("local token reference is invalid".into());
-        }
-        let database = data_dir.join("switchx.sqlite");
-        let directory_metadata = std::fs::symlink_metadata(&data_dir)
-            .map_err(|_| "local token data directory is unavailable")?;
-        let database_metadata = std::fs::symlink_metadata(&database)
-            .map_err(|_| "local token database is unavailable")?;
-        if !directory_metadata.is_dir()
-            || directory_metadata.file_type().is_symlink()
-            || !database_metadata.is_file()
-            || database_metadata.file_type().is_symlink()
-        {
-            return Err("local token storage must be a regular directory and database".into());
-        }
-        Store::open_read_only(&database)?
+    {
+        return Err("local token reference is invalid".into());
+    }
+    let database = data_dir.join("switchx.sqlite");
+    let directory_metadata = std::fs::symlink_metadata(&data_dir)
+        .map_err(|_| "local token data directory is unavailable")?;
+    let database_metadata =
+        std::fs::symlink_metadata(&database).map_err(|_| "local token database is unavailable")?;
+    if !directory_metadata.is_dir()
+        || directory_metadata.file_type().is_symlink()
+        || !database_metadata.is_file()
+        || database_metadata.file_type().is_symlink()
+    {
+        return Err("credential storage must be a regular directory and database".into());
+    }
+    let store = Store::open_credentials_read_only(&database)?;
+    let secret = if command == "credential" {
+        store
+            .provider_api_key(reference)?
+            .ok_or("upstream API key is missing")?
+    } else {
+        store
             .local_token(reference)?
             .ok_or("local token is missing")?
     };
@@ -1972,6 +2320,32 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 Command::BeginProviderEditor {
                     id: id.into(),
                     home: app.get_config_home().into(),
+                },
+            );
+        }
+    });
+    let callback_sender = sender.clone();
+    let weak = app.as_weak();
+    app.on_begin_subscription_editor(move |id| {
+        if let Some(app) = weak.upgrade() {
+            queue(
+                &app,
+                &callback_sender,
+                Command::BeginSubscriptionEditor(id.into()),
+            );
+        }
+    });
+    let callback_sender = sender.clone();
+    let weak = app.as_weak();
+    app.on_save_subscription(move |id, name, account_id| {
+        if let Some(app) = weak.upgrade() {
+            queue(
+                &app,
+                &callback_sender,
+                Command::SaveSubscription {
+                    id: id.into(),
+                    name: name.into(),
+                    account_id: account_id.into(),
                 },
             );
         }
@@ -2359,20 +2733,25 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         let Some(primary) = models.iter().find(|model| model.public_id == public_id) else {
             return;
         };
-        if primary.provider_id == chatgpt::PROVIDER_ID {
+        let providers = app.get_providers();
+        if providers
+            .iter()
+            .any(|provider| provider.id == primary.provider_id && provider.is_subscription)
+        {
             show_action(
                 &app,
                 Err("订阅账号不参与自动备用；请恢复后明确切换账号或 API 上游".into()),
             );
             return;
         }
-        let providers = app.get_providers();
         let mut ids = vec![slint::SharedString::default()];
         let mut labels = vec![slint::SharedString::from("不使用备用上游")];
         let mut selected = 0;
         for model in models.iter().filter(|model| {
             model.ready
-                && model.provider_id != chatgpt::PROVIDER_ID
+                && providers
+                    .iter()
+                    .any(|provider| provider.id == model.provider_id && !provider.is_subscription)
                 && model.provider_id != primary.provider_id
                 && model.upstream_model == primary.upstream_model
         }) {
@@ -2491,6 +2870,125 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn account_removal_checks_saved_fixed_and_default_provider_references() {
+        use base64::Engine;
+        let root = std::env::temp_dir().join(format!(
+            "switchx-account-removal-{}",
+            app::new_id().unwrap()
+        ));
+        let data = root.join("data");
+        let home = root.join("codex");
+        std::fs::create_dir_all(&data).unwrap();
+        std::fs::create_dir(&home).unwrap();
+        let auth = home.join("auth.json");
+        let mut fixture: serde_json::Value = serde_json::from_str(include_str!(
+            "../tests/fixtures/synthetic-chatgpt-auth.json"
+        ))
+        .unwrap();
+        let mut parts = fixture["tokens"]["id_token"]
+            .as_str()
+            .unwrap()
+            .split('.')
+            .map(str::to_owned)
+            .collect::<Vec<_>>();
+        parts[0] = base64::engine::general_purpose::URL_SAFE_NO_PAD
+            .encode(br#"{"alg":"RS256","typ":"JWT"}"#);
+        fixture["tokens"]["id_token"] = serde_json::json!(parts.join("."));
+        fixture["tokens"]["access_token"] = fixture["tokens"]["id_token"].clone();
+        std::fs::write(&auth, serde_json::to_vec(&fixture).unwrap()).unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&auth, std::fs::Permissions::from_mode(0o600)).unwrap();
+        }
+        let manager = AccountManager::open(&data).unwrap();
+        let account = manager.import_current(&home).unwrap();
+        manager.set_default(&account.id).unwrap();
+        let store = Store::open(&data.join("switchx.sqlite")).unwrap();
+        let fixed = ProviderRecord {
+            id: "fixed-provider".into(),
+            name: "固定上游".into(),
+            base_url: chatgpt::BASE_URL.into(),
+            model_id: "synthetic-model".into(),
+            credential_ref: None,
+            kind: ProviderKind::Chatgpt,
+            account_binding: Some(AccountBinding::Fixed(account.id.clone())),
+        };
+        let default = ProviderRecord {
+            id: "default-provider".into(),
+            name: "默认上游".into(),
+            account_binding: Some(AccountBinding::Default),
+            ..fixed.clone()
+        };
+        store.put_provider(&fixed).unwrap();
+        store.put_provider(&default).unwrap();
+        let account_file = data.join("codex_oauth_auth.json");
+        let before = std::fs::read(&account_file).unwrap();
+        let error = ensure_account_unbound(&data, &account.id).unwrap_err();
+        assert!(error.contains("固定上游") && error.contains("默认上游"));
+        // Inspect current database state again instead of trusting an old dialog snapshot.
+        store.delete_provider(&fixed.id).unwrap();
+        let error = ensure_account_unbound(&data, &account.id).unwrap_err();
+        assert!(!error.contains("固定上游") && error.contains("默认上游"));
+        store.delete_provider(&default.id).unwrap();
+        ensure_account_unbound(&data, &account.id).unwrap();
+        assert_eq!(std::fs::read(&account_file).unwrap(), before);
+        drop(store);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn credential_helper_reads_api_key_without_migrating_v8_or_v9() {
+        let root =
+            std::env::temp_dir().join(format!("switchx-key-helper-{}", app::new_id().unwrap()));
+        for version in [8, 9] {
+            let data = root.join(format!("v{version}"));
+            std::fs::create_dir_all(&data).unwrap();
+            let database = data.join("switchx.sqlite");
+            let provider = ProviderRecord {
+                id: "synthetic-api".into(),
+                name: "Synthetic API".into(),
+                base_url: "https://example.invalid/v1".into(),
+                model_id: "synthetic-model".into(),
+                credential_ref: None,
+                kind: ProviderKind::ApiKey,
+                account_binding: None,
+            };
+            {
+                let store = Store::open(&database).unwrap();
+                store
+                    .put_provider_with_models_options_and_key(
+                        &provider,
+                        &[],
+                        None,
+                        &Secret::new("synthetic-key".into()),
+                    )
+                    .unwrap();
+            }
+            {
+                let connection = rusqlite::Connection::open(&database).unwrap();
+                connection
+                    .pragma_update(None, "user_version", version)
+                    .unwrap();
+            }
+            let before = std::fs::read(&database).unwrap();
+            let value = credential_from_args(
+                [
+                    std::ffi::OsString::from("credential"),
+                    provider.id.into(),
+                    data.as_os_str().to_owned(),
+                ]
+                .into_iter(),
+            )
+            .unwrap()
+            .unwrap();
+            assert_eq!(value.expose(), "synthetic-key");
+            assert_eq!(std::fs::read(&database).unwrap(), before);
+        }
+        std::fs::remove_dir_all(root).unwrap();
+    }
 
     fn local_token_helper_args(reference: &str, data_dir: &Path) -> [std::ffi::OsString; 3] {
         [
