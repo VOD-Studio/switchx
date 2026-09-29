@@ -10,12 +10,12 @@ use switchx::{
     accounts::AccountManager,
     app::{self, AppError, Snapshot, data_directory, load_snapshot},
     catalog, chatgpt, client, config_transaction,
-    credentials::{CredentialStore, ROUTER_TOKEN_SERVICE, Secret},
+    credentials::Secret,
     direct,
     direct_config::{self, PreparedDirectSwitch},
     provider_config::{self, CodexOptions},
     routed::RouteSession,
-    storage::ProviderRecord,
+    storage::{ProviderRecord, Store},
 };
 use tokio::sync::{
     mpsc::{self, error::TrySendError},
@@ -1810,38 +1810,63 @@ async fn worker(
 }
 
 fn credential_command() -> Result<bool, Box<dyn std::error::Error>> {
-    let mut args = std::env::args_os();
-    args.next();
-    let Some(command) = args.next() else {
+    let Some(secret) = credential_from_args(std::env::args_os().skip(1))? else {
         return Ok(false);
+    };
+    println!("{}", secret.expose());
+    Ok(true)
+}
+
+fn credential_from_args(
+    mut args: impl Iterator<Item = std::ffi::OsString>,
+) -> Result<Option<Secret>, Box<dyn std::error::Error>> {
+    let Some(command) = args.next() else {
+        return Ok(None);
     };
     if command != "credential" && command != "local-token" {
         return Err("unknown SwitchX command".into());
     }
     let reference = args.next().ok_or("credential reference is missing")?;
-    let data_dir = args.next().map(PathBuf::from);
+    let data_dir = PathBuf::from(
+        args.next()
+            .ok_or("credential data directory is missing; regenerate the SwitchX configuration")?,
+    );
     if args.next().is_some() {
         return Err("unexpected credential command argument".into());
     }
     let reference = reference
         .to_str()
         .ok_or("credential reference is invalid")?;
+    if !data_dir.is_absolute() {
+        return Err("credential data directory must be absolute".into());
+    }
     let secret = if command == "credential" {
-        let data_dir = data_dir
-            .ok_or("credential data directory is missing; regenerate the SwitchX configuration")?;
-        if !data_dir.is_absolute() {
-            return Err("credential data directory must be absolute".into());
-        }
         let provider = app::load_provider(&data_dir, reference)?;
         app::provider_credential(&data_dir, &provider)?
     } else {
-        if data_dir.is_some() {
-            return Err("unexpected local-token command argument".into());
+        if !reference
+            .strip_prefix("router-")
+            .is_some_and(|id| id.len() == 32 && id.bytes().all(|byte| byte.is_ascii_hexdigit()))
+        {
+            return Err("local token reference is invalid".into());
         }
-        CredentialStore::new(ROUTER_TOKEN_SERVICE)?.get(reference)?
+        let database = data_dir.join("switchx.sqlite");
+        let directory_metadata = std::fs::symlink_metadata(&data_dir)
+            .map_err(|_| "local token data directory is unavailable")?;
+        let database_metadata = std::fs::symlink_metadata(&database)
+            .map_err(|_| "local token database is unavailable")?;
+        if !directory_metadata.is_dir()
+            || directory_metadata.file_type().is_symlink()
+            || !database_metadata.is_file()
+            || database_metadata.file_type().is_symlink()
+        {
+            return Err("local token storage must be a regular directory and database".into());
+        }
+        Store::open_read_only(&database)?
+            .local_token(reference)?
+            .ok_or("local token is missing")?
     };
-    println!("{}", secret.expose());
-    Ok(true)
+    Ok(Some(secret))
 }
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -2466,6 +2491,142 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn local_token_helper_args(reference: &str, data_dir: &Path) -> [std::ffi::OsString; 3] {
+        [
+            "local-token".into(),
+            reference.into(),
+            data_dir.as_os_str().to_owned(),
+        ]
+    }
+
+    #[test]
+    fn local_token_helper_reads_only_its_explicit_database() {
+        let root =
+            std::env::temp_dir().join(format!("switchx-local-helper-{}", app::new_id().unwrap()));
+        let reference = format!("router-{}", "a".repeat(32));
+        for (directory, value) in [(root.join("first"), "a"), (root.join("second"), "b")] {
+            std::fs::create_dir_all(&directory).unwrap();
+            let database = directory.join("switchx.sqlite");
+            let token = Secret::new(value.repeat(64));
+            {
+                let store = Store::open(&database).unwrap();
+                store.put_local_token(&reference, &token).unwrap();
+            }
+            let before = std::fs::read(&database).unwrap();
+            let result =
+                credential_from_args(local_token_helper_args(&reference, &directory).into_iter())
+                    .unwrap()
+                    .unwrap();
+            assert_eq!(result.expose(), token.expose());
+            assert_eq!(std::fs::read(&database).unwrap(), before);
+        }
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn local_token_helper_rejects_bad_args_before_opening_a_database() {
+        let missing = std::env::temp_dir().join(format!(
+            "switchx-local-helper-missing-{}",
+            app::new_id().unwrap()
+        ));
+        let reference = format!("router-{}", "a".repeat(32));
+        let valid = local_token_helper_args(&reference, &missing);
+        let cases = [
+            (valid[..2].to_vec(), "data directory is missing"),
+            (
+                local_token_helper_args(&reference, Path::new("relative")).to_vec(),
+                "data directory must be absolute",
+            ),
+            (
+                valid.clone().into_iter().chain(["extra".into()]).collect(),
+                "unexpected credential command argument",
+            ),
+            (
+                local_token_helper_args("../outside", &missing).to_vec(),
+                "local token reference is invalid",
+            ),
+        ];
+        for (args, expected) in cases {
+            let error = credential_from_args(args.into_iter())
+                .unwrap_err()
+                .to_string();
+            assert!(error.contains(expected), "{error}");
+            assert!(!missing.exists());
+        }
+        assert!(credential_from_args(std::iter::empty()).unwrap().is_none());
+    }
+
+    #[test]
+    fn local_token_helper_does_not_create_or_upgrade_databases() {
+        let directory = std::env::temp_dir().join(format!(
+            "switchx-local-helper-read-only-{}",
+            app::new_id().unwrap()
+        ));
+        std::fs::create_dir(&directory).unwrap();
+        let database = directory.join("switchx.sqlite");
+        let reference = format!("router-{}", "a".repeat(32));
+        let args = local_token_helper_args(&reference, &directory);
+        assert!(credential_from_args(args.clone().into_iter()).is_err());
+        assert!(!database.exists());
+        drop(Store::open(&database).unwrap());
+        let before = std::fs::read(&database).unwrap();
+        let error = credential_from_args(args.clone().into_iter())
+            .unwrap_err()
+            .to_string();
+        assert_eq!(error, "local token is missing");
+        assert_eq!(std::fs::read(&database).unwrap(), before);
+        {
+            let connection = rusqlite::Connection::open(&database).unwrap();
+            connection
+                .execute_batch("PRAGMA user_version = 7;")
+                .unwrap();
+        }
+        let before = std::fs::read(&database).unwrap();
+        assert!(credential_from_args(args.into_iter()).is_err());
+        assert_eq!(std::fs::read(&database).unwrap(), before);
+        std::fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn local_token_helper_rejects_symlinked_storage() {
+        let root = std::env::temp_dir().join(format!(
+            "switchx-local-helper-symlink-{}",
+            app::new_id().unwrap()
+        ));
+        let data = root.join("data");
+        std::fs::create_dir_all(&data).unwrap();
+        let database = data.join("switchx.sqlite");
+        let reference = format!("router-{}", "a".repeat(32));
+        {
+            let store = Store::open(&database).unwrap();
+            store
+                .put_local_token(&reference, &Secret::new("a".repeat(64)))
+                .unwrap();
+        }
+        let before = std::fs::read(&database).unwrap();
+        let linked_directory = root.join("linked");
+        std::os::unix::fs::symlink(&data, &linked_directory).unwrap();
+        assert!(
+            credential_from_args(
+                local_token_helper_args(&reference, &linked_directory).into_iter()
+            )
+            .is_err()
+        );
+        let linked_database_directory = root.join("linked-database");
+        std::fs::create_dir(&linked_database_directory).unwrap();
+        std::os::unix::fs::symlink(&database, linked_database_directory.join("switchx.sqlite"))
+            .unwrap();
+        assert!(
+            credential_from_args(
+                local_token_helper_args(&reference, &linked_database_directory).into_iter()
+            )
+            .is_err()
+        );
+        assert_eq!(std::fs::read(&database).unwrap(), before);
+        std::fs::remove_dir_all(root).unwrap();
+    }
 
     #[test]
     fn provider_filter_matches_chinese_names_and_ignores_case() {

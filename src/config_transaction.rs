@@ -286,6 +286,13 @@ impl PreparedSwitch {
         if !helper_is_usable(helper_path) || !valid_token_reference(reference) {
             return Err("SwitchX local token helper is unavailable or invalid".into());
         }
+        let state_dir = self
+            .journal_path
+            .parent()
+            .filter(|path| path.is_absolute())
+            .ok_or("local token data directory must be absolute")?
+            .to_str()
+            .ok_or("local token data directory must be UTF-8")?;
         let mut document: DocumentMut = self
             .preview
             .proposed
@@ -305,6 +312,7 @@ impl PreparedSwitch {
         let mut args = Array::new();
         args.push("local-token");
         args.push(reference);
+        args.push(state_dir);
         auth.insert("args", Item::Value(Value::Array(args)));
         self.preview.proposed = document.to_string();
         self.preview.required_environment_variable = None;
@@ -409,6 +417,21 @@ fn valid_token_reference(reference: &str) -> bool {
 }
 
 pub fn restore(config_path: &Path, state_dir: &Path) -> Result<RestoreResult, String> {
+    restore_impl(config_path, state_dir, false)
+}
+
+pub(crate) fn restore_preserving_journal(
+    config_path: &Path,
+    state_dir: &Path,
+) -> Result<RestoreResult, String> {
+    restore_impl(config_path, state_dir, true)
+}
+
+fn restore_impl(
+    config_path: &Path,
+    state_dir: &Path,
+    keep_journal: bool,
+) -> Result<RestoreResult, String> {
     let _lock = lock_config(config_path)?;
     let journal_path = state_dir.join(JOURNAL_NAME);
     let journal: Journal = serde_json::from_slice(&fs::read(&journal_path).map_err(io_error)?)
@@ -427,8 +450,10 @@ pub fn restore(config_path: &Path, state_dir: &Path) -> Result<RestoreResult, St
     let original = match read_config(config_path)? {
         Some(original) => original,
         None if !journal.config_existed => {
-            fs::remove_file(&journal_path).map_err(io_error)?;
-            sync_parent(&journal_path)?;
+            if !keep_journal {
+                fs::remove_file(&journal_path).map_err(io_error)?;
+                sync_parent(&journal_path)?;
+            }
             return Ok(RestoreResult {
                 conflicts: Vec::new(),
                 changed: false,
@@ -525,7 +550,7 @@ pub fn restore(config_path: &Path, state_dir: &Path) -> Result<RestoreResult, St
             &Some(original),
         )?;
     }
-    if conflicts.is_empty() {
+    if conflicts.is_empty() && !keep_journal {
         fs::remove_file(&journal_path).map_err(io_error)?;
         sync_parent(&journal_path)?;
     }
@@ -830,6 +855,48 @@ mod tests {
     }
 
     #[test]
+    fn successful_restore_keeps_journal_until_finalized_including_absent_config() {
+        for original in [Some("model = \"original\" # keep\n"), None] {
+            let home = TestHome::new();
+            if let Some(original) = original {
+                fs::write(home.config(), original).unwrap();
+            }
+            let reference = format!("router-{}", "a".repeat(32));
+            inspect(&home)
+                .with_credential_helper(&std::env::current_exe().unwrap(), &reference)
+                .unwrap()
+                .apply()
+                .unwrap();
+            let journal_path = home.state().join(JOURNAL_NAME);
+            let journal = fs::read(&journal_path).unwrap();
+            let restored = restore_preserving_journal(&home.config(), &home.state()).unwrap();
+            assert!(restored.conflicts.is_empty());
+            assert!(restored.changed);
+            assert_eq!(
+                read_config(&home.config()).unwrap(),
+                original.map(|text| text.as_bytes().to_vec())
+            );
+            assert_eq!(fs::read(&journal_path).unwrap(), journal);
+            assert_eq!(
+                recovery(&home.state())
+                    .unwrap()
+                    .unwrap()
+                    .local_token_reference
+                    .as_deref(),
+                Some(reference.as_str())
+            );
+            let repeated = restore_preserving_journal(&home.config(), &home.state()).unwrap();
+            assert!(repeated.conflicts.is_empty());
+            assert!(!repeated.changed);
+            assert_eq!(fs::read(&journal_path).unwrap(), journal);
+            let finalized = restore(&home.config(), &home.state()).unwrap();
+            assert!(finalized.conflicts.is_empty());
+            assert!(!finalized.changed);
+            assert!(!journal_path.exists());
+        }
+    }
+
+    #[test]
     fn journal_before_commit_recovers_without_changing_config() {
         let home = TestHome::new();
         let original = "model = \"first\"\n";
@@ -900,15 +967,12 @@ mod tests {
         let provider = config["model_providers"][PROVIDER_ID].as_table().unwrap();
         assert!(!provider.contains_key("env_key"));
         assert!(!provider.contains_key("requires_openai_auth"));
-        assert_eq!(
-            provider["auth"]["args"]
-                .as_array()
-                .unwrap()
-                .get(0)
-                .unwrap()
-                .as_str(),
-            Some("local-token")
-        );
+        let args = provider["auth"]["args"].as_array().unwrap();
+        assert_eq!(args.len(), 3);
+        assert_eq!(args.get(0).unwrap().as_str(), Some("local-token"));
+        assert_eq!(args.get(1).unwrap().as_str(), Some(reference.as_str()));
+        assert_eq!(args.get(2).unwrap().as_str(), home.state().to_str());
+        assert!(Path::new(args.get(2).unwrap().as_str().unwrap()).is_absolute());
         prepared.apply().unwrap();
         let recovery = recovery(&home.state()).unwrap().unwrap();
         assert_eq!(recovery.config_path, home.config());

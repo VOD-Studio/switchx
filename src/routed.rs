@@ -14,7 +14,7 @@ use crate::{
     catalog::{self, Publication},
     chatgpt, client,
     config_transaction::{self, PreparedSwitch},
-    credentials::{CredentialError, CredentialStore, ROUTER_TOKEN_SERVICE, Secret},
+    credentials::Secret,
     direct,
     routing::{RouterState, RunningRouter, Upstream},
     storage::{ModelRecord, ProviderRecord},
@@ -45,6 +45,7 @@ struct ActiveRoute {
     server: RunningRouter,
     address: SocketAddr,
     target: PathBuf,
+    state_dir: PathBuf,
     catalog_path: PathBuf,
     public_models: HashSet<String>,
     cli_path: PathBuf,
@@ -439,13 +440,22 @@ impl RouteSession {
         if !health.status().is_success() {
             return Err("本地路由鉴权验证失败".into());
         }
-        CredentialStore::new(ROUTER_TOKEN_SERVICE)
-            .and_then(|store| store.put(&prepared.token_reference, &local_token))
-            .map_err(|_| "无法保存本地路由访问令牌")?;
+        let saved_token = app::open_store(state_dir)
+            .map_err(|_| "无法保存本地路由访问令牌")
+            .and_then(|store| {
+                store
+                    .put_local_token(&prepared.token_reference, &local_token)
+                    .map_err(|_| "无法保存本地路由访问令牌")
+            });
+        if let Err(error) = saved_token {
+            server.stop().await;
+            return Err(error.into());
+        }
         self.active = Some(ActiveRoute {
             server,
             address: prepared.address,
             target: prepared.target,
+            state_dir: prepared.state_dir,
             catalog_path,
             public_models,
             cli_path: prepared.cli_path,
@@ -475,6 +485,9 @@ impl RouteSession {
             .as_ref()
             .filter(|active| active.server.is_running())
             .ok_or("请先开启模型路由，再启动 Codex")?;
+        if active.state_dir != state_dir {
+            return Err("路由数据目录已变化，请使用当前路由的数据目录启动 Codex".into());
+        }
         let target = client::config_path(config_home)?;
         let recovery = config_transaction::recovery(state_dir)?
             .ok_or("路由恢复记录已变化，请检查配置后重新发布")?;
@@ -504,7 +517,19 @@ impl RouteSession {
 
     pub async fn restore(&mut self, state_dir: &Path, config_home: &Path) -> Result<(), String> {
         self.discard_preview();
+        if self
+            .active
+            .as_ref()
+            .is_some_and(|active| active.state_dir != state_dir)
+        {
+            return Err("路由恢复数据目录不匹配，请使用当前路由的数据目录".into());
+        }
         let recovery = config_transaction::recovery(state_dir)?.ok_or("没有待恢复的路由配置")?;
+        if self.active.as_ref().is_some_and(|active| {
+            recovery.local_token_reference.as_deref() != Some(active.token_reference.as_str())
+        }) {
+            return Err("路由恢复记录与当前路由不匹配，请检查配置后恢复".into());
+        }
         let target = client::config_path(config_home)?;
         if target != recovery.config_path
             || self
@@ -520,16 +545,20 @@ impl RouteSession {
         if let Some(active) = &self.active {
             active.server.pause();
         }
-        let result = config_transaction::restore(&target, state_dir).and_then(|result| {
+        let without_conflicts = |result: config_transaction::RestoreResult| {
             if result.conflicts.is_empty() {
                 Ok(())
             } else {
                 Err(format!(
-                    "已保留外部改动，以下字段有冲突：{}；路由与恢复记录保留",
+                    "已保留外部改动，以下字段有冲突：{}；恢复记录保留",
                     result.conflicts.join("、")
                 ))
             }
-        });
+        };
+        // Keep the recovery reference until SQLite cleanup succeeds, so a
+        // locked or unavailable database can be retried after the route stops.
+        let result = config_transaction::restore_preserving_journal(&target, state_dir)
+            .and_then(without_conflicts);
         if let Err(error) = result {
             if let Some(active) = &self.active {
                 active.server.resume();
@@ -538,25 +567,25 @@ impl RouteSession {
         }
         self.stop().await?;
         if let Some(reference) = recovery.local_token_reference {
-            delete_local_token(&reference)?;
+            delete_local_token(state_dir, &reference)?;
         }
-        Ok(())
+        config_transaction::restore(&target, state_dir).and_then(without_conflicts)
     }
 
     async fn stop(&mut self) -> Result<(), String> {
         if let Some(active) = self.active.take() {
             active.server.stop().await;
-            delete_local_token(&active.token_reference)?;
+            delete_local_token(&active.state_dir, &active.token_reference)?;
         }
         Ok(())
     }
 }
 
-fn delete_local_token(reference: &str) -> Result<(), String> {
-    match CredentialStore::new(ROUTER_TOKEN_SERVICE).and_then(|store| store.delete(reference)) {
-        Ok(()) | Err(CredentialError::Missing) => Ok(()),
-        Err(_) => Err("路由已停止，但系统凭据中的本地令牌清理失败".into()),
-    }
+fn delete_local_token(state_dir: &Path, reference: &str) -> Result<(), String> {
+    app::open_store(state_dir)
+        .map_err(|_| "路由已停止，但数据库中的本地令牌清理失败")?
+        .delete_local_token(reference)
+        .map_err(|_| "路由已停止，但数据库中的本地令牌清理失败".into())
 }
 
 fn selected_inputs(state_dir: &Path) -> Result<(Vec<ModelRecord>, Vec<ProviderRecord>), String> {
@@ -581,7 +610,7 @@ fn selected_inputs(state_dir: &Path) -> Result<(Vec<ModelRecord>, Vec<ProviderRe
                     && primary.upstream_model == model.upstream_model
             })
     });
-    let mut providers: Vec<_> = store
+    let providers: Vec<_> = store
         .providers()
         .map_err(|_| "无法读取上游资料")?
         .into_iter()
@@ -604,14 +633,9 @@ fn selected_inputs(state_dir: &Path) -> Result<(Vec<ModelRecord>, Vec<ProviderRe
             }
         }
     }
-    for provider in &mut providers {
+    for provider in &providers {
         if provider.id != chatgpt::PROVIDER_ID {
             app::provider_credential(state_dir, provider)?;
-            // A legacy key migration clears its reference before preview snapshots it.
-            *provider = store
-                .provider(&provider.id)
-                .map_err(|_| "无法读取迁移后的上游资料")?
-                .ok_or("所选模型的上游已不存在")?;
         }
     }
     Ok((models, providers))
@@ -721,6 +745,7 @@ mod tests {
             server,
             address,
             target: home.join("config.toml"),
+            state_dir: data.clone(),
             catalog_path,
             public_models: HashSet::from(["sx-test".into()]),
             cli_path: root.join("must-not-be-executed"),
@@ -733,6 +758,22 @@ mod tests {
             ),
             token_reference: String::new(),
         });
+        assert!(
+            session
+                .codex_launcher(&root.join("another-data"), &home)
+                .await
+                .unwrap_err()
+                .contains("数据目录")
+        );
+        assert!(
+            session
+                .restore(&root.join("another-data"), &home)
+                .await
+                .unwrap_err()
+                .contains("数据目录")
+        );
+        assert!(session.is_running());
+        assert!(config_transaction::recovery(&data).unwrap().is_some());
         assert!(
             session
                 .codex_launcher(&data, &root.join("another-home"))
@@ -766,6 +807,107 @@ mod tests {
         std::fs::write(home.join("config.toml"), original).unwrap();
         session.active.take().unwrap().server.stop().await;
         config_transaction::restore(&home.join("config.toml"), &data).unwrap();
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[tokio::test]
+    async fn recovery_retains_local_token_until_conflicts_and_cleanup_failures_are_resolved() {
+        let root =
+            std::env::temp_dir().join(format!("switchx-token-recovery-{}", app::new_id().unwrap()));
+        let home = root.join("codex");
+        let data = root.join("data");
+        std::fs::create_dir_all(&home).unwrap();
+        let original = "model = \"original\"\n";
+        let config_path = home.join("config.toml");
+        std::fs::write(&config_path, original).unwrap();
+        let reference = format!("router-{}", app::new_id().unwrap());
+        let other_reference = format!("router-{}", app::new_id().unwrap());
+        let token = Secret::new("a".repeat(64));
+        let store = app::open_store(&data).unwrap();
+        store.put_local_token(&reference, &token).unwrap();
+        store
+            .put_local_token(&other_reference, &Secret::new("b".repeat(64)))
+            .unwrap();
+        let templates =
+            serde_json::from_str(include_str!("../tests/fixtures/synthetic-models.json")).unwrap();
+        let publication = catalog::publish(
+            &templates,
+            &[catalog::Selection {
+                public_id: "sx-test",
+                display_name: "Synthetic test",
+                provider_id: "mock",
+                upstream_model: "deepseek-flash",
+            }],
+        )
+        .unwrap();
+        PreparedSwitch::inspect(
+            &config_path,
+            &data,
+            &publication,
+            "127.0.0.1:18731".parse().unwrap(),
+            "sx-test",
+        )
+        .unwrap()
+        .with_credential_helper(&std::env::current_exe().unwrap(), &reference)
+        .unwrap()
+        .apply()
+        .unwrap();
+        let applied = std::fs::read_to_string(&config_path).unwrap();
+        assert!(!applied.contains(token.expose()));
+        assert!(
+            !std::fs::read_to_string(data.join("switch-journal.json"))
+                .unwrap()
+                .contains(token.expose())
+        );
+        std::fs::write(
+            &config_path,
+            applied.replace("model = \"sx-test\"", "model = \"external\""),
+        )
+        .unwrap();
+        let mut session = RouteSession::default();
+        assert!(session.restore(&data, &home).await.is_err());
+        assert!(config_transaction::recovery(&data).unwrap().is_some());
+        assert_eq!(
+            store.local_token(&reference).unwrap().unwrap().expose(),
+            token.expose()
+        );
+        let conflicted = std::fs::read_to_string(&config_path).unwrap();
+        std::fs::write(
+            &config_path,
+            conflicted.replace("model = \"external\"", "model = \"original\""),
+        )
+        .unwrap();
+        let connection = rusqlite::Connection::open(data.join("switchx.sqlite")).unwrap();
+        connection
+            .execute_batch(
+                "CREATE TRIGGER refuse_synthetic_token_delete BEFORE DELETE ON app_settings
+                 WHEN OLD.key LIKE 'local_token:%'
+                 BEGIN SELECT RAISE(ABORT, 'synthetic token delete failure'); END;",
+            )
+            .unwrap();
+        let error = session.restore(&data, &home).await.unwrap_err();
+        assert!(error.contains("令牌清理失败"));
+        assert_eq!(std::fs::read_to_string(&config_path).unwrap(), original);
+        assert!(config_transaction::recovery(&data).unwrap().is_some());
+        assert!(store.local_token(&reference).unwrap().is_some());
+        connection
+            .execute_batch("DROP TRIGGER refuse_synthetic_token_delete")
+            .unwrap();
+        drop(connection);
+        session.restore(&data, &home).await.unwrap();
+        assert_eq!(std::fs::read_to_string(&config_path).unwrap(), original);
+        assert!(config_transaction::recovery(&data).unwrap().is_none());
+        assert!(store.local_token(&reference).unwrap().is_none());
+        assert_eq!(
+            store
+                .local_token(&other_reference)
+                .unwrap()
+                .unwrap()
+                .expose(),
+            "b".repeat(64)
+        );
+        delete_local_token(&data, &reference).unwrap();
+        drop(store);
         std::fs::remove_dir_all(root).unwrap();
     }
 

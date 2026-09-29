@@ -36,7 +36,7 @@
 | 模型身份     | 稳定公开模型 ID，与 provider/upstream model 分离 | 支持重名、换地址和明确路由                 |
 | 路由策略     | 模型精确映射，规则可预览，未知模型明确报错       | 不按字符串猜供应商，不隐式泄漏流量         |
 | 故障切换     | 显式候选、能力约束、数据发送许可                 | 不让“可用性优化”偷偷改变模型或数据接收方   |
-| 数据         | SQLite 供应商/API Key + 私有 OAuth JSON + 系统路由令牌 | 按用户选择分别保存三类凭据，界面与诊断脱敏 |
+| 数据         | SQLite 供应商/API Key/本地令牌 + 私有 OAuth JSON | 按用户选择保存凭据，界面与诊断脱敏 |
 | 配置变更     | 预览、版本化产物、事务日志、冲突检测             | 不覆盖用户的 MCP、项目、安全和手工配置     |
 | 首发平台     | macOS 优先；Windows/Linux 同架构分阶段验收       | 原生托盘、凭据、字体和打包的差异需要实测   |
 
@@ -87,7 +87,7 @@
 | 对象             | 含义与不变量                                                      |
 | ---------------- | ----------------------------------------------------------------- |
 | `Provider`       | 上游连接地址、协议族、API 认证配置、TLS/代理/自定义头策略，不代表模型 |
-| `CredentialRef`  | 本地路由令牌的系统凭据引用；供应商 API Key 只从 SQLite 读取 |
+| `CredentialRef`  | 本地路由令牌的 SQLite 保存键；供应商 API Key 只从 SQLite 读取 |
 | `ManagedAccount` | SwitchX 保存的 ChatGPT 账号；OAuth token 在私有 JSON，默认选择不等于当前登录 |
 | `UpstreamModel`  | 某一 provider 真实提供的模型标识与探测记录                        |
 | `PublishedModel` | 给 Codex 展示的稳定 ID、名称、能力、prompt 兼容信息和发布状态     |
@@ -230,7 +230,7 @@ POST DeepSeek Responses { model: "deepseek-flash", ... }
 
 Key 按用户选择对齐 CC Switch，以明文 JSON 保存在 SQLite `providers.settings_config.auth.OPENAI_API_KEY`；路由器按选定 provider 注入，绝不复用另一上游的 key。编辑输入保持密码形式，留空保留已有值；Key 不显示在列表、状态或 TOML 预览，也不写入配置恢复 journal。它是 API 计费，不消耗 ChatGPT 订阅额度。[S2]
 
-2026-09-29 API Key 存储选择：SQLite 升级至 v8，保存供应商认证配置；API Key 仅从 SQLite 读取。按用户后续要求取消旧钥匙串迁移与旧 helper 兼容，缺失时需在表单重新输入，不读取或清理旧 API Key 条目。该选择仅改变供应商 API Key，本地路由令牌仍使用系统凭据库，ChatGPT OAuth 仍使用下述私有 JSON。数据库和副本包含明文 API Key，不提供数据库加密；验证范围为合成凭据和临时数据库，跨平台运行须独立验收。
+2026-09-29 API Key 存储选择：SQLite 升级至 v8，保存供应商认证配置；API Key 仅从 SQLite 读取。按用户要求取消旧钥匙串迁移与旧 helper 兼容，缺失时需在表单重新输入，不读取或清理旧条目。本地路由令牌同样改存 SQLite，ChatGPT OAuth 仍使用下述私有 JSON。数据库和副本包含明文 API Key 与本地令牌，不提供数据库加密；合成存储、本机独立 helper 和 CLI 检查已通过，见 [本地令牌保存检查](acceptance/M3-local-token-storage-2026-09-29.md)，真实上游、Windows/Linux 和原生界面仍未验收。
 
 ### B. ChatGPT 订阅账号中的 Codex
 
@@ -252,7 +252,7 @@ Key 按用户选择对齐 CC Switch，以明文 JSON 保存在 SQLite `providers
 
 官方 compact 与加密上下文只允许在订阅路径使用，第三方路径拒绝；服务器状态引用仍不支持，跨上游要求新建会话。模型资料取自完整 CLI 内置目录，不能作为账号权益发现。隔离 CLI 和本地 mock 已覆盖认证隔离、工具轮次、失效后下一次请求和恢复；真实登录完成、实际 token 轮换与官方请求仍待验收。2026-09-28 批次只衔接一套 Codex 原生账号，参见 [订阅路由记录](acceptance/M3-subscription-2026-09-28.md)；多账号扩展见下述实施选择。
 
-2026-09-29 多账号实施选择：参考本地 CC Switch `846de29`，按用户明确选择将多套 ChatGPT OAuth 账号保存到 `SWITCHX_DATA_DIR/codex_oauth_auth.json`。该原子 JSON 文件包含 refresh token、ID token 和账号资料，Unix 文件权限为 `0600`，access token 仅缓存于内存；不使用系统钥匙串加密账号文件，也不提供凭据同步。SQLite `app_settings` 只保存账号绑定，不保存 OAuth token；供应商 API Key 保存到 SQLite，本地路由令牌继续使用系统凭据存储。
+2026-09-29 多账号实施选择：参考本地 CC Switch `846de29`，按用户明确选择将多套 ChatGPT OAuth 账号保存到 `SWITCHX_DATA_DIR/codex_oauth_auth.json`。该原子 JSON 文件包含 refresh token、ID token 和账号资料，Unix 文件权限为 `0600`，access token 仅缓存于内存；不使用系统钥匙串加密账号文件，也不提供凭据同步。SQLite 保存供应商 API Key、本地路由令牌和账号绑定，不保存 OAuth token。
 
 原生页面提供设备码添加、导入当前 Codex 文件登录、设默认、使用指定/默认账号、移除和跟随原生登录。同工作区与用户身份再次设备登录会更新已有凭据，保留账号 ID、默认选择和绑定，可用于失效后的重新登录。设默认只更改默认选择，不立即切换；使用会先恢复受管配置、停止旧路由，保存已有完整的 ChatGPT 文件登录，再将完整 token bundle 写入所选 `CODEX_HOME/auth.json`，并设 `cli_auth_credentials_store = "file"`。配置读取、预览和发布只核对绑定及当前身份，不隐式更换登录。取消设备码登录不保存候选账号。跟随原生登录解除绑定，保留当前 Codex 登录；移除账号只清理已确认属于该托管账号的原生登录，不删除配置目录。移除后旧绑定失效，要求用户重新选择，不静默回退。原生客户端续期结果可被相同账号采纳，身份或外部文件变化时拒绝覆盖。
 
@@ -261,6 +261,10 @@ Key 按用户选择对齐 CC Switch，以明文 JSON 保存在 SQLite `providers
 ### 本地凭据 helper 路径
 
 在支持 `model_providers.<id>.auth.command` 的目标客户端上，**API-only 路由**可以从 SwitchX helper 取短作用域本地令牌，避免给每个 shell 手工设置环境变量。[S1]
+
+每次发布生成由 64 个十六进制字符组成的随机令牌，以明文保存到现有 `app_settings` 表，键为 `local_token:router-<32hex>`，不另建凭据表。`local-token REF ABS_DATA_DIR` 只读打开明确指定的 SQLite，不创建或迁移数据库；拒绝相对路径、无效引用、缺失或无效令牌及不可用数据库。程序移除 keyring 依赖，不读取、迁移或清理旧系统凭据；旧 helper 配置先恢复再重新发布。
+
+预览中的令牌仅在内存生成。启用时先验证本地鉴权并保存令牌，再发布配置与 journal；发布失败且未生成 journal 时停止路由、删除令牌，有 journal 时保留路由与令牌供恢复。配置恢复有冲突时保留令牌、路由和 journal；三方恢复完成后暂保留 journal，停止路由并删除令牌，再幂等完成 journal 清理。删除失败时保留 journal 中的引用，排除数据库问题后可在当前应用或重启后再次恢复；缺失令牌按幂等删除处理，活动路由同时核对数据目录与 journal 引用。此保存方式不放宽 loopback、本地鉴权、Host/Origin、模型映射或出站认证隔离。
 
 `auth` 与 `requires_openai_auth`、`env_key`、`experimental_bearer_token` 在同一 provider 配置中互斥，不能同时启用。[S1] 旧客户端的后备选择必须显式展示：受控启动环境或本地专用 token，不能生成指向一个用户尚未设置的 `env_key` 然后宣称开箱即用。
 
@@ -352,7 +356,7 @@ src/
   catalog/          发现、能力校验、目录生成
   routing/          Axum、路由策略、流式与生命周期
   providers/        原生 Responses、官方账号、兼容协议
-  storage/          SQLite 供应商配置/API Key、令牌引用、迁移
+  storage/          SQLite 供应商配置/API Key、本地令牌、迁移
   desktop/          托盘、主题、窗口、系统集成
 ui/
   app.slint
@@ -382,19 +386,19 @@ docs/
 
 ### 6.4 最新依赖与版本选择
 
-完整在线核查结果、精确版本、MSRV/许可证注意事项见 `research/dependencies-and-slint.md`。该表是本轮可核实的注册表状态，不是永远成立的“最新”。
+完整在线核查结果、精确版本、MSRV/许可证注意事项见 `research/dependencies-and-slint.md`。该研究是 2026-09-24 的历史快照，保留当时的 keyring 选型；当前依赖以 `Cargo.toml` 和 `Cargo.lock` 为准。
 
 选型原则：
 
 1. Stable 优先；不因为版本号更大就使用 prerelease。
 2. `slint` 与 `slint-build` 同版本；正式开发提交 `Cargo.lock`，对兼容敏感项精确锁定。
-3. 最新单包版本不代表整个组合已编译。先建立最小 Slint + Tokio + Axum + TLS + Keychain 的集成骨架，再扩界面。
+3. 最新单包版本不代表整个组合已编译。先建立最小 Slint + Tokio + Axum + TLS + SQLite 的集成骨架，再扩界面。
 4. 优先少依赖：标准库和既有库能完成的差异、导出、缓存，不再引入新的框架。
 5. TLS 证书、系统代理和企业 CA 需要按平台实测，不以禁用校验解决。
 6. Slint 1.18.1 已有内建 `SystemTrayIcon`，首选它，不默认叠加 `tray-icon/muda`。事件循环、关闭窗口驻留和系统菜单仍做 proof-of-concept；内建托盘不足时才引入替代依赖。
 7. Slint 授权方式与 CC Switch MIT 复用要求在发布前单列审核，不把“Rust 生态”当成可忽略许可证。
 
-当前核实的核心稳定版基线：Rust **1.98.1**；`slint/slint-build` **1.18.1**；`tokio` **1.53.1**；`axum` **0.8.9**；`reqwest` **0.13.5**；`rusqlite` **0.40.2**；`toml_edit` **0.25.15+spec-1.1.0**；`keyring` **4.2.0**。完整 18 项版本、发布日期、MSRV 见依赖研究。
+当前核实的核心稳定版基线：Rust **1.98.1**；`slint/slint-build` **1.18.1**；`tokio` **1.53.1**；`axum` **0.8.9**；`reqwest` **0.13.5**；`rusqlite` **0.40.2**；`toml_edit` **0.25.15+spec-1.1.0**。当前凭据路径不再依赖 keyring；原依赖调研的版本、发布日期、MSRV 记录见依赖研究。
 
 渲染初始验证选择 Winit + Skia，与 FemtoVG 对照小字号中文、阴影和内存。Skia 是候选，不是已经实测选出的最优解；实验性 renderer 不做首发默认。减少动态效果先提供应用内设置，跟随系统的跨平台桥接另行验证，不声称 Slint 自动处理全部平台设置。
 
@@ -524,7 +528,7 @@ Slint 使用属性动画、状态与过渡等原生机制；浏览器设计稿�
 - TLS 验证默认开启；HTTP 仅默认允许 loopback。自定义局域网/企业目标显式授权，重定向不得携带认证跨域。
 - 超时、连接数、body/SSE 大小、并发数有界；防止本地请求把内存撑爆。
 - 供应商 API Key 按用户选择存于明文 SQLite，仅在后台读取供指定上游使用；密码编辑框留空保留旧值，列表、状态、预览、日志和恢复 journal 均不得携带 Key。
-- API Key 不提供旧钥匙串迁移或旧 helper 兼容；缺少 SQLite Key 时要求重新输入，不回退系统凭据库。数据库不可用时明确报错；本地路由令牌的系统凭据库不可用时失败关闭。
+- API Key 与本地路由令牌均不提供旧钥匙串迁移或旧 helper 兼容，不读取或清理旧系统凭据。缺少 SQLite API Key 时要求重新输入；本地令牌缺失、格式无效或数据库不可用时失败关闭。旧配置先恢复再重新发布，恢复冲突不得提前删除对应本地令牌。
 - ChatGPT OAuth 采用用户明确选择的私有 JSON 保存；账号文件不进入配置恢复 journal、日志、导出或远端同步。Unix 原子写入使用 `0600`，拒绝符号链接与并发覆盖；Windows ACL 和跨平台运行须单独验收。
 - 导入包限制大小、路径、符号链接与解压穿越；深链只打开待审阅表单，不自动写配置或执行命令。
 - 远端同步默认不包含凭据；若未来同步 secrets，需独立端到端加密设计，不能以“WebDAV 是 HTTPS”代替。
@@ -585,9 +589,11 @@ Provider CRUD、连接验证、原配置导入、最小差异切换、快照/恢
 
 2026-09-28 订阅路由批次：实施显式官方连接、原生 app-server 登录/取消/检查续期、工作区及区域绑定、独立本地鉴权、官方 Responses/compact 转发与 API 认证隔离。原生页面提供失效提示、恢复后重新登录和仅含 API 模型的切回预览。Codex CLI `0.158.0-alpha.2.1` 已在合成账号、本地元数据服务和两个假上游中完成订阅/API 文件工具轮次，四条请求均正常完成，恢复保留原配置和原生登录文件。参见 [订阅路由记录](acceptance/M3-subscription-2026-09-28.md)。当前为模型路由预览版，不代表真实官方认证已验收。
 
-2026-09-29 账号保存批次：增加私有原子 JSON 多账号库、设备码添加、当前文件登录导入、默认选择、显式切换与删除。SQLite 保存绑定；配置与目录预览不隐式切换，使用时恢复旧路由，已删除绑定不自动回退。OAuth token 仍独立于 SQLite API Key 保存，本地路由令牌仍用系统凭据库；验证使用合成账号与本地 mock，真实多账号及跨平台运行仍待验收。
+2026-09-29 账号保存批次：增加私有原子 JSON 多账号库、设备码添加、当前文件登录导入、默认选择、显式切换与删除。SQLite 保存绑定；配置与目录预览不隐式切换，使用时恢复旧路由，已删除绑定不自动回退。OAuth token 仍独立于 SQLite API Key 和本地路由令牌保存；验证使用合成账号与本地 mock，真实多账号及跨平台运行仍待验收。
 
 2026-09-29 API Key 保存批次：按用户明确选择对齐 CC Switch 的 SQLite 供应商配置方式，升级到 v8，将 Key 保存到 `settings_config.auth.OPENAI_API_KEY`。更新表单与 helper/路由读取路径，编辑留空保留原值；后续按用户要求移除旧 API Key 钥匙串迁移和旧 helper 兼容，缺少数据库 Key 时重新输入。Key 不进入 UI 列表/状态/预览或恢复 journal。本轮验证采用合成记录、临时数据库与本地 mock，不宣称真实上游或跨平台已验收。
+
+2026-09-29 本地路由令牌保存批次：按用户选择改存 SQLite `app_settings`，采用由 64 个十六进制字符组成的随机值和独立引用，helper 使用显式绝对数据目录只读获取；移除 keyring 及旧 helper 兼容，不接触旧系统凭据。恢复冲突保留路由、令牌和 journal；配置恢复后再停止路由、删除令牌并移除 journal，删除失败保留引用以便重试。126 项自动检查、独立进程 helper、Codex CLI `0.158.0-alpha.2.1` 的双假上游与文件工具轮次、写入失败不发布、删除失败后模拟重启重试、直连 helper 回归与 macOS bundle 构建均通过。结果见 [本地令牌保存检查](acceptance/M3-local-token-storage-2026-09-29.md)；真实上游、Windows/Linux 和原生界面仍未验收。
 
 下一批：使用明确选定的真实供应商/账户运行验收，先验收已有 DeepSeek 路由，再补官方首次请求、实际续期、失效恢复与 DeepSeek ↔ 官方切回。当前 mock 和合成登录态不提供这些证据。真实订阅认证生命周期、并发会话、工作区变化和跨供应商会话状态仍是独立闸门；mock 成功不代表整个 M3 已验收。
 
@@ -620,7 +626,7 @@ MCP/Skills/Prompts、只读会话入口、备份迁移、用量费用、设置�
 
 - [ ] 确定“官方站点”要求包含 ChatGPT 订阅路径；本方案默认需要，不能用 API Key 路径替代。
 - [ ] 选定首轮稳定 CLI 与 Desktop/IDE 测试版本，锁定各自 schema。
-- [ ] 核实 Slint 授权模式、渲染/托盘共存、OS 凭据方案。
+- [ ] 核实 Slint 授权模式、渲染/托盘共存、凭据文件与数据库权限。
 - [ ] 验证 DeepSeek 当前真实模型与 Responses 行为，不仅引用静态文档。
 - [ ] 同意 Quiet Circuit 视觉方向，确认主题、密度和窗口最小尺寸。
 - [ ] 第一轮只做 M0 + M1，再决定完整排期。
