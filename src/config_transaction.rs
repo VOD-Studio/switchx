@@ -568,7 +568,16 @@ pub(crate) fn read_config(path: &Path) -> Result<Option<Vec<u8>>, String> {
     }
 }
 
-pub(crate) fn lock_config(config_path: &Path) -> Result<File, String> {
+pub(crate) struct ConfigLock(File);
+
+impl Drop for ConfigLock {
+    fn drop(&mut self) {
+        // A child can inherit the descriptor before exec; close alone leaves its lock held.
+        let _ = self.0.unlock();
+    }
+}
+
+pub(crate) fn lock_config(config_path: &Path) -> Result<ConfigLock, String> {
     let path = config_path.with_file_name(".switchx-config.lock");
     if let Ok(metadata) = fs::symlink_metadata(&path)
         && (!metadata.is_file() || metadata.file_type().is_symlink())
@@ -585,7 +594,7 @@ pub(crate) fn lock_config(config_path: &Path) -> Result<File, String> {
     let file = options.open(path).map_err(io_error)?;
     file.try_lock()
         .map_err(|_| "另一个 SwitchX 实例正在修改此 Codex 配置，请稍后重试")?;
-    Ok(file)
+    Ok(ConfigLock(file))
 }
 
 fn write_new(path: &Path, bytes: &[u8]) -> Result<(), String> {
@@ -1019,6 +1028,47 @@ mod tests {
             fs::read_to_string(home.config())
                 .unwrap()
                 .contains("model = 42")
+        );
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn config_lock_releases_before_inherited_child_handles_close() {
+        use std::{ffi::c_int, os::fd::AsRawFd, os::unix::net::UnixStream};
+
+        unsafe extern "C" {
+            fn fork() -> c_int;
+            fn read(fd: c_int, buffer: *mut std::ffi::c_void, count: usize) -> isize;
+            fn waitpid(pid: c_int, status: *mut c_int, options: c_int) -> c_int;
+            fn _exit(status: c_int) -> !;
+        }
+
+        let home = TestHome::new();
+        let lock = lock_config(&home.config()).unwrap();
+        let (mut release, inherited) = UnixStream::pair().unwrap();
+        let descriptor = inherited.as_raw_fd();
+        // SAFETY: the child only calls async-signal-safe read and _exit after fork.
+        let pid = unsafe { fork() };
+        assert!(pid >= 0);
+        if pid == 0 {
+            let mut byte = 0_u8;
+            // SAFETY: the inherited socket and stack byte are valid in the child.
+            unsafe {
+                let received = read(descriptor, (&mut byte as *mut u8).cast(), 1);
+                _exit(if received == 1 { 0 } else { 1 });
+            }
+        }
+        drop(lock);
+        let retry = lock_config(&home.config());
+        release.write_all(&[1]).unwrap();
+        let mut status = 0;
+        // SAFETY: pid is our child and status points to valid writable storage.
+        assert_eq!(unsafe { waitpid(pid, &mut status, 0) }, pid);
+        assert_eq!(status, 0);
+        assert!(
+            retry.is_ok(),
+            "released configuration lock: {:?}",
+            retry.err()
         );
     }
 
