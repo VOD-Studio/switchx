@@ -1,15 +1,15 @@
-//! Isolated desktop fixture. All accounts are synthetic; network and Codex CLI
-//! operations are disabled. Press Enter to stop this fixture and remove its data.
+//! Isolated desktop fixture for local account binding edits. All accounts are
+//! synthetic and Codex CLI operations are disabled. Quit the fixture app before
+//! pressing Enter to remove its bundle and data. Do not use online login actions.
 
 use std::{
     io,
-    path::PathBuf,
-    process::{Command, Stdio},
+    path::{Path, PathBuf},
 };
 
 use base64::{Engine, engine::general_purpose::URL_SAFE_NO_PAD};
 use serde_json::json;
-use switchx::{accounts::AccountManager, app, chatgpt};
+use switchx::{accounts::AccountManager, app, chatgpt, storage::AccountBinding};
 
 struct Fixture(PathBuf);
 
@@ -17,6 +17,53 @@ impl Drop for Fixture {
     fn drop(&mut self) {
         let _ = std::fs::remove_dir_all(&self.0);
     }
+}
+
+fn xml_text(value: &str) -> String {
+    value
+        .replace('&', "&amp;")
+        .replace('<', "&lt;")
+        .replace('>', "&gt;")
+}
+
+fn fixture_bundle(root: &Path, binary: &Path, data: &Path, home: &Path) -> io::Result<PathBuf> {
+    let bundle = root.join("SwitchX Account Fixture.app");
+    let contents = bundle.join("Contents");
+    std::fs::create_dir_all(contents.join("MacOS"))?;
+    std::fs::copy(binary, contents.join("MacOS/switchx"))?;
+    let identifier = format!(
+        "dev.switchx.fixture.accounts.{}",
+        app::new_id().map_err(io::Error::other)?
+    );
+    let data = xml_text(&data.to_string_lossy());
+    let home = xml_text(&home.to_string_lossy());
+    // A separate bundle identity prevents LaunchServices selecting an installed
+    // SwitchX. Its environment is part of the bundle, including when opened via UI.
+    std::fs::write(
+        contents.join("Info.plist"),
+        format!(
+            r#"<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0"><dict>
+<key>CFBundleIdentifier</key><string>{identifier}</string>
+<key>CFBundleName</key><string>SwitchX Account Fixture</string>
+<key>CFBundleDisplayName</key><string>SwitchX Account Fixture</string>
+<key>CFBundleExecutable</key><string>switchx</string>
+<key>CFBundlePackageType</key><string>APPL</string>
+<key>NSHighResolutionCapable</key><true/>
+<key>LSEnvironment</key><dict>
+<key>SWITCHX_DATA_DIR</key><string>{data}</string>
+<key>CODEX_HOME</key><string>{home}</string>
+<key>SWITCHX_CODEX_CLI</key><string>/usr/bin/false</string>
+<key>OPENAI_API_KEY</key><string></string>
+<key>CODEX_API_KEY</key><string></string>
+<key>CODEX_ACCESS_TOKEN</key><string></string>
+<key>OPENAI_BASE_URL</key><string></string>
+</dict></dict></plist>
+"#
+        ),
+    )?;
+    Ok(bundle)
 }
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -45,6 +92,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         "# synthetic desktop fixture\ncli_auth_credentials_store = \"file\"\n",
     )?;
     let manager = AccountManager::open(&data)?;
+    let mut account_ids = Vec::new();
     for label in ["A", "B"] {
         let claims = json!({"sub":format!("synthetic-user-{label}"),
             "email":format!("synthetic-{label}@example.invalid"), "exp":4102444800u64,
@@ -67,35 +115,50 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             )?;
         }
         let account = manager.import_current(&home)?;
-        if label == "A" {
-            chatgpt::bind_managed_account(&data, Some(&account.id))?;
-        } else {
+        if label == "B" {
             manager.set_default(&account.id)?;
         }
+        account_ids.push(account.id);
     }
-    let mut child = Command::new(&binary)
-        .env("SWITCHX_DATA_DIR", &data)
-        .env("CODEX_HOME", &home)
-        .env("SWITCHX_CODEX_CLI", "/usr/bin/false")
-        .env_remove("OPENAI_API_KEY")
-        .env_remove("CODEX_API_KEY")
-        .env_remove("CODEX_ACCESS_TOKEN")
-        .env_remove("OPENAI_BASE_URL")
-        .env("HTTP_PROXY", "http://127.0.0.1:9")
-        .env("HTTPS_PROXY", "http://127.0.0.1:9")
-        .env("ALL_PROXY", "http://127.0.0.1:9")
-        .env("NO_PROXY", "127.0.0.1,localhost")
-        .stdin(Stdio::null())
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .spawn()?;
-    println!("Isolated desktop PID {} · {}", child.id(), root.0.display());
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()?;
+    runtime.block_on(manager.activate(&account_ids[1], &home))?;
+    let catalog: serde_json::Value =
+        serde_json::from_str(include_str!("../tests/fixtures/synthetic-models.json"))?;
+    let mut model = catalog["models"][1].clone();
+    model["slug"] = json!("synthetic-shared-chatgpt");
+    model["display_name"] = json!("Synthetic shared ChatGPT model");
+    let models = [model];
+    // Keep the old connection/public ID visible alongside a new independent connection.
+    chatgpt::save_connection(&data, &models)?;
+    chatgpt::save_subscription(
+        &data,
+        Some(chatgpt::PROVIDER_ID),
+        "ChatGPT · 合成账号 A",
+        AccountBinding::Fixed(account_ids[0].clone()),
+        &[],
+    )?;
+    chatgpt::save_subscription(
+        &data,
+        None,
+        "ChatGPT · 合成账号 B",
+        AccountBinding::Fixed(account_ids[1].clone()),
+        &models,
+    )?;
+    app::save_provider(
+        &data,
+        None,
+        "API · 合成连接",
+        "http://127.0.0.1:9/v1",
+        "synthetic-api-model",
+        "synthetic-api-key".into(),
+    )?;
+    let bundle = fixture_bundle(&root.0, &binary, &data, &home)?;
+    println!("Open the synthetic fixture bundle: {}", bundle.display());
     println!(
-        "B is the native/default account; A is selected. Verify list, import B, use/default B, set default A, and removal. Press Enter to clean up."
+        "Synthetic A/B providers bind independently to the same model slug; B is the native/default entry login. Verify local rename/rebind, distinct public IDs, default changes, and shared references after rebinding B to A. Codex CLI is disabled; do not use login, refresh, or other online actions. Quit the fixture app, then press Enter to clean up."
     );
-    let result = io::stdin().read_line(&mut String::new());
-    let _ = child.kill();
-    let _ = child.wait();
-    result?;
+    io::stdin().read_line(&mut String::new())?;
     Ok(())
 }
