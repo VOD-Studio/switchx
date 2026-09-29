@@ -728,7 +728,7 @@ async fn headless(
     )?;
     std::fs::write(
         home.join("config.toml"),
-        conflicted.replace("model = \"external-choice\"", "model = \"original-model\""),
+        conflicted.replace("model = \"external-choice\"", "model = \"sx-mock-beta\""),
     )?;
     let connection = rusqlite::Connection::open(data.join("switchx.sqlite"))?;
     connection.execute_batch(
@@ -769,7 +769,7 @@ async fn headless(
         "successful recovery did not delete the route's SQLite token",
     )?;
     println!(
-        "Port conflicts, invalid catalog, stale preview and recovery conflicts were handled without losing user settings."
+        "Published model selection recovered; port conflicts, invalid catalog, stale preview and recovery conflicts were handled without losing user settings."
     );
     Ok(())
 }
@@ -795,13 +795,17 @@ async fn http_round_trip(
         let response = client
             .post(format!("http://{address}/v1/responses"))
             .bearer_auth(token.expose())
+            .header(
+                "session-id",
+                format!("00000000-0000-4000-8000-{index:012x}"),
+            )
             .header(header::CONTENT_TYPE, "application/json")
             .body(json!({"model":model,"input":"synthetic-http-route","stream":true}).to_string())
             .send()
             .await?;
         check(
             response.status() == StatusCode::OK,
-            "HTTP route rejected its local synthetic token",
+            "HTTP synthetic route request was rejected",
         )?;
         check(
             response.text().await?.contains("response.completed"),
