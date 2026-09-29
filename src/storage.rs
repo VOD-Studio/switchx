@@ -347,6 +347,22 @@ impl Store {
             .unwrap_or_default())
     }
 
+    pub fn common_codex_config_initialized(&self) -> Result<bool> {
+        self.connection.query_row(
+            "SELECT EXISTS(SELECT 1 FROM app_settings WHERE key = 'common_codex_config')",
+            [],
+            |row| row.get(0),
+        )
+    }
+
+    pub fn initialize_common_codex_config(&self, snippet: &str) -> Result<bool> {
+        Ok(self.connection.execute(
+            "INSERT INTO app_settings (key, value) VALUES ('common_codex_config', ?1)
+             ON CONFLICT(key) DO NOTHING",
+            [snippet],
+        )? != 0)
+    }
+
     pub fn put_common_codex_config(&self, snippet: &str) -> Result<()> {
         self.connection.execute(
             "INSERT INTO app_settings (key, value) VALUES ('common_codex_config', ?1)
@@ -486,6 +502,32 @@ impl Store {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn common_config_initialization_does_not_overwrite_saved_or_explicitly_cleared_values() {
+        let store = Store::open(Path::new(":memory:")).unwrap();
+        assert!(!store.common_codex_config_initialized().unwrap());
+        assert!(
+            store
+                .initialize_common_codex_config("first snippet")
+                .unwrap()
+        );
+        assert!(store.common_codex_config_initialized().unwrap());
+        assert!(
+            !store
+                .initialize_common_codex_config("next snippet")
+                .unwrap()
+        );
+        assert_eq!(store.common_codex_config().unwrap(), "first snippet");
+        store.put_common_codex_config("").unwrap();
+        assert!(store.common_codex_config_initialized().unwrap());
+        assert!(
+            !store
+                .initialize_common_codex_config("next snippet")
+                .unwrap()
+        );
+        assert_eq!(store.common_codex_config().unwrap(), "");
+    }
 
     #[test]
     fn provider_and_models_roll_back_together_on_model_conflict() {

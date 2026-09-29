@@ -89,8 +89,9 @@ fn sensitive_key(key: &str) -> bool {
             | "env_http_headers"
             | "experimental_bearer_token"
             | "credential"
+            | "credential_ref"
             | "credentials"
-    ) || ["_api_key", "_token", "_secret", "_password"]
+    ) || ["_api_key", "_token", "_secret", "_password", "_credentials"]
         .iter()
         .any(|suffix| key.ends_with(suffix))
         || key.contains("secret")
@@ -420,6 +421,47 @@ mod tests {
         let extracted = extract_common("[shell_environment_policy.set]\nPRIVATE_KEY = 'secret-marker'\nAWS_ACCESS_KEY_ID = 'secret-marker'\nLANG = 'en_US'\n").unwrap();
         assert!(!extracted.contains("secret-marker"));
         assert!(validate_common("model_provider = 'custom'").is_err());
+    }
+
+    #[test]
+    fn preview_extraction_removes_helper_references_and_env_credentials() {
+        let rendered = preview(
+            "Synthetic provider",
+            "https://example.invalid/v1",
+            "synthetic-model",
+            "synthetic-provider-reference",
+            Path::new("/tmp/synthetic-credential-helper"),
+            &CodexOptions::default(),
+            "model_reasoning_effort = 'max'\n[env]\nLANG = 'en_US.UTF-8'\n[features]\nhooks = true\n",
+        )
+        .unwrap();
+        assert!(rendered.contains("synthetic-credential-helper"));
+        assert!(rendered.contains("synthetic-provider-reference"));
+        let mut source: DocumentMut = rendered.parse().unwrap();
+        source["credential_ref"] = value("synthetic-standalone-reference");
+        source["env"]["GOOGLE_APPLICATION_CREDENTIALS"] = value("synthetic-env-credentials");
+        source["env"]["credential_ref"] = value("synthetic-env-reference");
+
+        let shared = extract_common(&source.to_string()).unwrap();
+        assert!(!shared.contains("synthetic-"));
+        let extracted: DocumentMut = shared.parse().unwrap();
+        assert!(extracted.get("model_providers").is_none());
+        assert!(extracted.get("auth").is_none());
+        assert!(extracted.get("credential_ref").is_none());
+        assert!(
+            extracted["env"]
+                .get("GOOGLE_APPLICATION_CREDENTIALS")
+                .is_none()
+        );
+        assert!(extracted["env"].get("credential_ref").is_none());
+        assert_eq!(extracted["env"]["LANG"].as_str(), Some("en_US.UTF-8"));
+        assert_eq!(extracted["features"]["hooks"].as_bool(), Some(true));
+        assert_eq!(extracted["model_reasoning_effort"].as_str(), Some("max"));
+        assert!(validate_common("credential_ref = 'synthetic-reference'").is_err());
+        assert!(
+            validate_common("[env]\nGOOGLE_APPLICATION_CREDENTIALS = 'synthetic-reference'\n")
+                .is_err()
+        );
     }
 
     #[test]

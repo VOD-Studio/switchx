@@ -1205,7 +1205,7 @@ export component AppWindow inherits Window {
                         VerticalLayout {
                             spacing: 12px;
                             SurfaceCard {
-                                height: 132px;
+                                height: 184px;
                                 background: Theme.brand-surface;
                                 border-color: Theme.brand;
                                 VerticalLayout {
@@ -1226,16 +1226,24 @@ export component AppWindow inherits Window {
                                     }
 
                                     Text {
-                                        text: "提取当前配置后检查草稿，点击“保存”，再在上游表单勾选“应用通用配置”。新增插件或 Hook 后可重新提取。";
+                                        text: "首次使用会从目标 Codex 配置自动提取；打开此页加载已保存的片段。";
                                         color: Theme.muted-text;
                                         font-size: 12px;
                                         wrap: word-wrap;
                                     }
 
                                     Text {
-                                        text: "提取会排除供应商、认证和 MCP 项。保存片段只更新 SwitchX 本地资料，切换时生效。";
+                                        text: "“从编辑内容提取”会提取供应商表单当前 config.toml 的通用部分并立即保存。手动修改后需点击“保存”。";
                                         color: Theme.muted-text;
                                         font-size: 12px;
+                                        wrap: word-wrap;
+                                    }
+
+                                    Text {
+                                        text: "取消只丢弃手动草稿，已完成的提取仍保留。提取会排除供应商、认证和 MCP 项，片段在勾选“应用通用配置”后切换时生效。";
+                                        color: Theme.muted-text;
+                                        font-size: 12px;
+                                        wrap: word-wrap;
                                     }
                                 }
                             }
@@ -1286,8 +1294,8 @@ export component AppWindow inherits Window {
                         height: 36px;
                         spacing: 8px;
                         QuietButton {
-                            min-width: 194px;
-                            text: "从当前 Codex 配置提取";
+                            min-width: 160px;
+                            text: "从编辑内容提取";
                             enabled: !root.busy && !root.config-managed;
                             clicked => { root.extract-common-config(); }
                         }
