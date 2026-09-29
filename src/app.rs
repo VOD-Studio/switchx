@@ -52,6 +52,7 @@ impl AppError {
 pub struct ProviderView {
     pub id: String,
     pub name: String,
+    pub icon_id: String,
     pub endpoint: String,
     pub base_url: String,
     pub model_id: String,
@@ -591,6 +592,7 @@ fn provider_view(provider: ProviderRecord, store: &Store, check_credentials: boo
         binding_label: binding_label(&provider),
         id: provider.id,
         name: provider.name.clone(),
+        icon_id: provider.icon_id.unwrap_or_default(),
         endpoint: reqwest::Url::parse(&provider.base_url)
             .ok()
             .filter(|url| matches!(url.scheme(), "http" | "https") && url.host_str().is_some())
@@ -623,7 +625,7 @@ pub fn save_provider(
     model_id: &str,
     key: String,
 ) -> Result<(), String> {
-    save_provider_inner(data_dir, id, name, base_url, model_id, key, None)
+    save_provider_inner(data_dir, id, name, base_url, model_id, key, None, None)
 }
 
 pub fn save_provider_with_codex_options(
@@ -635,10 +637,50 @@ pub fn save_provider_with_codex_options(
     key: String,
     options: &CodexOptions,
 ) -> Result<(), String> {
-    options.validate()?;
-    save_provider_inner(data_dir, id, name, base_url, model_id, key, Some(options))
+    save_provider_with_codex_options_and_icon(
+        data_dir, id, name, base_url, model_id, key, options, None,
+    )
 }
 
+/// None preserves the saved icon; an empty ID clears its custom override.
+#[allow(clippy::too_many_arguments)]
+pub fn save_provider_with_codex_options_and_icon(
+    data_dir: &Path,
+    id: Option<&str>,
+    name: &str,
+    base_url: &str,
+    model_id: &str,
+    key: String,
+    options: &CodexOptions,
+    icon_id: Option<&str>,
+) -> Result<(), String> {
+    options.validate()?;
+    save_provider_inner(
+        data_dir,
+        id,
+        name,
+        base_url,
+        model_id,
+        key,
+        Some(options),
+        icon_id,
+    )
+}
+
+pub(crate) fn resolve_provider_icon_id(
+    icon_id: Option<&str>,
+    old: Option<&ProviderRecord>,
+) -> Result<Option<String>, String> {
+    match icon_id {
+        None => Ok(old.and_then(|provider| provider.icon_id.clone())),
+        Some("") => Ok(None),
+        Some(id) => crate::provider_icons::icon(id)
+            .map(|icon| Some(icon.id.to_owned()))
+            .ok_or_else(|| "请选择有效的上游图标".into()),
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
 fn save_provider_inner(
     data_dir: &Path,
     id: Option<&str>,
@@ -647,6 +689,7 @@ fn save_provider_inner(
     model_id: &str,
     key: String,
     options: Option<&CodexOptions>,
+    icon_id: Option<&str>,
 ) -> Result<(), String> {
     ensure_editable(data_dir)?;
     let url = validate_provider(name, base_url, model_id)?;
@@ -666,6 +709,7 @@ fn save_provider_inner(
     {
         return Err("请使用订阅连接编辑器修改名称或绑定账号".into());
     }
+    let icon_id = resolve_provider_icon_id(icon_id, old.as_ref())?;
     let id = match &old {
         Some(record) => record.id.clone(),
         None => new_id()?,
@@ -684,6 +728,7 @@ fn save_provider_inner(
         base_url: url.to_string(),
         model_id: model_id.into(),
         credential_ref: None,
+        icon_id,
     };
     let models = store.models().map_err(|_| "无法读取模型资料")?;
     let defaults = new_preset_models(&record, &models)?;
@@ -1338,6 +1383,7 @@ mod tests {
             let provider = ProviderRecord {
                 kind: crate::storage::ProviderKind::ApiKey,
                 account_binding: None,
+                icon_id: None,
                 id: preset.id.into(),
                 name: preset.name.into(),
                 base_url: preset.base_url.into(),
@@ -1475,6 +1521,7 @@ mod tests {
             let provider = ProviderRecord {
                 kind: crate::storage::ProviderKind::ApiKey,
                 account_binding: None,
+                icon_id: None,
                 id: preset.id.into(),
                 name: preset.name.into(),
                 base_url: preset.base_url.into(),
@@ -1503,6 +1550,7 @@ mod tests {
             .put_provider(&ProviderRecord {
                 kind: crate::storage::ProviderKind::ApiKey,
                 account_binding: None,
+                icon_id: None,
                 id: "mock".into(),
                 name: "Mock".into(),
                 base_url: "https://example.invalid/v1".into(),
@@ -1579,6 +1627,7 @@ mod tests {
             .put_provider(&ProviderRecord {
                 kind: crate::storage::ProviderKind::ApiKey,
                 account_binding: None,
+                icon_id: None,
                 id: "probe".into(),
                 name: "Test Provider".into(),
                 base_url: "https://user:secret@example.invalid/v1?token=private".into(),
@@ -1621,6 +1670,102 @@ mod tests {
                 0o600
             );
         }
+        fs::remove_dir_all(path).unwrap();
+    }
+
+    #[test]
+    fn provider_icon_changes_preserve_empty_api_key_and_legacy_edits() {
+        let path = env::temp_dir().join(format!("switchx-api-icon-{}", new_id().unwrap()));
+        let options = CodexOptions::default();
+        save_provider_with_codex_options_and_icon(
+            &path,
+            None,
+            "Mock",
+            "https://example.invalid/v1",
+            "mock",
+            "synthetic-icon-key".into(),
+            &options,
+            Some("deepseek"),
+        )
+        .unwrap();
+        let store = open_store(&path).unwrap();
+        let id = store.providers().unwrap()[0].id.clone();
+        save_provider(
+            &path,
+            Some(&id),
+            "Renamed",
+            "https://example.invalid/v1",
+            "mock",
+            String::new(),
+        )
+        .unwrap();
+        assert_eq!(
+            store.provider(&id).unwrap().unwrap().icon_id.as_deref(),
+            Some("deepseek")
+        );
+        for (icon_id, expected) in [
+            (None, Some("deepseek")),
+            (Some(" OPENAI "), Some("openai")),
+            (Some(""), None),
+        ] {
+            save_provider_with_codex_options_and_icon(
+                &path,
+                Some(&id),
+                "Renamed",
+                "https://example.invalid/v1",
+                "mock",
+                String::new(),
+                &options,
+                icon_id,
+            )
+            .unwrap();
+            assert_eq!(
+                store.provider(&id).unwrap().unwrap().icon_id.as_deref(),
+                expected
+            );
+            assert_eq!(
+                store.provider_api_key(&id).unwrap().unwrap().expose(),
+                "synthetic-icon-key"
+            );
+            assert_eq!(
+                load_snapshot(&path, true).unwrap().providers[0].icon_id,
+                expected.unwrap_or("")
+            );
+        }
+        let before = store.provider(&id).unwrap().unwrap();
+        assert_eq!(
+            save_provider_with_codex_options_and_icon(
+                &path,
+                Some(&id),
+                "Must not save",
+                "https://example.invalid/v1",
+                "mock",
+                "must-not-save".into(),
+                &options,
+                Some("../unknown-icon"),
+            )
+            .unwrap_err(),
+            "请选择有效的上游图标"
+        );
+        assert_eq!(store.provider(&id).unwrap(), Some(before));
+        assert_eq!(
+            store.provider_api_key(&id).unwrap().unwrap().expose(),
+            "synthetic-icon-key"
+        );
+        let mut legacy = store.provider(&id).unwrap().unwrap();
+        legacy.icon_id = Some("removed-legacy-icon".into());
+        store.put_provider(&legacy).unwrap();
+        save_provider(
+            &path,
+            Some(&id),
+            "Renamed",
+            "https://example.invalid/v1",
+            "mock",
+            String::new(),
+        )
+        .unwrap();
+        assert_eq!(store.provider(&id).unwrap(), Some(legacy));
+        drop(store);
         fs::remove_dir_all(path).unwrap();
     }
 
@@ -1731,6 +1876,7 @@ mod tests {
         let provider = ProviderRecord {
             kind: crate::storage::ProviderKind::ApiKey,
             account_binding: None,
+            icon_id: None,
             id: "synthetic-unused-legacy-key".into(),
             name: "Mock".into(),
             base_url: "https://example.invalid/v1".into(),
@@ -1838,6 +1984,7 @@ mod tests {
             .put_provider(&ProviderRecord {
                 kind: crate::storage::ProviderKind::ApiKey,
                 account_binding: None,
+                icon_id: None,
                 id: "mock".into(),
                 name: "Mock".into(),
                 base_url: "https://example.invalid/v1".into(),
@@ -1859,6 +2006,7 @@ mod tests {
             .put_provider(&ProviderRecord {
                 kind: crate::storage::ProviderKind::ApiKey,
                 account_binding: None,
+                icon_id: None,
                 id: "backup".into(),
                 name: "Backup".into(),
                 base_url: "https://backup.invalid/v1".into(),

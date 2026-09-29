@@ -1045,7 +1045,8 @@ mod tests {
         let legacy = rusqlite::Connection::open(data.join("switchx.sqlite")).unwrap();
         legacy
             .execute_batch(
-                "ALTER TABLE providers DROP COLUMN account_binding;
+                "ALTER TABLE providers DROP COLUMN icon_id;
+             ALTER TABLE providers DROP COLUMN account_binding;
              ALTER TABLE providers DROP COLUMN kind;
              DROP TABLE session_bindings;
              PRAGMA user_version = 8;",
@@ -1146,6 +1147,7 @@ mod tests {
                     &ProviderRecord {
                         kind: crate::storage::ProviderKind::ApiKey,
                         account_binding: None,
+                        icon_id: None,
                         id: id.into(),
                         name: id.into(),
                         base_url: "https://example.invalid/v1".into(),

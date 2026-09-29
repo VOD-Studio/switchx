@@ -1045,6 +1045,7 @@ mod tests {
         let provider = crate::storage::ProviderRecord {
             kind: crate::storage::ProviderKind::ApiKey,
             account_binding: None,
+            icon_id: None,
             id: "fixture".into(),
             name: "Fixture".into(),
             base_url: "https://example.invalid/v1".into(),

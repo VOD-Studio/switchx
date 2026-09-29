@@ -364,6 +364,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         store.put_provider(&ProviderRecord {
             kind: switchx::storage::ProviderKind::ApiKey,
             account_binding: None,
+            icon_id: None,
             id: api_id.clone(),
             name: "Synthetic API".into(),
             base_url: "http://127.0.0.1:1/v1".into(),
