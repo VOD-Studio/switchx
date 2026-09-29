@@ -10,6 +10,7 @@ pub mod credentials;
 pub mod direct;
 pub mod direct_config;
 pub mod provider_config;
+pub mod provider_icons;
 pub mod requests;
 pub mod routed;
 pub mod routing;
