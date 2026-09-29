@@ -1,3 +1,5 @@
+//! System credential round trip for local router tokens; provider keys live in SQLite.
+
 use switchx::credentials::{CredentialError, CredentialStore, Secret};
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {

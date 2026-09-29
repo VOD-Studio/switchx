@@ -363,7 +363,7 @@ impl RouteSession {
                 );
                 continue;
             }
-            let token = app::provider_credential(provider)?;
+            let token = app::provider_credential(state_dir, provider)?;
             let available = direct::fetch_models(&provider.base_url, token.expose())
                 .await
                 .map_err(|error| format!("{}：{error}", provider.name))?;
@@ -581,7 +581,7 @@ fn selected_inputs(state_dir: &Path) -> Result<(Vec<ModelRecord>, Vec<ProviderRe
                     && primary.upstream_model == model.upstream_model
             })
     });
-    let providers: Vec<_> = store
+    let mut providers: Vec<_> = store
         .providers()
         .map_err(|_| "无法读取上游资料")?
         .into_iter()
@@ -602,8 +602,16 @@ fn selected_inputs(state_dir: &Path) -> Result<(Vec<ModelRecord>, Vec<ProviderRe
             {
                 return Err("订阅账号不参与自动备用切换".into());
             }
-        } else if provider.credential_ref.as_deref() != Some(provider.id.as_str()) {
-            return Err(format!("{} 的凭据引用无效，请重新保存上游", provider.name));
+        }
+    }
+    for provider in &mut providers {
+        if provider.id != chatgpt::PROVIDER_ID {
+            app::provider_credential(state_dir, provider)?;
+            // A legacy key migration clears its reference before preview snapshots it.
+            *provider = store
+                .provider(&provider.id)
+                .map_err(|_| "无法读取迁移后的上游资料")?
+                .ok_or("所选模型的上游已不存在")?;
         }
     }
     Ok((models, providers))
@@ -770,13 +778,18 @@ mod tests {
         let store = app::open_store(&path).unwrap();
         for id in ["primary", "backup"] {
             store
-                .put_provider(&ProviderRecord {
-                    id: id.into(),
-                    name: id.into(),
-                    base_url: "https://example.invalid/v1".into(),
-                    model_id: "unrelated-default".into(),
-                    credential_ref: Some(id.into()),
-                })
+                .put_provider_with_models_options_and_key(
+                    &ProviderRecord {
+                        id: id.into(),
+                        name: id.into(),
+                        base_url: "https://example.invalid/v1".into(),
+                        model_id: "unrelated-default".into(),
+                        credential_ref: None,
+                    },
+                    &[],
+                    None,
+                    &Secret::new(format!("synthetic-{id}-key")),
+                )
                 .unwrap();
         }
         let metadata = catalog::mapping_metadata(

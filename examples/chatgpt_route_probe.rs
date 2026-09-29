@@ -366,7 +366,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             name: "Synthetic API".into(),
             base_url: "http://127.0.0.1:1/v1".into(),
             model_id: "synthetic-api-model".into(),
-            credential_ref: Some(api_id.clone()),
+            credential_ref: None,
         })?;
         let mut api_metadata = native_models[0].clone();
         api_metadata["slug"] = "synthetic-api-model".into();

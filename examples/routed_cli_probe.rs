@@ -6,6 +6,7 @@
 //! `--live-probe` checks the real-route probe against these synthetic upstreams.
 //! `--models` checks two distinct models on one provider, including a manual catalog.
 //! `--desktop-models` opens that fixture for discovery and mapping UI checks.
+//! `--http-only` checks production forwarding without a separate CLI keychain reader.
 
 use std::{
     path::{Path, PathBuf},
@@ -24,7 +25,12 @@ use axum::{
     routing::{get, post},
 };
 use serde_json::{Value, json};
-use switchx::{app, client, config_transaction, routed::RouteSession, storage::Store};
+use switchx::{
+    app, client, config_transaction,
+    credentials::{CredentialStore, ROUTER_TOKEN_SERVICE},
+    routed::RouteSession,
+    storage::Store,
+};
 use tokio::{net::TcpListener, process::Command, sync::mpsc, time::timeout};
 
 const ORIGINAL: &str = "model = \"original-model\" # keep\napproval_policy = \"never\"\n\n[mcp_servers.synthetic]\nenabled = false\ncommand = \"false\"\n";
@@ -138,6 +144,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let multiple = matches!(mode.as_deref(), Some("--models" | "--desktop-models"));
     let fallback = matches!(mode.as_deref(), Some("--fallback" | "--desktop-fallback"));
     let live_probe = mode.as_deref() == Some("--live-probe");
+    let http_only = mode.as_deref() == Some("--http-only");
     let live_mode = Arc::new(AtomicU8::new(0));
     let root = std::env::temp_dir().join(format!(
         "switchx-routed-probe-{}-{}",
@@ -208,7 +215,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         } else if fallback {
             fallback_probe(&data, &home, &helper, &mut seen, &mut tasks[0]).await?;
         } else {
-            headless(&data, &home, &helper, &mut seen, multiple).await?;
+            headless(&data, &home, &helper, &mut seen, multiple, http_only).await?;
         }
         Ok::<_, Box<dyn std::error::Error>>(())
     }.await;
@@ -326,7 +333,7 @@ async fn live_probe_fixture(
         )?;
     }
     for provider in Store::open_read_only(&data.join("switchx.sqlite"))?.providers()? {
-        let secret = app::provider_credential(&provider)?;
+        let secret = app::provider_credential(data, &provider)?;
         let expected = if provider.name == "Mock Alpha" {
             "synthetic-alpha-key"
         } else {
@@ -441,6 +448,7 @@ async fn headless(
     helper: &Path,
     seen: &mut [mpsc::Receiver<Value>],
     multiple: bool,
+    http_only: bool,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let mut session = RouteSession::default();
     let occupied = TcpListener::bind("127.0.0.1:0").await?;
@@ -547,53 +555,72 @@ async fn headless(
     for secret in ["synthetic-alpha-key", "synthetic-beta-key"] {
         check(
             !active.contains(secret)
-                && !std::fs::read_to_string(data.join("switch-journal.json"))?.contains(secret)
-                && !String::from_utf8_lossy(&std::fs::read(data.join("switchx.sqlite"))?)
-                    .contains(secret),
-            "provider credential leaked into a metadata file",
+                && !std::fs::read_to_string(data.join("switch-journal.json"))?.contains(secret),
+            "provider credential leaked into the generated config or recovery journal",
+        )?;
+        check(
+            String::from_utf8_lossy(&std::fs::read(data.join("switchx.sqlite"))?).contains(secret),
+            "provider credential was not saved in SQLite",
         )?;
     }
-    run_cli(home, "sx-mock-alpha").await?;
-    let first = timeout(Duration::from_secs(3), seen[0].recv())
-        .await?
-        .ok_or("first upstream was not called")?;
-    let second = timeout(Duration::from_secs(3), seen[0].recv())
-        .await?
-        .ok_or("tool result was not forwarded")?;
-    check(
-        first["model"] == "shared-model"
-            && second["model"] == "shared-model"
-            && second["input"].to_string().contains("synthetic-tool-file")
-            && seen[1].try_recv().is_err(),
-        "first model did not complete an isolated tool round trip",
-    )?;
-    run_cli(home, "sx-mock-beta").await?;
-    let request = timeout(Duration::from_secs(3), seen[1].recv())
-        .await?
-        .ok_or("second upstream was not called")?;
-    check(
-        request["model"] == "shared-model" && seen[0].try_recv().is_err(),
-        "second model used the wrong upstream",
-    )?;
-    println!(
-        "Both aliases reached their own upstream; the first completed a file-tool round trip."
-    );
-    if multiple {
-        run_cli(home, "sx-mock-alpha-extra").await?;
-        let request = timeout(Duration::from_secs(3), seen[0].recv())
+    if http_only {
+        http_round_trip(data, &session, seen).await?;
+    } else {
+        run_cli(home, "sx-mock-alpha").await?;
+        let first = timeout(Duration::from_secs(3), seen[0].recv())
             .await?
-            .ok_or("extra model was not called")?;
+            .ok_or("first upstream was not called")?;
+        let second = timeout(Duration::from_secs(3), seen[0].recv())
+            .await?
+            .ok_or("tool result was not forwarded")?;
         check(
-            request["model"] == "extra-model" && seen[1].try_recv().is_err(),
-            "second model on one provider used the wrong actual model or credential",
+            first["model"] == "shared-model"
+                && second["model"] == "shared-model"
+                && second["input"].to_string().contains("synthetic-tool-file")
+                && seen[1].try_recv().is_err(),
+            "first model did not complete an isolated tool round trip",
+        )?;
+        run_cli(home, "sx-mock-beta").await?;
+        let request = timeout(Duration::from_secs(3), seen[1].recv())
+            .await?
+            .ok_or("second upstream was not called")?;
+        check(
+            request["model"] == "shared-model" && seen[0].try_recv().is_err(),
+            "second model used the wrong upstream",
         )?;
         println!(
-            "Manual catalog parsed by Codex; two models reached one provider with distinct actual model IDs."
+            "Both aliases reached their own upstream; the first completed a file-tool round trip."
         );
+        if multiple {
+            run_cli(home, "sx-mock-alpha-extra").await?;
+            let request = timeout(Duration::from_secs(3), seen[0].recv())
+                .await?
+                .ok_or("extra model was not called")?;
+            check(
+                request["model"] == "extra-model" && seen[1].try_recv().is_err(),
+                "second model on one provider used the wrong actual model or credential",
+            )?;
+            println!(
+                "Manual catalog parsed by Codex; two models reached one provider with distinct actual model IDs."
+            );
+        }
     }
     let records = store.requests(100)?;
+    for secret in ["synthetic-alpha-key", "synthetic-beta-key"] {
+        check(
+            !format!("{records:?}").contains(secret),
+            "provider credential leaked into request records",
+        )?;
+    }
     check(
-        records.len() == if multiple { 4 } else { 3 }
+        records.len()
+            == if http_only {
+                2
+            } else if multiple {
+                4
+            } else {
+                3
+            }
             && records.iter().all(|record| {
                 record.status == switchx::storage::RequestStatus::Completed
                     && record.http_status == Some(200)
@@ -601,9 +628,12 @@ async fn headless(
                     && record.error_code.is_none()
                     && record.generation.starts_with("catalog-")
             }),
-        "CLI requests did not produce the expected completed metadata records",
+        "route requests did not produce the expected completed metadata records",
     )?;
-    for (public_id, expected) in [("sx-mock-alpha", 2), ("sx-mock-beta", 1)] {
+    for (public_id, expected) in [
+        ("sx-mock-alpha", if http_only { 1 } else { 2 }),
+        ("sx-mock-beta", 1),
+    ] {
         let model = store
             .models()?
             .into_iter()
@@ -633,7 +663,7 @@ async fn headless(
         )?;
     }
     println!(
-        "CLI requests recorded completion, timings, model/provider mappings and catalog generation."
+        "Route requests recorded completion, timings, model/provider mappings and catalog generation."
     );
 
     std::fs::write(
@@ -672,6 +702,49 @@ async fn headless(
     Ok(())
 }
 
+async fn http_round_trip(
+    data: &Path,
+    session: &RouteSession,
+    seen: &mut [mpsc::Receiver<Value>],
+) -> Result<(), Box<dyn std::error::Error>> {
+    let reference = config_transaction::recovery(data)?
+        .and_then(|recovery| recovery.local_token_reference)
+        .ok_or("synthetic route's local token reference is missing")?;
+    // This is only the token that this probe created; no user credentials are read.
+    let token = CredentialStore::new(ROUTER_TOKEN_SERVICE)?.get(&reference)?;
+    let address = session.address().ok_or("synthetic route is not running")?;
+    let client = reqwest::Client::builder()
+        .no_proxy()
+        .timeout(Duration::from_secs(5))
+        .build()?;
+    for (index, model) in [(0, "sx-mock-alpha"), (1, "sx-mock-beta")] {
+        let response = client
+            .post(format!("http://{address}/v1/responses"))
+            .bearer_auth(token.expose())
+            .header(header::CONTENT_TYPE, "application/json")
+            .body(json!({"model":model,"input":"synthetic-http-route","stream":true}).to_string())
+            .send()
+            .await?;
+        check(
+            response.status() == StatusCode::OK,
+            "HTTP route rejected its local synthetic token",
+        )?;
+        check(
+            response.text().await?.contains("response.completed"),
+            "HTTP mock response did not complete",
+        )?;
+        let request = timeout(Duration::from_secs(3), seen[index].recv())
+            .await?
+            .ok_or("HTTP mock upstream was not called")?;
+        check(
+            request["model"] == "shared-model" && seen[1 - index].try_recv().is_err(),
+            "HTTP public model used the wrong upstream or actual model",
+        )?;
+    }
+    println!("Production RouteSession forwarded both HTTP models with their own SQLite API keys.");
+    Ok(())
+}
+
 fn check(condition: bool, message: &str) -> Result<(), Box<dyn std::error::Error>> {
     if condition {
         Ok(())
@@ -697,10 +770,16 @@ async fn run_cli(home: &Path, model: &str) -> Result<(), Box<dyn std::error::Err
             ])
             .current_dir(home)
             .env("CODEX_HOME", home)
+            .env_remove("SWITCHX_DATA_DIR")
             .env_remove("SWITCHX_LOCAL_TOKEN")
             .env_remove("OPENAI_API_KEY")
             .env_remove("CODEX_API_KEY")
+            .env_remove("CODEX_ACCESS_TOKEN")
             .env_remove("OPENAI_BASE_URL")
+            .env("HTTPS_PROXY", "http://127.0.0.1:9")
+            .env("HTTP_PROXY", "http://127.0.0.1:9")
+            .env("ALL_PROXY", "http://127.0.0.1:9")
+            .env("NO_PROXY", "127.0.0.1,localhost")
             .stdin(Stdio::null())
             .kill_on_drop(true)
             .output(),

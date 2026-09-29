@@ -2,7 +2,7 @@
 
 Rust + Slint 原生桌面应用。M2 直连已完成 macOS / DeepSeek 验收，M3 已实现模型目录、API 与 ChatGPT 订阅账号路由；目前仍为模型路由预览版，真实官方上游和认证生命周期尚待验收。完整范围见 `docs/SWITCHX-PLAN.md`。
 
-原生界面现可管理上游、直连配置、模型资料、多个 ChatGPT 账号与 loopback 路由。SQLite 保存元数据、凭据引用和账号绑定，系统凭据存储保存上游 Key 与独立的本地路由令牌；ChatGPT OAuth 账号单独保存在私有 JSON 文件中，详见下文。仓库中的**合成目录夹具**仅用于测试，不能作为真实模型能力或发布模板；`catalog_probe` 仍只输出夹具，不读取账号、凭据或现有 Codex 配置。
+原生界面现可管理上游、直连配置、模型资料、多个 ChatGPT 账号与 loopback 路由。SQLite 保存供应商配置、明文 API Key、模型资料和账号绑定；ChatGPT OAuth 账号单独保存在私有 JSON 文件中，独立的本地路由令牌仍使用系统凭据存储。API Key 保存方式按用户选择对齐 CC Switch，详见下文。仓库中的**合成目录夹具**仅用于测试，不能作为真实模型能力或发布模板；`catalog_probe` 仍只输出夹具，不读取账号、凭据或现有 Codex 配置。
 
 ```sh
 cargo run
@@ -18,7 +18,7 @@ CODEX_HOME="$(mktemp -d)" npx -y @openai/codex@0.156.1 \
 
 macOS 可运行 `sh scripts/bundle-macos.sh` 生成仅供本机交互检查的 `target/debug/SwitchX.app`。主窗口关闭后应驻留菜单栏，可从菜单栏重新打开或退出。此调试 bundle 未签名、未公证，不能作为发布包。
 
-M1 原生界面已提供设计 token、可通过键盘操作的按钮、基础卡片/状态控件、深浅主题、侧栏、状态抽屉和真实本地空态。启动后在平台应用数据目录创建权限受限的 SQLite 元数据文件，并经后台通道读取上游列表；列表只显示目标站点，隐藏 URL 中可能携带的凭据、路径和查询参数。只有点击“检查凭据”才读取已保存的钥匙串引用，界面只接收状态、不接收密钥。读取失败时保留上次成功的列表并显示错误原因和下一步。可用绝对路径 `SWITCHX_DATA_DIR` 隔离测试数据。主题和导航只保存在本次窗口实例中；路由和未接入页面仍明确标注未启用。macOS 已人工检查深浅主题、空态、上游列表、抽屉、Esc 关闭和错误态。
+M1 原生界面已提供设计 token、可通过键盘操作的按钮、基础卡片/状态控件、深浅主题、侧栏、状态抽屉和真实本地空态。启动后在平台应用数据目录创建权限受限的 SQLite 数据文件，并经后台通道读取上游列表；列表只显示目标站点，隐藏 URL 中可能携带的凭据、路径和查询参数，凭据状态不包含 API Key。读取失败时保留上次成功的列表并显示错误原因和下一步。可用绝对路径 `SWITCHX_DATA_DIR` 隔离测试数据。主题和导航只保存在本次窗口实例中；路由和未接入页面仍明确标注未启用。macOS 已人工检查深浅主题、空态、上游列表、抽屉、Esc 关闭和错误态。
 
 M1 收口检查（2026-09-24，macOS 调试 bundle，隔离的 `SWITCHX_DATA_DIR` 与两条合成上游记录）：上游页现在有按名称筛选，输入英文可实时筛选，中文字符经无障碍文本写入后可正确筛选；无匹配时显示空态。Tab 可从输入框移到“检查凭据”；抽屉用 Esc 关闭后焦点返回“状态详情”。深浅主题下均已查看筛选布局。关闭窗口后 SwitchX 进程仍在运行。**尚未完成**输入法拼音预编辑/候选上屏和托盘菜单重新打开/退出的实际操作验证；当前 UI 自动化无法访问该菜单栏项目，不能把进程驻留等同于完整托盘验收。上述检查未读取真实凭据，也未修改 Codex 配置。
 
@@ -40,7 +40,9 @@ M1 收口检查（2026-09-24，macOS 调试 bundle，隔离的 `SWITCHX_DATA_DIR
 
 ## M2 直连进度
 
-原生“上游供应商”页面现可添加、编辑、删除 Responses 上游，保存名称、API 地址、模型 ID 和系统钥匙串凭据。已有 SQLite v1 上游资料迁移到 v2 后保留原记录，缺少模型 ID 的旧记录需编辑补齐。输入地址只允许 HTTPS 或 `127.0.0.1` HTTP，拒绝 URL 内的用户名、密码、查询参数与片段。“检查”读取上游 `/models` 并核对所选 ID；它不发送推理请求，也不证明工具调用兼容。直连生效期间暂不允许编辑或删除上游，避免已配置的客户端拿到另一上游的 Key。
+原生“上游供应商”页面现可添加、编辑、删除 Responses 上游，保存名称、API 地址、模型 ID 和 API Key。API Key 按用户选择以明文 JSON 存在 SQLite `providers.settings_config` 的 `auth.OPENAI_API_KEY` 字段，编辑输入保持密码形式，留空保留已有 Key；列表、状态、TOML 预览和恢复 journal 不显示或保存 Key。数据库及其副本包含凭据，本版不提供数据库加密或凭据同步。旧记录迁移后保留上游资料，缺少模型 ID 或凭据时可重新输入。输入地址只允许 HTTPS 或 `127.0.0.1` HTTP，拒绝 URL 内的用户名、密码、查询参数与片段。“检查”读取上游 `/models` 并核对所选 ID；它不发送推理请求，也不证明工具调用兼容。直连生效期间暂不允许编辑或删除上游，避免已配置的客户端拿到另一上游的 Key。
+
+SQLite 自动升级至 v8。旧版系统凭据库中的 API Key 先读取并保存到数据库，成功后才清理 SwitchX 拥有的旧条目；读取或保存失败保留旧凭据，缺失的 Key 可在编辑表单中补填。迁移不会清理其他应用条目，本地路由令牌继续保存在系统凭据库。此存储变更的验证使用合成凭据与临时数据库，不代表真实旧 Key 迁移或跨平台运行已验收。
 
 “配置与恢复”页面可选择绝对路径的 Codex 配置目录、读取当前配置、将当前自定义上游的**元数据**填入新建表单，以及查看 `codex login status` 报告的 ChatGPT 登录、API Key 登录或未知状态。“导入当前上游”不复制原配置中的凭据，也不读取 `auth.json`；新建上游须重新输入自己的 API Key。ChatGPT 账号另有明确的“导入当前 Codex 账号”入口，见下文。`SWITCHX_CODEX_CLI` 可指向要检查的 CLI；默认优先使用本机 ChatGPT.app 内的 CLI。
 
@@ -54,24 +56,24 @@ M1 收口检查（2026-09-24，macOS 调试 bundle，隔离的 `SWITCHX_DATA_DIR
 - **编辑通用配置**：首次启动、打开供应商表单或导入当前配置时，若尚未保存通用片段，会从所选 Codex 目录的 `config.toml` 自动提取并保存。已有片段保持不变；明确保存空片段后不会自动填回。源文件缺失、无通用内容或由 SwitchX 管理时跳过自动提取，后续仍可重试。
 - **从编辑内容提取**：读取供应商表单当前的 TOML 预览，提取通用部分并立即保存；取消不会撤销这次提取。编辑器中的手动修改仍须点击保存，取消只丢弃手动草稿。模型、供应商身份、凭据和 MCP 配置不进入通用片段。
 
-保存供应商选项或通用配置后，在下次应用直连或开启路由时生效。路由的全局 Codex 选项取自默认模型所属供应商；在 Codex 菜单中切换模型不会动态更换这些全局设置。恢复时对通用字段和上下文字段同样做受管差异比较，保留外部编辑并报告冲突。SQLite 当前自动升级至 v7：`providers.codex_options` 保存供应商选项，`app_settings` 保存通用片段；没有保存选项且通用片段为空的旧记录保持原有行为。API Key 仍只保存在系统凭据存储中。
+保存供应商选项或通用配置后，在下次应用直连或开启路由时生效。路由的全局 Codex 选项取自默认模型所属供应商；在 Codex 菜单中切换模型不会动态更换这些全局设置。恢复时对通用字段和上下文字段同样做受管差异比较，保留外部编辑并报告冲突。SQLite 当前自动升级至 v8：`providers.codex_options` 保存供应商选项，`app_settings` 保存通用片段和账号绑定，`providers.settings_config` 保存 API 认证配置；没有保存选项且通用片段为空的旧记录保持原有行为。
 
 2026-09-29 已完成这六项功能的原生界面检查，以及隔离直连和路由配置的写入、逐字节恢复。覆盖范围与复跑步骤见 [供应商配置验收记录](docs/acceptance/M3-provider-config-2026-09-29.md)。
 
 随后对齐了 CC Switch 旧版通用片段的初始化、提取与保存行为，原生检查与回归结果见 [通用配置来源验收记录](docs/acceptance/M3-common-config-source-2026-09-29.md)。
 
-从上游列表点“直连”会预览受管字段。点“应用直连”时再检查钥匙串、`/models`、模型 ID 与目标配置文件是否变化，然后以 journal 和原子替换写入 `config.toml`。管理 `model`、`model_provider`、`model_catalog_json` 和 SwitchX 新建的 provider 表，启用上述选项时还管理对应的通用字段与上下文字段；其他配置和注释保留。若待移除的 `model_catalog_json` 带注释，切换会拒绝并要求先手动移走注释，不把原始注释写进 journal。生成的 provider 使用 Codex `auth.command` 调用当前 SwitchX 程序，从系统钥匙串读取 Bearer token；配置与 SQLite 均不保存明文 Key。可从页面或托盘恢复，恢复时保留外部改动并报告冲突。直连不依赖 SwitchX 常驻，但移动或删除当前 SwitchX 程序会让已生成的 helper 路径失效。切换只对新启动的目标客户端生效。
+从上游列表点“直连”会预览受管字段。点“应用直连”时再检查已保存的 API Key、`/models`、模型 ID 与目标配置文件是否变化，然后以 journal 和原子替换写入 `config.toml`。管理 `model`、`model_provider`、`model_catalog_json` 和 SwitchX 新建的 provider 表，启用上述选项时还管理对应的通用字段与上下文字段；其他配置和注释保留。若待移除的 `model_catalog_json` 带注释，切换会拒绝并要求先手动移走注释，不把原始注释写进 journal。生成的 provider 使用 Codex `auth.command` 调用当前 SwitchX 程序，从本地 SQLite 取得该供应商的 Bearer token；Key 不写入目标 `config.toml` 或恢复 journal。可从页面或托盘恢复，恢复时保留外部改动并报告冲突。直连不依赖 SwitchX 常驻，但移动或删除当前 SwitchX 程序会让已生成的 helper 路径失效。切换只对新启动的目标客户端生效。
 
-`cargo test` 使用临时目录和本地 mock 验证数据库迁移、目录检查、差异写入、恢复及冲突。隔离探针：先运行 `cargo build --bin switchx`，再运行 `cargo run --example direct_cli_probe`。它在临时 `CODEX_HOME`、合成钥匙串条目与本地假上游中启动 Codex CLI 0.156.1；2026-09-24 已验证 CLI 通过 helper 取凭据、发送直连 Responses 请求并完成合成回答，结束后恢复配置并删除测试凭据。该 mock 探针不使用真实供应商 Key，也不证明真实上游的 Responses 工具对话、取消或 Desktop/IDE 兼容。
+`cargo test` 使用临时目录和本地 mock 验证数据库迁移、目录检查、差异写入、恢复及冲突。隔离探针：先运行 `cargo build --bin switchx`，再运行 `cargo run --example direct_cli_probe`。它使用本机 Codex CLI、临时 `CODEX_HOME`、合成供应商凭据与本地假上游。2026-09-29 已在 CLI `0.158.0-alpha.2.1` 上核对 SQLite helper 通过显式数据目录取 Key，即使没有 `SWITCHX_DATA_DIR` 环境变量也能完成直连 Responses 合成回答，随后精确恢复配置并删除临时数据库。该 mock 结果不证明真实上游的 Responses 工具对话、取消或 Desktop/IDE 兼容。
 
-真实直连探针 `direct_live_probe` 使用已在 SwitchX 中保存的上游和系统钥匙串引用。先构建主程序，再指定绝对路径的数据目录和上游 ID：
+真实直连探针 `direct_live_probe` 使用已在 SwitchX 中保存的上游和 API Key。先构建主程序，再指定绝对路径的数据目录和上游 ID：
 
 ```sh
 cargo build --locked --bin switchx
 cargo run --locked --example direct_live_probe -- /absolute/switchx-data PROVIDER_ID
 ```
 
-它只读打开已升级到 v7 的源数据库，检查真实 `/models`，在新建的临时 `CODEX_HOME` 中通过生产直连事务写入 helper 配置，再让本机 Codex CLI 完成短回答和“读合成文件 → 回传工具结果 → 第二轮回答”。可用 `SWITCHX_CODEX_CLI` 指定 CLI，与路由目录检查使用同一选择规则。这些真实模型调用可能计费。探针不读取用户的 Codex 配置或登录文件，不输出 Key；正常结束（包括请求检查失败）会恢复临时配置并清理临时目录，恢复有冲突时保留目录供检查。原有上游记录与钥匙串条目由 SwitchX 管理，探针不删除。自动化测试不会执行真实请求。
+它只读打开已升级到 v8 的源数据库，检查真实 `/models`，在新建的临时 `CODEX_HOME` 中通过生产直连事务写入 helper 配置，再让本机 Codex CLI 完成短回答和“读合成文件 → 回传工具结果 → 第二轮回答”。可用 `SWITCHX_CODEX_CLI` 指定 CLI，与路由目录检查使用同一选择规则。这些真实模型调用可能计费。探针不读取用户的 Codex 配置或登录文件，不输出 Key；正常结束（包括请求检查失败）会恢复临时配置并清理临时目录，恢复有冲突时保留目录供检查。原有上游记录和 API Key 由 SwitchX 管理，探针不删除。自动化测试不会执行真实请求。
 
 2026-09-28 的 M2 验收已在 macOS 27.0 arm64、Codex CLI 0.156.1、DeepSeek `deepseek-flash` 上通过：真实模型发现、helper 直连短回答、真实文件工具与第二轮回答、原生页面写出的配置实际请求、原生上游编辑/删除、托盘重新打开/恢复/退出及中文拼音预编辑/候选上屏。中文输入法与托盘点击由用户实际操作确认；配置恢复、外部注释保留、journal 清除、进程退出与验收凭据清理由程序核对。首轮托盘组合操作未完成落盘恢复，单独补验恢复后通过，完整经过与覆盖边界见 [M2 验收记录](docs/acceptance/M2-2026-09-28.md)。本轮测试 Key 的保存副本和临时目录已清理；OpenAI 官方 API、ChatGPT 官方上游及认证生命周期、Desktop/IDE、取消和其他平台仍未在本轮验收。
 
@@ -88,7 +90,7 @@ cargo run --locked --example direct_live_probe -- /absolute/switchx-data PROVIDE
 
 预设参考 `others/cc-switch/src/config/codexProviderPresets.ts`，图标复用其内置 SVG；来源与 MIT 许可见 [图标说明](assets/providers/NOTICE.md)。以上地址与默认模型于 2026-09-28 核对，运行时可使用“获取模型列表”确认自己的账号目录。
 
-“上游供应商”的添加和编辑表单提供“获取模型列表”，使用当前填写的 API 地址和 Key；编辑时 Key 留空则读取该上游已保存的系统凭据。无需先填写模型 ID 或保存上游。支持 `data[].id` 和 `models[].slug/id`，结果去重排序；修改地址、Key 或切换表单后清空旧列表并丢弃在途结果。探测只读取模型列表，不发送推理请求。接口未开放或返回空列表时仍可手动填写模型 ID。
+“上游供应商”的添加和编辑表单提供“获取模型列表”，使用当前填写的 API 地址和 Key；编辑时 Key 留空则读取该上游在 SQLite 中已保存的 API Key。无需先填写模型 ID 或保存上游。支持 `data[].id` 和 `models[].slug/id`，结果去重排序；修改地址、Key 或切换表单后清空旧列表并丢弃在途结果。探测只读取模型列表，不发送推理请求。接口未开放或返回空列表时仍可手动填写模型 ID。
 
 “模型路由”页面支持为同一个上游添加多个独立映射，也可从上游卡片的“模型映射”进入。每条映射保存公开 ID、菜单显示名、实际请求模型、上下文窗口、支持的思考等级和默认等级；可以独立编辑、删除、选择发布和设为默认。公开 ID 全局唯一，同一上游的实际模型不重复。上游表单的模型 ID 仅作为直连默认值，修改它不会替换其他映射。
 
@@ -96,7 +98,7 @@ cargo run --locked --example direct_live_probe -- /absolute/switchx-data PROVIDE
 
 保存 DeepSeek、Kimi、MiniMax 或小米 MiMo 的官方 API 上游时，会自动补齐预置模型映射、上下文窗口、思考等级、默认等级、输入类型和并行工具参数。预置参考 CC Switch `da193d4`（2026-09-23），共 10 个模型：DeepSeek 2 个、Kimi 2 个、MiniMax 1 个、MiMo 5 个。新上游只默认选择其默认模型发布；其余模型可在“模型路由”中自行选择。重新保存已有上游只补缺少的模型，保留已保存模型的全部资料、名称、公开 ID、发布选择和备用策略。参数可继续编辑；自定义地址使用手动配置。预置沿用 SwitchX 的普通函数工具配置，未引入供应商的特殊工具和完整指令模板；仍需通过 `/models` 与实际请求验证上游能力。
 
-手动填写参数即可生成原生 Responses 目录，无需 JSON 文件。未填上下文时使用 128000，思考等级留空则不声明推理档位；支持 `none, minimal, low, medium, high, xhigh, max, ultra`，默认等级须在支持列表中。手动目录采用文字输入和普通函数工具配置，不推断供应商的图片、并行工具、搜索或特殊工具能力。需要完整能力与指令模板时，可导入用户指定的绝对路径 Codex 目录 JSON，精确匹配实际模型 ID，保留其他字段；导入失败保留旧资料。不同上游的同名模型各自保存资料。SQLite 自动迁移到 v7，保留旧映射、凭据引用、发布选择和备用策略；删除上游会同时删除其全部映射。
+手动填写参数即可生成原生 Responses 目录，无需 JSON 文件。未填上下文时使用 128000，思考等级留空则不声明推理档位；支持 `none, minimal, low, medium, high, xhigh, max, ultra`，默认等级须在支持列表中。手动目录采用文字输入和普通函数工具配置，不推断供应商的图片、并行工具、搜索或特殊工具能力。需要完整能力与指令模板时，可导入用户指定的绝对路径 Codex 目录 JSON，精确匹配实际模型 ID，保留其他字段；导入失败保留旧资料。不同上游的同名模型各自保存资料。SQLite 自动迁移到 v8，保留旧映射、已保存凭据、发布选择和备用策略；删除上游会同时删除其 API Key 与全部映射。
 
 使用步骤：
 
@@ -115,18 +117,22 @@ CODEX_HOME="/absolute/codex-home" codex --no-daemon
 
 目录检查会同时核对解析结果和新服务的 `model/list`，不再只以 `debug models` 能解析 JSON 作为模型菜单通过的依据。检查不读取原有账号或调用模型；目录与菜单检查通过仍不代表真实上游的工具能力或账号权限已验证。
 
-仅含 API 模型的原生路由使用独立 `auth.command` helper 获取本地令牌，无需手工设置终端环境变量。上游 Key 不进入 Codex 配置、SQLite 或恢复记录；API 出站请求只使用映射上游的 Key。原生 SSE 透传，取消不重放请求；服务器状态引用始终拒绝，API 模型另拒绝加密推理与压缩状态续接。应用运行中或有恢复记录时禁止修改上游、模型和绑定。成功的 `/models` 检查和目录解析不代表真实工具能力已验证。[Codex 配置约定](https://learn.chatgpt.com/docs/config-file/config-reference)
+仅含 API 模型的原生路由使用独立 `auth.command` helper 获取本地令牌，无需手工设置终端环境变量。上游 Key 保存于 SQLite，不进入 Codex 配置、请求记录或恢复 journal；API 出站请求只使用映射上游的 Key。原生 SSE 透传，取消不重放请求；服务器状态引用始终拒绝，API 模型另拒绝加密推理与压缩状态续接。应用运行中或有恢复记录时禁止修改上游、模型和绑定。成功的 `/models` 检查和目录解析不代表真实工具能力已验证。[Codex 配置约定](https://learn.chatgpt.com/docs/config-file/config-reference)
 
 可复跑的隔离验收：
 
 ```sh
 cargo build --locked --bin switchx
 cargo run --locked --example routed_cli_probe
+# 只验证生产路由的本地 HTTP 请求与恢复，不运行 CLI 模型请求
+cargo run --locked --example routed_cli_probe -- --http-only
 # 可选：使用同一套合成上游和凭据进行原生界面检查
 cargo run --locked --example routed_cli_probe -- --desktop
 ```
 
-`routed_cli_probe` 使用本机 CLI、两个本地假上游、临时配置和独立的合成钥匙串条目，检查目录兼容性、同名模型映射、helper 鉴权、文件工具轮次及恢复冲突，结束后恢复并清理；恢复失败则保留目录。2026-09-28 已通过 Codex CLI 0.156.1 的探针与原生页面配置的实际 CLI 请求，详见 [M3 首批验收记录](docs/acceptance/M3-2026-09-28.md)。本轮没有真实上游调用。
+`routed_cli_probe` 使用本机 CLI、两个本地假上游、临时配置和合成供应商凭据，检查目录兼容性、同名模型映射、helper 鉴权、文件工具轮次及恢复冲突，结束后恢复并清理；恢复失败则保留目录。2026-09-28 的旧版钥匙串存储已通过 Codex CLI 0.156.1 探针与原生页面配置的实际 CLI 请求，详见 [M3 首批验收记录](docs/acceptance/M3-2026-09-28.md)。该历史结果不验证本轮 SQLite API Key 存储变更，没有真实上游调用。
+
+2026-09-29 的 `--http-only` 检查已验证生产 `RouteSession` 从 SQLite 读取两条合成 Key，将公开模型分别转发到正确假上游，并通过 SSE 完成记录、凭据隔离与恢复冲突检查。完整 CLI 探针在独立 helper 读取本地令牌时超时，因此本轮不计为 CLI 请求或文件工具验收；没有调用真实上游。详见 [API Key 存储验收记录](docs/acceptance/M3-api-key-storage-2026-09-29.md)。
 
 单独验证新启动器和模型菜单：
 
@@ -163,7 +169,7 @@ cargo run --locked --example routed_cli_probe -- --desktop-models
 6. 官方 401/403 的状态和响应正文原样返回 Codex，由 Codex 执行自己的认证恢复；界面显示失效、权限不足或工作区变化的提示。SwitchX 不重放请求，不把订阅连接用于自动备用切换。仍失败时可重新登录。
 7. 点击“切回 API 预览”会先恢复原配置，再取消订阅映射的发布选择，生成仅含已选 API 模型的预览。确认后点击“开启路由”，不要求订阅登录。跨官方与第三方上游时须新建会话。
 
-多个账号的 refresh token、ID token 和账号资料保存在 `SWITCHX_DATA_DIR/codex_oauth_auth.json`，采用原子文件写入，Unix 文件权限为 `0600`；access token 仅在内存中缓存。显式使用账号时，会将 Codex 的 `cli_auth_credentials_store` 设为 `"file"`，并把完整 token bundle 写入目标 `auth.json`，供原生客户端运行和续期；覆盖已有完整 ChatGPT 文件登录前会先保存该账号。账号文件依赖操作系统文件权限保护，不提供文件加密或跨设备同步；API Key 和本地路由令牌仍保存在系统凭据存储中，SQLite 不保存这些 token。
+多个账号的 refresh token、ID token 和账号资料保存在 `SWITCHX_DATA_DIR/codex_oauth_auth.json`，采用原子文件写入，Unix 文件权限为 `0600`；access token 仅在内存中缓存。显式使用账号时，会将 Codex 的 `cli_auth_credentials_store` 设为 `"file"`，并把完整 token bundle 写入目标 `auth.json`，供原生客户端运行和续期；覆盖已有完整 ChatGPT 文件登录前会先保存该账号。账号文件依赖操作系统文件权限保护，不提供文件加密或跨设备同步。SQLite 保存供应商 API Key，不保存 ChatGPT OAuth token；本地路由令牌仍保存在系统凭据存储中。
 
 含订阅模型的配置使用 `requires_openai_auth = true`，通过独立 `x-switchx-local-token` 请求头校验本地访问。该本地令牌写入仅当前用户可读的配置与恢复 journal；macOS 上两者权限为 `0600`，不会转发到上游。保存账号的路由只使用绑定账号的 Bearer 与工作区，忽略客户端另带的官方认证；跟随原生登录时使用客户端认证。官方模型只向已验证的 ChatGPT 目的地发送认证与允许的 Codex 协议头；API 模型丢弃这些信息并注入自己的 Key。Cookie 和任意客户端头均不复制到上游。
 
@@ -187,7 +193,7 @@ cargo run --locked --example managed_accounts_desktop
 
 ### 真实路由验收探针
 
-`routed_live_probe` 从已有 SwitchX 数据目录中明确选择一或两个 **API 模型的公开 ID**；原目录须先由 SwitchX 升级到当前 v7。模型的能力与指令模板取自已保存资料，真实运行不使用仓库的合成模板。此探针创建未登录的临时 `CODEX_HOME`，不用于订阅账号验收。
+`routed_live_probe` 从已有 SwitchX 数据目录中明确选择一或两个 **API 模型的公开 ID**；原目录须先由 SwitchX 升级到当前 v8。模型的能力与指令模板取自已保存资料，真实运行不使用仓库的合成模板。此探针创建未登录的临时 `CODEX_HOME`，不用于订阅账号验收。
 
 ```sh
 cargo build --locked --bin switchx --example routed_live_probe
@@ -196,7 +202,7 @@ cargo run --locked --example routed_live_probe -- /absolute/switchx-data PUBLIC_
 cargo run --locked --example routed_live_probe -- /absolute/switchx-data FIRST_PUBLIC_ID SECOND_PUBLIC_ID
 ```
 
-源数据库只读打开。选定记录与凭据引用复制到权限受限的临时数据目录，使用已有系统钥匙串条目，并在独立临时 `CODEX_HOME` 中通过生产 `RouteSession` 预览、检查 `/models`、发布目录和启用 helper 路由。只在临时副本中启用选定模型并清除备用设置，避免验收请求进入未选定的上游；原有选择与备用设置保留。
+源数据库只读打开。选定供应商配置、API Key 和模型资料复制到权限受限的临时 SQLite 数据库，并在独立临时 `CODEX_HOME` 中通过生产 `RouteSession` 预览、检查 `/models`、发布目录和启用 helper 路由。本地路由令牌仍通过系统凭据库存取。只在临时副本中启用选定模型并清除备用设置，避免验收请求进入未选定的上游；原有选择与备用设置保留。
 
 每个模型由本机 Codex CLI 完成精确短回答和“读取随机标记文件 → 工具结果 → 第二轮回答”。回答与工具检查和 `direct_live_probe` 共用；请求记录另外核对短回答至少一条、工具轮次至少两条正常完成记录，以及公开 ID、provider ID、实际模型、目录版本、HTTP 状态和首事件计时。清除继承的 API Key、base URL 与本地令牌环境变量；不读取用户配置或登录文件，不输出 Key、原始 CLI 错误或对话正文。这些真实模型调用可能计费。
 
@@ -223,7 +229,7 @@ cargo run --locked --example routed_cli_probe -- --live-probe
 - 不跟随备用模型自己的备用设置。每个新请求仍先尝试主上游；不进行并行竞速、后台探测或会话绑定。此策略仅用于 API 连接，服务器状态引用、加密内容与压缩续接仍被拒绝；订阅连接不能作为主上游或备用上游参与自动切换。
 - 开启路由前，主备都要通过已有的凭据和 `/models` 检查。此功能处理路由开启之后的连接故障，不跳过启动时的验证。预览后任一站点或模型资料发生变化，必须重新预览。
 
-SQLite 自动升级到 v7（备用字段在 v5 引入），默认不设置备用。请求记录保存原主上游 ID、实际尝试的备用上游和固定切换原因，不保存地址、Key 或正文。独立 CLI 验收使用生产 `RouteSession` 和两个本地假上游，包含备用站点上的文件工具轮次：
+SQLite 自动升级到 v8（备用字段在 v5 引入），默认不设置备用。请求记录保存原主上游 ID、实际尝试的备用上游和固定切换原因，不保存地址、Key 或正文。独立 CLI 验收使用生产 `RouteSession` 和两个本地假上游，包含备用站点上的文件工具轮次：
 
 ```sh
 cargo build --locked --bin switchx
@@ -236,7 +242,7 @@ cargo run --locked --example routed_cli_probe -- --desktop-fallback
 
 ## 请求记录与完成状态
 
-原生路由默认把已结束请求的元数据写入 SQLite，旧库自动迁移至 v7（请求记录在 v4 引入，v5 增加备用来源）。进入“请求与用量”或点击“刷新记录”，可查看按开始时间倒序排列的最近 100 条记录：公开模型、实际尝试的上游及模型、路由版本、请求编号、上游 HTTP 状态、响应头/首事件耗时、总耗时和固定错误原因。发生备用尝试时，另显示主上游连接失败和切换去向；最后一次失败不隐藏前一次连接失败。记录不随上游删除而删除；上游名称显示当前资料，已删除的上游显示原 ID。直连请求不经过 SwitchX，不能在此记录。
+原生路由默认把已结束请求的元数据写入 SQLite，旧库自动迁移至 v8（请求记录在 v4 引入，v5 增加备用来源）。进入“请求与用量”或点击“刷新记录”，可查看按开始时间倒序排列的最近 100 条记录：公开模型、实际尝试的上游及模型、路由版本、请求编号、上游 HTTP 状态、响应头/首事件耗时、总耗时和固定错误原因。发生备用尝试时，另显示主上游连接失败和切换去向；最后一次失败不隐藏前一次连接失败。记录不随上游删除而删除；上游名称显示当前资料，已删除的上游显示原 ID。直连请求不经过 SwitchX，不能在此记录。
 
 | 状态 | 判定 |
 | --- | --- |

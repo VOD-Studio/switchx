@@ -1,5 +1,5 @@
 //! Managed ChatGPT accounts. OAuth credentials stay in a private JSON file;
-//! neither the account marker nor SQLite/config recovery journals contain tokens.
+//! neither the account marker nor SQLite/config recovery journals contain OAuth tokens.
 
 use std::{
     collections::{BTreeMap, HashMap},

@@ -747,7 +747,7 @@ export component AppWindow inherits Window {
                     HorizontalLayout {
                         spacing: 12px;
                         Text {
-                            text: "API Key 保存到系统凭据存储；ChatGPT 账号可在“配置与恢复”管理。";
+                            text: "API Key 随上游保存在本机；ChatGPT 账号可在“配置与恢复”管理。";
                             color: Theme.muted-text;
                             font-size: 13px;
                             vertical-alignment: center;
@@ -1032,7 +1032,7 @@ export component AppWindow inherits Window {
                             }
 
                             Text {
-                                text: "直连时写入所选 Codex 目录；1M 开关和阈值优先于通用配置。API Key 由系统凭据存储提供。";
+                                text: "直连时写入所选 Codex 目录；1M 开关和阈值优先于通用配置。使用此上游保存的 API Key。";
                                 color: Theme.muted-text;
                                 font-size: 12px;
                                 wrap: word-wrap;

@@ -482,10 +482,6 @@ async fn restore_connections(
     Ok(())
 }
 
-fn credential(provider: &ProviderRecord) -> Result<switchx::credentials::Secret, String> {
-    app::provider_credential(provider)
-}
-
 fn route_port(text: &str) -> Result<u16, String> {
     text.parse::<u16>()
         .ok()
@@ -816,10 +812,7 @@ async fn worker(
                     .and_then(|_| directory.as_ref().ok())
                     .map(|path| load_snapshot(path, false));
                 let _ = weak.upgrade_in_event_loop(move |app| {
-                    show_action(
-                        &app,
-                        result.map(|()| "上游已保存；API Key 未写入 SQLite".into()),
-                    );
+                    show_action(&app, result.map(|()| "上游与 API Key 已保存到本机".into()));
                     if let Some(snapshot) = snapshot {
                         show_result(&app, snapshot);
                         app.set_editor_open(false);
@@ -859,15 +852,19 @@ async fn worker(
                 let result = directory
                     .as_ref()
                     .map_err(|error| error.message().to_owned())
-                    .and_then(|path| app::load_provider(path, &id));
+                    .and_then(|path| {
+                        app::load_provider(path, &id).map(|provider| (path, provider))
+                    });
                 let result = match result {
-                    Ok(provider) if provider.id == chatgpt::PROVIDER_ID => match home(&target) {
+                    Ok((_, provider)) if provider.id == chatgpt::PROVIDER_ID => match home(&target)
+                    {
                         Ok(target) => chatgpt::account(&target, false)
                             .await
                             .map(|status| status.label().into()),
                         Err(error) => Err(error),
                     },
-                    Ok(provider) => match credential(&provider) {
+                    Ok((data_dir, provider)) => match app::provider_credential(data_dir, &provider)
+                    {
                         Ok(token) => direct::check_models(&provider, token.expose()).await.map(
                             |()| {
                                 format!(
@@ -904,7 +901,10 @@ async fn worker(
                         if provider.is_empty() {
                             return Err("请先填写 API 地址和 API Key".into());
                         }
-                        credential(&app::load_provider(data_dir, &provider)?)?
+                        app::provider_credential(
+                            data_dir,
+                            &app::load_provider(data_dir, &provider)?,
+                        )?
                     } else {
                         key
                     };
@@ -953,7 +953,8 @@ async fn worker(
                 let result = (|| {
                     let data_dir = directory.as_ref().map_err(|error| error.message())?;
                     let provider = app::load_provider(data_dir, &id)?;
-                    credential(&provider)?;
+                    app::provider_credential(data_dir, &provider)?;
+                    let provider = app::load_provider(data_dir, &id)?;
                     let target = client::config_path(&home(&target)?)?;
                     let helper = std::env::current_exe()
                         .map_err(|_| "无法定位 SwitchX credential helper")?;
@@ -1010,7 +1011,7 @@ async fn worker(
                             {
                                 return Err("上游资料已变化，请重新预览".into());
                             }
-                            let token = credential(&latest)?;
+                            let token = app::provider_credential(data_dir, &latest)?;
                             Ok::<_, String>((data_dir.clone(), latest, token))
                         })();
                         match checked {
@@ -1814,22 +1815,34 @@ fn credential_command() -> Result<bool, Box<dyn std::error::Error>> {
     let Some(command) = args.next() else {
         return Ok(false);
     };
-    let service = if command == "credential" {
-        PROVIDER_KEY_SERVICE
-    } else if command == "local-token" {
-        ROUTER_TOKEN_SERVICE
-    } else {
+    if command != "credential" && command != "local-token" {
         return Err("unknown SwitchX command".into());
-    };
+    }
     let reference = args.next().ok_or("credential reference is missing")?;
+    let data_dir = args.next().map(PathBuf::from);
     if args.next().is_some() {
         return Err("unexpected credential command argument".into());
     }
     let reference = reference
         .to_str()
         .ok_or("credential reference is invalid")?;
-    let store = CredentialStore::new(service)?;
-    let secret = store.get(reference)?;
+    let secret = if command == "credential" {
+        if let Some(data_dir) = data_dir {
+            if !data_dir.is_absolute() {
+                return Err("credential data directory must be absolute".into());
+            }
+            let provider = app::load_provider(&data_dir, reference)?;
+            app::provider_credential(&data_dir, &provider)?
+        } else {
+            // Existing active configurations still use the two-argument keychain helper.
+            CredentialStore::new(PROVIDER_KEY_SERVICE)?.get(reference)?
+        }
+    } else {
+        if data_dir.is_some() {
+            return Err("unexpected local-token command argument".into());
+        }
+        CredentialStore::new(ROUTER_TOKEN_SERVICE)?.get(reference)?
+    };
     println!("{}", secret.expose());
     Ok(true)
 }

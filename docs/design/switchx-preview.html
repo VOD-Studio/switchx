@@ -177,7 +177,7 @@
   </div>
   <footer class="bottom-bar"><span>SwitchX · DESIGN PREVIEW</span><span>所有连接状态均为演示，不访问网络、不修改 Codex</span><span>Rust + Slint 目标设计 · 2026.09</span></footer>
 </div>
-<div class="drawer-backdrop" id="drawer-backdrop"><section class="drawer" id="drawer" role="dialog" aria-modal="true" aria-labelledby="drawer-title" tabindex="-1"><button class="icon-button drawer-close" id="drawer-close" aria-label="关闭详情"><svg class="icon"><use href="#ic-close"/></svg></button><div class="eyebrow">PROVIDER DETAILS</div><h2 id="drawer-title">DeepSeek</h2><p id="drawer-description">直观管理连接，而不把复杂性放在首页。</p><div id="drawer-details"></div><div class="drawer-note" id="drawer-note">凭据只保存在系统钥匙串。模型能力由目录和探测共同验证。</div></section></div>
+<div class="drawer-backdrop" id="drawer-backdrop"><section class="drawer" id="drawer" role="dialog" aria-modal="true" aria-labelledby="drawer-title" tabindex="-1"><button class="icon-button drawer-close" id="drawer-close" aria-label="关闭详情"><svg class="icon"><use href="#ic-close"/></svg></button><div class="eyebrow">PROVIDER DETAILS</div><h2 id="drawer-title">DeepSeek</h2><p id="drawer-description">直观管理连接，而不把复杂性放在首页。</p><div id="drawer-details"></div><div class="drawer-note" id="drawer-note">API Key 随上游保存在本机 SQLite。模型能力由目录和探测共同验证。</div></section></div>
 <div class="toast" id="toast" role="status"></div>
 <script>
   const ui = Object.fromEntries([...document.querySelectorAll('[id]')].map(element => [element.id, element]));
@@ -274,7 +274,7 @@
   document.querySelectorAll('[data-model]').forEach(button => button.addEventListener('click', () => { state.model = button.dataset.model; updateRoute(); notify('下一次演示请求将发送到 '+modelData[state.model].provider); }));
   document.querySelectorAll('[data-provider]').forEach(button => button.addEventListener('click', () => {
     const provider = button.dataset.provider;
-    openDrawer(modelData[provider].provider,'上游详情 · 全部为设计演示数据',[['协议','原生 Responses'],['认证','API Key · 系统钥匙串'],['模型发布','手动选择后加入目录'],['故障切换','仅用户允许的候选']],provider === 'official' ? '这里演示官方 API 接入。ChatGPT 订阅账号使用独立认证路径，必须验证登录续期、工具调用和客户端兼容性。' : '能力未验证的模型只保留草稿，不自动出现在 Codex 的模型菜单中。');
+    openDrawer(modelData[provider].provider,'上游详情 · 全部为设计演示数据',[['协议','原生 Responses'],['认证','API Key · 本机 SQLite'],['模型发布','手动选择后加入目录'],['故障切换','仅用户允许的候选']],provider === 'official' ? '这里演示官方 API 接入。ChatGPT 订阅账号使用独立认证路径，必须验证登录续期、工具调用和客户端兼容性。' : '能力未验证的模型只保留草稿，不自动出现在 Codex 的模型菜单中。');
   }));
   ui['theme-toggle'].addEventListener('click', () => document.body.classList.toggle('light'));
   ui['direct-mode'].addEventListener('click', () => setMode('direct'));
