@@ -1,6 +1,8 @@
 # Provider icons
 
-The SVG files in this directory are copied from `others/cc-switch/src/icons/extracted/`. The brand artwork originates from LobeHub's [lobe-icons](https://github.com/lobehub/lobe-icons); CC Switch maintains its extracted SVG set. The original SVG paths and colors are retained. MiMo's view box and intrinsic dimensions crop unused whitespace around its wordmark. Monochrome logos are tinted by the UI for visibility in both themes.
+The original preset SVG files and the `icons/` picker catalog are copied from CC Switch (`others/cc-switch`, snapshot `846de29`). The picker includes all 110 names in `src/icons/extracted/index.ts`, using its optimized inline SVG strings and locally bundled image files. Display names and search keywords come from `metadata.ts`; entries without metadata keep their icon ID as the label.
+
+The brand artwork originates from LobeHub's [lobe-icons](https://github.com/lobehub/lobe-icons), with additional provider artwork maintained by CC Switch. The original SVG paths are retained. SVG `currentColor` values are replaced with the metadata brand color, except OpenAI uses the official preset's green (`#00A67E`); neutral vectors are tinted by the UI for visibility in both themes. The four existing SwitchX preset icons retain their artwork and tint rules. MiMo's view box and intrinsic dimensions crop unused whitespace around its wordmark. Raster images retain their original bytes inside data URI SVG wrappers so the catalog is bundled offline and uses the same image loader.
 
 The icons identify their respective providers.
 
