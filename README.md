@@ -123,6 +123,8 @@ CODEX_HOME="/absolute/codex-home" codex --no-daemon
 
 仅含 API 模型的原生路由使用独立 `auth.command` helper 获取本地令牌，无需手工设置终端环境变量。上游 Key 保存于 SQLite，不进入 Codex 配置、请求记录或恢复 journal；API 出站请求只使用映射上游的 Key。原生 SSE 透传，取消不重放请求；服务器状态引用始终拒绝，API 模型另拒绝加密推理与压缩状态续接。应用运行中或有恢复记录时禁止修改上游、模型和绑定。成功的 `/models` 检查和目录解析不代表真实工具能力已验证。[Codex 配置约定](https://learn.chatgpt.com/docs/config-file/config-reference)
 
+在 Codex 中切换到本次发布的其他公开模型后，“恢复并停止”会恢复开启路由前的 `model`，原配置没有该字段时移除它。新恢复记录保存已发布模型 ID；旧记录通过原发布目录识别正常模型选择，也支持先前恢复留下的部分配置。未发布的模型、外部修改的路由配置及其他受管字段仍按冲突处理。验证见 [模型切换后恢复检查](docs/acceptance/M3-model-selection-recovery-2026-09-29.md)。
+
 每次发布生成独立的随机本地令牌，由 64 个十六进制字符组成，以明文保存在 SQLite `app_settings` 的 `local_token:router-<32hex>` 键下。API 路由的 `local-token REF ABS_DATA_DIR` helper 只读打开明确指定的数据库，不创建或迁移数据库；令牌缺失、格式无效或数据库不可用时拒绝提供凭据。配置恢复有冲突时保留令牌、路由与 journal；配置恢复完成后停止路由，删除令牌，最后移除 journal。令牌删除失败时保留 journal 和引用，排除数据库问题后可再次恢复，重启应用后也可重试。旧版无数据目录的 helper 不兼容，须先恢复原配置再重新发布。新路径的存储、helper、失败清理和恢复重试结果见 [本地令牌保存检查](docs/acceptance/M3-local-token-storage-2026-09-29.md)。
 
 可复跑的隔离验收：

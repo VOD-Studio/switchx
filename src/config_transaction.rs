@@ -1,6 +1,7 @@
 //! A single Codex config switch. Callers must verify the router before `apply`.
 
 use std::{
+    collections::BTreeSet,
     fs::{self, File, OpenOptions, Permissions},
     io::Write,
     net::SocketAddr,
@@ -66,6 +67,54 @@ struct Journal {
     local_token_reference: Option<String>,
     #[serde(default)]
     overlay: Overlay,
+    #[serde(default, skip_serializing_if = "BTreeSet::is_empty")]
+    published_models: BTreeSet<String>,
+}
+
+impl Journal {
+    fn allows_model_selection(&self, document: &DocumentMut) -> bool {
+        let Some(model) = document.as_table().get("model").and_then(Item::as_str) else {
+            return false;
+        };
+        if model == self.fields[0].applied
+            || self.fields[1..].iter().any(|field| {
+                let found = document.as_table().get(&field.name).and_then(Item::as_str);
+                document
+                    .as_table()
+                    .get(&field.name)
+                    .is_some_and(|item| item.as_str().is_none())
+                    || (found != Some(field.applied.as_str()) && found != field.before.as_deref())
+            })
+            || document
+                .as_table()
+                .get("model_providers")
+                .is_some_and(|providers| {
+                    providers.as_table().is_none_or(|providers| {
+                        providers
+                            .get(PROVIDER_ID)
+                            .is_some_and(|provider| provider.to_string() != self.applied_provider)
+                    })
+                })
+        {
+            return false;
+        }
+        if !self.published_models.is_empty() {
+            return self.published_models.contains(model);
+        }
+        // Legacy journals retain their immutable published catalog for recovery.
+        let Some(catalog) = read_config(&self.catalog_path)
+            .ok()
+            .flatten()
+            .and_then(|bytes| serde_json::from_slice::<serde_json::Value>(&bytes).ok())
+        else {
+            return false;
+        };
+        catalog["models"].as_array().is_some_and(|models| {
+            models
+                .iter()
+                .any(|entry| entry["slug"].as_str() == Some(model))
+        })
+    }
 }
 
 pub struct Recovery {
@@ -168,6 +217,7 @@ impl PreparedSwitch {
             before_providers_table: before.as_table().contains_key("model_providers"),
             local_token_reference: None,
             overlay: Overlay::default(),
+            published_models: publication.routes.keys().cloned().collect(),
         };
         let catalog = serde_json::to_vec_pretty(&publication.catalog)
             .map_err(|_| "could not serialize model catalog")?;
@@ -465,6 +515,7 @@ fn restore_impl(
     let mut document: DocumentMut = current.parse().map_err(|_| "invalid Codex TOML")?;
     let mut conflicts = Vec::new();
     let mut changed = false;
+    let model_selected = journal.allows_model_selection(&document);
 
     for field in journal.fields {
         if document
@@ -482,7 +533,7 @@ fn restore_impl(
         if found == field.before.as_deref() {
             continue;
         }
-        if found != Some(field.applied.as_str()) {
+        if found != Some(field.applied.as_str()) && !(field.name == "model" && model_selected) {
             conflicts.push(field.name);
             continue;
         }
@@ -813,6 +864,143 @@ mod tests {
                 .with_chatgpt_auth("PROXY_MANAGED", &reference)
                 .is_err()
         );
+    }
+
+    fn publication_with_model_choices() -> Publication {
+        let templates =
+            serde_json::from_str(include_str!("../tests/fixtures/synthetic-models.json")).unwrap();
+        publish(
+            &templates,
+            &[
+                Selection {
+                    public_id: "sx-default",
+                    display_name: "Default",
+                    provider_id: "deepseek",
+                    upstream_model: "deepseek-flash",
+                },
+                Selection {
+                    public_id: "sx-selected",
+                    display_name: "Selected",
+                    provider_id: "official",
+                    upstream_model: "gpt-5.5",
+                },
+            ],
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn restores_selected_published_models_including_legacy_partial_recovery() {
+        let publication = publication_with_model_choices();
+        for legacy in [false, true] {
+            for partial in [false, true] {
+                for original in [Some("model = \"native-model\" # keep\n"), None] {
+                    let home = TestHome::new();
+                    if let Some(original) = original {
+                        fs::write(home.config(), original).unwrap();
+                    }
+                    let switch = PreparedSwitch::inspect(
+                        &home.config(),
+                        &home.state(),
+                        &publication,
+                        "127.0.0.1:18731".parse().unwrap(),
+                        "sx-default",
+                    )
+                    .unwrap();
+                    let catalog_path = switch.catalog_path().to_path_buf();
+                    switch.apply().unwrap();
+                    let mut selected: DocumentMut =
+                        fs::read_to_string(home.config()).unwrap().parse().unwrap();
+                    *selected["model"].as_value_mut().unwrap() = {
+                        let mut replacement = Value::from("sx-selected");
+                        *replacement.decor_mut() =
+                            selected["model"].as_value().unwrap().decor().clone();
+                        replacement
+                    };
+                    selected["model_reasoning_effort"] = value("high");
+                    selected["notify"] = value(true);
+                    if partial {
+                        for name in ["model_provider", "model_catalog_json", "model_providers"] {
+                            selected.as_table_mut().remove(name);
+                        }
+                    }
+                    fs::write(home.config(), selected.to_string()).unwrap();
+                    if legacy {
+                        let path = home.state().join(JOURNAL_NAME);
+                        let mut journal: serde_json::Value =
+                            serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+                        journal.as_object_mut().unwrap().remove("published_models");
+                        fs::write(path, serde_json::to_vec(&journal).unwrap()).unwrap();
+                    } else {
+                        // Recorded publication IDs also recover when the catalog was removed.
+                        fs::remove_file(catalog_path).unwrap();
+                    }
+
+                    let result = restore(&home.config(), &home.state()).unwrap();
+                    assert!(
+                        result.conflicts.is_empty(),
+                        "legacy={legacy}, partial={partial}, conflicts={:?}",
+                        result.conflicts
+                    );
+                    let restored: DocumentMut =
+                        fs::read_to_string(home.config()).unwrap().parse().unwrap();
+                    assert_eq!(
+                        restored.as_table().get("model").and_then(Item::as_str),
+                        original.map(|_| "native-model")
+                    );
+                    if original.is_some() {
+                        assert!(restored.to_string().contains("# keep"));
+                    }
+                    assert_eq!(restored["model_reasoning_effort"].as_str(), Some("high"));
+                    assert_eq!(restored["notify"].as_bool(), Some(true));
+                    for name in ["model_provider", "model_catalog_json", "model_providers"] {
+                        assert!(!restored.as_table().contains_key(name));
+                    }
+                    assert!(!home.state().join(JOURNAL_NAME).exists());
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn model_selection_recovery_preserves_unpublished_models_and_external_routing_changes() {
+        for (field, external) in [
+            ("model", "sx-unpublished"),
+            ("model_provider", "external-provider"),
+            ("model_catalog_json", "/external/catalog.json"),
+        ] {
+            let home = TestHome::new();
+            fs::write(home.config(), "model = \"native-model\"\n").unwrap();
+            PreparedSwitch::inspect(
+                &home.config(),
+                &home.state(),
+                &publication_with_model_choices(),
+                "127.0.0.1:18731".parse().unwrap(),
+                "sx-default",
+            )
+            .unwrap()
+            .apply()
+            .unwrap();
+            let mut current: DocumentMut =
+                fs::read_to_string(home.config()).unwrap().parse().unwrap();
+            current["model"] = value("sx-selected");
+            current[field] = value(external);
+            fs::write(home.config(), current.to_string()).unwrap();
+            let result = restore(&home.config(), &home.state()).unwrap();
+            assert!(result.conflicts.contains(&"model".to_owned()));
+            assert!(result.conflicts.contains(&field.to_owned()));
+            let restored: DocumentMut = fs::read_to_string(home.config()).unwrap().parse().unwrap();
+            assert_eq!(restored[field].as_str(), Some(external));
+            assert_eq!(
+                restored["model"].as_str(),
+                Some(if field == "model" {
+                    external
+                } else {
+                    "sx-selected"
+                })
+            );
+            assert!(home.state().join(JOURNAL_NAME).exists());
+        }
     }
 
     #[test]
