@@ -5,10 +5,11 @@ import {
     ListView,
     Palette,
     ScrollView,
-    TextEdit,
 } from "std-widgets.slint";
 import { Theme } from "tokens.slint";
 import { QuietButton, SurfaceCard, StatusPill } from "components.slint";
+import { CodeEditor } from "code-editor.slint";
+export { SyntaxHighlighting, CodeSpan } from "code-editor.slint";
 
 export struct ProviderRow {
     id: string,
@@ -1249,14 +1250,11 @@ export component AppWindow inherits Window {
                                 }
                             }
 
-                            TextEdit {
+                            CodeEditor {
                                 height: 208px;
                                 vertical-stretch: 0;
                                 text: root.edit-config-preview;
                                 read-only: true;
-                                wrap: no-wrap;
-                                font-family: "Menlo";
-                                font-size: 12px;
                                 accessible-label: "Codex config.toml 配置预览";
                             }
 
@@ -1570,14 +1568,12 @@ export component AppWindow inherits Window {
                                 }
                             }
 
-                            TextEdit {
+                            CodeEditor {
                                 height: 208px;
                                 vertical-stretch: 0;
                                 text <=> root.subscription-auth-json;
+                                language: "json";
                                 edited(text) => { root.subscription-auth-edited(); }
-                                wrap: no-wrap;
-                                font-family: "Menlo";
-                                font-size: 12px;
                                 enabled: !root.busy && !root.config-managed;
                                 accessible-label: "ChatGPT auth.json 编辑内容";
                             }
@@ -1663,14 +1659,11 @@ export component AppWindow inherits Window {
                                 }
                             }
 
-                            TextEdit {
+                            CodeEditor {
                                 height: 240px;
                                 vertical-stretch: 0;
                                 text <=> root.edit-config-preview;
                                 edited(text) => { root.subscription-config-edited(); }
-                                wrap: no-wrap;
-                                font-family: "Menlo";
-                                font-size: 12px;
                                 enabled: !root.busy && !root.config-managed;
                                 accessible-label: "ChatGPT config.toml 编辑内容";
                             }
@@ -1813,14 +1806,11 @@ export component AppWindow inherits Window {
                                 wrap: word-wrap;
                             }
 
-                            TextEdit {
+                            CodeEditor {
                                 height: 208px;
                                 vertical-stretch: 0;
                                 text <=> root.common-config-draft;
                                 placeholder-text: "在此填写可共享的 Codex TOML 配置";
-                                wrap: no-wrap;
-                                font-family: "Menlo";
-                                font-size: 12px;
                                 enabled: !root.busy && !root.config-managed;
                                 accessible-label: "Codex 通用配置片段";
                             }

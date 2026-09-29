@@ -9,7 +9,7 @@ use slint::{ComponentHandle, Model, ModelRc, VecModel};
 use switchx::{
     accounts::AccountManager,
     app::{self, AppError, Snapshot, data_directory, load_snapshot},
-    catalog, chatgpt, client, config_transaction,
+    catalog, chatgpt, client, code_highlight, config_transaction,
     credentials::Secret,
     direct,
     direct_config::{self, PreparedDirectSwitch},
@@ -2653,6 +2653,35 @@ fn credential_from_args(
     Ok(Some(secret))
 }
 
+fn connect_syntax_highlighting(app: &AppWindow) {
+    app.global::<SyntaxHighlighting>()
+        .on_spans(|source, language| {
+            let spans = code_highlight::spans(source.as_str(), language.as_str())
+                .into_iter()
+                .map(|span| {
+                    use code_highlight::TokenKind;
+                    let kind = match span.kind {
+                        TokenKind::Plain => 0,
+                        TokenKind::Key => 1,
+                        TokenKind::String => 2,
+                        TokenKind::Number => 3,
+                        TokenKind::Literal => 4,
+                        TokenKind::Comment => 5,
+                        TokenKind::Section => 6,
+                    };
+                    CodeSpan {
+                        text: span.text.into(),
+                        prefix: span.prefix.into(),
+                        line_text: span.line_text.into(),
+                        line: span.line,
+                        kind,
+                    }
+                })
+                .collect::<Vec<_>>();
+            ModelRc::new(VecModel::from(spans))
+        });
+}
+
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     if credential_command()? {
         return Ok(());
@@ -2661,6 +2690,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         .enable_all()
         .build()?;
     let app = AppWindow::new()?;
+    connect_syntax_highlighting(&app);
     let presets = app::PROVIDER_PRESETS
         .iter()
         .map(|preset| {
