@@ -29,6 +29,14 @@ export struct ProviderPresetRow {
     monochrome: bool,
 }
 
+export struct AccountRow {
+    id: string,
+    label: string,
+    workspace: string,
+    is-default: bool,
+    is-active: bool,
+}
+
 export struct ModelRow {
     provider-id: string,
     provider-name: string,
@@ -111,6 +119,14 @@ export component AppWindow inherits Window {
     in-out property <string> config-status: "尚未读取 Codex 配置";
     in-out property <bool> direct-active: false;
     in-out property <string> auth-status: "官方登录状态尚未检查";
+    in-out property <[AccountRow]> accounts: [];
+    in-out property <string> account-status: "账号列表尚未读取";
+    in-out property <string> login-user-code: "";
+    in-out property <string> login-url: "";
+    in-out property <string> selected-account-id: "";
+    in-out property <string> delete-account-id: "";
+    in-out property <bool> delete-account-confirm: false;
+    property <string> delete-account-label: "";
     in-out property <bool> chatgpt-login-pending: false;
     in-out property <string> chatgpt-login-id: "";
     in-out property <string> route-auth-error: "";
@@ -220,6 +236,7 @@ export component AppWindow inherits Window {
     callback import-current(string);
     callback check-login(string);
     callback subscription-action(int);
+    callback account-action(int, string);
     callback save-model();
     callback delete-model();
     callback begin-model-editor(string, string);
@@ -730,7 +747,7 @@ export component AppWindow inherits Window {
                     HorizontalLayout {
                         spacing: 12px;
                         Text {
-                            text: "API Key 保存到系统凭据存储；订阅登录由目标 Codex 管理。";
+                            text: "API Key 保存到系统凭据存储；ChatGPT 账号可在“配置与恢复”管理。";
                             color: Theme.muted-text;
                             font-size: 13px;
                             vertical-alignment: center;
@@ -1955,19 +1972,19 @@ export component AppWindow inherits Window {
                                 spacing: 8px;
                                 QuietButton {
                                     text: "读取当前配置";
-                                    enabled: !root.busy;
+                                    enabled: !root.busy && !root.chatgpt-login-pending;
                                     clicked => { root.inspect-config(root.config-home); }
                                 }
 
                                 QuietButton {
                                     text: "导入当前上游";
-                                    enabled: !root.busy;
+                                    enabled: !root.busy && !root.chatgpt-login-pending;
                                     clicked => { root.import-current(root.config-home); }
                                 }
 
                                 QuietButton {
                                     text: "检查官方登录";
-                                    enabled: !root.busy;
+                                    enabled: !root.busy && !root.chatgpt-login-pending;
                                     clicked => { root.check-login(root.config-home); }
                                 }
                             }
@@ -1975,36 +1992,224 @@ export component AppWindow inherits Window {
                     }
 
                     SurfaceCard {
-                        height: 216px;
+                        height: 356px + root.accounts.length * 94px + (root.accounts.length == 0 ? 40px : 0px) + (root.chatgpt-login-pending ? 172px : 0px);
                         VerticalLayout {
                             padding: 18px;
-                            spacing: 12px;
-                            Text {
-                                text: "ChatGPT 订阅账号";
-                                color: Theme.primary-text;
-                                font-size: 17px;
-                                font-weight: 600;
+                            spacing: 10px;
+                            HorizontalLayout {
+                                height: 36px;
+                                Text {
+                                    text: "ChatGPT 订阅账号";
+                                    color: Theme.primary-text;
+                                    font-size: 17px;
+                                    font-weight: 600;
+                                    vertical-alignment: center;
+                                }
+
+                                QuietButton {
+                                    width: 88px;
+                                    horizontal-stretch: 0;
+                                    text: "刷新列表";
+                                    enabled: !root.busy && !root.chatgpt-login-pending;
+                                    clicked => { root.account-action(0, ""); }
+                                }
                             }
 
                             Text {
-                                text: root.route-auth-error == "" ? root.auth-status : root.route-auth-error;
+                                text: root.route-auth-error == "" ? root.account-status : root.route-auth-error;
                                 color: Theme.primary-text;
                                 font-size: 13px;
+                                wrap: word-wrap;
+                            }
+
+                            Text {
+                                text: "账号保存在 SwitchX，切换对新会话生效。也可继续使用 Codex 当前登录。";
+                                color: Theme.muted-text;
+                                font-size: 12px;
                                 wrap: word-wrap;
                             }
 
                             HorizontalLayout {
                                 spacing: 8px;
                                 QuietButton {
-                                    text: root.config-managed ? "恢复并重新登录" : "登录 ChatGPT";
+                                    text: "添加 ChatGPT 账号";
                                     primary: true;
                                     enabled: !root.busy && !root.chatgpt-login-pending;
-                                    clicked => { root.subscription-action(1); }
+                                    clicked => { root.account-action(1, ""); }
                                 }
 
                                 QuietButton {
+                                    text: "导入当前 Codex 账号";
+                                    enabled: !root.busy && !root.chatgpt-login-pending;
+                                    clicked => { root.account-action(5, ""); }
+                                }
+
+                                QuietButton {
+                                    text: "使用默认账号";
+                                    enabled: !root.busy && !root.chatgpt-login-pending && root.accounts.length > 0;
+                                    clicked => { root.account-action(3, ""); }
+                                }
+                            }
+
+                            if root.accounts.length == 0: Text {
+                                height: 30px;
+                                text: "尚未保存账号。添加账号或导入当前 Codex 登录后，可在这里切换。";
+                                color: Theme.muted-text;
+                                font-size: 13px;
+                                wrap: word-wrap;
+                            }
+
+                            for account in root.accounts: Rectangle {
+                                height: 84px;
+                                background: account.is-active ? Theme.brand-surface : Theme.raised;
+                                border-width: 1px;
+                                border-color: account.is-active ? Theme.brand : Theme.border;
+                                border-radius: 10px;
+                                HorizontalLayout {
+                                    padding: 12px;
+                                    spacing: 8px;
+                                    VerticalLayout {
+                                        horizontal-stretch: 1;
+                                        spacing: 5px;
+                                        HorizontalLayout {
+                                            spacing: 8px;
+                                            Text {
+                                                text: account.label;
+                                                color: Theme.primary-text;
+                                                font-size: 14px;
+                                                font-weight: 600;
+                                                overflow: elide;
+                                                horizontal-stretch: 1;
+                                                vertical-alignment: center;
+                                            }
+
+                                            if account.is-active: Text {
+                                                text: "当前使用";
+                                                color: Theme.brand;
+                                                font-size: 12px;
+                                                vertical-alignment: center;
+                                            }
+                                        }
+
+                                        Text {
+                                            text: account.workspace == "" ? "ChatGPT 账号" : "工作区：" + account.workspace;
+                                            color: Theme.muted-text;
+                                            font-size: 12px;
+                                            overflow: elide;
+                                        }
+                                    }
+
+                                    QuietButton {
+                                        width: 92px;
+                                        horizontal-stretch: 0;
+                                        text: account.is-default ? "默认账号" : "设为默认";
+                                        selected: account.is-default;
+                                        enabled: !root.busy && !root.chatgpt-login-pending && !account.is-default;
+                                        clicked => { root.account-action(2, account.id); }
+                                    }
+
+                                    QuietButton {
+                                        width: 80px;
+                                        horizontal-stretch: 0;
+                                        text: account.is-active && root.selected-account-id == account.id ? "重新使用" : "使用";
+                                        enabled: !root.busy && !root.chatgpt-login-pending;
+                                        clicked => { root.account-action(3, account.id); }
+                                    }
+
+                                    QuietButton {
+                                        width: 80px;
+                                        horizontal-stretch: 0;
+                                        text: "移除";
+                                        enabled: !root.busy && !root.chatgpt-login-pending;
+                                        clicked => {
+                                            root.delete-account-id = account.id;
+                                            root.delete-account-label = account.label;
+                                            root.error-code = "";
+                                            root.error-message = "";
+                                            root.error-action = "";
+                                            root.delete-account-confirm = true;
+                                        }
+                                    }
+                                }
+                            }
+
+                            if root.chatgpt-login-pending: Rectangle {
+                                height: 162px;
+                                background: Theme.brand-surface;
+                                border-width: 1px;
+                                border-color: Theme.brand;
+                                border-radius: 10px;
+                                VerticalLayout {
+                                    padding: 12px;
+                                    spacing: 8px;
+                                    Text {
+                                        text: root.login-user-code == "" ? "在官方浏览器页面完成登录，可随时取消。" : "复制验证码，在已打开的官方登录页面完成登录。";
+                                        color: Theme.primary-text;
+                                        font-size: 13px;
+                                        wrap: word-wrap;
+                                    }
+
+                                    if root.login-user-code != "": HorizontalLayout {
+                                        spacing: 8px;
+                                        Text {
+                                            width: 88px;
+                                            text: "登录验证码";
+                                            color: Theme.muted-text;
+                                            font-size: 12px;
+                                            vertical-alignment: center;
+                                        }
+
+                                        LineEdit {
+                                            text: root.login-user-code;
+                                            read-only: true;
+                                            accessible-label: "登录验证码，可选择复制";
+                                        }
+                                    }
+                                    if root.login-url != "": HorizontalLayout {
+                                        spacing: 8px;
+                                        Text {
+                                            width: 88px;
+                                            text: "登录页面";
+                                            color: Theme.muted-text;
+                                            font-size: 12px;
+                                            vertical-alignment: center;
+                                        }
+
+                                        LineEdit {
+                                            text: root.login-url;
+                                            read-only: true;
+                                            accessible-label: "官方登录页面地址，可选择复制";
+                                        }
+                                    }
+                                }
+                            }
+
+                            Text {
+                                text: root.auth-status;
+                                color: Theme.muted-text;
+                                font-size: 12px;
+                                wrap: word-wrap;
+                            }
+
+                            HorizontalLayout {
+                                spacing: 8px;
+
+                                QuietButton {
+                                    text: "跟随 Codex 当前登录";
+                                    selected: root.selected-account-id == "";
+                                    enabled: !root.busy && !root.chatgpt-login-pending;
+                                    clicked => { root.account-action(6, ""); }
+                                }
+
+                                if !root.chatgpt-login-pending: QuietButton {
+                                    text: "Codex 原生登录";
+                                    enabled: !root.busy;
+                                    clicked => { root.subscription-action(1); }
+                                }
+
+                                if root.chatgpt-login-pending: QuietButton {
                                     text: "取消登录";
-                                    enabled: !root.busy && root.chatgpt-login-pending;
+                                    enabled: !root.busy;
                                     clicked => { root.subscription-action(3); }
                                 }
 
@@ -2022,14 +2227,7 @@ export component AppWindow inherits Window {
                             }
 
                             Text {
-                                text: root.chatgpt-login-pending ? "在官方浏览器页面完成登录；可随时取消。此时配置目录已锁定。" : "登录写入上方 Codex 目录，认证及自动续期由 Codex 保管。更换账号前会恢复原配置并停止路由。";
-                                color: Theme.muted-text;
-                                font-size: 12px;
-                                wrap: word-wrap;
-                            }
-
-                            Text {
-                                text: "失效后可重新登录；切回 API 会先恢复，再生成只含 API 模型的发布预览。";
+                                text: "账号登录完成后点击“使用”。设为默认不会立即切换；使用或更换账号会先恢复配置并停止路由，请重新发布并启动新会话。";
                                 color: Theme.muted-text;
                                 font-size: 12px;
                                 wrap: word-wrap;
@@ -2050,14 +2248,14 @@ export component AppWindow inherits Window {
                             }
 
                             Text {
-                                text: "凭据保持在 Codex 原有存储中，SwitchX 不复制官方登录凭据。";
+                                text: "ChatGPT 账号可在上方保存和切换，也可跟随 Codex 原生登录。";
                                 color: Theme.muted-text;
                                 font-size: 13px;
                                 wrap: word-wrap;
                             }
 
                             Text {
-                                text: "API Key 直连与 ChatGPT 官方登录是两条独立路径。导入只读取上游资料，不复制原凭据。";
+                                text: "API Key 直连与 ChatGPT 登录分别管理。“导入当前上游”只读取上游资料，不复制 API Key。";
                                 color: Theme.muted-text;
                                 font-size: 12px;
                                 wrap: word-wrap;
@@ -2221,6 +2419,81 @@ export component AppWindow inherits Window {
             QuietButton {
                 text: "关闭";
                 clicked => { root.drawer-open = false; }
+            }
+        }
+    }
+
+    if root.delete-account-confirm: Rectangle {
+        x: 0px;
+        y: 0px;
+        width: root.width;
+        height: root.height;
+        background: #00000070;
+        TouchArea {
+            enabled: !root.busy;
+            clicked => {
+                root.delete-account-confirm = false;
+                root.delete-account-id = "";
+            }
+        }
+    }
+    if root.delete-account-confirm: SurfaceCard {
+        x: (root.width - self.width) / 2;
+        y: (root.height - self.height) / 2;
+        width: 480px;
+        height: root.error-code == "" ? 272px : 332px;
+        VerticalLayout {
+            padding: 24px;
+            spacing: 14px;
+            Text {
+                text: "移除 ChatGPT 账号";
+                color: Theme.primary-text;
+                font-size: 19px;
+                font-weight: 600;
+            }
+
+            Text {
+                text: root.delete-account-label;
+                color: Theme.primary-text;
+                font-size: 14px;
+                overflow: elide;
+            }
+
+            Text {
+                text: "将移除此账号在 SwitchX 中保存的登录信息。若正在使用此账号，会先停止路由并恢复配置。Codex 配置目录会保留。";
+                color: Theme.muted-text;
+                font-size: 13px;
+                wrap: word-wrap;
+            }
+
+            if root.error-code != "": Text {
+                text: root.error-message;
+                color: Theme.error;
+                font-size: 13px;
+                wrap: word-wrap;
+            }
+
+            Rectangle {
+                vertical-stretch: 1;
+            }
+
+            HorizontalLayout {
+                spacing: 10px;
+                QuietButton {
+                    text: "取消";
+                    enabled: !root.busy;
+                    clicked => {
+                        root.delete-account-confirm = false;
+                        root.delete-account-id = "";
+                    }
+                }
+
+                QuietButton {
+                    text: "确认移除";
+                    primary: true;
+                    enabled: !root.busy && !root.chatgpt-login-pending && root.delete-account-id != "";
+                    clicked => { root.account-action(4, root.delete-account-id); }
+                }
             }
         }
     }

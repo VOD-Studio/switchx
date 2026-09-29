@@ -1,5 +1,8 @@
 use std::{collections::HashMap, io, sync::Arc, time::Duration};
 
+#[path = "router/managed_accounts.rs"]
+mod managed_accounts;
+
 use axum::{
     Json, Router,
     body::{Body, Bytes},

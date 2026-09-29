@@ -7,6 +7,7 @@ use std::path::{Path, PathBuf};
 
 use slint::{ComponentHandle, Model, ModelRc, VecModel};
 use switchx::{
+    accounts::AccountManager,
     app::{self, AppError, Snapshot, data_directory, load_snapshot},
     catalog, chatgpt, client, config_transaction,
     credentials::{CredentialStore, PROVIDER_KEY_SERVICE, ROUTER_TOKEN_SERVICE, Secret},
@@ -63,6 +64,11 @@ enum Command {
         action: i32,
         home: String,
         port: String,
+    },
+    Account {
+        action: i32,
+        id: String,
+        home: String,
     },
     SaveModel {
         provider: String,
@@ -232,6 +238,69 @@ fn show_action(app: &AppWindow, result: Result<String, String>) {
     }
 }
 
+struct AccountView {
+    rows: Vec<AccountRow>,
+    selected: String,
+    status: String,
+}
+
+fn account_view(data_dir: &Path, home: &Path) -> Result<AccountView, String> {
+    let manager = AccountManager::open(data_dir)?;
+    let active = manager.active_id(home)?;
+    let accounts = manager.list()?;
+    let binding = chatgpt::account_binding(data_dir)?;
+    let selected = match &binding {
+        Some(id) if id == "default" => manager.default_id()?.unwrap_or_else(|| "default".into()),
+        Some(id) => id.clone(),
+        None => String::new(),
+    };
+    let status = if binding.is_none() {
+        format!(
+            "已保存 {} 个账号 · 跟随此 Codex 目录的当前登录",
+            accounts.len()
+        )
+    } else if !accounts.iter().any(|account| account.id == selected) {
+        "所选账号已移除或默认账号尚未设置，请重新选择账号".into()
+    } else if active.as_ref() != Some(&selected) {
+        "账号选择与此 Codex 目录的登录不一致，请点击“使用账号”".into()
+    } else {
+        format!(
+            "已保存 {} 个账号 · 此 Codex 目录正在使用所选账号",
+            accounts.len()
+        )
+    };
+    Ok(AccountView {
+        rows: accounts
+            .into_iter()
+            .map(|account| AccountRow {
+                is_active: active.as_ref() == Some(&account.id),
+                id: account.id.into(),
+                label: account.label.into(),
+                workspace: account.workspace_id.into(),
+                is_default: account.is_default,
+            })
+            .collect(),
+        selected,
+        status,
+    })
+}
+
+fn show_accounts(app: &AppWindow, view: Result<AccountView, String>) {
+    match view {
+        Ok(view) => {
+            app.set_accounts(ModelRc::new(VecModel::from(view.rows)));
+            app.set_selected_account_id(view.selected.into());
+            app.set_account_status(view.status.into());
+        }
+        Err(error) => app.set_account_status(error.into()),
+    }
+}
+
+fn discard_account_previews(app: &AppWindow) {
+    app.set_direct_preview_ready(false);
+    app.set_route_preview_ready(false);
+}
+
 fn editor_codex_options(app: &AppWindow) -> Result<CodexOptions, String> {
     let options = CodexOptions {
         remote_compaction: app.get_edit_remote_compaction(),
@@ -372,6 +441,16 @@ fn home(text: &str) -> Result<PathBuf, String> {
     let path = PathBuf::from(text);
     client::config_path(&path)?;
     Ok(path)
+}
+
+fn sync_owned_account(data_dir: &Path, home: &Path) -> Result<(), String> {
+    let manager = AccountManager::open(data_dir)?;
+    // An external/native login has no matching ownership marker. Following it
+    // must not adopt that credential into another saved account.
+    if manager.active_id(home)?.is_some() {
+        manager.sync_current(home)?;
+    }
+    Ok(())
 }
 
 fn common_config_for_home(data_dir: &Path, target: &str) -> Result<String, String> {
@@ -529,7 +608,29 @@ async fn worker(
     )> = None;
     let mut route_session = RouteSession::default();
     let mut pending_login: Option<(watch::Sender<bool>, tokio::task::JoinHandle<()>)> = None;
+    let mut account_home = client::default_home().ok();
     while let Some(command) = receiver.recv().await {
+        let target = match &command {
+            Command::Account { home, .. }
+            | Command::Subscription { home, .. }
+            | Command::InspectRoute { home, .. }
+            | Command::ApplyRoute { home, .. }
+            | Command::LaunchCodex { home }
+            | Command::InspectDirect { home, .. }
+            | Command::BeginProviderEditor { home, .. }
+            | Command::FetchModels { home, .. }
+            | Command::InspectConfig(home)
+            | Command::CheckLogin(home)
+            | Command::ImportCurrent(home)
+            | Command::ApplyDirect(home)
+            | Command::RestoreConfig(home) => Some(home),
+            _ => None,
+        };
+        if let Some(target) = target
+            && let Ok(home) = home(target)
+        {
+            account_home = Some(home);
+        }
         match command {
             Command::PollRouteStatus => {}
             Command::RefreshRequests => {
@@ -994,8 +1095,18 @@ async fn worker(
                     common_config_for_home(data_dir, &target.to_string_lossy())?;
                     client::inspect(&target, data_dir).map(|status| (status, target))
                 })();
+                let accounts = result.as_ref().ok().and_then(|(_, target)| {
+                    account_home = Some(target.clone());
+                    directory
+                        .as_ref()
+                        .ok()
+                        .map(|data_dir| account_view(data_dir, target))
+                });
                 let _ = weak.upgrade_in_event_loop(move |app| match result {
                     Ok((status, target)) => {
+                        if let Some(accounts) = accounts {
+                            show_accounts(&app, accounts);
+                        }
                         let config_exists = status.config_exists;
                         app.set_config_home(target.to_string_lossy().into_owned().into());
                         show_config_status(&app, status);
@@ -1058,6 +1169,161 @@ async fn worker(
                     Err(error) => show_action(&app, Err(error)),
                 });
             }
+            Command::Account {
+                action,
+                id,
+                home: target,
+            } => {
+                let result: Result<String, String> = async {
+                    let target_home = home(&target)?;
+                    let data_dir = directory.as_ref().map_err(|error| error.message())?;
+                    let manager = AccountManager::open(data_dir)?;
+                    if pending_login
+                        .as_ref()
+                        .is_some_and(|(_, task)| !task.is_finished())
+                    {
+                        return Err("登录仍在进行；请先完成或取消登录".into());
+                    }
+                    match action {
+                        0 => Ok("已刷新保存的账号列表".into()),
+                        1 => {
+                            let login_id = app::new_id()?;
+                            let login = manager.start_login().await?;
+                            open_provider_link(&login.verification_url)?;
+                            let code = login.user_code.clone();
+                            let url = login.verification_url.clone();
+                            let ui_id = login_id.clone();
+                            let _ = weak.upgrade_in_event_loop(move |app| {
+                                app.set_chatgpt_login_id(ui_id.into());
+                                app.set_chatgpt_login_pending(true);
+                                app.set_login_user_code(code.into());
+                                app.set_login_url(url.into());
+                                app.set_account_status("正在等待官方设备验证码登录…".into());
+                            });
+                            let (cancel, receiver) = watch::channel(false);
+                            let window = weak.clone();
+                            let data_dir = data_dir.to_path_buf();
+                            let task = tokio::spawn(async move {
+                                let result = login.finish(receiver).await;
+                                let view = account_view(&data_dir, &target_home);
+                                let _ = window.upgrade_in_event_loop(move |app| {
+                                    if app.get_chatgpt_login_id() != login_id.as_str() {
+                                        return;
+                                    }
+                                    app.set_chatgpt_login_pending(false);
+                                    app.set_login_user_code("".into());
+                                    app.set_login_url("".into());
+                                    show_accounts(&app, view);
+                                    match result {
+                                        Ok(account) => app.set_action_message(
+                                            format!(
+                                                "已保存账号 {}；点击“使用账号”切换到此账号",
+                                                account.label
+                                            )
+                                            .into(),
+                                        ),
+                                        Err(error) => {
+                                            app.set_account_status(error.clone().into());
+                                            app.set_action_message(error.into());
+                                        }
+                                    }
+                                });
+                            });
+                            pending_login = Some((cancel, task));
+                            Ok("已打开官方登录页；完成验证码登录后保存账号".into())
+                        }
+                        2 => {
+                            manager.set_default(&id)?;
+                            route_session.discard_preview();
+                            let _ = weak
+                                .upgrade_in_event_loop(|app| app.set_route_preview_ready(false));
+                            Ok("已设为默认账号；点击“使用默认账号”才会切换当前登录".into())
+                        }
+                        3 => {
+                            let use_default = id.is_empty();
+                            let id = if use_default {
+                                manager.default_id()?.ok_or("请先添加或设置默认账号")?
+                            } else {
+                                id.clone()
+                            };
+                            restore_connections(&mut route_session, data_dir, &target_home).await?;
+                            prepared = None;
+                            route_session.discard_preview();
+                            let _ =
+                                weak.upgrade_in_event_loop(|app| discard_account_previews(&app));
+                            manager.activate(&id, &target_home).await?;
+                            chatgpt::bind_managed_account(
+                                data_dir,
+                                Some(if use_default { "default" } else { &id }),
+                            )?;
+                            let _ = weak.upgrade_in_event_loop(|app| {
+                                app.set_auth_status("已使用保存的 ChatGPT 账号".into());
+                            });
+                            Ok("账号已写入此 Codex 目录；请新建 Codex 会话，再重新预览路由".into())
+                        }
+                        4 => {
+                            let selected = chatgpt::managed_account(data_dir).ok().flatten();
+                            if manager.active_id(&target_home)?.as_ref() == Some(&id)
+                                || selected.as_ref() == Some(&id)
+                            {
+                                restore_connections(&mut route_session, data_dir, &target_home)
+                                    .await?;
+                                prepared = None;
+                                let _ = weak
+                                    .upgrade_in_event_loop(|app| discard_account_previews(&app));
+                            }
+                            route_session.discard_preview();
+                            manager.remove(&id, &target_home).await?;
+                            let removed_id = id.clone();
+                            let _ = weak.upgrade_in_event_loop(move |app| {
+                                app.set_route_preview_ready(false);
+                                app.set_delete_account_confirm(false);
+                                app.set_delete_account_id("".into());
+                                if app.get_selected_account_id() == removed_id.as_str() {
+                                    app.set_auth_status("请重新选择账号并检查登录".into());
+                                }
+                            });
+                            Ok("账号已移除；固定绑定此账号的请求不会自动改用其他账号".into())
+                        }
+                        5 => {
+                            let account = manager.import_current(&target_home)?;
+                            Ok(format!(
+                                "已保存此 Codex 目录的账号 {}；当前登录保持不变",
+                                account.label
+                            ))
+                        }
+                        6 => {
+                            restore_connections(&mut route_session, data_dir, &target_home).await?;
+                            sync_owned_account(data_dir, &target_home)?;
+                            chatgpt::bind_managed_account(data_dir, None)?;
+                            prepared = None;
+                            route_session.discard_preview();
+                            let _ =
+                                weak.upgrade_in_event_loop(|app| discard_account_previews(&app));
+                            Ok("已跟随此 Codex 目录的当前登录；请新建会话并重新预览路由".into())
+                        }
+                        _ => Err("未知账号操作".into()),
+                    }
+                }
+                .await;
+                let accounts = directory.as_ref().ok().and_then(|data_dir| {
+                    home(&target).ok().map(|home| account_view(data_dir, &home))
+                });
+                let status = directory.as_ref().ok().and_then(|data_dir| {
+                    home(&target)
+                        .ok()
+                        .and_then(|home| client::inspect(&home, data_dir).ok())
+                });
+                let _ = weak.upgrade_in_event_loop(move |app| {
+                    if let Some(accounts) = accounts {
+                        show_accounts(&app, accounts);
+                    }
+                    if let Some(status) = status {
+                        show_config_status(&app, status);
+                    }
+                    show_action(&app, result);
+                });
+            }
             Command::Subscription {
                 action,
                 home: target,
@@ -1090,6 +1356,8 @@ async fn worker(
                         1 => {
                             // Reauthentication is an explicit restore-then-login operation.
                             restore_connections(&mut route_session, data_dir, &target_home).await?;
+                            sync_owned_account(data_dir, &target_home)?;
+                            chatgpt::bind_managed_account(data_dir, None)?;
                             prepared = None;
                             route_session.discard_preview();
                             let _ = weak.upgrade_in_event_loop(move |app| {
@@ -1105,18 +1373,24 @@ async fn worker(
                             let _ = weak.upgrade_in_event_loop(move |app| {
                                 app.set_chatgpt_login_id(id.into());
                                 app.set_chatgpt_login_pending(true);
+                                app.set_login_user_code("".into());
+                                app.set_login_url("".into());
                                 app.set_auth_status("正在等待官方浏览器登录…".into());
                                 app.set_direct_preview_ready(false);
                                 app.set_route_preview_ready(false);
                             });
                             let window = weak.clone();
+                            let account_data_dir = data_dir.to_path_buf();
+                            let account_target = target_home.clone();
                             let task = tokio::spawn(async move {
                                 let result = login.finish(receiver).await;
+                                let accounts = account_view(&account_data_dir, &account_target);
                                 let _ = window.upgrade_in_event_loop(move |app| {
                                     if app.get_chatgpt_login_id() != login_id.as_str() {
                                         return;
                                     }
                                     app.set_chatgpt_login_pending(false);
+                                    show_accounts(&app, accounts);
                                     match result {
                                         Ok(status) => {
                                             app.set_auth_status(status.label().into());
@@ -1135,13 +1409,23 @@ async fn worker(
                             Ok("已打开官方登录页；原配置已恢复，可在此取消登录".to_owned())
                         }
                         2 => {
+                            let manager = AccountManager::open(data_dir)?;
+                            if let Some(id) = chatgpt::managed_account(data_dir)? {
+                                if manager.active_id(&target_home)?.as_ref() != Some(&id) {
+                                    return Err(
+                                        "所选账号与此 Codex 目录的登录不一致，请先使用账号".into(),
+                                    );
+                                }
+                                manager.refresh(&id, &target_home).await?;
+                            }
                             let status = chatgpt::account(&target_home, true).await?;
+                            sync_owned_account(data_dir, &target_home)?;
                             let _ = weak.upgrade_in_event_loop(move |app| {
                                 app.set_auth_status(status.label().into())
                             });
                             status.require_chatgpt()?;
                             Ok(
-                                "Codex 已检查订阅登录并请求续期；活跃会话的自动续期由 Codex 管理"
+                                "已检查订阅登录并同步续期凭据；活跃会话也可由 Codex 自动续期"
                                     .to_owned(),
                             )
                         }
@@ -1202,7 +1486,13 @@ async fn worker(
                         .ok()
                         .and_then(|data_dir| client::inspect(&path, data_dir).ok())
                 });
+                let accounts = directory.as_ref().ok().and_then(|data_dir| {
+                    home(&target).ok().map(|home| account_view(data_dir, &home))
+                });
                 let _ = weak.upgrade_in_event_loop(move |app| {
+                    if let Some(accounts) = accounts {
+                        show_accounts(&app, accounts);
+                    }
                     if let Some(status) = status {
                         show_config_status(&app, status);
                     }
@@ -1436,6 +1726,9 @@ async fn worker(
                     let _ = task.await;
                 }
                 let result = async {
+                    if let (Ok(directory), Some(home)) = (&directory, &account_home) {
+                        sync_owned_account(directory, home)?;
+                    }
                     if let Ok(directory) = &directory
                         && let Some(recovery) = config_transaction::recovery(directory)?
                     {
@@ -1500,6 +1793,9 @@ async fn worker(
     if let Some((cancel, task)) = pending_login {
         cancel.send_replace(true);
         let _ = task.await;
+    }
+    if let (Ok(directory), Some(home)) = (&directory, &account_home) {
+        sync_owned_account(directory, home)?;
     }
     // Also recover when the platform exits the event loop without using our tray.
     if let Ok(directory) = &directory
@@ -1911,6 +2207,21 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     action,
                     home: app.get_config_home().into(),
                     port: app.get_route_port().into(),
+                },
+            );
+        }
+    });
+    let callback_sender = sender.clone();
+    let weak = app.as_weak();
+    app.on_account_action(move |action, id| {
+        if let Some(app) = weak.upgrade() {
+            queue(
+                &app,
+                &callback_sender,
+                Command::Account {
+                    action,
+                    id: id.into(),
+                    home: app.get_config_home().into(),
                 },
             );
         }

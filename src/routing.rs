@@ -2,6 +2,7 @@ use std::{
     collections::HashMap,
     io::Read,
     net::{IpAddr, Ipv4Addr, SocketAddr},
+    path::PathBuf,
     sync::{
         Arc, Mutex,
         atomic::{AtomicBool, AtomicU8, Ordering},
@@ -45,6 +46,13 @@ pub struct Upstream {
 enum UpstreamAuth {
     ApiKey(Secret),
     Chatgpt {
+        account: Mutex<Option<HeaderValue>>,
+        routing_override: Option<HeaderValue>,
+    },
+    ManagedChatgpt {
+        manager: crate::accounts::AccountManager,
+        id: String,
+        home: PathBuf,
         account: Mutex<Option<HeaderValue>>,
         routing_override: Option<HeaderValue>,
     },
@@ -121,8 +129,90 @@ impl Upstream {
         Ok(upstream)
     }
 
+    pub fn managed_chatgpt(
+        manager: crate::accounts::AccountManager,
+        id: String,
+        home: PathBuf,
+        workspace: &crate::chatgpt::Workspace,
+    ) -> Result<Self, String> {
+        let mut upstream = Self::chatgpt_for_workspace(workspace)?;
+        let UpstreamAuth::Chatgpt {
+            account,
+            routing_override,
+        } = upstream.auth
+        else {
+            unreachable!()
+        };
+        upstream.auth = UpstreamAuth::ManagedChatgpt {
+            manager,
+            id,
+            home,
+            account,
+            routing_override,
+        };
+        Ok(upstream)
+    }
+
+    /// Synthetic probes only; managed credentials still follow the production account path.
+    pub fn managed_chatgpt_mock(
+        address: SocketAddr,
+        manager: crate::accounts::AccountManager,
+        id: String,
+        home: PathBuf,
+        workspace: &crate::chatgpt::Workspace,
+    ) -> Result<Self, String> {
+        if address.ip() != IpAddr::V4(Ipv4Addr::LOCALHOST) {
+            return Err("mock must use IPv4 loopback".into());
+        }
+        let mut upstream = Self::managed_chatgpt(manager, id, home, workspace)?;
+        upstream.responses_url = Url::parse(&format!("http://{address}/responses")).unwrap();
+        Ok(upstream)
+    }
+
     fn is_chatgpt(&self) -> bool {
-        matches!(self.auth, UpstreamAuth::Chatgpt { .. })
+        !matches!(self.auth, UpstreamAuth::ApiKey(_))
+    }
+
+    async fn authenticated_headers(
+        &self,
+        headers: &HeaderMap,
+        local_token: &Secret,
+    ) -> Result<HeaderMap, &'static str> {
+        if let UpstreamAuth::ManagedChatgpt {
+            manager,
+            id,
+            home,
+            account,
+            routing_override,
+        } = &self.auth
+        {
+            let credential = manager
+                .credential(id, home)
+                .await
+                .map_err(|_| "chatgpt_auth_required")?;
+            let expected = account.lock().map_err(|_| "chatgpt_account_unavailable")?;
+            let workspace = HeaderValue::from_str(&credential.workspace_id)
+                .map_err(|_| "chatgpt_account_changed")?;
+            if expected.as_ref() != Some(&workspace) {
+                return Err("chatgpt_account_changed");
+            }
+            drop(expected);
+            // Managed routes use their explicit binding, never a client's unrelated official login.
+            let mut input = headers.clone();
+            let mut bearer =
+                HeaderValue::from_str(&format!("Bearer {}", credential.access_token.expose()))
+                    .map_err(|_| "chatgpt_auth_required")?;
+            bearer.set_sensitive(true);
+            input.insert(header::AUTHORIZATION, bearer);
+            input.insert(crate::chatgpt::ACCOUNT_HEADER, workspace);
+            input.remove("x-openai-account-routing-override");
+            if let Some(value) = routing_override {
+                input.insert("x-openai-account-routing-override", value.clone());
+            }
+            self.outbound_headers(&input, local_token)
+        } else {
+            self.outbound_headers(headers, local_token)
+        }
     }
 
     fn outbound_headers(
@@ -141,6 +231,11 @@ impl Upstream {
             UpstreamAuth::Chatgpt {
                 account,
                 routing_override,
+            }
+            | UpstreamAuth::ManagedChatgpt {
+                account,
+                routing_override,
+                ..
             } => {
                 let mut values = headers.get_all(header::AUTHORIZATION).iter();
                 let bearer = values
@@ -544,6 +639,8 @@ async fn forward(
             );
         }
     };
+    let mut cancellation = state.cancel.subscribe();
+    let deadline = Instant::now() + state.request_budget;
     let is_json = headers
         .get(header::CONTENT_TYPE)
         .and_then(|v| v.to_str().ok())
@@ -653,9 +750,23 @@ async fn forward(
             "compact is only available for the official subscription route",
         );
     }
-    let outbound_headers = match state.upstreams[&binding.provider_id]
-        .outbound_headers(&headers, &state.local_token)
-    {
+    let authenticated = tokio::select! {
+        biased;
+        _ = cancellation.wait_for(|cancel| *cancel) => {
+            tracker.finish(RequestStatus::Interrupted, Some("router_stopping"));
+            return request_error(&mut tracker, StatusCode::SERVICE_UNAVAILABLE,
+                "router_stopping", "router is stopping");
+        }
+        result = tokio::time::timeout_at(deadline.into(),
+            state.upstreams[&binding.provider_id].authenticated_headers(&headers, &state.local_token)) => {
+            match result {
+                Ok(result) => result,
+                Err(_) => return request_error(&mut tracker, StatusCode::BAD_GATEWAY,
+                    "upstream_timeout", "account authentication timed out"),
+            }
+        }
+    };
+    let outbound_headers = match authenticated {
         Ok(headers) => headers,
         Err(code) => {
             if official {
@@ -709,8 +820,6 @@ async fn forward(
         );
     };
 
-    let mut cancellation = state.cancel.subscribe();
-    let deadline = Instant::now() + state.request_budget;
     let outbound_body = Bytes::from(outbound_body);
     let mut provider_id = &binding.provider_id;
     let upstream_response = loop {
@@ -736,6 +845,7 @@ async fn forward(
             .headers(if provider_id == &binding.provider_id {
                 outbound_headers.clone()
             } else {
+                // RouterState excludes subscription accounts from fallback.
                 match upstream.outbound_headers(&headers, &state.local_token) {
                     Ok(headers) => headers,
                     Err(code) => {
@@ -890,7 +1000,9 @@ async fn forward(
 mod tests {
     use super::*;
     use crate::catalog::{Selection, publish};
-    use std::sync::atomic::AtomicUsize;
+    use base64::{Engine, engine::general_purpose::URL_SAFE_NO_PAD};
+    use std::{fs, sync::atomic::AtomicUsize};
+    use tokio::sync::{Notify, mpsc};
 
     #[test]
     fn official_auth_rejects_placeholder_api_key_local_token_and_ambiguous_headers() {
@@ -1112,5 +1224,269 @@ mod tests {
                 .is_err()
         );
         server.abort();
+    }
+
+    struct RefreshReplyFinished(mpsc::Sender<()>);
+
+    impl Drop for RefreshReplyFinished {
+        fn drop(&mut self) {
+            let _ = self.0.try_send(());
+        }
+    }
+
+    struct RefreshFixture {
+        directory: PathBuf,
+        home: PathBuf,
+        manager: crate::accounts::AccountManager,
+        id: String,
+        address: SocketAddr,
+        started: mpsc::Receiver<()>,
+        finished: mpsc::Receiver<()>,
+        release: Arc<Notify>,
+        model_calls: Arc<AtomicUsize>,
+        original_auth: Vec<u8>,
+        original_store: Vec<u8>,
+        server: JoinHandle<()>,
+    }
+
+    impl RefreshFixture {
+        async fn new() -> Self {
+            let directory = std::env::temp_dir().join(format!(
+                "switchx-refresh-routing-{}",
+                crate::app::new_id().unwrap()
+            ));
+            let home = directory.join("home");
+            let data = directory.join("data");
+            fs::create_dir_all(&home).unwrap();
+            fs::create_dir_all(&data).unwrap();
+            let jwt = |payload: Value| {
+                format!(
+                    "{}.{}.synthetic-signature",
+                    URL_SAFE_NO_PAD.encode(br#"{"alg":"RS256"}"#),
+                    URL_SAFE_NO_PAD.encode(payload.to_string())
+                )
+            };
+            let identity = jwt(json!({"sub":"synthetic-refresh-user",
+                "https://api.openai.com/auth":{"chatgpt_account_id":"fixture-workspace"}}));
+            let original_auth = serde_json::to_vec(&json!({"auth_mode":"chatgpt",
+                "OPENAI_API_KEY":null,"tokens":{"id_token":identity,
+                    "access_token":jwt(json!({"exp":1})),
+                    "refresh_token":"synthetic-original-refresh","account_id":"fixture-workspace"},
+                "last_refresh":"2000-01-01T00:00:00.000Z"}))
+            .unwrap();
+            fs::write(home.join("auth.json"), &original_auth).unwrap();
+            let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let address = listener.local_addr().unwrap();
+            let release = Arc::new(Notify::new());
+            let gate = release.clone();
+            let (started_tx, started) = mpsc::channel(1);
+            let (finished_tx, finished) = mpsc::channel(1);
+            let renewed = json!({"id_token":identity,"access_token":jwt(json!({"exp":4102444800_i64})),
+                "refresh_token":"synthetic-uncommitted-refresh","expires_in":3600});
+            let model_calls = Arc::new(AtomicUsize::new(0));
+            let calls = model_calls.clone();
+            let mock = Router::new()
+                .route(
+                    "/token",
+                    post(move || {
+                        let started = started_tx.clone();
+                        let finished = finished_tx.clone();
+                        let gate = gate.clone();
+                        let renewed = renewed.clone();
+                        async move {
+                            let _finished = RefreshReplyFinished(finished);
+                            started.send(()).await.unwrap();
+                            gate.notified().await;
+                            Json(renewed)
+                        }
+                    }),
+                )
+                .route(
+                    "/responses",
+                    post(move || {
+                        calls.fetch_add(1, Ordering::SeqCst);
+                        async { Json(json!({"status":"completed","output":[]})) }
+                    }),
+                );
+            let server = tokio::spawn(async move { axum::serve(listener, mock).await.unwrap() });
+            let manager =
+                crate::accounts::AccountManager::open_mock(&data, &format!("http://{address}"))
+                    .unwrap();
+            let id = manager.import_current(&home).unwrap().id;
+            let original_store = fs::read(data.join("codex_oauth_auth.json")).unwrap();
+            Self {
+                directory,
+                home,
+                manager,
+                id,
+                address,
+                started,
+                finished,
+                release,
+                model_calls,
+                original_auth,
+                original_store,
+                server,
+            }
+        }
+
+        fn state(&self, address: SocketAddr, budget: Duration) -> RouterState {
+            let templates =
+                serde_json::from_str(include_str!("../tests/fixtures/synthetic-models.json"))
+                    .unwrap();
+            let publication = publish(
+                &templates,
+                &[Selection {
+                    public_id: "sx-account",
+                    display_name: "Account",
+                    provider_id: "official",
+                    upstream_model: "gpt-5.5",
+                }],
+            )
+            .unwrap();
+            let workspace = crate::chatgpt::Workspace {
+                account_id: "fixture-workspace".into(),
+                backend_origin: "https://chatgpt.com".into(),
+                routing_override: "NO_CONSTRAINT".into(),
+            };
+            let upstream = Upstream::managed_chatgpt_mock(
+                self.address,
+                self.manager.clone(),
+                self.id.clone(),
+                self.home.clone(),
+                &workspace,
+            )
+            .unwrap();
+            let mut state = RouterState::new(
+                address,
+                "synthetic-local-token-at-least-32-bytes".into(),
+                publication,
+                HashMap::from([("official".into(), upstream)]),
+            )
+            .unwrap();
+            state.request_budget = budget;
+            state
+        }
+
+        fn assert_unchanged_and_unlocked(&self) {
+            self.manager
+                .set_default(&self.id)
+                .expect("cancelled refresh must release the account operation and file lock");
+            self.manager
+                .sync_current(&self.home)
+                .expect("cancelled refresh must release the Codex config lock");
+            assert_eq!(
+                fs::read(self.home.join("auth.json")).unwrap(),
+                self.original_auth
+            );
+            assert_eq!(
+                fs::read(self.directory.join("data/codex_oauth_auth.json")).unwrap(),
+                self.original_store
+            );
+            assert_eq!(self.model_calls.load(Ordering::SeqCst), 0);
+        }
+
+        async fn finish_abandoned_refresh(&mut self) {
+            self.release.notify_one();
+            tokio::time::timeout(Duration::from_secs(2), self.finished.recv())
+                .await
+                .unwrap()
+                .unwrap();
+            self.assert_unchanged_and_unlocked();
+        }
+    }
+
+    impl Drop for RefreshFixture {
+        fn drop(&mut self) {
+            self.server.abort();
+            let _ = fs::remove_dir_all(&self.directory);
+        }
+    }
+
+    #[tokio::test]
+    async fn managed_auth_refresh_uses_the_request_budget_and_never_reaches_the_model() {
+        let mut fixture = RefreshFixture::new().await;
+        let address = "127.0.0.1:18731".parse().unwrap();
+        let state = fixture.state(address, Duration::from_millis(250));
+        let headers = HeaderMap::from_iter([
+            (header::HOST, address.to_string().parse().unwrap()),
+            (header::CONTENT_TYPE, "application/json".parse().unwrap()),
+            (
+                axum::http::HeaderName::from_static(LOCAL_TOKEN_HEADER),
+                "synthetic-local-token-at-least-32-bytes".parse().unwrap(),
+            ),
+        ]);
+        let request = tokio::spawn(responses(
+            State(Arc::new(state)),
+            headers,
+            Bytes::from_static(b"{\"model\":\"sx-account\"}"),
+        ));
+        tokio::time::timeout(Duration::from_secs(2), fixture.started.recv())
+            .await
+            .unwrap()
+            .unwrap();
+        let response = tokio::time::timeout(Duration::from_secs(2), request)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::BAD_GATEWAY);
+        let body = axum::body::to_bytes(response.into_body(), 4096)
+            .await
+            .unwrap();
+        assert_eq!(
+            serde_json::from_slice::<Value>(&body).unwrap()["error"]["code"],
+            "upstream_timeout"
+        );
+        fixture.assert_unchanged_and_unlocked();
+        fixture.finish_abandoned_refresh().await;
+    }
+
+    #[tokio::test]
+    async fn stopping_the_router_cancels_managed_refresh_without_writing_credentials() {
+        let mut fixture = RefreshFixture::new().await;
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let database = fixture.directory.join("requests.sqlite");
+        let state = fixture
+            .state(address, Duration::from_secs(120))
+            .with_request_log(Store::open(&database).unwrap(), "cancel-refresh".into());
+        let running = RunningRouter::start(listener, state).unwrap();
+        let mut request = tokio::spawn(async move {
+            Client::builder()
+                .no_proxy()
+                .build()
+                .unwrap()
+                .post(format!("http://{address}/v1/responses"))
+                .header(
+                    LOCAL_TOKEN_HEADER,
+                    "synthetic-local-token-at-least-32-bytes",
+                )
+                .header(header::CONTENT_TYPE, "application/json")
+                .body("{\"model\":\"sx-account\"}")
+                .send()
+                .await
+        });
+        tokio::time::timeout(Duration::from_secs(2), fixture.started.recv())
+            .await
+            .unwrap()
+            .unwrap();
+        tokio::time::timeout(Duration::from_secs(8), running.stop())
+            .await
+            .unwrap();
+        let received = tokio::time::timeout(Duration::from_secs(2), &mut request).await;
+        if received.is_err() {
+            request.abort();
+            let _ = request.await;
+            panic!("router shutdown must end the pending HTTP request");
+        }
+        if let Ok(response) = received.unwrap().unwrap() {
+            assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+        }
+        let records = Store::open(&database).unwrap().requests(10).unwrap();
+        assert_eq!(records.len(), 1);
+        assert_eq!(records[0].status, RequestStatus::Interrupted);
+        assert_eq!(records[0].error_code.as_deref(), Some("router_stopping"));
+        fixture.assert_unchanged_and_unlocked();
+        fixture.finish_abandoned_refresh().await;
     }
 }

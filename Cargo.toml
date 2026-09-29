@@ -6,6 +6,8 @@ publish = false
 
 [dependencies]
 axum = "0.8.9"
+base64 = "0.22.1"
+chrono = { version = "0.4.45", default-features = false, features = ["clock", "std"] }
 futures-util = "0.3.34"
 getrandom = "0.3.4"
 keyring = "=4.2.0"
