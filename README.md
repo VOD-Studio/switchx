@@ -12,6 +12,8 @@ CODEX_HOME="$(mktemp -d)" npx -y @openai/codex@0.156.1 \
   -c 'model_catalog_json="/tmp/switchx-models.json"' debug models
 ```
 
+界面代码按职责组织：`ui/pages/` 放总览、上游、路由、请求记录和配置恢复页面，`ui/editors/` 放编辑表单与头像选择器，`ui/view-models.slint` 定义展示数据。`ui/app.slint` 保留窗口布局、导航、跨页状态、凭据草稿清理和 Rust 回调接口；页面通过属性绑定与操作回调接入。基础控件、代码编辑器和主题分别在 `components.slint`、`code-editor.slint`、`tokens.slint` 中。`make format` 与 `make format-check` 会递归处理 `ui/` 下的 Slint 文件。
+
 在 2026-09-24 的 macOS 本机测试中，Codex CLI 0.156.1 的 `debug models` 与 app-server `model/list` 均返回 `sx-ds-flash`、`sx-oai-coding`。这证明该版本能读取夹具目录，尚未证明真实 `/model` 交互、真实模型请求、Desktop 或 IDE 兼容。
 
 `cargo test --test router` 用本地假上游验证精确映射、SSE 首事件直达、认证头隔离、未知模型、本地鉴权，以及订阅账号的工作区绑定、401/403、续期后请求和 compact。它不使用真实供应商凭据，不证明真实上游或真实订阅账号可用。

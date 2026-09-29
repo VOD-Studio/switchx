@@ -1,0 +1,141 @@
+import { LineEdit, ScrollView } from "std-widgets.slint";
+import { Theme } from "../tokens.slint";
+import { QuietButton, SurfaceCard } from "../components.slint";
+import { ProviderIconRow } from "../view-models.slint";
+
+export component ProviderIconPicker inherits SurfaceCard {
+    in property <bool> busy;
+    in property <[ProviderIconRow]> provider-icons;
+    in property <[ProviderIconRow]> filtered-provider-icons;
+    in-out property <string> provider-icon-query;
+    in property <string> edit-icon-id;
+    in property <string> edit-icon-name;
+    in property <bool> config-managed;
+    callback choose-provider-icon(string);
+    callback close-provider-icon-picker();
+    callback filter-provider-icons(string);
+
+    vertical-stretch: 1;
+    FocusScope {
+        key-pressed(event) => {
+            if (event.text == Key.Escape) {
+                root.close-provider-icon-picker();
+                return accept;
+            }
+            return reject;
+        }
+
+        VerticalLayout {
+            padding: 18px;
+            spacing: 12px;
+            HorizontalLayout {
+                height: 36px;
+                spacing: 12px;
+                QuietButton {
+                    width: 80px;
+                    horizontal-stretch: 0;
+                    text: "返回";
+                    clicked => { root.close-provider-icon-picker(); }
+                }
+
+                Text {
+                    text: "选择头像";
+                    color: Theme.primary-text;
+                    font-size: 17px;
+                    font-weight: 600;
+                    vertical-alignment: center;
+                }
+
+                Rectangle {
+                    horizontal-stretch: 1;
+                }
+
+                Text {
+                    text: root.provider-icons.length + " 个内置图标";
+                    color: Theme.muted-text;
+                    font-size: 12px;
+                    vertical-alignment: center;
+                }
+            }
+
+            provider-icon-search := LineEdit {
+                init => { self.focus(); }
+                height: 36px;
+                text <=> root.provider-icon-query;
+                placeholder-text: "搜索图标名称，例如 OpenAI、DeepSeek";
+                accessible-label: "搜索上游头像";
+                edited(text) => { root.filter-provider-icons(text); }
+            }
+
+            if root.filtered-provider-icons.length == 0: Rectangle {
+                vertical-stretch: 1;
+                Text {
+                    text: "没有找到匹配的图标，试试其他名称。";
+                    color: Theme.muted-text;
+                    font-size: 14px;
+                    horizontal-alignment: center;
+                    vertical-alignment: center;
+                    wrap: word-wrap;
+                }
+            }
+
+            if root.filtered-provider-icons.length > 0: icon-scroll := ScrollView {
+                vertical-stretch: 1;
+                horizontal-scrollbar-policy: ScrollBarPolicy.always-off;
+                content-width: self.visible-width;
+                content-height: icon-grid.height;
+                icon-grid := Rectangle {
+                    width: icon-scroll.visible-width;
+                    height: Math.ceil(root.filtered-provider-icons.length / self.columns) * 112px;
+                    property <int> columns: max(1, Math.floor((self.width + 12px) / 124px));
+                    for item[index] in root.filtered-provider-icons: QuietButton {
+                        x: Math.mod(index, icon-grid.columns) * (icon-grid.width + 12px) / icon-grid.columns;
+                        y: Math.floor(index / icon-grid.columns) * 112px;
+                        width: (icon-grid.width + 12px) / icon-grid.columns - 12px;
+                        height: 100px;
+                        text: item.name;
+                        icon: item.icon;
+                        icon-width: item.icon.width > item.icon.height * 2 ? 80px : 40px;
+                        icon-height: 40px;
+                        stacked-icon: true;
+                        icon-color: item.monochrome ? Theme.primary-text : transparent;
+                        selected: root.edit-icon-id == item.id;
+                        accessible-label: item.name + (root.edit-icon-id == item.id ? "，已选择" : "");
+                        enabled: !root.busy && !root.config-managed;
+                        clicked => { root.choose-provider-icon(item.id); }
+                    }
+                }
+            }
+
+            HorizontalLayout {
+                height: 36px;
+                spacing: 12px;
+                QuietButton {
+                    width: 124px;
+                    horizontal-stretch: 0;
+                    text: "使用默认头像";
+                    selected: root.edit-icon-id == "";
+                    enabled: !root.busy && !root.config-managed;
+                    clicked => { root.choose-provider-icon(""); }
+                }
+
+                Text {
+                    text: (root.edit-icon-id == "" ? "默认头像" : root.edit-icon-name) + " · 保存上游后生效";
+                    color: Theme.muted-text;
+                    font-size: 12px;
+                    vertical-alignment: center;
+                    overflow: elide;
+                    horizontal-stretch: 1;
+                }
+
+                QuietButton {
+                    width: 80px;
+                    horizontal-stretch: 0;
+                    text: "完成";
+                    primary: true;
+                    clicked => { root.close-provider-icon-picker(); }
+                }
+            }
+        }
+    }
+}

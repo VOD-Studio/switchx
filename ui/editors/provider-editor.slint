@@ -1,0 +1,385 @@
+import { CheckBox, ComboBox, LineEdit } from "std-widgets.slint";
+import { Theme } from "../tokens.slint";
+import { QuietButton, SurfaceCard } from "../components.slint";
+import { CodeEditor } from "../code-editor.slint";
+import { ProviderPresetRow } from "../view-models.slint";
+
+export component ProviderEditor inherits SurfaceCard {
+    in property <bool> busy;
+    in-out property <bool> editor-open;
+    in-out property <bool> delete-confirm;
+    in property <string> edit-id;
+    in-out property <string> edit-name;
+    in-out property <string> edit-url;
+    in-out property <string> edit-model;
+    in-out property <string> edit-key;
+    in-out property <bool> edit-remote-compaction;
+    in-out property <bool> edit-use-common-config;
+    in-out property <bool> edit-context-1m;
+    in-out property <string> edit-compact-limit;
+    in property <string> edit-config-preview;
+    in property <string> edit-config-error;
+    in property <[ProviderPresetRow]> provider-presets;
+    in property <string> edit-preset-id;
+    in property <string> edit-icon-name;
+    in property <image> edit-icon;
+    in property <bool> edit-icon-monochrome;
+    in property <[string]> fetched-models;
+    in property <bool> fetching-models;
+    in property <string> discovery-message;
+    in property <int> discovery-scope;
+    in property <bool> config-managed;
+    callback save-provider(string, string, string, string, string);
+    callback open-common-config();
+    callback delete-provider(string);
+    callback apply-provider-preset(string);
+    callback open-provider-preset-link(bool);
+    callback open-provider-icon-picker();
+    callback fetch-models(int);
+
+    height: 782px + (root.edit-id == "" ? 92px : 0px) + (root.edit-preset-id != "" ? 58px : 0px) + (root.discovery-scope == 0 && (root.fetched-models.length > 0 || root.discovery-message != "") ? 68px : 0px) + (root.edit-config-error != "" ? 48px : 0px);
+    VerticalLayout {
+        padding: 16px;
+        spacing: 7px;
+        Text {
+            text: root.edit-id == "" ? "添加上游" : "编辑上游";
+            color: Theme.primary-text;
+            font-size: 17px;
+            font-weight: 600;
+        }
+
+        if root.edit-id == "": Text {
+            text: "官方 API 预设";
+            color: Theme.muted-text;
+            font-size: 12px;
+        }
+
+        if root.edit-id == "": HorizontalLayout {
+            spacing: 8px;
+            QuietButton {
+                text: "自定义配置";
+                selected: root.edit-preset-id == "";
+                enabled: !root.busy;
+                clicked => {
+                    if (root.edit-preset-id != "") { root.apply-provider-preset(""); }
+                }
+            }
+
+            for preset in root.provider-presets: QuietButton {
+                text: preset.name;
+                icon: preset.icon;
+                icon-width: preset.id == "xiaomimimo" ? 64px : 18px;
+                min-width: preset.id == "xiaomimimo" ? 160px : 118px;
+                icon-color: preset.monochrome ? Theme.primary-text : transparent;
+                selected: root.edit-preset-id == preset.id;
+                enabled: !root.busy;
+                clicked => {
+                    if (root.edit-preset-id != preset.id) { root.apply-provider-preset(preset.id); }
+                }
+            }
+        }
+
+        if root.edit-preset-id != "": HorizontalLayout {
+            spacing: 10px;
+            Text {
+                text: root.edit-id == "" ? "已预填官方地址和默认模型，填写 API Key 即可保存。" : "官方 API 连接";
+                color: Theme.muted-text;
+                font-size: 12px;
+                vertical-alignment: center;
+                wrap: word-wrap;
+            }
+
+            QuietButton {
+                width: 94px;
+                horizontal-stretch: 0;
+                text: "官方网站";
+                enabled: !root.busy;
+                clicked => { root.open-provider-preset-link(false); }
+            }
+
+            QuietButton {
+                width: 108px;
+                horizontal-stretch: 0;
+                text: "获取 API Key";
+                enabled: !root.busy;
+                clicked => { root.open-provider-preset-link(true); }
+            }
+        }
+
+        HorizontalLayout {
+            height: 80px;
+            spacing: 14px;
+            QuietButton {
+                width: 80px;
+                height: 80px;
+                horizontal-stretch: 0;
+                text: "选择上游头像";
+                icon-only: true;
+                icon: root.edit-icon;
+                icon-width: root.edit-icon.width > root.edit-icon.height * 2 ? 64px : 40px;
+                icon-height: 40px;
+                icon-color: root.edit-icon-monochrome ? Theme.primary-text : transparent;
+                enabled: !root.busy && !root.config-managed;
+                clicked => { root.open-provider-icon-picker(); }
+            }
+
+            VerticalLayout {
+                alignment: center;
+                spacing: 4px;
+                Text {
+                    text: root.edit-icon-name == "" ? "默认头像" : root.edit-icon-name;
+                    color: Theme.primary-text;
+                    font-size: 14px;
+                }
+
+                Text {
+                    text: "点击头像选择图标，保存上游后生效。";
+                    color: Theme.muted-text;
+                    font-size: 12px;
+                }
+            }
+
+            Rectangle {
+                horizontal-stretch: 1;
+            }
+
+            QuietButton {
+                width: 100px;
+                horizontal-stretch: 0;
+                text: "选择头像";
+                enabled: !root.busy && !root.config-managed;
+                clicked => { root.open-provider-icon-picker(); }
+            }
+        }
+
+        HorizontalLayout {
+            spacing: 8px;
+            Text {
+                width: 92px;
+                text: "名称";
+                color: Theme.muted-text;
+                vertical-alignment: center;
+            }
+
+            LineEdit {
+                text <=> root.edit-name;
+                placeholder-text: "例如 DeepSeek";
+                accessible-label: "上游名称";
+            }
+        }
+
+        HorizontalLayout {
+            spacing: 8px;
+            Text {
+                width: 92px;
+                text: "API 地址";
+                color: Theme.muted-text;
+                vertical-alignment: center;
+            }
+
+            LineEdit {
+                text <=> root.edit-url;
+                placeholder-text: "https://example.com/v1";
+                accessible-label: "上游 API 地址";
+            }
+        }
+
+        HorizontalLayout {
+            spacing: 8px;
+            Text {
+                width: 92px;
+                text: "模型 ID";
+                color: Theme.muted-text;
+                vertical-alignment: center;
+            }
+
+            LineEdit {
+                text <=> root.edit-model;
+                placeholder-text: "上游实际模型 ID";
+                accessible-label: "上游模型 ID";
+            }
+
+            QuietButton {
+                width: 132px;
+                text: root.fetching-models && root.discovery-scope == 0 ? "获取中…" : "获取模型列表";
+                enabled: !root.busy && root.edit-url != "" && (root.edit-key != "" || root.edit-id != "");
+                clicked => { root.fetch-models(0); }
+            }
+        }
+
+        if root.discovery-scope == 0 && root.fetched-models.length > 0: ComboBox {
+            model: root.fetched-models;
+            current-value: root.edit-model;
+            accessible-label: "选择探测到的默认模型";
+            enabled: !root.busy;
+            selected(value) => { root.edit-model = value; }
+        }
+
+        if root.discovery-scope == 0 && root.discovery-message != "": Text {
+            text: root.discovery-message;
+            color: Theme.muted-text;
+            font-size: 12px;
+            wrap: word-wrap;
+        }
+
+        HorizontalLayout {
+            spacing: 8px;
+            Text {
+                width: 92px;
+                text: "API Key";
+                color: Theme.muted-text;
+                vertical-alignment: center;
+            }
+
+            LineEdit {
+                text <=> root.edit-key;
+                input-type: password;
+                placeholder-text: root.edit-id == "" ? "必填" : "留空则保留已保存的 Key";
+                accessible-label: "上游 API Key";
+            }
+        }
+
+        Rectangle {
+            height: 1px;
+            background: Theme.border;
+        }
+
+        HorizontalLayout {
+            height: 32px;
+            spacing: 14px;
+            Text {
+                text: "config.toml (TOML)";
+                color: Theme.primary-text;
+                font-size: 14px;
+                font-weight: 600;
+                vertical-alignment: center;
+            }
+
+            Rectangle {
+                horizontal-stretch: 1;
+            }
+
+            CheckBox {
+                text: "启用远程压缩";
+                checked <=> root.edit-remote-compaction;
+                accessible-label: "启用 Codex 远程压缩";
+                enabled: !root.busy;
+            }
+
+            CheckBox {
+                text: "应用通用配置";
+                checked <=> root.edit-use-common-config;
+                accessible-label: "应用已保存的通用配置";
+                enabled: !root.busy;
+            }
+        }
+
+        HorizontalLayout {
+            height: 32px;
+            Rectangle {
+                horizontal-stretch: 1;
+            }
+
+            QuietButton {
+                width: 132px;
+                horizontal-stretch: 0;
+                text: "编辑通用配置";
+                enabled: !root.busy && !root.config-managed;
+                clicked => { root.open-common-config(); }
+            }
+        }
+
+        HorizontalLayout {
+            height: 32px;
+            spacing: 12px;
+            CheckBox {
+                text: "1M 上下文窗口";
+                checked <=> root.edit-context-1m;
+                accessible-label: "设置一百万 token 上下文窗口";
+                enabled: !root.busy;
+            }
+
+            Text {
+                text: "压缩阈值";
+                color: Theme.muted-text;
+                vertical-alignment: center;
+            }
+
+            LineEdit {
+                width: 144px;
+                horizontal-stretch: 0;
+                text <=> root.edit-compact-limit;
+                input-type: number;
+                placeholder-text: "900000";
+                accessible-label: "自动压缩 token 阈值";
+                enabled: root.edit-context-1m && !root.busy;
+            }
+
+            Text {
+                text: "tokens";
+                color: Theme.muted-text;
+                vertical-alignment: center;
+            }
+
+            Rectangle {
+                horizontal-stretch: 1;
+            }
+        }
+
+        CodeEditor {
+            height: 208px;
+            vertical-stretch: 0;
+            text: root.edit-config-preview;
+            read-only: true;
+            accessible-label: "Codex config.toml 配置预览";
+        }
+
+        if root.edit-config-error != "": Text {
+            text: root.edit-config-error;
+            color: Theme.error;
+            font-size: 12px;
+            wrap: word-wrap;
+        }
+
+        Text {
+            text: "直连时写入所选 Codex 目录；1M 开关和阈值优先于通用配置。使用此上游保存的 API Key。";
+            color: Theme.muted-text;
+            font-size: 12px;
+            wrap: word-wrap;
+        }
+
+        Text {
+            text: "远程压缩仅用于 API 直连，需上游支持 /responses/compact；本地路由使用默认模型的供应商设置。";
+            color: Theme.muted-text;
+            font-size: 12px;
+            wrap: word-wrap;
+        }
+
+        HorizontalLayout {
+            spacing: 8px;
+            QuietButton {
+                text: "保存";
+                primary: true;
+                enabled: !root.busy && root.edit-config-error == "";
+                clicked => {
+                    root.save-provider(root.edit-id, root.edit-name, root.edit-url, root.edit-model, root.edit-key);
+                    root.edit-key = "";
+                }
+            }
+
+            QuietButton {
+                text: "取消";
+                clicked => { root.edit-key = ""; root.editor-open = false; }
+            }
+
+            if root.edit-id != "": QuietButton {
+                text: root.delete-confirm ? "确认删除" : "删除";
+                enabled: !root.busy;
+                clicked => {
+                    if (root.delete-confirm) { root.delete-provider(root.edit-id); root.edit-key = ""; }
+                    else { root.delete-confirm = true; }
+                }
+            }
+        }
+    }
+}

@@ -1,7 +1,7 @@
 .DEFAULT_GOAL := build
 
 SLINT_LSP ?= slint-lsp
-SLINT_FILES := $(wildcard ui/*.slint)
+SLINT_FILES := $(shell find ui -type f -name '*.slint' | sort)
 
 .PHONY: build lint format format-check test check require-slint-lsp
 

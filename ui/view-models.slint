@@ -1,0 +1,70 @@
+export struct ProviderRow {
+    id: string,
+    name: string,
+    endpoint: string,
+    base-url: string,
+    model-id: string,
+    credential-status: string,
+    auth-error: string,
+    is-subscription: bool,
+    binding-label: string,
+    preset-id: string,
+    icon-id: string,
+    icon: image,
+    monochrome: bool,
+}
+
+export struct ProviderPresetRow {
+    id: string,
+    name: string,
+    icon: image,
+    monochrome: bool,
+}
+
+export struct ProviderIconRow {
+    id: string,
+    name: string,
+    icon: image,
+    monochrome: bool,
+}
+
+export struct AccountRow {
+    id: string,
+    label: string,
+    workspace: string,
+    is-default: bool,
+    is-active: bool,
+    bound-provider-count: int,
+    bound-provider-names: string,
+}
+
+export struct ModelRow {
+    provider-id: string,
+    provider-name: string,
+    upstream-model: string,
+    public-id: string,
+    display-name: string,
+    detail: string,
+    context-window: string,
+    reasoning-levels: string,
+    default-reasoning: string,
+    saved: bool,
+    ready: bool,
+    included: bool,
+    fallback-provider-id: string,
+    fallback-label: string,
+    binding-label: string,
+    is-subscription: bool,
+}
+
+export struct RequestRow {
+    time: string,
+    route: string,
+    timing: string,
+    detail: string,
+    status: string,
+    completed: bool,
+    cancelled: bool,
+    error: string,
+    fallback: string,
+}

@@ -1,86 +1,32 @@
-import {
-    CheckBox,
-    ComboBox,
-    LineEdit,
-    ListView,
-    Palette,
-    ScrollView,
-} from "std-widgets.slint";
+import { Palette } from "std-widgets.slint";
 import { Theme } from "tokens.slint";
 import { QuietButton, SurfaceCard, StatusPill } from "components.slint";
-import { CodeEditor } from "code-editor.slint";
+import {
+    ProviderRow,
+    ProviderPresetRow,
+    ProviderIconRow,
+    AccountRow,
+    ModelRow,
+    RequestRow,
+} from "view-models.slint";
+import { OverviewPage } from "pages/overview.slint";
+import { ProviderIconPicker } from "editors/provider-icon-picker.slint";
+import { ProvidersPage } from "pages/providers.slint";
+import { SubscriptionEditor } from "editors/subscription-editor.slint";
+import { CommonConfigEditor } from "editors/common-config-editor.slint";
+import { RoutingPage } from "pages/routing.slint";
+import { ActivityPage } from "pages/activity.slint";
+import { ConfigPage } from "pages/config.slint";
+
+export {
+    ProviderRow,
+    ProviderPresetRow,
+    ProviderIconRow,
+    AccountRow,
+    ModelRow,
+    RequestRow,
+} from "view-models.slint";
 export { SyntaxHighlighting, CodeSpan } from "code-editor.slint";
-
-export struct ProviderRow {
-    id: string,
-    name: string,
-    endpoint: string,
-    base-url: string,
-    model-id: string,
-    credential-status: string,
-    auth-error: string,
-    is-subscription: bool,
-    binding-label: string,
-    preset-id: string,
-    icon-id: string,
-    icon: image,
-    monochrome: bool,
-}
-
-export struct ProviderPresetRow {
-    id: string,
-    name: string,
-    icon: image,
-    monochrome: bool,
-}
-
-export struct ProviderIconRow {
-    id: string,
-    name: string,
-    icon: image,
-    monochrome: bool,
-}
-
-export struct AccountRow {
-    id: string,
-    label: string,
-    workspace: string,
-    is-default: bool,
-    is-active: bool,
-    bound-provider-count: int,
-    bound-provider-names: string,
-}
-
-export struct ModelRow {
-    provider-id: string,
-    provider-name: string,
-    upstream-model: string,
-    public-id: string,
-    display-name: string,
-    detail: string,
-    context-window: string,
-    reasoning-levels: string,
-    default-reasoning: string,
-    saved: bool,
-    ready: bool,
-    included: bool,
-    fallback-provider-id: string,
-    fallback-label: string,
-    binding-label: string,
-    is-subscription: bool,
-}
-
-export struct RequestRow {
-    time: string,
-    route: string,
-    timing: string,
-    detail: string,
-    status: string,
-    completed: bool,
-    cancelled: bool,
-    error: string,
-    fallback: string,
-}
 
 export component AppWindow inherits Window {
     title: "switchx";
@@ -538,1909 +484,190 @@ export component AppWindow inherits Window {
                 }
             }
 
-            if root.active-page == 0: ScrollView {
-                vertical-stretch: 1;
-                VerticalLayout {
-                    spacing: 20px;
-                    SurfaceCard {
-                        height: 248px;
-                        VerticalLayout {
-                            padding: 24px;
-                            spacing: 18px;
-                            HorizontalLayout {
-                                spacing: 12px;
-                                Text {
-                                    text: "连接控制台";
-                                    color: Theme.primary-text;
-                                    font-size: 17px;
-                                    font-weight: 600;
-                                }
-
-                                StatusPill {
-                                    label: root.route-running ? "模型路由运行中" : root.direct-active ? "直连已配置" : root.route-managed ? "待恢复" : "未启用";
-                                    ink: root.route-running || root.direct-active ? Theme.success : Theme.warning;
-                                }
-
-                                Rectangle {
-                                    horizontal-stretch: 1;
-                                }
-
-                                Text {
-                                    text: root.config-managed ? "请重启目标客户端" : "本地状态";
-                                    color: Theme.muted-text;
-                                    font-size: 12px;
-                                }
-                            }
-
-                            HorizontalLayout {
-                                spacing: 12px;
-                                SurfaceCard {
-                                    width: 176px;
-                                    height: 94px;
-                                    background: Theme.raised;
-                                    VerticalLayout {
-                                        padding: 14px;
-                                        spacing: 5px;
-                                        Text {
-                                            text: "Codex";
-                                            color: Theme.primary-text;
-                                            font-size: 15px;
-                                            font-weight: 600;
-                                        }
-
-                                        Text {
-                                            text: root.route-managed ? "路由配置已写入" : root.direct-active ? "直连已写入" : "查看配置与恢复";
-                                            color: Theme.muted-text;
-                                            font-size: 12px;
-                                        }
-                                    }
-                                }
-
-                                Rectangle {
-                                    height: 1px;
-                                    background: Theme.border;
-                                    horizontal-stretch: 1;
-                                }
-
-                                SurfaceCard {
-                                    width: 176px;
-                                    height: 94px;
-                                    background: Theme.brand-surface;
-                                    VerticalLayout {
-                                        padding: 14px;
-                                        spacing: 5px;
-                                        Text {
-                                            text: "SwitchX Router";
-                                            color: Theme.primary-text;
-                                            font-size: 15px;
-                                            font-weight: 600;
-                                        }
-
-                                        Text {
-                                            text: root.route-running ? "运行中" : root.route-managed ? "未运行 · 待恢复" : "尚未启动";
-                                            color: Theme.muted-text;
-                                            font-size: 12px;
-                                        }
-                                    }
-                                }
-
-                                Rectangle {
-                                    height: 1px;
-                                    background: Theme.border;
-                                    horizontal-stretch: 1;
-                                }
-
-                                SurfaceCard {
-                                    width: 176px;
-                                    height: 94px;
-                                    background: Theme.raised;
-                                    VerticalLayout {
-                                        padding: 14px;
-                                        spacing: 5px;
-                                        Text {
-                                            text: "上游";
-                                            color: Theme.primary-text;
-                                            font-size: 15px;
-                                            font-weight: 600;
-                                        }
-
-                                        Text {
-                                            text: root.providers.length + " 个本地记录";
-                                            color: Theme.muted-text;
-                                            font-size: 12px;
-                                        }
-                                    }
-                                }
-                            }
-
-                            Rectangle {
-                                height: 1px;
-                                background: Theme.border;
-                            }
-
-                            Text {
-                                text: root.route-running ? "请求按公开模型 ID 转发到指定上游；关闭窗口后路由继续运行。" : root.direct-active ? "Codex 直连所选上游；SwitchX 不经手推理请求。" : "从上游列表预览直连，或在模型路由页面发布所选模型。";
-                                color: Theme.muted-text;
-                                font-size: 12px;
-                            }
-                        }
-                    }
-
-                    HorizontalLayout {
-                        spacing: 16px;
-                        VerticalLayout {
-                            spacing: 12px;
-                            Text {
-                                text: "本地上游资料";
-                                color: Theme.primary-text;
-                                font-size: 16px;
-                                font-weight: 600;
-                            }
-
-                            SurfaceCard {
-                                height: 172px;
-                                VerticalLayout {
-                                    padding: 20px;
-                                    spacing: 12px;
-                                    Text {
-                                        text: root.loading ? "正在读取…" : root.error-code != "" ? "读取失败" : root.providers.length == 0 ? "还没有上游记录" : root.providers.length + " 个上游记录";
-                                        color: Theme.primary-text;
-                                        font-size: 17px;
-                                        font-weight: 600;
-                                    }
-
-                                    Text {
-                                        text: "添加上游后，这里会显示真实连接。";
-                                        color: Theme.muted-text;
-                                        font-size: 13px;
-                                        wrap: word-wrap;
-                                    }
-
-                                    QuietButton {
-                                        text: "查看上游";
-                                        clicked => { root.active-page = 1; }
-                                    }
-                                }
-                            }
-                        }
-
-                        VerticalLayout {
-                            spacing: 12px;
-                            Text {
-                                text: "Codex 模型菜单";
-                                color: Theme.primary-text;
-                                font-size: 16px;
-                                font-weight: 600;
-                            }
-
-                            SurfaceCard {
-                                height: 172px;
-                                VerticalLayout {
-                                    padding: 20px;
-                                    spacing: 12px;
-                                    Text {
-                                        text: root.route-running ? "目录已发布 · 可启动 Codex" : root.route-managed ? "配置待恢复" : root.selected-model-count + " 个模型待发布";
-                                        color: Theme.primary-text;
-                                        font-size: 17px;
-                                        font-weight: 600;
-                                    }
-
-                                    Text {
-                                        text: root.route-running ? "在模型路由页点击“启动 Codex”，从新会话选择已发布模型。" : root.route-managed ? "请先恢复原配置，再重新发布并启动 Codex。" : "添加模型映射后，可预览并开启路由。";
-                                        color: Theme.muted-text;
-                                        font-size: 13px;
-                                        wrap: word-wrap;
-                                    }
-
-                                    QuietButton {
-                                        text: "查看路由";
-                                        clicked => { root.active-page = 2; }
-                                    }
-                                }
-                            }
-                        }
-                    }
-
-                    SurfaceCard {
-                        height: 92px;
-                        VerticalLayout {
-                            padding: 18px;
-                            spacing: 8px;
-                            Text {
-                                text: "本地状态";
-                                color: Theme.primary-text;
-                                font-size: 15px;
-                                font-weight: 600;
-                            }
-
-                            Text {
-                                text: root.status-text;
-                                color: Theme.muted-text;
-                                font-size: 13px;
-                                wrap: word-wrap;
-                            }
-                        }
-                    }
-                }
+            if root.active-page == 0: OverviewPage {
+                loading: root.loading;
+                error-code: root.error-code;
+                status-text: root.status-text;
+                providers: root.providers;
+                direct-active: root.direct-active;
+                selected-model-count: root.selected-model-count;
+                config-managed: root.config-managed;
+                route-managed: root.route-managed;
+                route-running: root.route-running;
+                navigate(page) => { root.active-page = page; }
             }
 
-            if root.active-page == 1 && root.icon-picker-open: SurfaceCard {
-                vertical-stretch: 1;
-                FocusScope {
-                    key-pressed(event) => {
-                        if (event.text == Key.Escape) {
-                            root.close-provider-icon-picker();
-                            return accept;
-                        }
-                        return reject;
-                    }
-
-                    VerticalLayout {
-                        padding: 18px;
-                        spacing: 12px;
-                        HorizontalLayout {
-                            height: 36px;
-                            spacing: 12px;
-                            QuietButton {
-                                width: 80px;
-                                horizontal-stretch: 0;
-                                text: "返回";
-                                clicked => { root.close-provider-icon-picker(); }
-                            }
-
-                            Text {
-                                text: "选择头像";
-                                color: Theme.primary-text;
-                                font-size: 17px;
-                                font-weight: 600;
-                                vertical-alignment: center;
-                            }
-
-                            Rectangle {
-                                horizontal-stretch: 1;
-                            }
-
-                            Text {
-                                text: root.provider-icons.length + " 个内置图标";
-                                color: Theme.muted-text;
-                                font-size: 12px;
-                                vertical-alignment: center;
-                            }
-                        }
-
-                        provider-icon-search := LineEdit {
-                            init => { self.focus(); }
-                            height: 36px;
-                            text <=> root.provider-icon-query;
-                            placeholder-text: "搜索图标名称，例如 OpenAI、DeepSeek";
-                            accessible-label: "搜索上游头像";
-                            edited(text) => { root.filter-provider-icons(text); }
-                        }
-
-                        if root.filtered-provider-icons.length == 0: Rectangle {
-                            vertical-stretch: 1;
-                            Text {
-                                text: "没有找到匹配的图标，试试其他名称。";
-                                color: Theme.muted-text;
-                                font-size: 14px;
-                                horizontal-alignment: center;
-                                vertical-alignment: center;
-                                wrap: word-wrap;
-                            }
-                        }
-
-                        if root.filtered-provider-icons.length > 0: icon-scroll := ScrollView {
-                            vertical-stretch: 1;
-                            horizontal-scrollbar-policy: ScrollBarPolicy.always-off;
-                            content-width: self.visible-width;
-                            content-height: icon-grid.height;
-                            icon-grid := Rectangle {
-                                width: icon-scroll.visible-width;
-                                height: Math.ceil(root.filtered-provider-icons.length / self.columns) * 112px;
-                                property <int> columns: max(1, Math.floor((self.width + 12px) / 124px));
-                                for item[index] in root.filtered-provider-icons: QuietButton {
-                                    x: Math.mod(index, icon-grid.columns) * (icon-grid.width + 12px) / icon-grid.columns;
-                                    y: Math.floor(index / icon-grid.columns) * 112px;
-                                    width: (icon-grid.width + 12px) / icon-grid.columns - 12px;
-                                    height: 100px;
-                                    text: item.name;
-                                    icon: item.icon;
-                                    icon-width: item.icon.width > item.icon.height * 2 ? 80px : 40px;
-                                    icon-height: 40px;
-                                    stacked-icon: true;
-                                    icon-color: item.monochrome ? Theme.primary-text : transparent;
-                                    selected: root.edit-icon-id == item.id;
-                                    accessible-label: item.name + (root.edit-icon-id == item.id ? "，已选择" : "");
-                                    enabled: !root.busy && !root.config-managed;
-                                    clicked => { root.choose-provider-icon(item.id); }
-                                }
-                            }
-                        }
-
-                        HorizontalLayout {
-                            height: 36px;
-                            spacing: 12px;
-                            QuietButton {
-                                width: 124px;
-                                horizontal-stretch: 0;
-                                text: "使用默认头像";
-                                selected: root.edit-icon-id == "";
-                                enabled: !root.busy && !root.config-managed;
-                                clicked => { root.choose-provider-icon(""); }
-                            }
-
-                            Text {
-                                text: (root.edit-icon-id == "" ? "默认头像" : root.edit-icon-name) + " · 保存上游后生效";
-                                color: Theme.muted-text;
-                                font-size: 12px;
-                                vertical-alignment: center;
-                                overflow: elide;
-                                horizontal-stretch: 1;
-                            }
-
-                            QuietButton {
-                                width: 80px;
-                                horizontal-stretch: 0;
-                                text: "完成";
-                                primary: true;
-                                clicked => { root.close-provider-icon-picker(); }
-                            }
-                        }
-                    }
-                }
+            if root.active-page == 1 && root.icon-picker-open: ProviderIconPicker {
+                busy: root.busy;
+                provider-icons: root.provider-icons;
+                filtered-provider-icons: root.filtered-provider-icons;
+                provider-icon-query <=> root.provider-icon-query;
+                edit-icon-id: root.edit-icon-id;
+                edit-icon-name: root.edit-icon-name;
+                config-managed: root.config-managed;
+                choose-provider-icon(id) => { root.choose-provider-icon(id); }
+                close-provider-icon-picker() => { root.close-provider-icon-picker(); }
+                filter-provider-icons(query) => { root.filter-provider-icons(query); }
             }
 
-            if root.active-page == 1 && !root.common-config-editor-open && !root.subscription-editor-open && !root.icon-picker-open: ScrollView {
-                vertical-stretch: 1;
-                VerticalLayout {
-                    spacing: 12px;
-                    HorizontalLayout {
-                        height: 40px;
-                        spacing: 8px;
-                        Text {
-                            text: "已保存的上游元数据";
-                            color: Theme.primary-text;
-                            font-size: 16px;
-                            font-weight: 600;
-                        }
-
-                        Rectangle {
-                            horizontal-stretch: 1;
-                        }
-
-                        LineEdit {
-                            width: 220px;
-                            horizontal-stretch: 0;
-                            placeholder-text: "按名称筛选";
-                            accessible-label: "按名称筛选上游";
-                            text <=> root.provider-query;
-                            edited(text) => { root.filter-providers(text); }
-                        }
-
-                        QuietButton {
-                            width: 106px;
-                            text: "检查凭据";
-                            clicked => { root.refresh(true); }
-                        }
-
-                        QuietButton {
-                            width: 70px;
-                            text: "刷新";
-                            clicked => { root.refresh(false); }
-                        }
-
-                        QuietButton {
-                            width: 92px;
-                            text: "添加上游";
-                            enabled: !root.busy && !root.config-managed;
-                            clicked => { root.begin-provider-editor(""); }
-                        }
-                    }
-
-                    HorizontalLayout {
-                        spacing: 12px;
-                        Text {
-                            text: "API Key 随上游保存；每个 ChatGPT 订阅连接可独立绑定已保存的账号。";
-                            color: Theme.muted-text;
-                            font-size: 13px;
-                            vertical-alignment: center;
-                        }
-
-                        QuietButton {
-                            text: "添加 ChatGPT 订阅";
-                            enabled: !root.busy && !root.config-managed && !root.chatgpt-login-pending;
-                            clicked => { root.begin-subscription-editor(""); }
-                        }
-                    }
-
-                    if root.config-managed: Text {
-                        text: root.recovery-only ? "旧版资料有配置待恢复。先在“配置与恢复”恢复原配置，再升级并读取上游资料。" : "配置正在管理中。恢复并停止路由后，才能修改上游、模型和账号绑定。";
-                        color: Theme.warning;
-                        font-size: 13px;
-                        wrap: word-wrap;
-                    }
-
-                    if root.editor-open: SurfaceCard {
-                        height: 782px + (root.edit-id == "" ? 92px : 0px) + (root.edit-preset-id != "" ? 58px : 0px) + (root.discovery-scope == 0 && (root.fetched-models.length > 0 || root.discovery-message != "") ? 68px : 0px) + (root.edit-config-error != "" ? 48px : 0px);
-                        VerticalLayout {
-                            padding: 16px;
-                            spacing: 7px;
-                            Text {
-                                text: root.edit-id == "" ? "添加上游" : "编辑上游";
-                                color: Theme.primary-text;
-                                font-size: 17px;
-                                font-weight: 600;
-                            }
-
-                            if root.edit-id == "": Text {
-                                text: "官方 API 预设";
-                                color: Theme.muted-text;
-                                font-size: 12px;
-                            }
-
-                            if root.edit-id == "": HorizontalLayout {
-                                spacing: 8px;
-                                QuietButton {
-                                    text: "自定义配置";
-                                    selected: root.edit-preset-id == "";
-                                    enabled: !root.busy;
-                                    clicked => {
-                                        if (root.edit-preset-id != "") { root.apply-provider-preset(""); }
-                                    }
-                                }
-
-                                for preset in root.provider-presets: QuietButton {
-                                    text: preset.name;
-                                    icon: preset.icon;
-                                    icon-width: preset.id == "xiaomimimo" ? 64px : 18px;
-                                    min-width: preset.id == "xiaomimimo" ? 160px : 118px;
-                                    icon-color: preset.monochrome ? Theme.primary-text : transparent;
-                                    selected: root.edit-preset-id == preset.id;
-                                    enabled: !root.busy;
-                                    clicked => {
-                                        if (root.edit-preset-id != preset.id) { root.apply-provider-preset(preset.id); }
-                                    }
-                                }
-                            }
-
-                            if root.edit-preset-id != "": HorizontalLayout {
-                                spacing: 10px;
-                                Text {
-                                    text: root.edit-id == "" ? "已预填官方地址和默认模型，填写 API Key 即可保存。" : "官方 API 连接";
-                                    color: Theme.muted-text;
-                                    font-size: 12px;
-                                    vertical-alignment: center;
-                                    wrap: word-wrap;
-                                }
-
-                                QuietButton {
-                                    width: 94px;
-                                    horizontal-stretch: 0;
-                                    text: "官方网站";
-                                    enabled: !root.busy;
-                                    clicked => { root.open-provider-preset-link(false); }
-                                }
-
-                                QuietButton {
-                                    width: 108px;
-                                    horizontal-stretch: 0;
-                                    text: "获取 API Key";
-                                    enabled: !root.busy;
-                                    clicked => { root.open-provider-preset-link(true); }
-                                }
-                            }
-
-                            HorizontalLayout {
-                                height: 80px;
-                                spacing: 14px;
-                                QuietButton {
-                                    width: 80px;
-                                    height: 80px;
-                                    horizontal-stretch: 0;
-                                    text: "选择上游头像";
-                                    icon-only: true;
-                                    icon: root.edit-icon;
-                                    icon-width: root.edit-icon.width > root.edit-icon.height * 2 ? 64px : 40px;
-                                    icon-height: 40px;
-                                    icon-color: root.edit-icon-monochrome ? Theme.primary-text : transparent;
-                                    enabled: !root.busy && !root.config-managed;
-                                    clicked => { root.open-provider-icon-picker(); }
-                                }
-
-                                VerticalLayout {
-                                    alignment: center;
-                                    spacing: 4px;
-                                    Text {
-                                        text: root.edit-icon-name == "" ? "默认头像" : root.edit-icon-name;
-                                        color: Theme.primary-text;
-                                        font-size: 14px;
-                                    }
-
-                                    Text {
-                                        text: "点击头像选择图标，保存上游后生效。";
-                                        color: Theme.muted-text;
-                                        font-size: 12px;
-                                    }
-                                }
-
-                                Rectangle {
-                                    horizontal-stretch: 1;
-                                }
-
-                                QuietButton {
-                                    width: 100px;
-                                    horizontal-stretch: 0;
-                                    text: "选择头像";
-                                    enabled: !root.busy && !root.config-managed;
-                                    clicked => { root.open-provider-icon-picker(); }
-                                }
-                            }
-
-                            HorizontalLayout {
-                                spacing: 8px;
-                                Text {
-                                    width: 92px;
-                                    text: "名称";
-                                    color: Theme.muted-text;
-                                    vertical-alignment: center;
-                                }
-
-                                LineEdit {
-                                    text <=> root.edit-name;
-                                    placeholder-text: "例如 DeepSeek";
-                                    accessible-label: "上游名称";
-                                }
-                            }
-
-                            HorizontalLayout {
-                                spacing: 8px;
-                                Text {
-                                    width: 92px;
-                                    text: "API 地址";
-                                    color: Theme.muted-text;
-                                    vertical-alignment: center;
-                                }
-
-                                LineEdit {
-                                    text <=> root.edit-url;
-                                    placeholder-text: "https://example.com/v1";
-                                    accessible-label: "上游 API 地址";
-                                }
-                            }
-
-                            HorizontalLayout {
-                                spacing: 8px;
-                                Text {
-                                    width: 92px;
-                                    text: "模型 ID";
-                                    color: Theme.muted-text;
-                                    vertical-alignment: center;
-                                }
-
-                                LineEdit {
-                                    text <=> root.edit-model;
-                                    placeholder-text: "上游实际模型 ID";
-                                    accessible-label: "上游模型 ID";
-                                }
-
-                                QuietButton {
-                                    width: 132px;
-                                    text: root.fetching-models && root.discovery-scope == 0 ? "获取中…" : "获取模型列表";
-                                    enabled: !root.busy && root.edit-url != "" && (root.edit-key != "" || root.edit-id != "");
-                                    clicked => { root.fetch-models(0); }
-                                }
-                            }
-
-                            if root.discovery-scope == 0 && root.fetched-models.length > 0: ComboBox {
-                                model: root.fetched-models;
-                                current-value: root.edit-model;
-                                accessible-label: "选择探测到的默认模型";
-                                enabled: !root.busy;
-                                selected(value) => { root.edit-model = value; }
-                            }
-
-                            if root.discovery-scope == 0 && root.discovery-message != "": Text {
-                                text: root.discovery-message;
-                                color: Theme.muted-text;
-                                font-size: 12px;
-                                wrap: word-wrap;
-                            }
-
-                            HorizontalLayout {
-                                spacing: 8px;
-                                Text {
-                                    width: 92px;
-                                    text: "API Key";
-                                    color: Theme.muted-text;
-                                    vertical-alignment: center;
-                                }
-
-                                LineEdit {
-                                    text <=> root.edit-key;
-                                    input-type: password;
-                                    placeholder-text: root.edit-id == "" ? "必填" : "留空则保留已保存的 Key";
-                                    accessible-label: "上游 API Key";
-                                }
-                            }
-
-                            Rectangle {
-                                height: 1px;
-                                background: Theme.border;
-                            }
-
-                            HorizontalLayout {
-                                height: 32px;
-                                spacing: 14px;
-                                Text {
-                                    text: "config.toml (TOML)";
-                                    color: Theme.primary-text;
-                                    font-size: 14px;
-                                    font-weight: 600;
-                                    vertical-alignment: center;
-                                }
-
-                                Rectangle {
-                                    horizontal-stretch: 1;
-                                }
-
-                                CheckBox {
-                                    text: "启用远程压缩";
-                                    checked <=> root.edit-remote-compaction;
-                                    accessible-label: "启用 Codex 远程压缩";
-                                    enabled: !root.busy;
-                                }
-
-                                CheckBox {
-                                    text: "应用通用配置";
-                                    checked <=> root.edit-use-common-config;
-                                    accessible-label: "应用已保存的通用配置";
-                                    enabled: !root.busy;
-                                }
-                            }
-
-                            HorizontalLayout {
-                                height: 32px;
-                                Rectangle {
-                                    horizontal-stretch: 1;
-                                }
-
-                                QuietButton {
-                                    width: 132px;
-                                    horizontal-stretch: 0;
-                                    text: "编辑通用配置";
-                                    enabled: !root.busy && !root.config-managed;
-                                    clicked => { root.open-common-config(); }
-                                }
-                            }
-
-                            HorizontalLayout {
-                                height: 32px;
-                                spacing: 12px;
-                                CheckBox {
-                                    text: "1M 上下文窗口";
-                                    checked <=> root.edit-context-1m;
-                                    accessible-label: "设置一百万 token 上下文窗口";
-                                    enabled: !root.busy;
-                                }
-
-                                Text {
-                                    text: "压缩阈值";
-                                    color: Theme.muted-text;
-                                    vertical-alignment: center;
-                                }
-
-                                LineEdit {
-                                    width: 144px;
-                                    horizontal-stretch: 0;
-                                    text <=> root.edit-compact-limit;
-                                    input-type: number;
-                                    placeholder-text: "900000";
-                                    accessible-label: "自动压缩 token 阈值";
-                                    enabled: root.edit-context-1m && !root.busy;
-                                }
-
-                                Text {
-                                    text: "tokens";
-                                    color: Theme.muted-text;
-                                    vertical-alignment: center;
-                                }
-
-                                Rectangle {
-                                    horizontal-stretch: 1;
-                                }
-                            }
-
-                            CodeEditor {
-                                height: 208px;
-                                vertical-stretch: 0;
-                                text: root.edit-config-preview;
-                                read-only: true;
-                                accessible-label: "Codex config.toml 配置预览";
-                            }
-
-                            if root.edit-config-error != "": Text {
-                                text: root.edit-config-error;
-                                color: Theme.error;
-                                font-size: 12px;
-                                wrap: word-wrap;
-                            }
-
-                            Text {
-                                text: "直连时写入所选 Codex 目录；1M 开关和阈值优先于通用配置。使用此上游保存的 API Key。";
-                                color: Theme.muted-text;
-                                font-size: 12px;
-                                wrap: word-wrap;
-                            }
-
-                            Text {
-                                text: "远程压缩仅用于 API 直连，需上游支持 /responses/compact；本地路由使用默认模型的供应商设置。";
-                                color: Theme.muted-text;
-                                font-size: 12px;
-                                wrap: word-wrap;
-                            }
-
-                            HorizontalLayout {
-                                spacing: 8px;
-                                QuietButton {
-                                    text: "保存";
-                                    primary: true;
-                                    enabled: !root.busy && root.edit-config-error == "";
-                                    clicked => {
-                                        root.save-provider(root.edit-id, root.edit-name, root.edit-url, root.edit-model, root.edit-key);
-                                        root.edit-key = "";
-                                    }
-                                }
-
-                                QuietButton {
-                                    text: "取消";
-                                    clicked => { root.edit-key = ""; root.editor-open = false; }
-                                }
-
-                                if root.edit-id != "": QuietButton {
-                                    text: root.delete-confirm ? "确认删除" : "删除";
-                                    enabled: !root.busy;
-                                    clicked => {
-                                        if (root.delete-confirm) { root.delete-provider(root.edit-id); root.edit-key = ""; }
-                                        else { root.delete-confirm = true; }
-                                    }
-                                }
-                            }
-                        }
-                    }
-                    if !root.loading && root.error-code == "" && root.providers.length == 0: SurfaceCard {
-                        height: 140px;
-                        VerticalLayout {
-                            padding: 22px;
-                            spacing: 10px;
-                            Text {
-                                text: "还没有上游";
-                                color: Theme.primary-text;
-                                font-size: 18px;
-                                font-weight: 600;
-                            }
-
-                            Text {
-                                text: "点击“添加上游”保存 Responses API 连接。";
-                                color: Theme.muted-text;
-                                font-size: 13px;
-                            }
-                        }
-                    }
-                    if !root.loading && root.error-code == "" && root.providers.length > 0 && root.filtered-providers.length == 0: SurfaceCard {
-                        height: 100px;
-                        Text {
-                            text: "没有匹配的上游。清除筛选可查看全部记录。";
-                            color: Theme.muted-text;
-                            font-size: 13px;
-                            horizontal-alignment: center;
-                            vertical-alignment: center;
-                        }
-                    }
-                    for provider in root.filtered-providers: SurfaceCard {
-                        height: (provider.is-subscription ? 132px : 108px) + (provider.auth-error == "" ? 0px : 34px);
-                        HorizontalLayout {
-                            padding: 20px;
-                            spacing: 10px;
-                            if provider.icon.width > 0: Image {
-                                width: provider.icon-id == "xiaomimimo" ? 84px : 32px;
-                                height: 32px;
-                                source: provider.icon;
-                                colorize: provider.monochrome ? Theme.primary-text : transparent;
-                                image-fit: contain;
-                                accessible-role: none;
-                            }
-                            VerticalLayout {
-                                spacing: 7px;
-                                Text {
-                                    text: provider.name;
-                                    color: Theme.primary-text;
-                                    font-size: 16px;
-                                    font-weight: 600;
-                                }
-
-                                Text {
-                                    text: provider.endpoint;
-                                    color: Theme.muted-text;
-                                    font-size: 12px;
-                                }
-
-                                Text {
-                                    text: provider.model-id;
-                                    color: Theme.muted-text;
-                                    font-size: 12px;
-                                }
-
-                                if provider.is-subscription: Text {
-                                    text: provider.binding-label;
-                                    color: Theme.muted-text;
-                                    font-size: 12px;
-                                    overflow: elide;
-                                }
-                                if provider.auth-error != "": Text {
-                                    text: provider.auth-error;
-                                    color: Theme.error;
-                                    font-size: 12px;
-                                    wrap: word-wrap;
-                                }
-                            }
-
-                            Rectangle {
-                                horizontal-stretch: 1;
-                            }
-
-                            Text {
-                                text: provider.credential-status;
-                                color: Theme.muted-text;
-                                font-size: 12px;
-                            }
-
-                            QuietButton {
-                                width: 62px;
-                                text: "编辑";
-                                enabled: !root.busy && !root.config-managed;
-                                clicked => {
-                                    if provider.is-subscription {
-                                        root.begin-subscription-editor(provider.id);
-                                        return;
-                                    }
-                                    root.begin-provider-editor(provider.id);
-                                }
-                            }
-
-                            QuietButton {
-                                width: 88px;
-                                text: "模型映射";
-                                enabled: !root.busy && !root.config-managed;
-                                clicked => { root.begin-model-editor(provider.id, ""); }
-                            }
-
-                            QuietButton {
-                                width: 70px;
-                                text: "检查";
-                                enabled: !root.busy;
-                                clicked => { root.check-provider(provider.id); }
-                            }
-
-                            QuietButton {
-                                width: 70px;
-                                text: "直连";
-                                enabled: !root.busy && !root.config-managed && !root.chatgpt-login-pending && !provider.is-subscription;
-                                clicked => {
-                                    root.selected-provider-id = provider.id;
-                                    root.active-page = 5;
-                                    root.inspect-direct(provider.id, root.config-home);
-                                }
-                            }
-                        }
-                    }
+            if root.active-page == 1 && !root.common-config-editor-open && !root.subscription-editor-open && !root.icon-picker-open: ProvidersPage {
+                loading: root.loading;
+                busy: root.busy;
+                recovery-only: root.recovery-only;
+                error-code: root.error-code;
+                providers: root.providers;
+                filtered-providers: root.filtered-providers;
+                provider-query <=> root.provider-query;
+                editor-open <=> root.editor-open;
+                delete-confirm <=> root.delete-confirm;
+                edit-id: root.edit-id;
+                edit-name <=> root.edit-name;
+                edit-url <=> root.edit-url;
+                edit-model <=> root.edit-model;
+                edit-key <=> root.edit-key;
+                edit-remote-compaction <=> root.edit-remote-compaction;
+                edit-use-common-config <=> root.edit-use-common-config;
+                edit-context-1m <=> root.edit-context-1m;
+                edit-compact-limit <=> root.edit-compact-limit;
+                edit-config-preview: root.edit-config-preview;
+                edit-config-error: root.edit-config-error;
+                provider-presets: root.provider-presets;
+                edit-preset-id: root.edit-preset-id;
+                edit-icon-name: root.edit-icon-name;
+                edit-icon: root.edit-icon;
+                edit-icon-monochrome: root.edit-icon-monochrome;
+                fetched-models: root.fetched-models;
+                fetching-models: root.fetching-models;
+                discovery-message: root.discovery-message;
+                discovery-scope: root.discovery-scope;
+                chatgpt-login-pending: root.chatgpt-login-pending;
+                config-managed: root.config-managed;
+                refresh(check-credentials) => { root.refresh(check-credentials); }
+                filter-providers(query) => { root.filter-providers(query); }
+                save-provider(id, name, url, model, key) => { root.save-provider(id, name, url, model, key); }
+                begin-provider-editor(id) => { root.begin-provider-editor(id); }
+                begin-subscription-editor(id) => { root.begin-subscription-editor(id); }
+                open-common-config() => { root.open-common-config(); }
+                delete-provider(id) => { root.delete-provider(id); }
+                check-provider(id) => { root.check-provider(id); }
+                apply-provider-preset(id) => { root.apply-provider-preset(id); }
+                open-provider-preset-link(api-key-page) => { root.open-provider-preset-link(api-key-page); }
+                open-provider-icon-picker() => { root.open-provider-icon-picker(); }
+                fetch-models(scope) => { root.fetch-models(scope); }
+                preview-direct(provider-id) => {
+                    root.selected-provider-id = provider-id;
+                    root.active-page = 5;
+                    root.inspect-direct(provider-id, root.config-home);
                 }
+                begin-model-editor(provider-id, model-id) => { root.begin-model-editor(provider-id, model-id); }
             }
 
-            if root.active-page == 1 && root.subscription-editor-open && !root.common-config-editor-open && !root.icon-picker-open: SurfaceCard {
-                vertical-stretch: 1;
-                VerticalLayout {
-                    padding: 18px;
-                    spacing: 12px;
-                    Text {
-                        text: root.subscription-id == "" ? "添加 ChatGPT 订阅连接" : "编辑 ChatGPT 订阅连接";
-                        color: Theme.primary-text;
-                        font-size: 17px;
-                        font-weight: 600;
-                    }
-
-                    ScrollView {
-                        vertical-stretch: 1;
-                        VerticalLayout {
-                            spacing: 12px;
-                            HorizontalLayout {
-                                height: 80px;
-                                spacing: 14px;
-                                QuietButton {
-                                    width: 80px;
-                                    height: 80px;
-                                    horizontal-stretch: 0;
-                                    text: "选择 ChatGPT 订阅头像";
-                                    icon-only: true;
-                                    icon: root.edit-icon;
-                                    icon-width: root.edit-icon.width > root.edit-icon.height * 2 ? 64px : 40px;
-                                    icon-height: 40px;
-                                    icon-color: root.edit-icon-monochrome ? Theme.primary-text : transparent;
-                                    enabled: !root.busy && !root.config-managed;
-                                    clicked => { root.open-provider-icon-picker(); }
-                                }
-
-                                VerticalLayout {
-                                    alignment: center;
-                                    spacing: 4px;
-                                    Text {
-                                        text: root.edit-icon-name == "" ? "OpenAI" : root.edit-icon-name;
-                                        color: Theme.primary-text;
-                                        font-size: 14px;
-                                    }
-
-                                    Text {
-                                        text: "点击头像选择图标，保存订阅连接后生效。";
-                                        color: Theme.muted-text;
-                                        font-size: 12px;
-                                    }
-                                }
-
-                                Rectangle {
-                                    horizontal-stretch: 1;
-                                }
-
-                                QuietButton {
-                                    width: 100px;
-                                    horizontal-stretch: 0;
-                                    text: "选择头像";
-                                    enabled: !root.busy && !root.config-managed;
-                                    clicked => { root.open-provider-icon-picker(); }
-                                }
-                            }
-
-                            HorizontalLayout {
-                                height: 36px;
-                                spacing: 8px;
-                                Text {
-                                    width: 92px;
-                                    text: "名称";
-                                    color: Theme.muted-text;
-                                    vertical-alignment: center;
-                                }
-
-                                LineEdit {
-                                    text <=> root.subscription-name;
-                                    placeholder-text: "例如 ChatGPT · 工作账号";
-                                    accessible-label: "ChatGPT 订阅连接名称";
-                                    enabled: !root.busy && !root.config-managed;
-                                }
-                            }
-
-                            HorizontalLayout {
-                                height: 36px;
-                                spacing: 8px;
-                                Text {
-                                    width: 92px;
-                                    text: "绑定账号";
-                                    color: Theme.muted-text;
-                                    vertical-alignment: center;
-                                }
-
-                                ComboBox {
-                                    model: root.subscription-account-options;
-                                    current-index <=> root.subscription-account-choice;
-                                    accessible-label: "为订阅连接选择已保存账号";
-                                    enabled: !root.busy && !root.config-managed;
-                                }
-
-                                QuietButton {
-                                    text: "管理 ChatGPT 账号";
-                                    enabled: !root.busy;
-                                    clicked => { root.active-page = 5; }
-                                }
-                            }
-
-                            Text {
-                                text: root.subscription-binding-label;
-                                color: Theme.muted-text;
-                                font-size: 12px;
-                                wrap: word-wrap;
-                            }
-
-                            HorizontalLayout {
-                                height: 32px;
-                                Text {
-                                    text: "auth.json (JSON)";
-                                    color: Theme.primary-text;
-                                    font-size: 14px;
-                                    font-weight: 600;
-                                    vertical-alignment: center;
-                                }
-
-                                Rectangle {
-                                    horizontal-stretch: 1;
-                                }
-
-                                QuietButton {
-                                    text: "格式化";
-                                    enabled: !root.busy;
-                                    clicked => { root.format-subscription-auth(); }
-                                }
-                            }
-
-                            CodeEditor {
-                                height: 208px;
-                                vertical-stretch: 0;
-                                text <=> root.subscription-auth-json;
-                                language: "json";
-                                edited(text) => { root.subscription-auth-edited(); }
-                                enabled: !root.busy && !root.config-managed;
-                                accessible-label: "ChatGPT auth.json 编辑内容";
-                            }
-
-                            if root.subscription-auth-error != "": Text {
-                                text: root.subscription-auth-error;
-                                color: Theme.error;
-                                font-size: 12px;
-                                wrap: word-wrap;
-                            }
-
-                            Text {
-                                text: "可查看和修改所选账号的登录 JSON。修改后保存到私有账号文件；需要切换 Codex 登录时，在账号管理中点击“写入 Codex 登录”。";
-                                color: Theme.muted-text;
-                                font-size: 12px;
-                                wrap: word-wrap;
-                            }
-
-                            HorizontalLayout {
-                                height: 32px;
-                                spacing: 12px;
-                                Text {
-                                    text: "config.toml (TOML)";
-                                    color: Theme.primary-text;
-                                    font-size: 14px;
-                                    font-weight: 600;
-                                    vertical-alignment: center;
-                                }
-
-                                Rectangle {
-                                    horizontal-stretch: 1;
-                                }
-
-                                CheckBox {
-                                    text: "应用通用配置";
-                                    checked <=> root.edit-use-common-config;
-                                    toggled => { root.update-subscription-common(); }
-                                    enabled: !root.busy && !root.config-managed;
-                                }
-
-                                QuietButton {
-                                    text: "编辑通用配置";
-                                    enabled: !root.busy && !root.config-managed;
-                                    clicked => { root.open-common-config(); }
-                                }
-                            }
-
-                            HorizontalLayout {
-                                height: 32px;
-                                spacing: 12px;
-                                CheckBox {
-                                    text: "1M 上下文窗口";
-                                    checked <=> root.edit-context-1m;
-                                    toggled => { root.update-subscription-context(); }
-                                    accessible-label: "订阅一百万 token 上下文窗口";
-                                    enabled: !root.busy && !root.config-managed;
-                                }
-
-                                Text {
-                                    text: "压缩阈值";
-                                    color: Theme.muted-text;
-                                    vertical-alignment: center;
-                                }
-
-                                LineEdit {
-                                    width: 144px;
-                                    horizontal-stretch: 0;
-                                    text <=> root.edit-compact-limit;
-                                    edited(text) => { root.update-subscription-context(); }
-                                    input-type: number;
-                                    accessible-label: "订阅自动压缩 token 阈值";
-                                    enabled: root.edit-context-1m && !root.busy && !root.config-managed;
-                                }
-
-                                Text {
-                                    text: "tokens";
-                                    color: Theme.muted-text;
-                                    vertical-alignment: center;
-                                }
-
-                                Rectangle {
-                                    horizontal-stretch: 1;
-                                }
-                            }
-
-                            CodeEditor {
-                                height: 240px;
-                                vertical-stretch: 0;
-                                text <=> root.edit-config-preview;
-                                edited(text) => { root.subscription-config-edited(); }
-                                enabled: !root.busy && !root.config-managed;
-                                accessible-label: "ChatGPT config.toml 编辑内容";
-                            }
-
-                            if root.edit-config-error != "": Text {
-                                text: root.edit-config-error;
-                                color: Theme.error;
-                                font-size: 12px;
-                                wrap: word-wrap;
-                            }
-
-                            Text {
-                                text: "保存后在下次开启路由时应用默认模型所属连接的配置。可编辑模型和非敏感设置；官方地址与路由认证由 SwitchX 管理。";
-                                color: Theme.muted-text;
-                                font-size: 12px;
-                                wrap: word-wrap;
-                            }
-                        }
-                    }
-
-                    HorizontalLayout {
-                        height: 36px;
-                        spacing: 8px;
-                        if root.subscription-id != "": QuietButton {
-                            text: root.delete-confirm ? "确认删除上游" : "删除上游";
-                            enabled: !root.busy && !root.config-managed;
-                            clicked => {
-                                if root.delete-confirm { root.delete-provider(root.subscription-id); }
-                                else { root.delete-confirm = true; }
-                            }
-                        }
-
-                        Rectangle {
-                            horizontal-stretch: 1;
-                        }
-
-                        QuietButton {
-                            text: "取消";
-                            enabled: !root.busy;
-                            clicked => { root.cancel-subscription-editor(); }
-                        }
-
-                        QuietButton {
-                            text: "保存订阅连接";
-                            primary: true;
-                            enabled: !root.busy && !root.config-managed && root.subscription-name != "" && root.edit-config-error == "" && root.subscription-auth-error == "";
-                            clicked => { root.save-subscription(root.subscription-id, root.subscription-name, root.subscription-account-ids[root.subscription-account-choice]); }
-                        }
-                    }
-                }
+            if root.active-page == 1 && root.subscription-editor-open && !root.common-config-editor-open && !root.icon-picker-open: SubscriptionEditor {
+                busy: root.busy;
+                subscription-id: root.subscription-id;
+                subscription-name <=> root.subscription-name;
+                subscription-binding-label: root.subscription-binding-label;
+                subscription-account-ids: root.subscription-account-ids;
+                subscription-account-options: root.subscription-account-options;
+                subscription-account-choice <=> root.subscription-account-choice;
+                subscription-auth-json <=> root.subscription-auth-json;
+                subscription-auth-error: root.subscription-auth-error;
+                delete-confirm <=> root.delete-confirm;
+                edit-use-common-config <=> root.edit-use-common-config;
+                edit-context-1m <=> root.edit-context-1m;
+                edit-compact-limit <=> root.edit-compact-limit;
+                edit-config-preview <=> root.edit-config-preview;
+                edit-config-error: root.edit-config-error;
+                edit-icon-name: root.edit-icon-name;
+                edit-icon: root.edit-icon;
+                edit-icon-monochrome: root.edit-icon-monochrome;
+                config-managed: root.config-managed;
+                save-subscription(id, name, account-id) => { root.save-subscription(id, name, account-id); }
+                cancel-subscription-editor() => { root.cancel-subscription-editor(); }
+                format-subscription-auth() => { root.format-subscription-auth(); }
+                subscription-auth-edited() => { root.subscription-auth-edited(); }
+                subscription-config-edited() => { root.subscription-config-edited(); }
+                update-subscription-context() => { root.update-subscription-context(); }
+                update-subscription-common() => { root.update-subscription-common(); }
+                open-common-config() => { root.open-common-config(); }
+                delete-provider(id) => { root.delete-provider(id); }
+                open-provider-icon-picker() => { root.open-provider-icon-picker(); }
+                navigate(page) => { root.active-page = page; }
             }
 
-            if root.active-page == 1 && root.common-config-editor-open && !root.icon-picker-open: SurfaceCard {
-                vertical-stretch: 1;
-                VerticalLayout {
-                    padding: 18px;
-                    spacing: 12px;
-                    HorizontalLayout {
-                        height: 36px;
-                        Text {
-                            text: "编辑通用配置片段";
-                            color: Theme.primary-text;
-                            font-size: 17px;
-                            font-weight: 600;
-                            vertical-alignment: center;
-                        }
-
-                        Rectangle {
-                            horizontal-stretch: 1;
-                        }
-
-                        QuietButton {
-                            width: 108px;
-                            horizontal-stretch: 0;
-                            text: "返回上游";
-                            enabled: !root.busy;
-                            clicked => { root.cancel-common-config(); }
-                        }
-                    }
-
-                    ScrollView {
-                        vertical-stretch: 1;
-                        VerticalLayout {
-                            spacing: 12px;
-                            SurfaceCard {
-                                height: 184px;
-                                background: Theme.brand-surface;
-                                border-color: Theme.brand;
-                                VerticalLayout {
-                                    padding: 14px;
-                                    spacing: 7px;
-                                    Text {
-                                        text: "什么是通用配置片段？";
-                                        color: Theme.brand;
-                                        font-size: 14px;
-                                        font-weight: 600;
-                                    }
-
-                                    Text {
-                                        text: "用于在不同供应商之间共享插件、Hook、环境变量和其他非敏感 Codex 设置。";
-                                        color: Theme.primary-text;
-                                        font-size: 12px;
-                                        wrap: word-wrap;
-                                    }
-
-                                    Text {
-                                        text: "首次使用会从目标 Codex 配置自动提取；打开此页加载已保存的片段。";
-                                        color: Theme.muted-text;
-                                        font-size: 12px;
-                                        wrap: word-wrap;
-                                    }
-
-                                    Text {
-                                        text: "“从编辑内容提取”会提取供应商表单当前 config.toml 的通用部分并立即保存。手动修改后需点击“保存”。";
-                                        color: Theme.muted-text;
-                                        font-size: 12px;
-                                        wrap: word-wrap;
-                                    }
-
-                                    Text {
-                                        text: "取消只丢弃手动草稿，已完成的提取仍保留。提取会排除供应商、认证和 MCP 项，片段在勾选“应用通用配置”后切换时生效。";
-                                        color: Theme.muted-text;
-                                        font-size: 12px;
-                                        wrap: word-wrap;
-                                    }
-                                }
-                            }
-
-                            if root.common-config-current-source != "": Text {
-                                text: "提取来源：" + root.common-config-current-source;
-                                color: Theme.muted-text;
-                                font-size: 12px;
-                                wrap: word-wrap;
-                            }
-
-                            Text {
-                                text: "config.toml (TOML) · 直连或发布路由时与供应商配置合并";
-                                color: Theme.muted-text;
-                                font-size: 12px;
-                                wrap: word-wrap;
-                            }
-
-                            CodeEditor {
-                                height: 208px;
-                                vertical-stretch: 0;
-                                text <=> root.common-config-draft;
-                                placeholder-text: "在此填写可共享的 Codex TOML 配置";
-                                enabled: !root.busy && !root.config-managed;
-                                accessible-label: "Codex 通用配置片段";
-                            }
-
-                            if root.common-config-error != "": Text {
-                                text: root.common-config-error;
-                                color: Theme.error;
-                                font-size: 12px;
-                                wrap: word-wrap;
-                            }
-
-                            if root.common-config-message != "": Text {
-                                text: root.common-config-message;
-                                color: Theme.muted-text;
-                                font-size: 12px;
-                                wrap: word-wrap;
-                            }
-                        }
-                    }
-
-                    HorizontalLayout {
-                        height: 36px;
-                        spacing: 8px;
-                        QuietButton {
-                            min-width: 160px;
-                            text: "从编辑内容提取";
-                            enabled: !root.busy && !root.config-managed;
-                            clicked => { root.extract-common-config(); }
-                        }
-
-                        Rectangle {
-                            horizontal-stretch: 1;
-                        }
-
-                        QuietButton {
-                            width: 80px;
-                            horizontal-stretch: 0;
-                            text: "取消";
-                            enabled: !root.busy;
-                            clicked => { root.cancel-common-config(); }
-                        }
-
-                        QuietButton {
-                            width: 92px;
-                            horizontal-stretch: 0;
-                            text: "保存";
-                            primary: true;
-                            enabled: !root.busy && !root.config-managed;
-                            clicked => { root.save-common-config(); }
-                        }
-                    }
-                }
+            if root.active-page == 1 && root.common-config-editor-open && !root.icon-picker-open: CommonConfigEditor {
+                busy: root.busy;
+                common-config-draft <=> root.common-config-draft;
+                common-config-error: root.common-config-error;
+                common-config-message: root.common-config-message;
+                common-config-current-source: root.common-config-current-source;
+                config-managed: root.config-managed;
+                extract-common-config() => { root.extract-common-config(); }
+                save-common-config() => { root.save-common-config(); }
+                cancel-common-config() => { root.cancel-common-config(); }
             }
 
-            if root.active-page == 2: ScrollView {
-                vertical-stretch: 1;
-                content-y <=> root.model-scroll-y;
-                VerticalLayout {
-                    spacing: 14px;
-                    HorizontalLayout {
-                        spacing: 10px;
-                        Text {
-                            text: "模型映射 · 一个上游可添加多个模型";
-                            color: Theme.primary-text;
-                            font-size: 16px;
-                            font-weight: 600;
-                            vertical-alignment: center;
-                        }
-
-                        ComboBox {
-                            width: 180px;
-                            model: root.model-provider-options;
-                            current-index <=> root.model-provider-choice;
-                            accessible-label: "添加映射的上游";
-                            enabled: !root.busy && !root.config-managed;
-                        }
-
-                        QuietButton {
-                            width: 128px;
-                            text: "添加模型映射";
-                            enabled: !root.busy && !root.config-managed && root.providers.length > 0;
-                            clicked => { root.add-selected-model(); }
-                        }
-                    }
-
-                    if root.model-editor-open: SurfaceCard {
-                        height: root.discovery-scope == 1 && (root.fetched-models.length > 0 || root.discovery-message != "") ? 532px : 462px;
-                        VerticalLayout {
-                            padding: 18px;
-                            spacing: 9px;
-                            Text {
-                                text: (root.model-original-id == "" ? "添加模型映射 · " : "编辑模型映射 · ") + root.model-provider-name;
-                                color: Theme.primary-text;
-                                font-size: 16px;
-                                font-weight: 600;
-                            }
-
-                            HorizontalLayout {
-                                spacing: 10px;
-                                Text {
-                                    width: 96px;
-                                    text: "公开模型 ID";
-                                    color: Theme.muted-text;
-                                    vertical-alignment: center;
-                                }
-
-                                LineEdit {
-                                    text <=> root.model-public-id;
-                                    accessible-label: "公开模型 ID";
-                                }
-                            }
-
-                            HorizontalLayout {
-                                spacing: 10px;
-                                Text {
-                                    width: 96px;
-                                    text: "菜单显示名";
-                                    color: Theme.muted-text;
-                                    vertical-alignment: center;
-                                }
-
-                                LineEdit {
-                                    text <=> root.model-display-name;
-                                    accessible-label: "模型显示名称";
-                                    edited(text) => { root.model-display-name-custom = true; }
-                                }
-                            }
-
-                            HorizontalLayout {
-                                spacing: 10px;
-                                Text {
-                                    width: 96px;
-                                    text: "实际请求模型";
-                                    color: Theme.muted-text;
-                                    vertical-alignment: center;
-                                }
-
-                                LineEdit {
-                                    text <=> root.model-upstream-id;
-                                    placeholder-text: "上游实际模型 ID";
-                                    accessible-label: "映射实际请求模型";
-                                }
-
-                                QuietButton {
-                                    width: 132px;
-                                    text: root.fetching-models && root.discovery-scope == 1 ? "获取中…" : "获取模型列表";
-                                    enabled: !root.busy && !root.config-managed;
-                                    clicked => { root.fetch-models(1); }
-                                }
-                            }
-
-                            if root.discovery-scope == 1 && root.fetched-models.length > 0: ComboBox {
-                                model: root.fetched-models;
-                                current-value: root.model-upstream-id;
-                                accessible-label: "选择探测到的映射模型";
-                                enabled: !root.busy;
-                                selected(value) => { root.model-upstream-id = value; }
-                            }
-
-                            if root.discovery-scope == 1 && root.discovery-message != "": Text {
-                                text: root.discovery-message;
-                                color: Theme.muted-text;
-                                font-size: 12px;
-                                wrap: word-wrap;
-                            }
-
-                            HorizontalLayout {
-                                spacing: 10px;
-                                Text {
-                                    width: 96px;
-                                    text: "上下文窗口";
-                                    color: Theme.muted-text;
-                                    vertical-alignment: center;
-                                }
-
-                                LineEdit {
-                                    text <=> root.model-context-window;
-                                    placeholder-text: "留空使用 128000；导入时保留原值";
-                                    accessible-label: "模型上下文窗口";
-                                }
-                            }
-
-                            HorizontalLayout {
-                                spacing: 10px;
-                                Text {
-                                    width: 96px;
-                                    text: "思考等级";
-                                    color: Theme.muted-text;
-                                    vertical-alignment: center;
-                                }
-
-                                LineEdit {
-                                    text <=> root.model-reasoning-levels;
-                                    placeholder-text: "例如 low, medium, high；留空不设置";
-                                    accessible-label: "模型支持的思考等级";
-                                }
-
-                                Text {
-                                    width: 56px;
-                                    text: "默认";
-                                    color: Theme.muted-text;
-                                    vertical-alignment: center;
-                                }
-
-                                ComboBox {
-                                    width: 124px;
-                                    model: root.model-reasoning-options;
-                                    current-value <=> root.model-default-reasoning;
-                                    accessible-label: "模型默认思考等级";
-                                }
-                            }
-
-                            HorizontalLayout {
-                                spacing: 10px;
-                                Text {
-                                    width: 96px;
-                                    text: "目录 JSON";
-                                    color: Theme.muted-text;
-                                    vertical-alignment: center;
-                                }
-
-                                LineEdit {
-                                    text <=> root.model-source-path;
-                                    placeholder-text: "可选：绝对路径，导入完整模型资料";
-                                    accessible-label: "模型资料 JSON 文件绝对路径";
-                                }
-                            }
-
-                            Text {
-                                text: "填写参数即可生成模型目录；也可导入 JSON 保留完整能力和指令。保存后预览发布，重启 Codex 刷新模型菜单。";
-                                color: Theme.muted-text;
-                                font-size: 12px;
-                                wrap: word-wrap;
-                            }
-
-                            HorizontalLayout {
-                                spacing: 8px;
-                                QuietButton {
-                                    text: "保存映射";
-                                    primary: true;
-                                    enabled: !root.busy && !root.config-managed;
-                                    clicked => { root.save-model(); }
-                                }
-
-                                QuietButton {
-                                    text: "取消";
-                                    clicked => { root.model-editor-open = false; }
-                                }
-
-                                if root.model-original-id != "": QuietButton {
-                                    text: root.model-delete-confirm ? "确认删除映射" : "删除映射";
-                                    enabled: !root.busy && !root.config-managed;
-                                    clicked => {
-                                        if (root.model-delete-confirm) { root.delete-model(); }
-                                        else { root.model-delete-confirm = true; }
-                                    }
-                                }
-                            }
-                        }
-                    }
-                    SurfaceCard {
-                        height: 242px;
-                        VerticalLayout {
-                            padding: 18px;
-                            spacing: 10px;
-                            HorizontalLayout {
-                                Text {
-                                    text: "模型路由预览版";
-                                    color: Theme.primary-text;
-                                    font-size: 18px;
-                                    font-weight: 600;
-                                }
-
-                                StatusPill {
-                                    label: root.route-running ? "运行中" : root.route-managed ? "待恢复" : root.selected-model-count + " 个已选";
-                                    ink: root.route-running ? Theme.success : Theme.warning;
-                                }
-                            }
-
-                            Text {
-                                text: root.route-status;
-                                color: Theme.primary-text;
-                                font-size: 13px;
-                                wrap: word-wrap;
-                            }
-
-                            Text {
-                                text: "目标：" + root.config-home;
-                                color: Theme.muted-text;
-                                font-size: 12px;
-                                wrap: word-wrap;
-                            }
-
-                            HorizontalLayout {
-                                spacing: 10px;
-                                Text {
-                                    width: 76px;
-                                    horizontal-stretch: 0;
-                                    text: "本地端口";
-                                    color: Theme.muted-text;
-                                    vertical-alignment: center;
-                                }
-
-                                LineEdit {
-                                    width: 100px;
-                                    text <=> root.route-port;
-                                    accessible-label: "本地路由端口";
-                                    enabled: !root.busy && !root.config-managed;
-                                }
-
-                                Text {
-                                    text: "默认模型：" + (root.default-model == "" ? "尚未选择" : root.default-model);
-                                    color: Theme.muted-text;
-                                    vertical-alignment: center;
-                                    overflow: elide;
-                                }
-                            }
-
-                            HorizontalLayout {
-                                spacing: 8px;
-                                QuietButton {
-                                    text: "预览发布";
-                                    enabled: !root.busy && !root.config-managed && !root.chatgpt-login-pending && root.selected-model-count > 0;
-                                    clicked => { root.inspect-route(); }
-                                }
-
-                                QuietButton {
-                                    text: "开启路由";
-                                    primary: true;
-                                    enabled: !root.busy && !root.config-managed && !root.chatgpt-login-pending && root.route-preview-ready;
-                                    clicked => { root.apply-route(); }
-                                }
-
-                                QuietButton {
-                                    text: "启动 Codex";
-                                    enabled: !root.busy && root.route-running;
-                                    clicked => { root.launch-codex(); }
-                                }
-
-                                QuietButton {
-                                    text: "恢复并停止";
-                                    enabled: !root.busy && root.route-managed;
-                                    clicked => { root.restore-config(root.config-home); }
-                                }
-
-                                QuietButton {
-                                    text: "配置目录";
-                                    clicked => { root.active-page = 5; }
-                                }
-                            }
-
-                            Text {
-                                text: "API 模型使用各自的 Key；订阅模型使用各上游绑定的账号。Codex 入口登录单独管理。发布后启动新会话，跨上游切换请新建会话。";
-                                color: Theme.muted-text;
-                                font-size: 12px;
-                                wrap: word-wrap;
-                            }
-                        }
-                    }
-
-                    if root.route-preview != "": SurfaceCard {
-                        height: 218px;
-                        VerticalLayout {
-                            padding: 18px;
-                            spacing: 8px;
-                            ScrollView {
-                                Text {
-                                    text: root.route-preview;
-                                    color: Theme.primary-text;
-                                    font-size: 13px;
-                                    wrap: word-wrap;
-                                    vertical-alignment: top;
-                                    horizontal-alignment: left;
-                                }
-                            }
-
-                            if !root.route-managed: QuietButton {
-                                text: "取消预览";
-                                enabled: !root.busy;
-                                clicked => { root.cancel-route-preview(); }
-                            }
-                        }
-                    }
-                    if root.fallback-editor-open: SurfaceCard {
-                        height: 282px;
-                        VerticalLayout {
-                            padding: 18px;
-                            spacing: 10px;
-                            Text {
-                                text: "备用上游 · " + root.fallback-primary-label;
-                                color: Theme.primary-text;
-                                font-size: 16px;
-                                font-weight: 600;
-                                overflow: elide;
-                            }
-
-                            ComboBox {
-                                model: root.fallback-options;
-                                current-index <=> root.fallback-choice;
-                                accessible-label: "选择备用上游";
-                                enabled: !root.busy && !root.config-managed;
-                                selected(value) => { root.fallback-consent = false; }
-                            }
-
-                            Text {
-                                text: "主上游 → 一个备用上游。仅在连接建立失败且请求尚未发送时尝试一次；超时、HTTP 错误和响应中断均不切换。主备实际模型 ID、能力和指令模板须一致。";
-                                color: Theme.muted-text;
-                                font-size: 12px;
-                                wrap: word-wrap;
-                            }
-
-                            Text {
-                                text: "选择备用后，请确认该站点的数据区域与隐私要求适用；费用可能变化。备用模型无需单独发布。";
-                                color: Theme.muted-text;
-                                font-size: 12px;
-                                wrap: word-wrap;
-                            }
-
-                            CheckBox {
-                                text: "允许在上述条件下把完整请求发送到所选备用站点";
-                                checked <=> root.fallback-consent;
-                                enabled: root.fallback-choice > 0 && !root.busy && !root.config-managed;
-                            }
-
-                            HorizontalLayout {
-                                spacing: 8px;
-                                QuietButton {
-                                    text: "保存备用策略";
-                                    primary: true;
-                                    enabled: !root.busy && !root.config-managed && (root.fallback-choice == 0 || root.fallback-consent);
-                                    clicked => { root.save-fallback(); }
-                                }
-
-                                QuietButton {
-                                    text: "取消";
-                                    clicked => { root.fallback-editor-open = false; }
-                                }
-                            }
-                        }
-                    }
-                    if root.models.length == 0: SurfaceCard {
-                        height: 108px;
-                        VerticalLayout {
-                            padding: 18px;
-                            spacing: 10px;
-                            Text {
-                                text: "添加上游后，可在这里添加模型映射并选择发布。";
-                                color: Theme.muted-text;
-                                font-size: 13px;
-                            }
-
-                            QuietButton {
-                                text: "查看上游";
-                                clicked => { root.active-page = 1; }
-                            }
-                        }
-                    }
-                    for model in root.models: SurfaceCard {
-                        height: 154px;
-                        HorizontalLayout {
-                            padding: 16px;
-                            spacing: 10px;
-                            VerticalLayout {
-                                spacing: 7px;
-                                Text {
-                                    text: model.display-name;
-                                    color: Theme.primary-text;
-                                    font-size: 15px;
-                                    font-weight: 600;
-                                    overflow: elide;
-                                }
-
-                                Text {
-                                    text: model.public-id + " → " + model.provider-name + " / " + model.upstream-model;
-                                    color: Theme.muted-text;
-                                    font-size: 12px;
-                                    overflow: elide;
-                                }
-
-                                Text {
-                                    text: model.detail + (model.binding-label == "" ? "" : " · " + model.binding-label);
-                                    color: Theme.muted-text;
-                                    font-size: 12px;
-                                    overflow: elide;
-                                }
-
-                                Text {
-                                    text: model.fallback-label;
-                                    color: Theme.muted-text;
-                                    font-size: 12px;
-                                    overflow: elide;
-                                }
-                            }
-
-                            QuietButton {
-                                width: 84px;
-                                text: model.saved ? "编辑映射" : "添加映射";
-                                enabled: !root.busy && !root.config-managed;
-                                clicked => {
-                                    root.begin-model-editor(model.provider-id, model.saved ? model.public-id : "");
-                                }
-                            }
-
-                            QuietButton {
-                                width: 62px;
-                                text: "备用";
-                                enabled: model.ready && !root.busy && !root.config-managed && !model.is-subscription;
-                                clicked => { root.edit-fallback(model.public-id); }
-                            }
-
-                            QuietButton {
-                                width: 74px;
-                                text: model.included ? "已选择" : "选择";
-                                selected: model.included;
-                                enabled: model.ready && !root.busy && !root.config-managed;
-                                clicked => { root.select-model(model.public-id, !model.included); }
-                            }
-
-                            QuietButton {
-                                width: 74px;
-                                text: root.default-model == model.public-id ? "默认" : "设默认";
-                                selected: root.default-model == model.public-id;
-                                enabled: model.included && !root.busy && !root.config-managed;
-                                clicked => { root.default-model = model.public-id; }
-                            }
-                        }
-                    }
-                }
+            if root.active-page == 2: RoutingPage {
+                busy: root.busy;
+                providers: root.providers;
+                fetched-models: root.fetched-models;
+                fetching-models: root.fetching-models;
+                discovery-message: root.discovery-message;
+                discovery-scope: root.discovery-scope;
+                config-home: root.config-home;
+                chatgpt-login-pending: root.chatgpt-login-pending;
+                models: root.models;
+                selected-model-count: root.selected-model-count;
+                config-managed: root.config-managed;
+                route-managed: root.route-managed;
+                route-running: root.route-running;
+                route-status: root.route-status;
+                route-port <=> root.route-port;
+                default-model <=> root.default-model;
+                route-preview: root.route-preview;
+                route-preview-ready: root.route-preview-ready;
+                model-editor-open <=> root.model-editor-open;
+                model-provider-name: root.model-provider-name;
+                model-upstream-id <=> root.model-upstream-id;
+                model-public-id <=> root.model-public-id;
+                model-display-name <=> root.model-display-name;
+                model-display-name-custom <=> root.model-display-name-custom;
+                model-source-path <=> root.model-source-path;
+                model-original-id: root.model-original-id;
+                model-context-window <=> root.model-context-window;
+                model-reasoning-levels <=> root.model-reasoning-levels;
+                model-default-reasoning <=> root.model-default-reasoning;
+                model-reasoning-options: root.model-reasoning-options;
+                model-delete-confirm <=> root.model-delete-confirm;
+                model-provider-options: root.model-provider-options;
+                model-provider-choice <=> root.model-provider-choice;
+                model-scroll-y <=> root.model-scroll-y;
+                fallback-editor-open <=> root.fallback-editor-open;
+                fallback-primary-label: root.fallback-primary-label;
+                fallback-options: root.fallback-options;
+                fallback-choice <=> root.fallback-choice;
+                fallback-consent <=> root.fallback-consent;
+                fetch-models(scope) => { root.fetch-models(scope); }
+                restore-config(home) => { root.restore-config(home); }
+                save-model() => { root.save-model(); }
+                delete-model() => { root.delete-model(); }
+                begin-model-editor(provider-id, model-id) => { root.begin-model-editor(provider-id, model-id); }
+                add-selected-model() => { root.add-selected-model(); }
+                select-model(id, selected) => { root.select-model(id, selected); }
+                edit-fallback(id) => { root.edit-fallback(id); }
+                save-fallback() => { root.save-fallback(); }
+                inspect-route() => { root.inspect-route(); }
+                apply-route() => { root.apply-route(); }
+                launch-codex() => { root.launch-codex(); }
+                cancel-route-preview() => { root.cancel-route-preview(); }
+                navigate(page) => { root.active-page = page; }
             }
 
-            if root.active-page == 3: VerticalLayout {
-                spacing: 12px;
-                HorizontalLayout {
-                    Text {
-                        text: "最近 100 条已结束请求 · " + root.requests.length + " 条";
-                        color: Theme.primary-text;
-                        font-size: 17px;
-                        vertical-alignment: center;
-                    }
-
-                    QuietButton {
-                        width: 100px;
-                        text: "刷新记录";
-                        enabled: !root.busy;
-                        clicked => { root.refresh-requests(); }
-                    }
-                }
-
-                Text {
-                    text: "仅记录经过 SwitchX 路由的请求；正文与凭据不保存。手动刷新查看最新结果。";
-                    color: Theme.muted-text;
-                    font-size: 12px;
-                    wrap: word-wrap;
-                }
-
-                if root.request-error != "": Text {
-                    text: root.request-error;
-                    color: Theme.warning;
-                    wrap: word-wrap;
-                }
-                if root.requests.length == 0: Text {
-                    text: root.busy ? "正在读取请求记录…" : "暂无请求记录。开启模型路由并完成请求后，可在这里查看结果。";
-                    color: Theme.muted-text;
-                    wrap: word-wrap;
-                }
-                ListView {
-                    vertical-stretch: 1;
-                    for request in root.requests: SurfaceCard {
-                        height: (request.error == "" ? 132px : 160px) + (request.fallback == "" ? 0px : 28px);
-                        VerticalLayout {
-                            padding: 14px;
-                            spacing: 6px;
-                            HorizontalLayout {
-                                Text {
-                                    text: request.time;
-                                    color: Theme.muted-text;
-                                    font-size: 12px;
-                                    vertical-alignment: center;
-                                }
-
-                                StatusPill {
-                                    width: request.cancelled ? 176px : 100px;
-                                    label: request.status;
-                                    ink: request.completed ? Theme.success : request.cancelled ? Theme.muted-text : Theme.warning;
-                                }
-                            }
-
-                            Text {
-                                text: request.route;
-                                color: Theme.primary-text;
-                                font-size: 14px;
-                                overflow: elide;
-                            }
-
-                            if request.fallback != "": Text {
-                                text: request.fallback;
-                                color: Theme.muted-text;
-                                font-size: 12px;
-                                overflow: elide;
-                            }
-
-                            Text {
-                                text: request.timing;
-                                color: Theme.muted-text;
-                                font-size: 12px;
-                            }
-
-                            Text {
-                                text: request.detail;
-                                color: Theme.muted-text;
-                                font-size: 10px;
-                                overflow: elide;
-                            }
-
-                            if request.error != "": Text {
-                                text: request.error;
-                                color: request.cancelled ? Theme.muted-text : Theme.warning;
-                                font-size: 12px;
-                                overflow: elide;
-                            }
-                        }
-                    }
-                }
-
-                Text {
-                    text: "“正常完成”表示已收到上游完成信号；客户端断开无法判断是否由用户主动取消。用量与费用统计尚未接入。";
-                    color: Theme.muted-text;
-                    font-size: 12px;
-                    wrap: word-wrap;
-                }
+            if root.active-page == 3: ActivityPage {
+                busy: root.busy;
+                requests: root.requests;
+                request-error: root.request-error;
+                refresh-requests() => { root.refresh-requests(); }
             }
 
             if root.active-page == 4: SurfaceCard {
@@ -2464,373 +691,36 @@ export component AppWindow inherits Window {
                 }
             }
 
-            if root.active-page == 5: ScrollView {
-                vertical-stretch: 1;
-                VerticalLayout {
-                    spacing: 14px;
-                    SurfaceCard {
-                        height: 176px;
-                        VerticalLayout {
-                            padding: 18px;
-                            spacing: 10px;
-                            Text {
-                                text: "Codex 配置目录";
-                                color: Theme.primary-text;
-                                font-size: 16px;
-                                font-weight: 600;
-                            }
-
-                            LineEdit {
-                                text <=> root.config-home;
-                                accessible-label: "Codex 配置目录绝对路径";
-                                enabled: !root.busy && !root.config-managed && !root.chatgpt-login-pending;
-                            }
-
-                            Text {
-                                text: "只管理此目录的 config.toml；切换对新启动的客户端生效。";
-                                color: Theme.muted-text;
-                                font-size: 12px;
-                            }
-
-                            HorizontalLayout {
-                                spacing: 8px;
-                                QuietButton {
-                                    text: "读取当前配置";
-                                    enabled: !root.busy && !root.chatgpt-login-pending;
-                                    clicked => { root.inspect-config(root.config-home); }
-                                }
-
-                                QuietButton {
-                                    text: "导入当前上游";
-                                    enabled: !root.busy && !root.chatgpt-login-pending;
-                                    clicked => { root.import-current(root.config-home); }
-                                }
-
-                                QuietButton {
-                                    text: "检查官方登录";
-                                    enabled: !root.busy && !root.chatgpt-login-pending;
-                                    clicked => { root.check-login(root.config-home); }
-                                }
-                            }
-                        }
-                    }
-
-                    SurfaceCard {
-                        height: 356px + root.accounts.length * 94px + (root.accounts.length == 0 ? 40px : 0px) + (root.chatgpt-login-pending ? 172px : 0px);
-                        VerticalLayout {
-                            padding: 18px;
-                            spacing: 10px;
-                            HorizontalLayout {
-                                height: 36px;
-                                Text {
-                                    text: "ChatGPT 订阅账号";
-                                    color: Theme.primary-text;
-                                    font-size: 17px;
-                                    font-weight: 600;
-                                    vertical-alignment: center;
-                                }
-
-                                QuietButton {
-                                    width: 88px;
-                                    horizontal-stretch: 0;
-                                    text: "刷新列表";
-                                    enabled: !root.busy && !root.chatgpt-login-pending;
-                                    clicked => { root.account-action(0, ""); }
-                                }
-                            }
-
-                            Text {
-                                text: root.route-auth-error == "" ? root.account-status : root.route-auth-error;
-                                color: Theme.primary-text;
-                                font-size: 13px;
-                                wrap: word-wrap;
-                            }
-
-                            Text {
-                                text: "账号可绑定到多个订阅上游。写入 Codex 登录只设置客户端入口登录，不改变各上游的绑定。";
-                                color: Theme.muted-text;
-                                font-size: 12px;
-                                wrap: word-wrap;
-                            }
-
-                            HorizontalLayout {
-                                spacing: 8px;
-                                QuietButton {
-                                    text: "添加 ChatGPT 账号";
-                                    primary: true;
-                                    enabled: !root.busy && !root.chatgpt-login-pending;
-                                    clicked => { root.account-action(1, ""); }
-                                }
-
-                                QuietButton {
-                                    text: "导入当前 Codex 账号";
-                                    enabled: !root.busy && !root.chatgpt-login-pending;
-                                    clicked => { root.account-action(5, ""); }
-                                }
-
-                                QuietButton {
-                                    text: "将默认账号写入 Codex";
-                                    enabled: !root.busy && !root.chatgpt-login-pending && root.accounts.length > 0;
-                                    clicked => { root.account-action(3, ""); }
-                                }
-                            }
-
-                            if root.accounts.length == 0: Text {
-                                height: 30px;
-                                text: "尚未保存账号。添加或导入后，可为订阅上游选择账号，也可显式设置 Codex 入口登录。";
-                                color: Theme.muted-text;
-                                font-size: 13px;
-                                wrap: word-wrap;
-                            }
-
-                            for account in root.accounts: Rectangle {
-                                height: 84px;
-                                background: account.is-active ? Theme.brand-surface : Theme.raised;
-                                border-width: 1px;
-                                border-color: account.is-active ? Theme.brand : Theme.border;
-                                border-radius: 10px;
-                                HorizontalLayout {
-                                    padding: 12px;
-                                    spacing: 8px;
-                                    VerticalLayout {
-                                        horizontal-stretch: 1;
-                                        spacing: 5px;
-                                        HorizontalLayout {
-                                            spacing: 8px;
-                                            Text {
-                                                text: account.label;
-                                                color: Theme.primary-text;
-                                                font-size: 14px;
-                                                font-weight: 600;
-                                                overflow: elide;
-                                                horizontal-stretch: 1;
-                                                vertical-alignment: center;
-                                            }
-
-                                            if account.is-active: Text {
-                                                text: "Codex 入口登录";
-                                                color: Theme.brand;
-                                                font-size: 12px;
-                                                vertical-alignment: center;
-                                            }
-                                        }
-
-                                        Text {
-                                            text: (account.workspace == "" ? "ChatGPT 账号" : "工作区：" + account.workspace) + " · " + account.bound-provider-count + " 个上游引用";
-                                            color: Theme.muted-text;
-                                            font-size: 12px;
-                                            overflow: elide;
-                                        }
-                                    }
-
-                                    QuietButton {
-                                        width: 92px;
-                                        horizontal-stretch: 0;
-                                        text: account.is-default ? "默认账号" : "设为默认";
-                                        selected: account.is-default;
-                                        enabled: !root.busy && !root.config-managed && !root.chatgpt-login-pending && !account.is-default;
-                                        clicked => { root.account-action(2, account.id); }
-                                    }
-
-                                    QuietButton {
-                                        width: 138px;
-                                        horizontal-stretch: 0;
-                                        text: "写入 Codex 登录";
-                                        enabled: !root.busy && !root.recovery-only && !root.chatgpt-login-pending;
-                                        clicked => { root.account-action(3, account.id); }
-                                    }
-
-                                    QuietButton {
-                                        width: 80px;
-                                        horizontal-stretch: 0;
-                                        text: "移除";
-                                        enabled: !root.busy && !root.config-managed && !root.chatgpt-login-pending;
-                                        clicked => {
-                                            root.delete-account-id = account.id;
-                                            root.delete-account-label = account.label;
-                                            root.delete-account-references = account.bound-provider-names;
-                                            root.error-code = "";
-                                            root.error-message = "";
-                                            root.error-action = "";
-                                            root.delete-account-confirm = true;
-                                        }
-                                    }
-                                }
-                            }
-
-                            if root.chatgpt-login-pending: Rectangle {
-                                height: 162px;
-                                background: Theme.brand-surface;
-                                border-width: 1px;
-                                border-color: Theme.brand;
-                                border-radius: 10px;
-                                VerticalLayout {
-                                    padding: 12px;
-                                    spacing: 8px;
-                                    Text {
-                                        text: root.login-user-code == "" ? "在官方浏览器页面完成登录，可随时取消。" : "复制验证码，在已打开的官方登录页面完成登录。";
-                                        color: Theme.primary-text;
-                                        font-size: 13px;
-                                        wrap: word-wrap;
-                                    }
-
-                                    if root.login-user-code != "": HorizontalLayout {
-                                        spacing: 8px;
-                                        Text {
-                                            width: 88px;
-                                            text: "登录验证码";
-                                            color: Theme.muted-text;
-                                            font-size: 12px;
-                                            vertical-alignment: center;
-                                        }
-
-                                        LineEdit {
-                                            text: root.login-user-code;
-                                            read-only: true;
-                                            accessible-label: "登录验证码，可选择复制";
-                                        }
-                                    }
-                                    if root.login-url != "": HorizontalLayout {
-                                        spacing: 8px;
-                                        Text {
-                                            width: 88px;
-                                            text: "登录页面";
-                                            color: Theme.muted-text;
-                                            font-size: 12px;
-                                            vertical-alignment: center;
-                                        }
-
-                                        LineEdit {
-                                            text: root.login-url;
-                                            read-only: true;
-                                            accessible-label: "官方登录页面地址，可选择复制";
-                                        }
-                                    }
-                                }
-                            }
-
-                            Text {
-                                text: root.auth-status;
-                                color: Theme.muted-text;
-                                font-size: 12px;
-                                wrap: word-wrap;
-                            }
-
-                            HorizontalLayout {
-                                spacing: 8px;
-
-                                if !root.chatgpt-login-pending: QuietButton {
-                                    text: "Codex 原生登录";
-                                    enabled: !root.busy;
-                                    clicked => { root.subscription-action(1); }
-                                }
-
-                                if root.chatgpt-login-pending: QuietButton {
-                                    text: "取消登录";
-                                    enabled: !root.busy;
-                                    clicked => { root.subscription-action(3); }
-                                }
-
-                                QuietButton {
-                                    text: "检查 Codex 登录";
-                                    enabled: !root.busy && !root.chatgpt-login-pending;
-                                    clicked => { root.subscription-action(2); }
-                                }
-
-                                QuietButton {
-                                    text: "切回 API 预览";
-                                    enabled: !root.busy && !root.chatgpt-login-pending;
-                                    clicked => { root.subscription-action(4); }
-                                }
-                            }
-
-                            Text {
-                                text: "账号登录完成后点击“使用”。设为默认不会立即切换；使用或更换账号会先恢复配置并停止路由，请重新发布并启动新会话。";
-                                color: Theme.muted-text;
-                                font-size: 12px;
-                                wrap: word-wrap;
-                            }
-                        }
-                    }
-
-                    SurfaceCard {
-                        height: 154px;
-                        VerticalLayout {
-                            padding: 18px;
-                            spacing: 10px;
-                            Text {
-                                text: root.config-status;
-                                color: Theme.primary-text;
-                                font-size: 15px;
-                                wrap: word-wrap;
-                            }
-
-                            Text {
-                                text: "固定账号由每个订阅上游分别选择。Codex 原生登录只设置入口登录；旧的跟随登录连接仍使用该入口身份。";
-                                color: Theme.muted-text;
-                                font-size: 13px;
-                                wrap: word-wrap;
-                            }
-
-                            Text {
-                                text: "API Key 直连与 ChatGPT 登录分别管理。“导入当前上游”只读取上游资料，不复制 API Key。";
-                                color: Theme.muted-text;
-                                font-size: 12px;
-                                wrap: word-wrap;
-                            }
-                        }
-                    }
-
-                    SurfaceCard {
-                        height: 230px;
-                        VerticalLayout {
-                            padding: 18px;
-                            spacing: 12px;
-                            Text {
-                                text: "直连切换";
-                                color: Theme.primary-text;
-                                font-size: 17px;
-                                font-weight: 600;
-                            }
-
-                            Text {
-                                text: root.direct-preview == "" ? "从上游列表选择“直连”，先查看受管字段差异。" : root.direct-preview;
-                                color: Theme.muted-text;
-                                font-size: 13px;
-                                wrap: word-wrap;
-                            }
-
-                            Text {
-                                text: "应用前会再次检查 /models 和所选模型；这不能证明 Responses 工具调用兼容。";
-                                color: Theme.warning;
-                                font-size: 12px;
-                                wrap: word-wrap;
-                            }
-
-                            HorizontalLayout {
-                                spacing: 8px;
-                                QuietButton {
-                                    text: "应用直连";
-                                    primary: true;
-                                    enabled: root.direct-preview-ready && !root.busy && !root.chatgpt-login-pending;
-                                    clicked => { root.apply-direct(); }
-                                }
-
-                                QuietButton {
-                                    text: "恢复原配置";
-                                    enabled: !root.busy;
-                                    clicked => { root.restore-config(root.config-home); }
-                                }
-                            }
-
-                            Text {
-                                text: "直连凭据依赖当前 SwitchX 程序路径；移动或删除应用前请恢复原配置。";
-                                color: Theme.muted-text;
-                                font-size: 12px;
-                                wrap: word-wrap;
-                            }
-                        }
-                    }
+            if root.active-page == 5: ConfigPage {
+                busy: root.busy;
+                recovery-only: root.recovery-only;
+                config-home <=> root.config-home;
+                config-status: root.config-status;
+                auth-status: root.auth-status;
+                accounts: root.accounts;
+                account-status: root.account-status;
+                login-user-code: root.login-user-code;
+                login-url: root.login-url;
+                chatgpt-login-pending: root.chatgpt-login-pending;
+                route-auth-error: root.route-auth-error;
+                direct-preview: root.direct-preview;
+                direct-preview-ready: root.direct-preview-ready;
+                config-managed: root.config-managed;
+                apply-direct() => { root.apply-direct(); }
+                restore-config(home) => { root.restore-config(home); }
+                inspect-config(home) => { root.inspect-config(home); }
+                import-current(home) => { root.import-current(home); }
+                check-login(home) => { root.check-login(home); }
+                subscription-action(action) => { root.subscription-action(action); }
+                account-action(action, account-id) => { root.account-action(action, account-id); }
+                request-account-removal(account) => {
+                    root.delete-account-id = account.id;
+                    root.delete-account-label = account.label;
+                    root.delete-account-references = account.bound-provider-names;
+                    root.error-code = "";
+                    root.error-message = "";
+                    root.error-action = "";
+                    root.delete-account-confirm = true;
                 }
             }
 

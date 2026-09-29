@@ -1,0 +1,241 @@
+import { ScrollView } from "std-widgets.slint";
+import { Theme } from "../tokens.slint";
+import { QuietButton, SurfaceCard, StatusPill } from "../components.slint";
+import { ProviderRow } from "../view-models.slint";
+
+export component OverviewPage inherits ScrollView {
+    in property <bool> loading;
+    in property <string> error-code;
+    in property <string> status-text;
+    in property <[ProviderRow]> providers;
+    in property <bool> direct-active;
+    in property <int> selected-model-count;
+    in property <bool> config-managed;
+    in property <bool> route-managed;
+    in property <bool> route-running;
+    callback navigate(int);
+
+    vertical-stretch: 1;
+    VerticalLayout {
+        spacing: 20px;
+        SurfaceCard {
+            height: 248px;
+            VerticalLayout {
+                padding: 24px;
+                spacing: 18px;
+                HorizontalLayout {
+                    spacing: 12px;
+                    Text {
+                        text: "连接控制台";
+                        color: Theme.primary-text;
+                        font-size: 17px;
+                        font-weight: 600;
+                    }
+
+                    StatusPill {
+                        label: root.route-running ? "模型路由运行中" : root.direct-active ? "直连已配置" : root.route-managed ? "待恢复" : "未启用";
+                        ink: root.route-running || root.direct-active ? Theme.success : Theme.warning;
+                    }
+
+                    Rectangle {
+                        horizontal-stretch: 1;
+                    }
+
+                    Text {
+                        text: root.config-managed ? "请重启目标客户端" : "本地状态";
+                        color: Theme.muted-text;
+                        font-size: 12px;
+                    }
+                }
+
+                HorizontalLayout {
+                    spacing: 12px;
+                    SurfaceCard {
+                        width: 176px;
+                        height: 94px;
+                        background: Theme.raised;
+                        VerticalLayout {
+                            padding: 14px;
+                            spacing: 5px;
+                            Text {
+                                text: "Codex";
+                                color: Theme.primary-text;
+                                font-size: 15px;
+                                font-weight: 600;
+                            }
+
+                            Text {
+                                text: root.route-managed ? "路由配置已写入" : root.direct-active ? "直连已写入" : "查看配置与恢复";
+                                color: Theme.muted-text;
+                                font-size: 12px;
+                            }
+                        }
+                    }
+
+                    Rectangle {
+                        height: 1px;
+                        background: Theme.border;
+                        horizontal-stretch: 1;
+                    }
+
+                    SurfaceCard {
+                        width: 176px;
+                        height: 94px;
+                        background: Theme.brand-surface;
+                        VerticalLayout {
+                            padding: 14px;
+                            spacing: 5px;
+                            Text {
+                                text: "SwitchX Router";
+                                color: Theme.primary-text;
+                                font-size: 15px;
+                                font-weight: 600;
+                            }
+
+                            Text {
+                                text: root.route-running ? "运行中" : root.route-managed ? "未运行 · 待恢复" : "尚未启动";
+                                color: Theme.muted-text;
+                                font-size: 12px;
+                            }
+                        }
+                    }
+
+                    Rectangle {
+                        height: 1px;
+                        background: Theme.border;
+                        horizontal-stretch: 1;
+                    }
+
+                    SurfaceCard {
+                        width: 176px;
+                        height: 94px;
+                        background: Theme.raised;
+                        VerticalLayout {
+                            padding: 14px;
+                            spacing: 5px;
+                            Text {
+                                text: "上游";
+                                color: Theme.primary-text;
+                                font-size: 15px;
+                                font-weight: 600;
+                            }
+
+                            Text {
+                                text: root.providers.length + " 个本地记录";
+                                color: Theme.muted-text;
+                                font-size: 12px;
+                            }
+                        }
+                    }
+                }
+
+                Rectangle {
+                    height: 1px;
+                    background: Theme.border;
+                }
+
+                Text {
+                    text: root.route-running ? "请求按公开模型 ID 转发到指定上游；关闭窗口后路由继续运行。" : root.direct-active ? "Codex 直连所选上游；SwitchX 不经手推理请求。" : "从上游列表预览直连，或在模型路由页面发布所选模型。";
+                    color: Theme.muted-text;
+                    font-size: 12px;
+                }
+            }
+        }
+
+        HorizontalLayout {
+            spacing: 16px;
+            VerticalLayout {
+                spacing: 12px;
+                Text {
+                    text: "本地上游资料";
+                    color: Theme.primary-text;
+                    font-size: 16px;
+                    font-weight: 600;
+                }
+
+                SurfaceCard {
+                    height: 172px;
+                    VerticalLayout {
+                        padding: 20px;
+                        spacing: 12px;
+                        Text {
+                            text: root.loading ? "正在读取…" : root.error-code != "" ? "读取失败" : root.providers.length == 0 ? "还没有上游记录" : root.providers.length + " 个上游记录";
+                            color: Theme.primary-text;
+                            font-size: 17px;
+                            font-weight: 600;
+                        }
+
+                        Text {
+                            text: "添加上游后，这里会显示真实连接。";
+                            color: Theme.muted-text;
+                            font-size: 13px;
+                            wrap: word-wrap;
+                        }
+
+                        QuietButton {
+                            text: "查看上游";
+                            clicked => { root.navigate(1); }
+                        }
+                    }
+                }
+            }
+
+            VerticalLayout {
+                spacing: 12px;
+                Text {
+                    text: "Codex 模型菜单";
+                    color: Theme.primary-text;
+                    font-size: 16px;
+                    font-weight: 600;
+                }
+
+                SurfaceCard {
+                    height: 172px;
+                    VerticalLayout {
+                        padding: 20px;
+                        spacing: 12px;
+                        Text {
+                            text: root.route-running ? "目录已发布 · 可启动 Codex" : root.route-managed ? "配置待恢复" : root.selected-model-count + " 个模型待发布";
+                            color: Theme.primary-text;
+                            font-size: 17px;
+                            font-weight: 600;
+                        }
+
+                        Text {
+                            text: root.route-running ? "在模型路由页点击“启动 Codex”，从新会话选择已发布模型。" : root.route-managed ? "请先恢复原配置，再重新发布并启动 Codex。" : "添加模型映射后，可预览并开启路由。";
+                            color: Theme.muted-text;
+                            font-size: 13px;
+                            wrap: word-wrap;
+                        }
+
+                        QuietButton {
+                            text: "查看路由";
+                            clicked => { root.navigate(2); }
+                        }
+                    }
+                }
+            }
+        }
+
+        SurfaceCard {
+            height: 92px;
+            VerticalLayout {
+                padding: 18px;
+                spacing: 8px;
+                Text {
+                    text: "本地状态";
+                    color: Theme.primary-text;
+                    font-size: 15px;
+                    font-weight: 600;
+                }
+
+                Text {
+                    text: root.status-text;
+                    color: Theme.muted-text;
+                    font-size: 13px;
+                    wrap: word-wrap;
+                }
+            }
+        }
+    }
+}

@@ -1,0 +1,163 @@
+import { ScrollView } from "std-widgets.slint";
+import { Theme } from "../tokens.slint";
+import { QuietButton, SurfaceCard } from "../components.slint";
+import { CodeEditor } from "../code-editor.slint";
+
+export component CommonConfigEditor inherits SurfaceCard {
+    in property <bool> busy;
+    in-out property <string> common-config-draft;
+    in property <string> common-config-error;
+    in property <string> common-config-message;
+    in property <string> common-config-current-source;
+    in property <bool> config-managed;
+    callback extract-common-config();
+    callback save-common-config();
+    callback cancel-common-config();
+
+    vertical-stretch: 1;
+    VerticalLayout {
+        padding: 18px;
+        spacing: 12px;
+        HorizontalLayout {
+            height: 36px;
+            Text {
+                text: "编辑通用配置片段";
+                color: Theme.primary-text;
+                font-size: 17px;
+                font-weight: 600;
+                vertical-alignment: center;
+            }
+
+            Rectangle {
+                horizontal-stretch: 1;
+            }
+
+            QuietButton {
+                width: 108px;
+                horizontal-stretch: 0;
+                text: "返回上游";
+                enabled: !root.busy;
+                clicked => { root.cancel-common-config(); }
+            }
+        }
+
+        ScrollView {
+            vertical-stretch: 1;
+            VerticalLayout {
+                spacing: 12px;
+                SurfaceCard {
+                    height: 184px;
+                    background: Theme.brand-surface;
+                    border-color: Theme.brand;
+                    VerticalLayout {
+                        padding: 14px;
+                        spacing: 7px;
+                        Text {
+                            text: "什么是通用配置片段？";
+                            color: Theme.brand;
+                            font-size: 14px;
+                            font-weight: 600;
+                        }
+
+                        Text {
+                            text: "用于在不同供应商之间共享插件、Hook、环境变量和其他非敏感 Codex 设置。";
+                            color: Theme.primary-text;
+                            font-size: 12px;
+                            wrap: word-wrap;
+                        }
+
+                        Text {
+                            text: "首次使用会从目标 Codex 配置自动提取；打开此页加载已保存的片段。";
+                            color: Theme.muted-text;
+                            font-size: 12px;
+                            wrap: word-wrap;
+                        }
+
+                        Text {
+                            text: "“从编辑内容提取”会提取供应商表单当前 config.toml 的通用部分并立即保存。手动修改后需点击“保存”。";
+                            color: Theme.muted-text;
+                            font-size: 12px;
+                            wrap: word-wrap;
+                        }
+
+                        Text {
+                            text: "取消只丢弃手动草稿，已完成的提取仍保留。提取会排除供应商、认证和 MCP 项，片段在勾选“应用通用配置”后切换时生效。";
+                            color: Theme.muted-text;
+                            font-size: 12px;
+                            wrap: word-wrap;
+                        }
+                    }
+                }
+
+                if root.common-config-current-source != "": Text {
+                    text: "提取来源：" + root.common-config-current-source;
+                    color: Theme.muted-text;
+                    font-size: 12px;
+                    wrap: word-wrap;
+                }
+
+                Text {
+                    text: "config.toml (TOML) · 直连或发布路由时与供应商配置合并";
+                    color: Theme.muted-text;
+                    font-size: 12px;
+                    wrap: word-wrap;
+                }
+
+                CodeEditor {
+                    height: 208px;
+                    vertical-stretch: 0;
+                    text <=> root.common-config-draft;
+                    placeholder-text: "在此填写可共享的 Codex TOML 配置";
+                    enabled: !root.busy && !root.config-managed;
+                    accessible-label: "Codex 通用配置片段";
+                }
+
+                if root.common-config-error != "": Text {
+                    text: root.common-config-error;
+                    color: Theme.error;
+                    font-size: 12px;
+                    wrap: word-wrap;
+                }
+
+                if root.common-config-message != "": Text {
+                    text: root.common-config-message;
+                    color: Theme.muted-text;
+                    font-size: 12px;
+                    wrap: word-wrap;
+                }
+            }
+        }
+
+        HorizontalLayout {
+            height: 36px;
+            spacing: 8px;
+            QuietButton {
+                min-width: 160px;
+                text: "从编辑内容提取";
+                enabled: !root.busy && !root.config-managed;
+                clicked => { root.extract-common-config(); }
+            }
+
+            Rectangle {
+                horizontal-stretch: 1;
+            }
+
+            QuietButton {
+                width: 80px;
+                horizontal-stretch: 0;
+                text: "取消";
+                enabled: !root.busy;
+                clicked => { root.cancel-common-config(); }
+            }
+
+            QuietButton {
+                width: 92px;
+                horizontal-stretch: 0;
+                text: "保存";
+                primary: true;
+                enabled: !root.busy && !root.config-managed;
+                clicked => { root.save-common-config(); }
+            }
+        }
+    }
+}
