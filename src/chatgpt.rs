@@ -480,7 +480,7 @@ pub fn save_subscription(
     binding: AccountBinding,
     models: &[Value],
 ) -> Result<String, String> {
-    save_subscription_inner(data_dir, provider_id, name, binding, models, None)
+    save_subscription_inner(data_dir, provider_id, name, binding, models, None, None)
 }
 
 pub fn save_subscription_with_codex_options(
@@ -491,6 +491,30 @@ pub fn save_subscription_with_codex_options(
     models: &[Value],
     options: &crate::provider_config::CodexOptions,
     common: &str,
+) -> Result<String, String> {
+    save_subscription_with_codex_options_and_icon(
+        data_dir,
+        provider_id,
+        name,
+        binding,
+        models,
+        options,
+        common,
+        None,
+    )
+}
+
+/// None preserves the saved icon; an empty ID clears its custom override.
+#[allow(clippy::too_many_arguments)]
+pub fn save_subscription_with_codex_options_and_icon(
+    data_dir: &Path,
+    provider_id: Option<&str>,
+    name: &str,
+    binding: AccountBinding,
+    models: &[Value],
+    options: &crate::provider_config::CodexOptions,
+    common: &str,
+    icon_id: Option<&str>,
 ) -> Result<String, String> {
     let mut options = match &options.config_toml {
         Some(config) => crate::provider_config::subscription_options_from_config(options, config)?,
@@ -510,7 +534,15 @@ pub fn save_subscription_with_codex_options(
             )?);
         }
     }
-    save_subscription_inner(data_dir, provider_id, name, binding, models, Some(&options))
+    save_subscription_inner(
+        data_dir,
+        provider_id,
+        name,
+        binding,
+        models,
+        Some(&options),
+        icon_id,
+    )
 }
 
 pub fn validate_subscription_name(name: &str) -> Result<(), String> {
@@ -599,6 +631,7 @@ fn save_subscription_inner(
     binding: AccountBinding,
     models: &[Value],
     options: Option<&crate::provider_config::CodexOptions>,
+    icon_id: Option<&str>,
 ) -> Result<String, String> {
     app::ensure_editable(data_dir)?;
     validate_subscription_name(name)?;
@@ -621,6 +654,7 @@ fn save_subscription_inner(
     if provider_id.is_some_and(|id| id != PROVIDER_ID) && old.is_none() {
         return Err("订阅连接不存在，请刷新后重试".into());
     }
+    let icon_id = app::resolve_provider_icon_id(icon_id, old.as_ref())?;
     for metadata in models {
         catalog::validate_metadata(metadata)?;
     }
@@ -647,6 +681,7 @@ fn save_subscription_inner(
         credential_ref: None,
         kind: ProviderKind::Chatgpt,
         account_binding: Some(binding),
+        icon_id,
     };
     let mut additions: Vec<ModelRecord> = Vec::new();
     for metadata in models {
@@ -943,6 +978,7 @@ mod tests {
             credential_ref: None,
             kind: ProviderKind::Chatgpt,
             account_binding: Some(AccountBinding::Native),
+            icon_id: None,
         };
         assert!(validate_provider(&provider).is_ok());
         provider.base_url = "https://example.invalid/v1".into();
@@ -1134,6 +1170,87 @@ done
         save_connection(&path, models).unwrap();
         assert!(store.models().unwrap().iter().all(|model| !model.enabled));
         assert_eq!(store.models().unwrap().len(), models.len());
+        drop(store);
+        std::fs::remove_dir_all(path).unwrap();
+    }
+
+    #[test]
+    fn subscription_icons_preserve_binding_options_and_model_mappings() {
+        let path = std::env::temp_dir().join(format!(
+            "switchx-subscription-icon-{}",
+            app::new_id().unwrap()
+        ));
+        let fixture: Value =
+            serde_json::from_str(include_str!("../tests/fixtures/synthetic-models.json")).unwrap();
+        let models = fixture["models"].as_array().unwrap();
+        let options = crate::provider_config::CodexOptions::default();
+        let id = save_subscription_with_codex_options_and_icon(
+            &path,
+            None,
+            "Native subscription",
+            AccountBinding::Native,
+            models,
+            &options,
+            "",
+            Some("openai"),
+        )
+        .unwrap();
+        let store = app::open_store(&path).unwrap();
+        let mappings = store.models().unwrap();
+        let saved_options = store.provider_codex_options(&id).unwrap();
+        save_subscription(
+            &path,
+            Some(&id),
+            "Native subscription",
+            AccountBinding::Native,
+            &[],
+        )
+        .unwrap();
+        assert_eq!(
+            store.provider(&id).unwrap().unwrap().icon_id.as_deref(),
+            Some("openai")
+        );
+        for (icon_id, expected) in [
+            (None, Some("openai")),
+            (Some("deepseek"), Some("deepseek")),
+            (Some(""), None),
+        ] {
+            save_subscription_with_codex_options_and_icon(
+                &path,
+                Some(&id),
+                "Native subscription",
+                AccountBinding::Native,
+                &[],
+                &options,
+                "",
+                icon_id,
+            )
+            .unwrap();
+            let provider = store.provider(&id).unwrap().unwrap();
+            assert_eq!(provider.icon_id.as_deref(), expected);
+            assert_eq!(provider.account_binding, Some(AccountBinding::Native));
+            assert_eq!(store.models().unwrap(), mappings);
+            assert_eq!(store.provider_codex_options(&id).unwrap(), saved_options);
+            assert!(store.provider_api_key(&id).unwrap().is_none());
+        }
+        let before = store.provider(&id).unwrap().unwrap();
+        assert_eq!(
+            save_subscription_with_codex_options_and_icon(
+                &path,
+                Some(&id),
+                "Must not save",
+                AccountBinding::Native,
+                &[],
+                &options,
+                "",
+                Some("../unknown-icon"),
+            )
+            .unwrap_err(),
+            "请选择有效的上游图标"
+        );
+        assert_eq!(store.provider(&id).unwrap(), Some(before));
+        assert_eq!(store.models().unwrap(), mappings);
+        assert_eq!(store.provider_codex_options(&id).unwrap(), saved_options);
         drop(store);
         std::fs::remove_dir_all(path).unwrap();
     }
@@ -1402,6 +1519,7 @@ done
             credential_ref: None,
             kind: ProviderKind::ApiKey,
             account_binding: None,
+            icon_id: None,
         };
         let api = ModelRecord {
             provider_id: api_provider.id.clone(),

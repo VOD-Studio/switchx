@@ -21,11 +21,19 @@ export struct ProviderRow {
     is-subscription: bool,
     binding-label: string,
     preset-id: string,
+    icon-id: string,
     icon: image,
     monochrome: bool,
 }
 
 export struct ProviderPresetRow {
+    id: string,
+    name: string,
+    icon: image,
+    monochrome: bool,
+}
+
+export struct ProviderIconRow {
     id: string,
     name: string,
     icon: image,
@@ -130,6 +138,14 @@ export component AppWindow inherits Window {
     in-out property <string> edit-preset-url: "";
     in-out property <image> edit-preset-icon;
     in-out property <bool> edit-preset-monochrome: false;
+    in property <[ProviderIconRow]> provider-icons;
+    in-out property <[ProviderIconRow]> filtered-provider-icons;
+    in-out property <string> provider-icon-query: "";
+    in-out property <bool> icon-picker-open: false;
+    in-out property <string> edit-icon-id: "";
+    in-out property <string> edit-icon-name: "";
+    in-out property <image> edit-icon;
+    in-out property <bool> edit-icon-monochrome: false;
     in-out property <[string]> fetched-models: [];
     in-out property <bool> fetching-models: false;
     in-out property <string> discovery-message: "";
@@ -200,6 +216,7 @@ export component AppWindow inherits Window {
         if (root.subscription-editor-open || root.subscription-editor-pending) { root.cancel-subscription-editor(); }
     }
     changed active-page => {
+        if (root.active-page != 1 && root.icon-picker-open) { root.close-provider-icon-picker(); }
         if (root.active-page != 1 && (root.subscription-editor-open || root.subscription-editor-pending)) { root.cancel-subscription-editor(); }
     }
     changed subscription-editor-open => {
@@ -227,6 +244,7 @@ export component AppWindow inherits Window {
         if (root.edit-preset-id != "" && root.edit-url != root.edit-preset-url) {
             root.edit-preset-id = "";
         }
+        root.update-provider-icon();
         if (root.editor-open) { root.update-provider-config-preview(); }
     }
     changed edit-name => { if (root.editor-open) { root.update-provider-config-preview(); } }
@@ -271,6 +289,11 @@ export component AppWindow inherits Window {
     callback check-provider(string);
     callback apply-provider-preset(string);
     callback open-provider-preset-link(bool);
+    callback open-provider-icon-picker();
+    callback choose-provider-icon(string);
+    callback close-provider-icon-picker();
+    callback filter-provider-icons(string);
+    callback update-provider-icon();
     callback fetch-models(int);
     callback inspect-direct(string, string);
     callback apply-direct();
@@ -444,7 +467,7 @@ export component AppWindow inherits Window {
 
                     Text {
                         text: root.active-page == 0 ? "模型，各就各位。"
-                            : root.active-page == 1 ? (root.common-config-editor-open ? "Codex 通用配置" : "上游供应商")
+                            : root.active-page == 1 ? (root.icon-picker-open ? "选择上游头像" : root.common-config-editor-open ? "Codex 通用配置" : "上游供应商")
                             : root.active-page == 2 ? "模型路由"
                             : root.active-page == 3 ? "请求与用量"
                             : root.active-page == 4 ? "MCP · Skills"
@@ -740,7 +763,133 @@ export component AppWindow inherits Window {
                 }
             }
 
-            if root.active-page == 1 && !root.common-config-editor-open && !root.subscription-editor-open: ScrollView {
+            if root.active-page == 1 && root.icon-picker-open: SurfaceCard {
+                vertical-stretch: 1;
+                FocusScope {
+                    key-pressed(event) => {
+                        if (event.text == Key.Escape) {
+                            root.close-provider-icon-picker();
+                            return accept;
+                        }
+                        return reject;
+                    }
+
+                    VerticalLayout {
+                        padding: 18px;
+                        spacing: 12px;
+                        HorizontalLayout {
+                            height: 36px;
+                            spacing: 12px;
+                            QuietButton {
+                                width: 80px;
+                                horizontal-stretch: 0;
+                                text: "返回";
+                                clicked => { root.close-provider-icon-picker(); }
+                            }
+
+                            Text {
+                                text: "选择头像";
+                                color: Theme.primary-text;
+                                font-size: 17px;
+                                font-weight: 600;
+                                vertical-alignment: center;
+                            }
+
+                            Rectangle {
+                                horizontal-stretch: 1;
+                            }
+
+                            Text {
+                                text: root.provider-icons.length + " 个内置图标";
+                                color: Theme.muted-text;
+                                font-size: 12px;
+                                vertical-alignment: center;
+                            }
+                        }
+
+                        provider-icon-search := LineEdit {
+                            init => { self.focus(); }
+                            height: 36px;
+                            text <=> root.provider-icon-query;
+                            placeholder-text: "搜索图标名称，例如 OpenAI、DeepSeek";
+                            accessible-label: "搜索上游头像";
+                            edited(text) => { root.filter-provider-icons(text); }
+                        }
+
+                        if root.filtered-provider-icons.length == 0: Rectangle {
+                            vertical-stretch: 1;
+                            Text {
+                                text: "没有找到匹配的图标，试试其他名称。";
+                                color: Theme.muted-text;
+                                font-size: 14px;
+                                horizontal-alignment: center;
+                                vertical-alignment: center;
+                                wrap: word-wrap;
+                            }
+                        }
+
+                        if root.filtered-provider-icons.length > 0: icon-scroll := ScrollView {
+                            vertical-stretch: 1;
+                            horizontal-scrollbar-policy: ScrollBarPolicy.always-off;
+                            content-width: self.visible-width;
+                            content-height: icon-grid.height;
+                            icon-grid := Rectangle {
+                                width: icon-scroll.visible-width;
+                                height: Math.ceil(root.filtered-provider-icons.length / self.columns) * 112px;
+                                property <int> columns: max(1, Math.floor((self.width + 12px) / 124px));
+                                for item[index] in root.filtered-provider-icons: QuietButton {
+                                    x: Math.mod(index, icon-grid.columns) * (icon-grid.width + 12px) / icon-grid.columns;
+                                    y: Math.floor(index / icon-grid.columns) * 112px;
+                                    width: (icon-grid.width + 12px) / icon-grid.columns - 12px;
+                                    height: 100px;
+                                    text: item.name;
+                                    icon: item.icon;
+                                    icon-width: item.icon.width > item.icon.height * 2 ? 80px : 40px;
+                                    icon-height: 40px;
+                                    stacked-icon: true;
+                                    icon-color: item.monochrome ? Theme.primary-text : transparent;
+                                    selected: root.edit-icon-id == item.id;
+                                    accessible-label: item.name + (root.edit-icon-id == item.id ? "，已选择" : "");
+                                    enabled: !root.busy && !root.config-managed;
+                                    clicked => { root.choose-provider-icon(item.id); }
+                                }
+                            }
+                        }
+
+                        HorizontalLayout {
+                            height: 36px;
+                            spacing: 12px;
+                            QuietButton {
+                                width: 124px;
+                                horizontal-stretch: 0;
+                                text: "使用默认头像";
+                                selected: root.edit-icon-id == "";
+                                enabled: !root.busy && !root.config-managed;
+                                clicked => { root.choose-provider-icon(""); }
+                            }
+
+                            Text {
+                                text: (root.edit-icon-id == "" ? "默认头像" : root.edit-icon-name) + " · 保存上游后生效";
+                                color: Theme.muted-text;
+                                font-size: 12px;
+                                vertical-alignment: center;
+                                overflow: elide;
+                                horizontal-stretch: 1;
+                            }
+
+                            QuietButton {
+                                width: 80px;
+                                horizontal-stretch: 0;
+                                text: "完成";
+                                primary: true;
+                                clicked => { root.close-provider-icon-picker(); }
+                            }
+                        }
+                    }
+                }
+            }
+
+            if root.active-page == 1 && !root.common-config-editor-open && !root.subscription-editor-open && !root.icon-picker-open: ScrollView {
                 vertical-stretch: 1;
                 VerticalLayout {
                     spacing: 12px;
@@ -811,7 +960,7 @@ export component AppWindow inherits Window {
                     }
 
                     if root.editor-open: SurfaceCard {
-                        height: 690px + (root.edit-id == "" ? 92px : 0px) + (root.edit-preset-id != "" ? 58px : 0px) + (root.discovery-scope == 0 && (root.fetched-models.length > 0 || root.discovery-message != "") ? 68px : 0px) + (root.edit-config-error != "" ? 48px : 0px);
+                        height: 782px + (root.edit-id == "" ? 92px : 0px) + (root.edit-preset-id != "" ? 58px : 0px) + (root.discovery-scope == 0 && (root.fetched-models.length > 0 || root.discovery-message != "") ? 68px : 0px) + (root.edit-config-error != "" ? 48px : 0px);
                         VerticalLayout {
                             padding: 16px;
                             spacing: 7px;
@@ -855,15 +1004,6 @@ export component AppWindow inherits Window {
 
                             if root.edit-preset-id != "": HorizontalLayout {
                                 spacing: 10px;
-                                Image {
-                                    width: root.edit-preset-id == "xiaomimimo" ? 96px : 36px;
-                                    height: 36px;
-                                    source: root.edit-preset-icon;
-                                    colorize: root.edit-preset-monochrome ? Theme.primary-text : transparent;
-                                    image-fit: contain;
-                                    accessible-role: none;
-                                }
-
                                 Text {
                                     text: root.edit-id == "" ? "已预填官方地址和默认模型，填写 API Key 即可保存。" : "官方 API 连接";
                                     color: Theme.muted-text;
@@ -886,6 +1026,52 @@ export component AppWindow inherits Window {
                                     text: "获取 API Key";
                                     enabled: !root.busy;
                                     clicked => { root.open-provider-preset-link(true); }
+                                }
+                            }
+
+                            HorizontalLayout {
+                                height: 80px;
+                                spacing: 14px;
+                                QuietButton {
+                                    width: 80px;
+                                    height: 80px;
+                                    horizontal-stretch: 0;
+                                    text: "选择上游头像";
+                                    icon-only: true;
+                                    icon: root.edit-icon;
+                                    icon-width: root.edit-icon.width > root.edit-icon.height * 2 ? 64px : 40px;
+                                    icon-height: 40px;
+                                    icon-color: root.edit-icon-monochrome ? Theme.primary-text : transparent;
+                                    enabled: !root.busy && !root.config-managed;
+                                    clicked => { root.open-provider-icon-picker(); }
+                                }
+
+                                VerticalLayout {
+                                    alignment: center;
+                                    spacing: 4px;
+                                    Text {
+                                        text: root.edit-icon-name == "" ? "默认头像" : root.edit-icon-name;
+                                        color: Theme.primary-text;
+                                        font-size: 14px;
+                                    }
+
+                                    Text {
+                                        text: "点击头像选择图标，保存上游后生效。";
+                                        color: Theme.muted-text;
+                                        font-size: 12px;
+                                    }
+                                }
+
+                                Rectangle {
+                                    horizontal-stretch: 1;
+                                }
+
+                                QuietButton {
+                                    width: 100px;
+                                    horizontal-stretch: 0;
+                                    text: "选择头像";
+                                    enabled: !root.busy && !root.config-managed;
+                                    clicked => { root.open-provider-icon-picker(); }
                                 }
                             }
 
@@ -1157,8 +1343,8 @@ export component AppWindow inherits Window {
                         HorizontalLayout {
                             padding: 20px;
                             spacing: 10px;
-                            if provider.preset-id != "": Image {
-                                width: provider.preset-id == "xiaomimimo" ? 84px : 32px;
+                            if provider.icon.width > 0: Image {
+                                width: provider.icon-id == "xiaomimimo" ? 84px : 32px;
                                 height: 32px;
                                 source: provider.icon;
                                 colorize: provider.monochrome ? Theme.primary-text : transparent;
@@ -1252,7 +1438,7 @@ export component AppWindow inherits Window {
                 }
             }
 
-            if root.active-page == 1 && root.subscription-editor-open && !root.common-config-editor-open: SurfaceCard {
+            if root.active-page == 1 && root.subscription-editor-open && !root.common-config-editor-open && !root.icon-picker-open: SurfaceCard {
                 vertical-stretch: 1;
                 VerticalLayout {
                     padding: 18px;
@@ -1268,6 +1454,52 @@ export component AppWindow inherits Window {
                         vertical-stretch: 1;
                         VerticalLayout {
                             spacing: 12px;
+                            HorizontalLayout {
+                                height: 80px;
+                                spacing: 14px;
+                                QuietButton {
+                                    width: 80px;
+                                    height: 80px;
+                                    horizontal-stretch: 0;
+                                    text: "选择 ChatGPT 订阅头像";
+                                    icon-only: true;
+                                    icon: root.edit-icon;
+                                    icon-width: root.edit-icon.width > root.edit-icon.height * 2 ? 64px : 40px;
+                                    icon-height: 40px;
+                                    icon-color: root.edit-icon-monochrome ? Theme.primary-text : transparent;
+                                    enabled: !root.busy && !root.config-managed;
+                                    clicked => { root.open-provider-icon-picker(); }
+                                }
+
+                                VerticalLayout {
+                                    alignment: center;
+                                    spacing: 4px;
+                                    Text {
+                                        text: root.edit-icon-name == "" ? "OpenAI" : root.edit-icon-name;
+                                        color: Theme.primary-text;
+                                        font-size: 14px;
+                                    }
+
+                                    Text {
+                                        text: "点击头像选择图标，保存订阅连接后生效。";
+                                        color: Theme.muted-text;
+                                        font-size: 12px;
+                                    }
+                                }
+
+                                Rectangle {
+                                    horizontal-stretch: 1;
+                                }
+
+                                QuietButton {
+                                    width: 100px;
+                                    horizontal-stretch: 0;
+                                    text: "选择头像";
+                                    enabled: !root.busy && !root.config-managed;
+                                    clicked => { root.open-provider-icon-picker(); }
+                                }
+                            }
+
                             HorizontalLayout {
                                 height: 36px;
                                 spacing: 8px;
@@ -1491,7 +1723,7 @@ export component AppWindow inherits Window {
                 }
             }
 
-            if root.active-page == 1 && root.common-config-editor-open: SurfaceCard {
+            if root.active-page == 1 && root.common-config-editor-open && !root.icon-picker-open: SurfaceCard {
                 vertical-stretch: 1;
                 VerticalLayout {
                     padding: 18px;

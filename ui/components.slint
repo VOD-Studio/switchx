@@ -31,7 +31,10 @@ export component QuietButton inherits Rectangle {
     in property <string> text;
     in property <image> icon;
     in property <length> icon-width: 18px;
+    in property <length> icon-height: 18px;
     in property <brush> icon-color: transparent;
+    in property <bool> icon-only: false;
+    in property <bool> stacked-icon: false;
     in property <bool> selected: false;
     in property <bool> primary: false;
     in property <bool> left-aligned: false;
@@ -55,24 +58,36 @@ export component QuietButton inherits Rectangle {
     accessible-action-default => { if (root.enabled) { root.clicked(); } }
 
     if root.icon.width > 0: Image {
-        x: 12px;
-        y: (parent.height - self.height) / 2;
+        x: root.icon-only || root.stacked-icon ? (parent.width - self.width) / 2 : 12px;
+        y: root.stacked-icon ? 16px : (parent.height - self.height) / 2;
         width: root.icon-width;
-        height: 18px;
+        height: root.icon-height;
         source: root.icon;
         image-fit: contain;
         colorize: root.icon-color;
         accessible-role: none;
     }
 
-    Text {
-        x: root.icon.width > 0 ? root.icon-width + 20px : 12px;
+    if !root.icon-only: Text {
+        x: !root.stacked-icon && root.icon.width > 0 ? root.icon-width + 20px : 12px;
+        y: root.stacked-icon ? root.icon-height + 24px : 0px;
         width: parent.width - self.x - 12px;
+        height: parent.height - self.y;
         text: root.text;
         color: root.primary ? Theme.on-brand : root.selected ? Theme.brand : Theme.primary-text;
         font-size: 13px;
         font-weight: root.selected || root.primary ? 600 : 400;
         horizontal-alignment: root.left-aligned ? left : center;
+        vertical-alignment: center;
+        overflow: elide;
+        accessible-role: none;
+    }
+
+    if root.icon-only && root.icon.width == 0: Text {
+        text: "+";
+        color: Theme.muted-text;
+        font-size: 30px;
+        horizontal-alignment: center;
         vertical-alignment: center;
         accessible-role: none;
     }

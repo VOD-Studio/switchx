@@ -254,6 +254,7 @@ mod tests {
         let mut provider = ProviderRecord {
             kind: crate::storage::ProviderKind::ApiKey,
             account_binding: None,
+            icon_id: None,
             id: "mock".into(),
             name: "Mock".into(),
             base_url: format!("http://{address}/v1"),

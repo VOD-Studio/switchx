@@ -4,7 +4,7 @@ use rusqlite::{Connection, OpenFlags, Result, params};
 
 use crate::credentials::Secret;
 
-const SCHEMA_VERSION: i64 = 9;
+const SCHEMA_VERSION: i64 = 10;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ProviderKind {
@@ -69,6 +69,7 @@ pub struct ProviderRecord {
     pub credential_ref: Option<String>,
     pub kind: ProviderKind,
     pub account_binding: Option<AccountBinding>,
+    pub icon_id: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -170,7 +171,7 @@ impl Store {
     fn open_compatible(path: &Path, flags: OpenFlags) -> Result<Self> {
         let connection = Connection::open_with_flags(path, flags)?;
         let version: i64 = connection.query_row("PRAGMA user_version", [], |row| row.get(0))?;
-        if !matches!(version, 8 | SCHEMA_VERSION) {
+        if !matches!(version, 8 | 9 | SCHEMA_VERSION) {
             return Err(rusqlite::Error::InvalidQuery);
         }
         connection.prepare("SELECT settings_config FROM providers LIMIT 0")?;
@@ -348,8 +349,16 @@ impl Store {
                     [],
                 )?;
             }
-            transaction.pragma_update(None, "user_version", SCHEMA_VERSION)?;
+            transaction.pragma_update(None, "user_version", 9)?;
             transaction.commit()?;
+        }
+        if version < 10 {
+            connection.execute_batch(
+                "BEGIN IMMEDIATE;
+                 ALTER TABLE providers ADD COLUMN icon_id TEXT;
+                 PRAGMA user_version = 10;
+                 COMMIT;",
+            )?;
         }
         Ok(Self { connection })
     }
@@ -554,14 +563,15 @@ impl Store {
             binding
         };
         transaction.execute(
-            "INSERT INTO providers (id, name, base_url, model_id, credential_ref, kind, account_binding)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
+            "INSERT INTO providers (id, name, base_url, model_id, credential_ref, kind, account_binding, icon_id)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)
              ON CONFLICT(id) DO UPDATE SET
                 name = excluded.name,
                 base_url = excluded.base_url,
                 model_id = excluded.model_id,
                 kind = excluded.kind,
                 account_binding = excluded.account_binding,
+                icon_id = excluded.icon_id,
                 credential_ref = CASE WHEN json_valid(providers.settings_config)
                     THEN CASE WHEN json_type(providers.settings_config, '$.auth.OPENAI_API_KEY') = 'text'
                         THEN NULL ELSE excluded.credential_ref END
@@ -573,7 +583,8 @@ impl Store {
                 provider.model_id,
                 provider.credential_ref,
                 provider.kind.as_str(),
-                binding
+                binding,
+                provider.icon_id
             ],
         )?;
         if let Some(options) = options {
@@ -801,7 +812,7 @@ impl Store {
 
     pub fn providers(&self) -> Result<Vec<ProviderRecord>> {
         let mut statement = self.connection.prepare(
-            "SELECT id, name, base_url, model_id, credential_ref, kind, account_binding FROM providers ORDER BY name, id",
+            "SELECT id, name, base_url, model_id, credential_ref, kind, account_binding, icon_id FROM providers ORDER BY name, id",
         )?;
         statement.query_map([], provider_from_row)?.collect()
     }
@@ -810,7 +821,7 @@ impl Store {
         use rusqlite::OptionalExtension;
         self.connection
             .query_row(
-                "SELECT id, name, base_url, model_id, credential_ref, kind, account_binding FROM providers WHERE id = ?1",
+                "SELECT id, name, base_url, model_id, credential_ref, kind, account_binding, icon_id FROM providers WHERE id = ?1",
                 [id],
                 provider_from_row,
             )
@@ -938,6 +949,7 @@ fn provider_from_row(row: &rusqlite::Row<'_>) -> Result<ProviderRecord> {
         credential_ref: row.get(4)?,
         kind,
         account_binding,
+        icon_id: row.get(7)?,
     })
 }
 
@@ -999,12 +1011,118 @@ mod tests {
         store
             .connection
             .execute_batch(
-                "ALTER TABLE providers DROP COLUMN account_binding;
+                "ALTER TABLE providers DROP COLUMN icon_id; ALTER TABLE providers DROP COLUMN account_binding;
              ALTER TABLE providers DROP COLUMN kind;
              DROP TABLE session_bindings;
              PRAGMA user_version = 8;",
             )
             .unwrap();
+    }
+
+    #[test]
+    fn v9_icon_migration_and_credentials_readers_preserve_saved_data() {
+        let path = std::env::temp_dir().join(format!(
+            "switchx-icon-migration-{}.sqlite",
+            crate::app::new_id().unwrap()
+        ));
+        let provider = ProviderRecord {
+            credential_ref: None,
+            ..api_provider()
+        };
+        let key = Secret::new("synthetic-icon-api-key".into());
+        let reference = format!("router-{}", "a".repeat(32));
+        let token = Secret::new("b".repeat(64));
+        let store = Store::open(&path).unwrap();
+        store
+            .put_provider_with_models_options_and_key(&provider, &[], Some("saved-options"), &key)
+            .unwrap();
+        store.put_local_token(&reference, &token).unwrap();
+        store
+            .connection
+            .execute_batch("ALTER TABLE providers DROP COLUMN icon_id; PRAGMA user_version = 9;")
+            .unwrap();
+        drop(store);
+        for expected_version in [9, 10] {
+            let before = std::fs::read(&path).unwrap();
+            let readonly = Store::open_credentials_read_only(&path).unwrap();
+            assert_eq!(
+                readonly
+                    .provider_api_key(&provider.id)
+                    .unwrap()
+                    .unwrap()
+                    .expose(),
+                key.expose()
+            );
+            assert_eq!(
+                readonly.local_token(&reference).unwrap().unwrap().expose(),
+                token.expose()
+            );
+            assert_eq!(
+                readonly
+                    .connection
+                    .query_row("PRAGMA user_version", [], |row| row.get::<_, i64>(0))
+                    .unwrap(),
+                expected_version
+            );
+            drop(readonly);
+            assert_eq!(std::fs::read(&path).unwrap(), before);
+            let recovery = Store::open_recovery(&path).unwrap();
+            assert_eq!(
+                recovery.local_token(&reference).unwrap().unwrap().expose(),
+                token.expose()
+            );
+            drop(recovery);
+            assert_eq!(std::fs::read(&path).unwrap(), before);
+            let store = Store::open(&path).unwrap();
+            assert_eq!(
+                store.provider(&provider.id).unwrap(),
+                Some(provider.clone())
+            );
+            assert_eq!(
+                store.provider_codex_options(&provider.id).unwrap(),
+                "saved-options"
+            );
+            assert_eq!(
+                store
+                    .provider_api_key(&provider.id)
+                    .unwrap()
+                    .unwrap()
+                    .expose(),
+                key.expose()
+            );
+            assert_eq!(
+                store
+                    .connection
+                    .query_row("PRAGMA user_version", [], |row| row.get::<_, i64>(0))
+                    .unwrap(),
+                SCHEMA_VERSION
+            );
+        }
+        let store = Store::open(&path).unwrap();
+        let mut custom = provider;
+        custom.icon_id = Some("openai".into());
+        store.put_provider(&custom).unwrap();
+        drop(store);
+        let store = Store::open(&path).unwrap();
+        assert_eq!(store.providers().unwrap(), [custom.clone()]);
+        custom.icon_id = Some("deepseek".into());
+        store
+            .update_provider_preserving_key(&custom, &[], None)
+            .unwrap();
+        assert_eq!(store.provider(&custom.id).unwrap(), Some(custom.clone()));
+        custom.icon_id = None;
+        store.put_provider(&custom).unwrap();
+        assert_eq!(store.provider(&custom.id).unwrap(), Some(custom.clone()));
+        assert_eq!(
+            store
+                .provider_api_key(&custom.id)
+                .unwrap()
+                .unwrap()
+                .expose(),
+            key.expose()
+        );
+        drop(store);
+        std::fs::remove_file(path).unwrap();
     }
 
     #[test]
@@ -1027,6 +1145,7 @@ mod tests {
                 credential_ref: None,
                 kind: ProviderKind::Chatgpt,
                 account_binding: Some(AccountBinding::Native),
+                icon_id: None,
             };
             let model = ModelRecord {
                 provider_id: provider.id.clone(),
@@ -1093,6 +1212,7 @@ mod tests {
             credential_ref: None,
             kind: ProviderKind::Chatgpt,
             account_binding: Some(AccountBinding::Native),
+            icon_id: None,
         };
         let wrong_model = ModelRecord {
             provider_id: "missing".into(),
@@ -1365,6 +1485,7 @@ mod tests {
         ProviderRecord {
             kind: crate::storage::ProviderKind::ApiKey,
             account_binding: None,
+            icon_id: None,
             id: "synthetic-api".into(),
             name: "Synthetic API".into(),
             base_url: "https://example.invalid/v1".into(),
@@ -1704,7 +1825,7 @@ mod tests {
         store
             .connection
             .execute_batch(
-                "ALTER TABLE providers DROP COLUMN settings_config; ALTER TABLE providers DROP COLUMN account_binding; ALTER TABLE providers DROP COLUMN kind; DROP TABLE session_bindings; PRAGMA user_version = 7;",
+                "ALTER TABLE providers DROP COLUMN settings_config; ALTER TABLE providers DROP COLUMN icon_id; ALTER TABLE providers DROP COLUMN account_binding; ALTER TABLE providers DROP COLUMN kind; DROP TABLE session_bindings; PRAGMA user_version = 7;",
             )
             .unwrap();
         drop(store);
@@ -1785,6 +1906,7 @@ mod tests {
         let provider = ProviderRecord {
             kind: crate::storage::ProviderKind::ApiKey,
             account_binding: None,
+            icon_id: None,
             id: "primary".into(),
             name: "Original".into(),
             base_url: "https://example.invalid/v1".into(),
@@ -1849,6 +1971,7 @@ mod tests {
         let provider = ProviderRecord {
             kind: crate::storage::ProviderKind::ApiKey,
             account_binding: None,
+            icon_id: None,
             id: "primary".into(),
             name: "Primary".into(),
             base_url: "https://example.invalid/v1".into(),
@@ -1900,6 +2023,7 @@ mod tests {
         let provider = ProviderRecord {
             kind: crate::storage::ProviderKind::ApiKey,
             account_binding: None,
+            icon_id: None,
             id: "primary".into(),
             name: "Primary".into(),
             base_url: "https://example.invalid/v1".into(),
@@ -1924,7 +2048,7 @@ mod tests {
                 "INSERT INTO request_records (id, started_at_ms, generation, duration_ms, status)
                     VALUES ('v6-request', 1, 'old-generation', 3, 'completed');
                  ALTER TABLE providers DROP COLUMN codex_options;
-                 ALTER TABLE providers DROP COLUMN settings_config; ALTER TABLE providers DROP COLUMN account_binding; ALTER TABLE providers DROP COLUMN kind; DROP TABLE session_bindings;
+                 ALTER TABLE providers DROP COLUMN settings_config; ALTER TABLE providers DROP COLUMN icon_id; ALTER TABLE providers DROP COLUMN account_binding; ALTER TABLE providers DROP COLUMN kind; DROP TABLE session_bindings;
                  DROP TABLE app_settings;
                  PRAGMA user_version = 6;",
             )
@@ -1959,6 +2083,7 @@ mod tests {
                 .put_provider(&ProviderRecord {
                     kind: crate::storage::ProviderKind::ApiKey,
                     account_binding: None,
+                    icon_id: None,
                     id: id.into(),
                     name: id.into(),
                     base_url: "https://example.invalid/v1".into(),
@@ -1988,7 +2113,7 @@ mod tests {
              DROP TABLE published_models;
              ALTER TABLE old_models RENAME TO published_models;
              ALTER TABLE providers DROP COLUMN codex_options;
-             ALTER TABLE providers DROP COLUMN settings_config; ALTER TABLE providers DROP COLUMN account_binding; ALTER TABLE providers DROP COLUMN kind; DROP TABLE session_bindings;
+             ALTER TABLE providers DROP COLUMN settings_config; ALTER TABLE providers DROP COLUMN icon_id; ALTER TABLE providers DROP COLUMN account_binding; ALTER TABLE providers DROP COLUMN kind; DROP TABLE session_bindings;
              DROP TABLE app_settings;
              PRAGMA user_version = 5;"
         ).unwrap();
@@ -2054,6 +2179,7 @@ mod tests {
         let provider = ProviderRecord {
             kind: crate::storage::ProviderKind::ApiKey,
             account_binding: None,
+            icon_id: None,
             id: "read-only".into(),
             name: "Read only".into(),
             base_url: "https://example.invalid".into(),
@@ -2091,6 +2217,7 @@ mod tests {
                 .put_provider(&ProviderRecord {
                     kind: crate::storage::ProviderKind::ApiKey,
                     account_binding: None,
+                    icon_id: None,
                     id: id.into(),
                     name: id.into(),
                     base_url: "https://example.invalid".into(),
@@ -2117,7 +2244,7 @@ mod tests {
                  ALTER TABLE published_models DROP COLUMN fallback_provider_id;
                  ALTER TABLE request_records DROP COLUMN fallback_from;
                  ALTER TABLE providers DROP COLUMN codex_options;
-                 ALTER TABLE providers DROP COLUMN settings_config; ALTER TABLE providers DROP COLUMN account_binding; ALTER TABLE providers DROP COLUMN kind; DROP TABLE session_bindings;
+                 ALTER TABLE providers DROP COLUMN settings_config; ALTER TABLE providers DROP COLUMN icon_id; ALTER TABLE providers DROP COLUMN account_binding; ALTER TABLE providers DROP COLUMN kind; DROP TABLE session_bindings;
                  DROP TABLE app_settings;
                  PRAGMA user_version = 4;",
             )
@@ -2154,13 +2281,14 @@ mod tests {
         let store = Store::open(&path).unwrap();
         store
             .connection
-            .execute_batch("DROP TABLE request_records; ALTER TABLE published_models DROP COLUMN fallback_provider_id; ALTER TABLE providers DROP COLUMN codex_options; ALTER TABLE providers DROP COLUMN settings_config; ALTER TABLE providers DROP COLUMN account_binding; ALTER TABLE providers DROP COLUMN kind; DROP TABLE session_bindings; DROP TABLE app_settings; PRAGMA user_version = 3;")
+            .execute_batch("DROP TABLE request_records; ALTER TABLE published_models DROP COLUMN fallback_provider_id; ALTER TABLE providers DROP COLUMN codex_options; ALTER TABLE providers DROP COLUMN settings_config; ALTER TABLE providers DROP COLUMN icon_id; ALTER TABLE providers DROP COLUMN account_binding; ALTER TABLE providers DROP COLUMN kind; DROP TABLE session_bindings; DROP TABLE app_settings; PRAGMA user_version = 3;")
             .unwrap();
         drop(store);
         let store = Store::open(&path).unwrap();
         let provider = ProviderRecord {
             kind: crate::storage::ProviderKind::ApiKey,
             account_binding: None,
+            icon_id: None,
             id: "one".into(),
             name: "One".into(),
             base_url: "https://example.invalid".into(),
@@ -2215,6 +2343,7 @@ mod tests {
         let provider = ProviderRecord {
             kind: crate::storage::ProviderKind::ApiKey,
             account_binding: None,
+            icon_id: None,
             id: "deepseek".into(),
             name: "DeepSeek".into(),
             base_url: "https://api.deepseek.com/".into(),
