@@ -9,6 +9,7 @@ import {
     SurfaceCard,
     StatusPill,
     Drawer,
+    DropdownViewport,
 } from "components.slint";
 import {
     ProviderRow,
@@ -49,6 +50,9 @@ export component AppWindow inherits Window {
     min-height: 680px;
     background: Theme.background;
     forward-focus: app-keyboard;
+    property <Point> dropdown-viewport: { x: root.width, y: root.height };
+    init => { DropdownViewport.size = root.dropdown-viewport; }
+    changed dropdown-viewport => { DropdownViewport.size = root.dropdown-viewport; }
 
     MenuBar {
         Menu {

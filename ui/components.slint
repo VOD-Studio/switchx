@@ -2,6 +2,11 @@ import { ComboBox } from "std-widgets.slint";
 import { QuietScrollView as ScrollView } from "scroll-view.slint";
 import { Theme } from "tokens.slint";
 
+// Bound by the owning Window so outside clicks can request an animated close.
+export global DropdownViewport {
+    in-out property <Point> size;
+}
+
 export component SurfaceCard inherits Rectangle {
     background: Theme.panel;
     border-width: 1px;
@@ -429,10 +434,34 @@ export component QuietComboBox inherits Rectangle {
     in property <bool> enabled: true;
     in-out property <int> current-index <=> selection-state.current-index;
     in-out property <string> current-value <=> selection-state.current-value;
-    out property <bool> has-focus: keyboard.has-focus || root.popup-open;
+    out property <bool> has-focus: keyboard.has-focus || root.popup-mounted;
     callback selected(string);
-    property <bool> popup-open: popup.is-open;
+    property <bool> popup-open: false;
+    property <bool> popup-mounted: popup.is-open;
+    property <bool> popup-entered: false;
+    property <float> popup-reveal: root.popup-open && root.popup-entered ? 1 : 0;
+    property <duration> popup-motion: root.popup-open ? Theme.fast : Theme.fast * 0.8;
     property <int> visible-items: min(6, root.model.length);
+    animate popup-reveal {
+        duration: root.popup-motion;
+        easing: ease-out;
+    }
+
+    Timer {
+        interval: 16ms;
+        running: root.popup-open && !root.popup-entered;
+        triggered => { root.popup-entered = true; }
+    }
+
+    Timer {
+        interval: root.popup-motion;
+        running: root.popup-mounted && !root.popup-open;
+        triggered => { popup.close(); }
+    }
+
+    changed popup-mounted => {
+        if (!root.popup-mounted) { root.popup-open = false; root.popup-entered = false; }
+    }
 
     function select(index: int) {
         if (root.enabled && index >= 0 && index < root.model.length) {
@@ -442,7 +471,17 @@ export component QuietComboBox inherits Rectangle {
         }
     }
     function open-popup() {
-        if (root.enabled && root.model.length > 0) { popup.show(); }
+        if (root.enabled && root.model.length > 0) {
+            if (!root.popup-mounted) {
+                root.popup-entered = Theme.fast == 0ms;
+                popup.show();
+            }
+            root.popup-open = true;
+        }
+    }
+    function close-popup() {
+        root.popup-open = false;
+        if (Theme.fast == 0ms) { popup.close(); }
     }
     function handle-selection-key(event: KeyEvent) -> EventResult {
         if (event.text == Key.UpArrow) {
@@ -460,8 +499,8 @@ export component QuietComboBox inherits Rectangle {
         }
         return reject;
     }
-    changed model => { if (root.model.length == 0) { popup.close(); } }
-    changed enabled => { if (!root.enabled) { popup.close(); } }
+    changed model => { if (root.model.length == 0) { root.close-popup(); } }
+    changed enabled => { if (!root.enabled) { root.close-popup(); } }
 
     min-width: 0px;
     min-height: 36px;
@@ -535,25 +574,49 @@ export component QuietComboBox inherits Rectangle {
     }
 
     popup := PopupWindow {
-        x: 0px;
-        y: root.height + 6px;
-        width: max(root.width, 200px);
-        height: root.visible-items * 40px + 10px;
-        close-policy: close-on-click-outside;
+        x: -root.absolute-position.x;
+        y: -root.absolute-position.y;
+        width: DropdownViewport.size.x;
+        height: DropdownViewport.size.y;
+        property <Point> viewport-size: DropdownViewport.size;
+        changed viewport-size => { self.width = self.viewport-size.x; self.height = self.viewport-size.y; }
+        close-policy: no-auto-close;
         forward-focus: popup-keyboard;
 
         popup-keyboard := FocusScope {
             key-pressed(event) => {
                 if (event.text == Key.Return || event.text == Key.Space || event.text == Key.Escape) {
-                    popup.close();
+                    if (!root.popup-open && event.text != Key.Escape) {
+                        root.open-popup();
+                    } else {
+                        root.close-popup();
+                    }
                     return accept;
                 } else if (event.text == Key.Tab || event.text == Key.Backtab) {
+                    // Release the native focus grab before Tab moves to the next control.
+                    root.close-popup();
                     popup.close();
                     return reject;
                 }
-                return root.handle-selection-key(event);
+                return root.popup-open ? root.handle-selection-key(event) : accept;
             }
+            TouchArea {
+                clicked => {
+                    if (!root.popup-open && self.mouse-x >= root.absolute-position.x && self.mouse-x <= root.absolute-position.x + root.width && self.mouse-y >= root.absolute-position.y && self.mouse-y <= root.absolute-position.y + root.height) {
+                        root.open-popup();
+                    } else {
+                        root.close-popup();
+                    }
+                }
+            }
+
             Rectangle {
+                width: min(max(root.width, 200px), parent.width);
+                height: min(root.visible-items * 40px + 10px, parent.height);
+                x: max(0px, min(root.absolute-position.x, parent.width - self.width));
+                property <bool> above: root.absolute-position.y + root.height + 6px + self.height > parent.height;
+                y: (self.above ? max(0px, root.absolute-position.y - self.height - 6px) : root.absolute-position.y + root.height + 6px) + (self.above ? 5px : -5px) * (1 - root.popup-reveal);
+                opacity: root.popup-reveal;
                 background: Theme.panel;
                 border-radius: 10px;
                 border-width: 1px;
@@ -562,7 +625,11 @@ export component QuietComboBox inherits Rectangle {
                 drop-shadow-offset-y: 5px;
                 drop-shadow-color: Theme.dark ? #00000050 : #18221a18;
 
+                // Consume padding clicks, including while the panel is fading out.
+                TouchArea { }
+
                 ScrollView {
+                    enabled: root.popup-open && root.enabled;
                     x: 1px;
                     y: 1px;
                     width: parent.width - 2px;
@@ -609,10 +676,14 @@ export component QuietComboBox inherits Rectangle {
                             accessible-role: list-item;
                             accessible-label: value;
                             accessible-value: index == root.current-index ? "已选" : "";
-                            accessible-action-default => { root.select(index); popup.close(); }
+                            accessible-enabled: root.popup-open && root.enabled;
+                            accessible-action-default => {
+                                if (root.popup-open) { root.select(index); root.close-popup(); }
+                            }
                             item-touch := TouchArea {
+                                enabled: root.popup-open && root.enabled;
                                 mouse-cursor: pointer;
-                                clicked => { root.select(index); popup.close(); }
+                                clicked => { root.select(index); root.close-popup(); }
                             }
                         }
                     }
