@@ -910,29 +910,33 @@ pub(crate) fn save_mapping_from(
 }
 
 pub fn select_model(data_dir: &Path, public_id: &str, enabled: bool) -> Result<(), String> {
+    select_models(data_dir, &[public_id.into()], enabled)
+}
+
+pub fn select_models(data_dir: &Path, public_ids: &[String], enabled: bool) -> Result<(), String> {
     ensure_editable(data_dir)?;
     let store = open_store(data_dir).map_err(|error| error.message())?;
     let models = store.models().map_err(|_| "无法读取模型资料")?;
-    let mut model = models
-        .iter()
-        .find(|model| model.public_id == public_id)
-        .ok_or("请先导入模型资料")?
-        .clone();
-    if enabled {
-        let provider = store
-            .provider(&model.provider_id)
-            .map_err(|_| "无法读取上游资料")?
-            .ok_or("上游不存在")?;
-        validate_provider(&provider.name, &provider.base_url, &model.upstream_model)?;
-        model.enabled = true;
-        catalog::validate_fallback(&model, &models)?;
-        let mut validation = model.clone();
-        validation.fallback_provider_id = None;
-        catalog::publish_saved(&[validation])?;
+    for public_id in public_ids {
+        let mut model = models
+            .iter()
+            .find(|model| &model.public_id == public_id)
+            .ok_or("请先导入模型资料")?
+            .clone();
+        if enabled {
+            let provider = store
+                .provider(&model.provider_id)
+                .map_err(|_| "无法读取上游资料")?
+                .ok_or("上游不存在")?;
+            validate_provider(&provider.name, &provider.base_url, &model.upstream_model)?;
+            model.enabled = true;
+            catalog::validate_fallback(&model, &models)?;
+            model.fallback_provider_id = None;
+            catalog::publish_saved(&[model])?;
+        }
     }
-    model.enabled = enabled;
     store
-        .put_model(&model)
+        .set_models_enabled(public_ids, enabled)
         .map_err(|_| "无法保存模型选择".into())
 }
 
@@ -1615,6 +1619,95 @@ mod tests {
         fs::write(path.join("switch-journal.json"), "synthetic journal").unwrap();
         assert!(save("", "sx-blocked", "new-model", "").is_err());
         assert!(delete_model(&path, "sx-second").is_err());
+        drop(store);
+        fs::remove_dir_all(path).unwrap();
+    }
+
+    #[test]
+    fn bulk_model_selection_is_atomic_and_respects_recovery_lock() {
+        let path = env::temp_dir().join(format!("switchx-model-selection-{}", new_id().unwrap()));
+        let store = open_store(&path).unwrap();
+        store
+            .put_provider(&ProviderRecord {
+                kind: crate::storage::ProviderKind::ApiKey,
+                account_binding: None,
+                icon_id: None,
+                id: "mock".into(),
+                name: "Mock".into(),
+                base_url: "https://example.invalid/v1".into(),
+                model_id: "first-model".into(),
+                credential_ref: None,
+            })
+            .unwrap();
+        for id in ["first", "second", "broken"] {
+            let public_id = format!("sx-{id}");
+            let metadata = catalog::mapping_metadata(
+                id,
+                id,
+                &catalog::MappingSettings {
+                    context_window: "128000",
+                    reasoning_levels: None,
+                    default_reasoning: None,
+                },
+                None,
+            )
+            .unwrap();
+            store
+                .put_model(&ModelRecord {
+                    provider_id: "mock".into(),
+                    public_id,
+                    display_name: id.into(),
+                    upstream_model: id.into(),
+                    metadata: if id == "broken" {
+                        "{}".into()
+                    } else {
+                        metadata.to_string()
+                    },
+                    enabled: false,
+                    fallback_provider_id: None,
+                })
+                .unwrap();
+        }
+        let before = store.models().unwrap();
+        for invalid_id in ["sx-broken", "sx-missing"] {
+            assert!(select_models(&path, &["sx-first".into(), invalid_id.into()], true).is_err());
+            assert_eq!(store.models().unwrap(), before);
+        }
+        // A row removed between validation and persistence must roll back earlier updates.
+        assert!(
+            store
+                .set_models_enabled(&["sx-first".into(), "sx-missing".into()], true)
+                .is_err()
+        );
+        assert_eq!(store.models().unwrap(), before);
+
+        let ids = ["sx-first".into(), "sx-second".into()];
+        select_models(&path, &ids, true).unwrap();
+        let mut expected = before;
+        for model in &mut expected {
+            model.enabled = ids.contains(&model.public_id);
+        }
+        assert_eq!(store.models().unwrap(), expected);
+        select_models(&path, &["sx-second".into()], false).unwrap();
+        assert!(
+            store
+                .models()
+                .unwrap()
+                .iter()
+                .find(|model| model.public_id == "sx-first")
+                .unwrap()
+                .enabled
+        );
+        select_models(&path, &ids, false).unwrap();
+        assert!(store.models().unwrap().iter().all(|model| !model.enabled));
+        fs::write(path.join("switch-journal.json"), "synthetic journal").unwrap();
+        let before = store.models().unwrap();
+        assert!(
+            select_models(&path, &ids, true)
+                .unwrap_err()
+                .contains("先恢复")
+        );
+        assert_eq!(store.models().unwrap(), before);
         drop(store);
         fs::remove_dir_all(path).unwrap();
     }

@@ -16,6 +16,7 @@ export component RoutingPage inherits Rectangle {
     in property <[ProviderRow]> providers;
     in property <[ModelRow]> models;
     in property <int> selected-model-count;
+    in property <int> selectable-model-count;
     in property <bool> config-managed;
     in property <bool> route-managed;
     in property <bool> route-running;
@@ -31,6 +32,7 @@ export component RoutingPage inherits Rectangle {
     callback add-selected-model();
     callback begin-model-editor(string, string);
     callback select-model(string, bool);
+    callback select-models(bool, bool);
     callback edit-fallback(string);
     callback inspect-route();
     callback launch-codex();
@@ -185,9 +187,20 @@ export component RoutingPage inherits Rectangle {
                     height: 36px;
                     background: Theme.background;
                     HorizontalLayout {
-                        padding-left: 54px;
+                        padding-left: 14px;
                         padding-right: 20px;
                         spacing: 12px;
+                        QuietCheckBox {
+                            width: 64px;
+                            text: "全选";
+                            accessible-label: self.checked ? "取消全选可发布模型" : "全选可发布模型";
+                            auto-toggle: false;
+                            checked: root.selected-model-count > 0 && (root.selected-only || root.selected-model-count == root.selectable-model-count);
+                            indeterminate: !root.selected-only && root.selected-model-count > 0 && root.selected-model-count < root.selectable-model-count;
+                            enabled: !root.busy && !root.loading && !root.config-managed && (root.selected-only ? root.selected-model-count : root.selectable-model-count) > 0;
+                            toggled => { root.select-models(!self.checked, root.selected-only); }
+                        }
+
                         Text {
                             text: "模型 / 公开标识";
                             color: Theme.muted-text;

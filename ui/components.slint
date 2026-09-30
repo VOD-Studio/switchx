@@ -165,6 +165,8 @@ export component QuietButton inherits Rectangle {
 export component QuietCheckBox inherits Rectangle {
     in property <string> text;
     in-out property <bool> checked;
+    in property <bool> indeterminate: false;
+    in property <bool> auto-toggle: true;
     in property <bool> enabled: true;
     callback toggled;
     height: 32px;
@@ -176,10 +178,14 @@ export component QuietCheckBox inherits Rectangle {
     accessible-role: checkbox;
     accessible-label: root.text;
     accessible-checked: root.checked;
+    accessible-value: root.indeterminate ? "部分选中" : root.checked ? "已选" : "未选";
     accessible-enabled: root.enabled;
     accessible-action-default => { root.toggle(); }
     function toggle() {
-        if (root.enabled) { root.checked = !root.checked; root.toggled(); }
+        if (root.enabled) {
+            if (root.auto-toggle) { root.checked = !root.checked; }
+            root.toggled();
+        }
     }
     Rectangle {
         x: 3px;
@@ -188,8 +194,8 @@ export component QuietCheckBox inherits Rectangle {
         height: 17px;
         border-radius: 4px;
         border-width: 1px;
-        border-color: root.checked || touch.has-hover || keyboard.has-focus ? Theme.brand : Theme.border;
-        background: root.checked ? Theme.brand : Theme.panel;
+        border-color: root.checked || root.indeterminate || touch.has-hover || keyboard.has-focus ? Theme.brand : Theme.border;
+        background: root.checked || root.indeterminate ? Theme.brand : Theme.panel;
         animate background, border-color { duration: Theme.fast; }
         Image {
             x: 2px;
@@ -199,11 +205,22 @@ export component QuietCheckBox inherits Rectangle {
             source: @image-url("../assets/ui/check.svg");
             accessible-role: none;
             colorize: Theme.on-brand;
-            opacity: root.checked ? 1 : 0;
+            opacity: root.checked && !root.indeterminate ? 1 : 0;
             animate y, opacity {
                 duration: Theme.fast;
                 easing: ease-out;
             }
+        }
+
+        Rectangle {
+            x: 4px;
+            y: 7px;
+            width: 9px;
+            height: 2px;
+            border-radius: 1px;
+            background: Theme.on-brand;
+            visible: root.indeterminate;
+            accessible-role: none;
         }
     }
 

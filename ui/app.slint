@@ -154,6 +154,7 @@ export component AppWindow inherits Window {
     in-out property <[RequestRow]> requests: [];
     in-out property <string> request-error: "";
     in-out property <int> selected-model-count: 0;
+    in-out property <int> selectable-model-count: 0;
     in-out property <bool> config-managed: false;
     in-out property <bool> route-managed: false;
     in-out property <bool> route-running: false;
@@ -295,6 +296,7 @@ export component AppWindow inherits Window {
     callback update-model-display-name();
     callback update-reasoning-options();
     callback select-model(string, bool);
+    callback select-models(bool, bool);
     callback edit-fallback(string);
     callback save-fallback();
     callback inspect-route();
@@ -648,6 +650,7 @@ export component AppWindow inherits Window {
                                     providers: root.providers;
                                     models: root.models;
                                     selected-model-count: root.selected-model-count;
+                                    selectable-model-count: root.selectable-model-count;
                                     config-managed: root.config-managed;
                                     route-managed: root.route-managed;
                                     route-running: root.route-running;
@@ -662,6 +665,7 @@ export component AppWindow inherits Window {
                                     add-selected-model() => { root.add-selected-model(); }
                                     begin-model-editor(provider-id, model-id) => { root.begin-model-editor(provider-id, model-id); }
                                     select-model(id, selected) => { root.select-model(id, selected); }
+                                    select-models(selected, selected-only) => { root.select-models(selected, selected-only); }
                                     edit-fallback(id) => { root.edit-fallback(id); }
                                     inspect-route() => { root.publish-drawer-open = true; root.inspect-route(); }
                                     launch-codex() => { root.launch-codex(); }
