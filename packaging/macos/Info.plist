@@ -6,6 +6,7 @@
   <key>CFBundleDisplayName</key><string>SwitchX</string>
   <key>CFBundleExecutable</key><string>switchx</string>
   <key>CFBundleIdentifier</key><string>dev.switchx.preview</string>
+  <key>CFBundleIconFile</key><string>AppIcon.icns</string>
   <key>CFBundleInfoDictionaryVersion</key><string>6.0</string>
   <key>CFBundleName</key><string>SwitchX</string>
   <key>CFBundlePackageType</key><string>APPL</string>
