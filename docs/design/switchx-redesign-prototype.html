@@ -1,0 +1,385 @@
+<!-- Throwaway design study, 2026-09-30. Three alternative application architectures.
+     Synthetic, in-memory state only. No backend, credentials, files, or real Codex actions.
+     Review question: quiet workbench, focused launcher, or visible route canvas?
+     Runtime provides the shared variant carousel; no production files are replaced. -->
+<style>
+#sx-redesign .sx {
+  --sx-bg:light-dark(#fbfaf8,#17191b);--sx-side:light-dark(#f0efeb,#111315);
+  --sx-surface:light-dark(#ffffff,#202326);--sx-soft:light-dark(#f3f3ef,#282c2e);
+  --sx-ink:light-dark(#252c29,#e9ede9);--sx-muted:light-dark(#6d7670,#a3ada5);
+  --sx-faint:light-dark(#858c87,#849087);--sx-line:light-dark(#e4e7e1,#333a35);
+  --sx-accent:light-dark(#496b56,#a7c4ab);--sx-tint:light-dark(#e8efe6,#29382e);
+  --sx-solid:light-dark(#273f31,#bfd4bf);--sx-on-solid:light-dark(#ffffff,#1b2a20);
+  --sx-amber:light-dark(#946621,#e1b879);--sx-amber-bg:light-dark(#f8efdf,#3a3125);
+  --sx-blue:light-dark(#4b70ae,#a7bce8);--sx-blue-bg:light-dark(#edf2fb,#283343);
+  --sx-red:light-dark(#ae534d,#e7a19b);--sx-shadow:light-dark(#24352814,#00000040);
+  --sx-fast:150ms;--sx-mid:240ms;--sx-slow:340ms;--sx-ease:cubic-bezier(.2,.75,.25,1);
+  font-family:-apple-system,BlinkMacSystemFont,"SF Pro Text","PingFang SC","Microsoft YaHei",sans-serif;
+  font-size:13px;font-weight:400;line-height:1.5;letter-spacing:.01em;color:var(--sx-ink);background:var(--sx-bg);
+  min-height:830px;position:relative;border:1px solid var(--sx-line);border-radius:16px;
+  overflow:clip;isolation:isolate;transition:background var(--sx-mid),color var(--sx-mid),border-color var(--sx-mid);
+}
+#sx-redesign .sx *,#sx-redesign .sx *::before,#sx-redesign .sx *::after{box-sizing:border-box}
+#sx-redesign .sx h1,#sx-redesign .sx h2,#sx-redesign .sx h3,#sx-redesign .sx p{margin:0}
+#sx-redesign .sx h1{font-size:27px;font-weight:580;line-height:1.3;letter-spacing:-.055em}
+#sx-redesign .sx h2{font-size:16px;font-weight:580;letter-spacing:-.02em}
+#sx-redesign .sx h3{font-size:14px;font-weight:580}
+#sx-redesign .sx button,#sx-redesign .sx input,#sx-redesign .sx select{font:inherit;color:inherit;letter-spacing:inherit}
+#sx-redesign .sx button{display:inline-flex;align-items:center;justify-content:center;gap:8px;border:0;background:transparent;padding:0;transition:background var(--sx-fast),color var(--sx-fast),border-color var(--sx-fast),box-shadow var(--sx-fast),transform var(--sx-fast),opacity var(--sx-fast)}
+#sx-redesign .sx button:active:not(:disabled){transform:scale(.975)}
+#sx-redesign .sx button:disabled{opacity:.44;cursor:not-allowed}
+#sx-redesign .sx [hidden]{display:none!important}
+#sx-redesign .sx svg{width:16px;height:16px;flex:none;stroke-width:1.65}
+#sx-redesign .sx small{font-size:11px}
+#sx-redesign .sx .sx-muted{color:var(--sx-muted)}
+#sx-redesign .sx .sx-mono{font-family:"SFMono-Regular",Consolas,monospace;font-size:11px;letter-spacing:0;overflow-wrap:anywhere}
+#sx-redesign .sx .sx-eyebrow{font-size:10px;letter-spacing:.15em;font-weight:600;color:var(--sx-muted);text-transform:uppercase}
+#sx-redesign .sx .sx-row{display:flex;align-items:center;gap:10px;min-width:0}
+#sx-redesign .sx .sx-between{justify-content:space-between}
+#sx-redesign .sx .sx-stack{display:flex;flex-direction:column;gap:4px;min-width:0}
+#sx-redesign .sx .sx-pill{display:inline-flex;align-items:center;gap:6px;font-size:11px;white-space:nowrap;color:var(--sx-accent);background:var(--sx-tint);padding:4px 8px;border-radius:6px}
+#sx-redesign .sx .sx-pill.sx-wait{background:var(--sx-amber-bg);color:var(--sx-amber)}
+#sx-redesign .sx .sx-dot{width:5px;height:5px;border-radius:50%;background:currentColor;display:inline-block;flex:none}
+#sx-redesign .sx .sx-button{padding:9px 13px;min-height:36px;border-radius:8px;background:var(--sx-surface);border:1px solid var(--sx-line);white-space:nowrap;font-size:12px;font-weight:500}
+#sx-redesign .sx .sx-button:hover:not(:disabled){background:var(--sx-soft);border-color:var(--sx-faint);box-shadow:0 2px 5px var(--sx-shadow)}
+#sx-redesign .sx .sx-primary{background:var(--sx-solid);border-color:var(--sx-solid);color:var(--sx-on-solid);box-shadow:0 2px 4px var(--sx-shadow)}
+#sx-redesign .sx .sx-primary:hover:not(:disabled){background:var(--sx-solid);border-color:var(--sx-solid);filter:brightness(1.1);transform:translateY(-1px)}
+#sx-redesign .sx .sx-ghost{min-height:32px;padding:6px 9px;border-radius:7px;color:var(--sx-muted);font-size:12px}
+#sx-redesign .sx .sx-ghost:hover:not(:disabled){color:var(--sx-ink);background:var(--sx-soft)}
+#sx-redesign .sx .sx-icon-button{width:32px;height:32px;flex:none;border-radius:7px;color:var(--sx-muted)}
+#sx-redesign .sx .sx-icon-button:hover{background:var(--sx-soft);color:var(--sx-ink)}
+#sx-redesign .sx .sx-brand{display:flex;align-items:center;gap:8px;font-size:20px;font-weight:650;letter-spacing:-1px}
+#sx-redesign .sx .sx-mark{position:relative;width:23px;height:23px;flex:none;display:inline-block;color:var(--sx-accent)}
+#sx-redesign .sx .sx-mark:before,#sx-redesign .sx .sx-mark:after{content:"";position:absolute;width:15px;height:7px;border:2px solid currentColor;border-radius:2px;transform:skewY(-28deg);left:1px;top:3px}
+#sx-redesign .sx .sx-mark:after{left:7px;top:13px}
+#sx-redesign .sx .sx-windowbar{height:37px;display:flex;align-items:center;padding:0 18px;gap:7px;position:relative}
+#sx-redesign .sx .sx-windowbar>span{width:9px;height:9px;border-radius:50%;background:var(--sx-line)}
+#sx-redesign .sx .sx-windowbar>span:first-child{background:light-dark(#d89788,#865a52)}
+#sx-redesign .sx .sx-windowbar>span:nth-child(2){background:light-dark(#d4b776,#82703f)}
+#sx-redesign .sx .sx-windowbar>span:nth-child(3){background:light-dark(#9eb590,#526749)}
+#sx-redesign .sx .sx-demo{margin-left:auto;font-size:10px;letter-spacing:.08em;color:var(--sx-muted)}
+#sx-redesign .sx .sx-shell{display:grid;grid-template-columns:174px minmax(0,1fr);min-height:791px}
+#sx-redesign .sx .sx-sidebar{display:flex;flex-direction:column;padding:14px 12px 17px;background:var(--sx-side);border-right:1px solid var(--sx-line)}
+#sx-redesign .sx .sx-sidebar .sx-brand{padding:0 9px 28px}
+#sx-redesign .sx .sx-workspace{display:flex;align-items:center;gap:9px;padding:10px 9px;margin-bottom:22px}
+#sx-redesign .sx .sx-workspace-icon{width:28px;height:28px;border-radius:8px;background:var(--sx-surface);border:1px solid var(--sx-line);display:grid;place-items:center;font-size:14px}
+#sx-redesign .sx .sx-workspace strong{font-size:12px;font-weight:550}
+#sx-redesign .sx .sx-workspace small{color:var(--sx-muted);font-size:10px}
+#sx-redesign .sx .sx-nav{display:flex;flex-direction:column;gap:5px;position:relative}
+#sx-redesign .sx .sx-nav .sx-navitem{position:relative;justify-content:flex-start;text-align:left;gap:10px;padding:10px 12px;border-radius:8px;min-height:39px;color:var(--sx-muted);font-size:12px}
+#sx-redesign .sx .sx-nav .sx-navitem:hover{background:color-mix(in srgb,var(--sx-ink) 4%,transparent);color:var(--sx-ink)}
+#sx-redesign .sx .sx-nav .sx-navitem[aria-current=page]{background:var(--sx-surface);color:var(--sx-ink);box-shadow:0 1px 3px var(--sx-shadow);font-weight:550}
+#sx-redesign .sx .sx-nav .sx-navitem[aria-current=page]:before{content:"";width:3px;height:14px;background:var(--sx-accent);position:absolute;left:0;top:12px;border-radius:2px}
+#sx-redesign .sx .sx-nav-spacer{height:19px}
+#sx-redesign .sx .sx-sidebar-bottom{margin-top:auto;padding:30px 8px 0}
+#sx-redesign .sx .sx-sidebar-bottom .sx-statuslink{display:flex;font-size:11px;color:var(--sx-muted);gap:7px;padding:8px 0}
+#sx-redesign .sx .sx-sidebar-bottom small{font-size:10px;color:var(--sx-faint)}
+#sx-redesign .sx .sx-main{min-width:0;display:flex;flex-direction:column}
+#sx-redesign .sx .sx-topbar{display:flex;align-items:center;justify-content:space-between;height:54px;gap:10px;padding:0 30px;border-bottom:1px solid var(--sx-line)}
+#sx-redesign .sx .sx-breadcrumb{font-size:11px;color:var(--sx-muted);display:flex;align-items:center;gap:8px}
+#sx-redesign .sx .sx-breadcrumb span{color:var(--sx-ink)}
+#sx-redesign .sx .sx-search-button{font-size:11px;color:var(--sx-muted);gap:8px}
+#sx-redesign .sx kbd{font:10px -apple-system,BlinkMacSystemFont,sans-serif;padding:2px 4px;border:1px solid var(--sx-line);border-radius:4px;background:var(--sx-surface);color:var(--sx-muted)}
+#sx-redesign .sx .sx-content{padding:30px;min-width:0;flex:1}
+#sx-redesign .sx .sx-heading{display:flex;align-items:flex-start;justify-content:space-between;gap:20px;margin-bottom:26px}
+#sx-redesign .sx .sx-heading p{font-size:12px;color:var(--sx-muted);margin-top:7px;line-height:1.7}
+#sx-redesign .sx .sx-connection-strip{display:flex;align-items:center;gap:11px;padding:15px 17px;background:var(--sx-tint);border-radius:9px;margin:0 0 28px;position:relative;overflow:hidden;transition:background var(--sx-mid)}
+#sx-redesign .sx .sx-connection-strip .sx-line{height:1px;width:27px;flex:1;max-width:55px;background:color-mix(in srgb,var(--sx-accent) 25%,transparent)}
+#sx-redesign .sx .sx-connection-strip .sx-rail-label{font-size:11px;display:flex;align-items:center;gap:6px;white-space:nowrap}
+#sx-redesign .sx .sx-connection-strip .sx-state{margin-left:auto;font-size:11px;display:flex;align-items:center;gap:7px;color:var(--sx-accent);white-space:nowrap}
+#sx-redesign .sx .sx-sectionline{display:flex;align-items:center;justify-content:space-between;gap:10px;margin-bottom:14px}
+#sx-redesign .sx .sx-sectionline small{color:var(--sx-muted);font-size:11px;margin-left:7px}
+#sx-redesign .sx .sx-segments{display:flex;align-items:center;gap:2px;padding:3px;background:var(--sx-soft);border-radius:7px}
+#sx-redesign .sx .sx-segments button{padding:5px 10px;border-radius:5px;font-size:11px;color:var(--sx-muted);min-height:26px}
+#sx-redesign .sx .sx-segments button[aria-pressed=true]{background:var(--sx-surface);color:var(--sx-ink);box-shadow:0 1px 3px var(--sx-shadow)}
+#sx-redesign .sx .sx-table{border:1px solid var(--sx-line);border-radius:11px;overflow:hidden;background:var(--sx-surface)}
+#sx-redesign .sx .sx-tablehead,#sx-redesign .sx .sx-modelrow{display:grid;grid-template-columns:29px minmax(0,1fr) 115px 56px 28px;align-items:center;gap:10px;padding:14px 15px}
+#sx-redesign .sx .sx-tablehead{padding-top:10px;padding-bottom:10px;font-size:10px;color:var(--sx-muted);background:var(--sx-bg);letter-spacing:.04em}
+#sx-redesign .sx .sx-modelrow{min-height:72px;border-top:1px solid var(--sx-line);transition:background var(--sx-fast),opacity var(--sx-mid)}
+#sx-redesign .sx .sx-modelrow:hover{background:var(--sx-bg)}
+#sx-redesign .sx .sx-modelrow.sx-is-default{background:color-mix(in srgb,var(--sx-tint) 35%,var(--sx-surface))}
+#sx-redesign .sx .sx-check{position:relative;display:inline-flex;align-items:center;justify-content:center;width:24px;height:28px;flex:none}
+#sx-redesign .sx .sx-check input{position:absolute;width:24px;height:28px;margin:0;opacity:0;inset:0;z-index:1}
+#sx-redesign .sx .sx-check .sx-checkbox{width:16px;height:16px;border-radius:4px;background:var(--sx-surface);border:1px solid var(--sx-line);display:grid;place-items:center;transition:background var(--sx-fast),border-color var(--sx-fast),transform var(--sx-fast)}
+#sx-redesign .sx .sx-check input:checked+.sx-checkbox{background:var(--sx-accent);border-color:var(--sx-accent)}
+#sx-redesign .sx .sx-check .sx-checkbox svg{width:12px;height:12px;color:var(--sx-bg);transform:scale(.45);opacity:0;transition:transform var(--sx-mid),opacity var(--sx-mid)}
+#sx-redesign .sx .sx-check input:checked+.sx-checkbox svg{transform:scale(1);opacity:1}
+#sx-redesign .sx .sx-check input:focus-visible+.sx-checkbox{outline:2px solid var(--sx-accent);outline-offset:3px}
+#sx-redesign .sx .sx-check input:disabled+.sx-checkbox{opacity:.5}
+#sx-redesign .sx .sx-model-name{font-size:13px;font-weight:550;justify-content:flex-start;gap:8px;text-align:left;min-width:0;overflow-wrap:anywhere}
+#sx-redesign .sx .sx-model-name:hover{color:var(--sx-accent)}
+#sx-redesign .sx .sx-model-meta{font-size:10px;color:var(--sx-muted);margin-top:3px;overflow-wrap:anywhere}
+#sx-redesign .sx .sx-provider-label{display:flex;align-items:center;gap:7px;color:var(--sx-muted);font-size:11px}
+#sx-redesign .sx .sx-provider-symbol{display:inline-flex;align-items:center;justify-content:center;border-radius:7px;width:24px;height:24px;background:var(--sx-soft);color:var(--sx-ink);flex:none}
+#sx-redesign .sx .sx-provider-symbol.sx-deepseek{background:var(--sx-blue-bg);color:var(--sx-blue)}
+#sx-redesign .sx .sx-default{font-size:10px;border:1px solid transparent;padding:4px 6px;border-radius:5px;color:var(--sx-muted);white-space:nowrap}
+#sx-redesign .sx .sx-default[aria-pressed=true]{background:var(--sx-tint);color:var(--sx-accent)}
+#sx-redesign .sx .sx-default:hover:not(:disabled){border-color:var(--sx-line);color:var(--sx-accent)}
+#sx-redesign .sx .sx-default svg{width:12px;height:12px}
+#sx-redesign .sx .sx-publishbar{display:flex;align-items:center;justify-content:space-between;gap:15px;padding-top:19px}
+#sx-redesign .sx .sx-publishbar p{font-size:11px;color:var(--sx-muted);margin-top:3px}
+#sx-redesign .sx .sx-publishbar strong{font-size:12px;font-weight:550}
+#sx-redesign .sx .sx-bottom-note{display:flex;align-items:center;justify-content:space-between;gap:10px;margin-top:30px;padding-top:15px;border-top:1px solid var(--sx-line);color:var(--sx-muted);font-size:10px}
+#sx-redesign .sx .sx-bottom-note button{font-size:10px;gap:5px}
+#sx-redesign .sx .sx-split{display:grid;grid-template-columns:minmax(0,1fr) minmax(0,1fr);gap:16px}
+#sx-redesign .sx .sx-provider-card{padding:22px;border-radius:12px;background:var(--sx-surface);border:1px solid var(--sx-line);transition:box-shadow var(--sx-mid),transform var(--sx-mid),border-color var(--sx-mid)}
+#sx-redesign .sx .sx-provider-card:hover{border-color:var(--sx-faint);box-shadow:0 5px 15px var(--sx-shadow);transform:translateY(-2px)}
+#sx-redesign .sx .sx-provider-card>.sx-row{margin-bottom:20px}
+#sx-redesign .sx .sx-provider-card .sx-provider-symbol{width:36px;height:36px;border-radius:10px}
+#sx-redesign .sx .sx-provider-card .sx-provider-symbol svg{width:21px;height:21px}
+#sx-redesign .sx .sx-provider-card p{color:var(--sx-muted);font-size:11px;margin:8px 0}
+#sx-redesign .sx .sx-provider-card .sx-button{margin-top:17px;width:100%}
+#sx-redesign .sx .sx-detail-line{display:flex;justify-content:space-between;align-items:center;gap:14px;padding:13px 0;border-bottom:1px solid var(--sx-line);font-size:12px}
+#sx-redesign .sx .sx-detail-line>span:first-child{color:var(--sx-muted)}
+#sx-redesign .sx .sx-detail-line>span:last-child{text-align:right}
+#sx-redesign .sx .sx-subsection{margin-top:30px}
+#sx-redesign .sx .sx-accountrow{display:flex;align-items:center;justify-content:space-between;gap:12px;padding:19px 0;border-bottom:1px solid var(--sx-line)}
+#sx-redesign .sx .sx-avatar{width:30px;height:30px;border-radius:50%;display:grid;place-items:center;color:var(--sx-accent);background:var(--sx-tint);font-size:11px;font-weight:550}
+#sx-redesign .sx .sx-activity{width:100%;border-collapse:collapse;font-size:11px}
+#sx-redesign .sx .sx-activity th{text-align:left;color:var(--sx-muted);font-size:10px;font-weight:400;padding:12px 8px;border-bottom:1px solid var(--sx-line)}
+#sx-redesign .sx .sx-activity td{padding:17px 8px;border-bottom:1px solid var(--sx-line)}
+#sx-redesign .sx .sx-activity tr{transition:background var(--sx-fast)}
+#sx-redesign .sx .sx-activity tbody tr:hover{background:var(--sx-soft)}
+#sx-redesign .sx .sx-toolrow{display:flex;align-items:center;justify-content:space-between;padding:23px 0;border-bottom:1px solid var(--sx-line);gap:14px}
+#sx-redesign .sx .sx-toolrow p{font-size:11px;color:var(--sx-muted);margin-top:6px}
+#sx-redesign .sx .sx-toolrow>svg{width:22px;height:22px;color:var(--sx-accent)}
+#sx-redesign .sx .sx-toolrow>.sx-stack{flex:1}
+#sx-redesign .sx .sx-settingrow{display:flex;align-items:center;justify-content:space-between;gap:16px;padding:20px 0;border-bottom:1px solid var(--sx-line)}
+#sx-redesign .sx .sx-settingrow strong{font-weight:500}
+#sx-redesign .sx .sx-settingrow p{font-size:11px;color:var(--sx-muted);margin-top:5px;overflow-wrap:anywhere}
+#sx-redesign .sx .sx-toggle{position:relative;display:inline-flex;align-items:center;min-height:32px;flex:none}
+#sx-redesign .sx .sx-toggle input{width:36px;height:24px;opacity:0;position:absolute;margin:0;z-index:1}
+#sx-redesign .sx .sx-toggle span{display:block;width:36px;height:22px;border-radius:20px;background:var(--sx-line);transition:background var(--sx-mid);position:relative}
+#sx-redesign .sx .sx-toggle span:after{content:"";position:absolute;width:16px;height:16px;left:3px;top:3px;border-radius:50%;background:var(--sx-surface);box-shadow:0 1px 3px var(--sx-shadow);transition:transform var(--sx-mid) var(--sx-ease)}
+#sx-redesign .sx .sx-toggle input:checked+span{background:var(--sx-accent)}
+#sx-redesign .sx .sx-toggle input:checked+span:after{transform:translateX(14px);background:var(--sx-bg)}
+#sx-redesign .sx .sx-toggle input:focus-visible+span{outline:2px solid var(--sx-accent);outline-offset:3px}
+#sx-redesign .sx .sx-field{display:flex;flex-direction:column;gap:7px;font-size:11px;font-weight:500;margin:18px 0}
+#sx-redesign .sx .sx-input,#sx-redesign .sx .sx-select{width:100%;min-height:39px;border-radius:7px;border:1px solid var(--sx-line);background:var(--sx-bg);padding:9px 11px;transition:border-color var(--sx-fast),box-shadow var(--sx-fast),background var(--sx-fast);font-size:12px}
+#sx-redesign .sx .sx-input:hover,#sx-redesign .sx .sx-select:hover{border-color:var(--sx-faint)}
+#sx-redesign .sx .sx-input:focus,#sx-redesign .sx .sx-select:focus{border-color:var(--sx-accent);box-shadow:0 0 0 3px var(--sx-tint)}
+#sx-redesign .sx .sx-helper{font-weight:400;font-size:11px;color:var(--sx-muted);line-height:1.8}
+#sx-redesign .sx .sx-sheet-layer{position:absolute;inset:37px 0 0;z-index:20;visibility:hidden;transition:visibility 0s var(--sx-slow)}
+#sx-redesign .sx .sx-sheet-layer.sx-open{visibility:visible;transition-delay:0s}
+#sx-redesign .sx .sx-scrim{position:absolute;inset:0;background:light-dark(#18221a25,#00000066);opacity:0;transition:opacity var(--sx-slow)}
+#sx-redesign .sx .sx-sheet{position:absolute;top:0;right:0;bottom:0;width:min(410px,100%);background:var(--sx-surface);box-shadow:-15px 0 50px var(--sx-shadow);transform:translateX(103%);opacity:.5;transition:transform var(--sx-slow) var(--sx-ease),opacity var(--sx-mid);padding:27px;display:flex;flex-direction:column;border-left:1px solid var(--sx-line);overflow:auto}
+#sx-redesign .sx .sx-open .sx-scrim{opacity:1}
+#sx-redesign .sx .sx-open .sx-sheet{transform:translateX(0);opacity:1}
+#sx-redesign .sx .sx-sheet-header{display:flex;align-items:flex-start;justify-content:space-between;gap:10px;margin-bottom:25px}
+#sx-redesign .sx .sx-sheet-header h2{font-size:21px;letter-spacing:-.04em;margin-top:7px}
+#sx-redesign .sx .sx-sheet-body{flex:1;min-height:0}
+#sx-redesign .sx .sx-sheet .sx-tablehead,#sx-redesign .sx .sx-sheet .sx-modelrow{grid-template-columns:23px minmax(0,1fr) 49px 24px;gap:6px;padding-left:9px;padding-right:9px}
+#sx-redesign .sx .sx-sheet .sx-provider-column{display:none}
+#sx-redesign .sx .sx-sheet-footer{display:flex;flex-direction:column;gap:10px;padding-top:22px;margin-top:auto}
+#sx-redesign .sx .sx-sheet-footer .sx-button{width:100%;min-height:41px}
+#sx-redesign .sx .sx-sheet-footer p{font-size:10px;color:var(--sx-muted);text-align:center}
+#sx-redesign .sx .sx-notice{background:var(--sx-tint);color:var(--sx-accent);border-radius:8px;padding:13px 14px;line-height:1.85;font-size:11px;margin:17px 0}
+#sx-redesign .sx .sx-notice.sx-wait{background:var(--sx-amber-bg);color:var(--sx-amber)}
+#sx-redesign .sx .sx-step{display:flex;align-items:center;gap:12px;padding:13px 0;border-bottom:1px solid var(--sx-line);font-size:12px}
+#sx-redesign .sx .sx-step>span{width:23px;height:23px;border-radius:50%;background:var(--sx-tint);color:var(--sx-accent);display:grid;place-items:center;font-size:10px;flex:none}
+#sx-redesign .sx .sx-step small{display:block;color:var(--sx-muted);margin-top:2px;font-size:10px}
+#sx-redesign .sx .sx-diff{font-family:"SFMono-Regular",Consolas,monospace;font-size:11px;background:var(--sx-bg);padding:15px;line-height:2;border-radius:8px;margin:18px 0;overflow-wrap:anywhere;color:var(--sx-muted)}
+#sx-redesign .sx .sx-diff .sx-plus{color:var(--sx-accent)}
+#sx-redesign .sx .sx-diff .sx-minus{color:var(--sx-red)}
+#sx-redesign .sx .sx-toast{position:absolute;bottom:18px;left:50%;transform:translate(-50%,10px);opacity:0;z-index:30;border-radius:9px;padding:11px 15px;background:var(--sx-solid);color:var(--sx-on-solid);box-shadow:0 5px 20px var(--sx-shadow);font-size:11px;display:flex;align-items:center;gap:8px;max-width:calc(100% - 36px);pointer-events:none;transition:transform var(--sx-mid) var(--sx-ease),opacity var(--sx-mid)}
+#sx-redesign .sx .sx-toast.sx-show{opacity:1;transform:translate(-50%,0)}
+#sx-redesign .sx .sx-empty{padding:50px 20px;text-align:center;color:var(--sx-muted);font-size:12px}
+#sx-redesign .sx .sx-empty svg{width:28px;height:28px;margin:0 auto 12px;display:block}
+#sx-redesign .sx .sx-command-item{width:100%;padding:13px 10px!important;border-bottom:1px solid var(--sx-line)!important;justify-content:flex-start!important;font-size:12px;gap:12px!important}
+#sx-redesign .sx .sx-command-item:hover{background:var(--sx-soft)}
+#sx-redesign .sx .sx-command-item span{flex:1;text-align:left}
+#sx-redesign .sx .sx-fadein{animation:sx-page-in var(--sx-mid) var(--sx-ease) both}
+#sx-redesign .sx .sx-out{opacity:0;transform:translateY(4px);transition:opacity 90ms,transform 90ms}
+@keyframes sx-page-in{from{opacity:0;transform:translateY(7px)}to{opacity:1;transform:translateY(0)}}
+@keyframes sx-flow{from{transform:translateX(-100%)}to{transform:translateX(400%)}}
+#sx-redesign .sx .sx-connection-strip.sx-flowing:after{content:"";position:absolute;bottom:0;height:2px;width:25%;background:var(--sx-accent);animation:sx-flow 850ms var(--sx-ease) 1}
+#sx-redesign .sx[data-layout=focus]{--sx-accent:light-dark(#786257,#cdb4a1);--sx-tint:light-dark(#f1e9e0,#352e28);--sx-solid:light-dark(#42392f,#d9c8b7);--sx-on-solid:light-dark(#ffffff,#251e18);--sx-bg:light-dark(#fbf9f5,#1c1917)}
+#sx-redesign .sx[data-layout=focus] .sx-shell{display:block}
+#sx-redesign .sx .sx-horizontal{display:flex;align-items:center;justify-content:space-between;gap:24px;padding:10px 29px 17px;border-bottom:1px solid var(--sx-line)}
+#sx-redesign .sx .sx-horizontal .sx-nav{flex-direction:row;gap:8px}
+#sx-redesign .sx .sx-horizontal .sx-nav .sx-navitem{padding:7px 10px;min-height:32px;font-size:11px}
+#sx-redesign .sx .sx-horizontal .sx-nav .sx-navitem[aria-current=page]{background:transparent;box-shadow:none;color:var(--sx-accent)}
+#sx-redesign .sx .sx-horizontal .sx-nav .sx-navitem[aria-current=page]:before{top:auto;bottom:-17px;left:10px;right:10px;width:auto;height:2px}
+#sx-redesign .sx .sx-horizontal .sx-nav svg{display:none}
+#sx-redesign .sx .sx-focus-content{max-width:740px;margin:0 auto;padding:32px 36px}
+#sx-redesign .sx .sx-focus-hero{text-align:center;padding:7px 0 23px}
+#sx-redesign .sx .sx-focus-hero h1{font-size:33px;letter-spacing:-.06em;margin:15px 0 9px}
+#sx-redesign .sx .sx-focus-hero p{color:var(--sx-muted);font-size:12px}
+#sx-redesign .sx .sx-focus-current{display:flex;align-items:center;justify-content:space-between;gap:22px;padding:27px;background:var(--sx-surface);border:1px solid var(--sx-line);border-radius:16px;box-shadow:0 7px 25px var(--sx-shadow);margin-top:13px}
+#sx-redesign .sx .sx-focus-current h2{font-size:24px;margin:8px 0 3px;letter-spacing:-.05em}
+#sx-redesign .sx .sx-focus-current .sx-provider-symbol{width:47px;height:47px;border-radius:13px;margin-right:15px}
+#sx-redesign .sx .sx-focus-current .sx-provider-symbol svg{width:26px;height:26px}
+#sx-redesign .sx .sx-focus-choices{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:12px;margin:20px 0 24px}
+#sx-redesign .sx .sx-focus-choice{display:flex;align-items:flex-start;flex-direction:column;text-align:left;padding:16px!important;background:transparent;border:1px solid var(--sx-line)!important;border-radius:10px}
+#sx-redesign .sx .sx-focus-choice:hover{background:var(--sx-surface);transform:translateY(-2px);border-color:var(--sx-accent)!important}
+#sx-redesign .sx .sx-focus-choice[aria-pressed=true]{background:var(--sx-tint);border-color:var(--sx-accent)!important}
+#sx-redesign .sx .sx-focus-choice small{color:var(--sx-muted);font-size:10px}
+#sx-redesign .sx .sx-focus-actions{display:flex;align-items:center;flex-direction:column;gap:12px;margin:25px 0 21px}
+#sx-redesign .sx .sx-focus-actions .sx-primary{min-width:230px;min-height:42px}
+#sx-redesign .sx .sx-focus-actions p{font-size:11px;color:var(--sx-muted)}
+#sx-redesign .sx[data-layout=canvas]{--sx-accent:light-dark(#666291,#b4aedf);--sx-tint:light-dark(#eeecf6,#302d44);--sx-solid:light-dark(#45415e,#c5bee7);--sx-on-solid:light-dark(#ffffff,#242034)}
+#sx-redesign .sx[data-layout=canvas] .sx-shell{grid-template-columns:68px minmax(0,1fr)}
+#sx-redesign .sx[data-layout=canvas] .sx-sidebar{padding:18px 8px 12px;align-items:center}
+#sx-redesign .sx[data-layout=canvas] .sx-sidebar .sx-brand{padding:0 0 27px}
+#sx-redesign .sx[data-layout=canvas] .sx-sidebar .sx-brand>span:last-child{display:none}
+#sx-redesign .sx[data-layout=canvas] .sx-sidebar .sx-workspace{display:none}
+#sx-redesign .sx[data-layout=canvas] .sx-sidebar .sx-navitem{flex-direction:column;gap:5px;padding:11px 3px;min-width:50px;font-size:9px}
+#sx-redesign .sx[data-layout=canvas] .sx-sidebar .sx-navitem svg{width:19px;height:19px}
+#sx-redesign .sx[data-layout=canvas] .sx-sidebar .sx-navitem[aria-current=page]:before{top:19px}
+#sx-redesign .sx[data-layout=canvas] .sx-sidebar-bottom{padding:25px 0 0}
+#sx-redesign .sx[data-layout=canvas] .sx-sidebar-bottom .sx-statuslink span:not(.sx-dot),#sx-redesign .sx[data-layout=canvas] .sx-sidebar-bottom small{display:none}
+#sx-redesign .sx .sx-map-layout{display:grid;grid-template-columns:minmax(0,1fr) 200px;border:1px solid var(--sx-line);border-radius:12px;overflow:hidden;min-height:360px}
+#sx-redesign .sx .sx-map{position:relative;background-image:radial-gradient(var(--sx-line) .7px,transparent .7px);background-size:16px 16px;display:grid;grid-template-columns:1fr 1fr;align-items:center;gap:35px;padding:36px 22px}
+#sx-redesign .sx .sx-map-source{position:relative;display:flex;flex-direction:column;align-items:center;gap:13px;z-index:1}
+#sx-redesign .sx .sx-map-node{display:flex;flex-direction:column;align-items:center;gap:8px;border:1px solid var(--sx-line);background:var(--sx-surface);padding:20px 12px;border-radius:12px;box-shadow:0 3px 10px var(--sx-shadow);font-size:12px;width:100%;position:relative;z-index:2}
+#sx-redesign .sx .sx-map-node>svg{width:24px;height:24px;color:var(--sx-accent)}
+#sx-redesign .sx .sx-map-router{position:relative;border:1px solid var(--sx-accent);background:var(--sx-tint);color:var(--sx-accent);padding:10px 12px;border-radius:8px;gap:7px;font-size:11px;width:100%;z-index:2}
+#sx-redesign .sx .sx-map-source>.sx-map-node{position:absolute;bottom:calc(100% + 15px)}
+#sx-redesign .sx .sx-map-source:before{content:"";position:absolute;height:15px;top:-15px;width:1px;background:var(--sx-accent)}
+#sx-redesign .sx .sx-map-destinations{display:flex;flex-direction:column;gap:47px;position:relative}
+#sx-redesign .sx .sx-map-destinations:before{content:"";position:absolute;left:-20px;top:calc(25% - 11.75px);bottom:calc(25% - 11.75px);border-left:1px solid var(--sx-accent)}
+#sx-redesign .sx .sx-map-destinations:after{content:"";position:absolute;left:-45px;top:50%;width:25px;border-top:1px solid var(--sx-accent)}
+#sx-redesign .sx .sx-map-destinations .sx-map-node:before{content:"";position:absolute;width:20px;left:-21px;top:50%;height:1px;background:var(--sx-accent)}
+#sx-redesign .sx .sx-map-destinations .sx-map-node{padding:15px 10px;transition:border-color var(--sx-fast),transform var(--sx-fast),box-shadow var(--sx-fast)}
+#sx-redesign .sx .sx-map-destinations .sx-map-node:hover{transform:translateX(3px);border-color:var(--sx-accent);box-shadow:0 4px 15px var(--sx-shadow)}
+#sx-redesign .sx .sx-map small{font-size:10px;color:var(--sx-muted)}
+#sx-redesign .sx .sx-inspector{padding:23px 18px;background:var(--sx-surface);border-left:1px solid var(--sx-line);display:flex;flex-direction:column}
+#sx-redesign .sx .sx-inspector .sx-button{margin-top:auto;font-size:11px}
+#sx-redesign .sx .sx-inspector h3{margin:11px 0 18px}
+#sx-redesign .sx .sx-inspector p{font-size:11px;line-height:1.9;color:var(--sx-muted)}
+#sx-redesign .sx .sx-map-mini{display:flex;flex-wrap:wrap;gap:9px;margin-top:22px}
+#sx-redesign .sx .sx-map-mini button{border:1px solid var(--sx-line);padding:9px 12px;background:var(--sx-surface);border-radius:8px;font-size:11px}
+#sx-redesign .sx .sx-map-mini button:hover{border-color:var(--sx-accent);background:var(--sx-tint)}
+#sx-redesign .sx .sx-map-mini button[aria-pressed=true]{color:var(--sx-accent);border-color:var(--sx-accent)}
+#sx-redesign .sx.sx-reduced{--sx-fast:1ms;--sx-mid:1ms;--sx-slow:1ms}
+#sx-redesign .sx.sx-reduced *,#sx-redesign .sx.sx-reduced *::after{animation-duration:1ms!important}
+@media(prefers-reduced-motion:reduce){#sx-redesign .sx{--sx-fast:1ms;--sx-mid:1ms;--sx-slow:1ms}#sx-redesign .sx *,#sx-redesign .sx *::after{animation-duration:1ms!important}}
+@media(max-width:850px){#sx-redesign .sx .sx-shell{grid-template-columns:151px minmax(0,1fr)}#sx-redesign .sx .sx-content{padding:24px}#sx-redesign .sx .sx-topbar{padding:0 24px}#sx-redesign .sx .sx-tablehead,#sx-redesign .sx .sx-modelrow{grid-template-columns:23px minmax(0,1fr) 86px 48px 23px;gap:7px;padding-left:10px;padding-right:10px}#sx-redesign .sx .sx-map-layout{grid-template-columns:minmax(0,1fr) 172px}#sx-redesign .sx .sx-horizontal{gap:14px;padding-left:22px;padding-right:22px}#sx-redesign .sx .sx-horizontal .sx-nav{gap:0}#sx-redesign .sx .sx-horizontal .sx-nav .sx-navitem{padding:7px 8px}#sx-redesign .sx .sx-focus-content{padding:32px}}
+@media(max-width:660px){#sx-redesign .sx{min-height:880px}#sx-redesign .sx .sx-shell{grid-template-columns:1fr;min-height:842px}#sx-redesign .sx .sx-sidebar{display:block;padding:10px 16px;border-right:0;border-bottom:1px solid var(--sx-line)}#sx-redesign .sx .sx-sidebar .sx-brand{padding:0 0 14px;font-size:19px}#sx-redesign .sx .sx-workspace,#sx-redesign .sx .sx-sidebar-bottom,#sx-redesign .sx .sx-nav-spacer{display:none}#sx-redesign .sx .sx-nav{flex-direction:row;gap:4px;justify-content:space-between}#sx-redesign .sx .sx-nav .sx-navitem{padding:9px 8px;font-size:11px;gap:6px;min-height:35px}#sx-redesign .sx .sx-nav .sx-navitem[aria-current=page]:before{display:none}#sx-redesign .sx .sx-topbar{padding:0 20px;height:47px}#sx-redesign .sx .sx-content{padding:26px 20px}#sx-redesign .sx h1{font-size:25px}#sx-redesign .sx .sx-heading{gap:12px}#sx-redesign .sx .sx-provider-label{font-size:10px;gap:4px}#sx-redesign .sx .sx-provider-label .sx-provider-symbol{display:none}#sx-redesign .sx .sx-horizontal{align-items:flex-start;flex-wrap:wrap;padding:8px 20px 17px;gap:18px}#sx-redesign .sx .sx-horizontal .sx-nav{order:3;width:100%;justify-content:space-between}#sx-redesign .sx .sx-horizontal .sx-nav .sx-navitem[aria-current=page]:before{display:block}#sx-redesign .sx .sx-focus-content{padding:24px 20px}#sx-redesign .sx .sx-focus-current{padding:22px 18px}#sx-redesign .sx .sx-focus-current h2{font-size:21px}#sx-redesign .sx .sx-focus-choices{gap:8px}#sx-redesign .sx .sx-focus-choice{padding:12px!important;font-size:11px}#sx-redesign .sx[data-layout=canvas] .sx-shell{grid-template-columns:1fr}#sx-redesign .sx[data-layout=canvas] .sx-sidebar{display:block;padding:10px 16px}#sx-redesign .sx[data-layout=canvas] .sx-sidebar .sx-brand{padding:0 0 14px}#sx-redesign .sx[data-layout=canvas] .sx-sidebar .sx-brand>span:last-child{display:block}#sx-redesign .sx[data-layout=canvas] .sx-sidebar .sx-navitem{flex-direction:row;padding:9px 8px;font-size:11px;min-width:0}#sx-redesign .sx[data-layout=canvas] .sx-sidebar .sx-navitem svg{width:16px;height:16px}#sx-redesign .sx .sx-map-layout{grid-template-columns:minmax(0,1fr) 154px}#sx-redesign .sx .sx-map{padding:28px 18px;gap:32px}#sx-redesign .sx .sx-sheet{padding:23px}#sx-redesign .sx .sx-toast{bottom:14px}}
+@media(max-width:460px){#sx-redesign .sx{min-height:940px}#sx-redesign .sx .sx-shell{min-height:902px}#sx-redesign .sx .sx-nav .sx-navitem svg{display:none}#sx-redesign .sx .sx-nav .sx-navitem{padding:9px 6px;font-size:10px}#sx-redesign .sx .sx-content{padding:24px 16px}#sx-redesign .sx .sx-heading{flex-wrap:wrap;margin-bottom:20px}#sx-redesign .sx .sx-heading .sx-button{min-height:34px}#sx-redesign .sx .sx-tablehead,#sx-redesign .sx .sx-modelrow{grid-template-columns:23px minmax(0,1fr) 49px 24px;padding:13px 9px;gap:5px}#sx-redesign .sx .sx-tablehead .sx-provider-column,#sx-redesign .sx .sx-modelrow .sx-provider-column{display:none}#sx-redesign .sx .sx-model-name{font-size:12px}#sx-redesign .sx .sx-model-meta{font-size:10px}#sx-redesign .sx .sx-sectionline{flex-wrap:wrap}#sx-redesign .sx .sx-connection-strip{gap:8px;padding:13px 12px;flex-wrap:wrap}#sx-redesign .sx .sx-connection-strip .sx-state{width:100%;margin:6px 0 0}#sx-redesign .sx .sx-connection-strip .sx-line{max-width:none}#sx-redesign .sx .sx-publishbar{align-items:stretch;flex-direction:column}#sx-redesign .sx .sx-bottom-note{flex-wrap:wrap;margin-top:23px}#sx-redesign .sx .sx-split{grid-template-columns:1fr;gap:12px}#sx-redesign .sx .sx-provider-card{padding:17px}#sx-redesign .sx .sx-provider-card>.sx-row{margin-bottom:9px}#sx-redesign .sx .sx-provider-card .sx-button{margin-top:8px}#sx-redesign .sx .sx-accountrow{flex-wrap:wrap}#sx-redesign .sx .sx-focus-hero h1{font-size:27px}#sx-redesign .sx .sx-focus-current{gap:8px;flex-wrap:wrap;padding:20px}#sx-redesign .sx .sx-focus-current .sx-provider-symbol{width:38px;height:38px;margin-right:6px}#sx-redesign .sx .sx-focus-current h2{font-size:20px}#sx-redesign .sx .sx-focus-choices{grid-template-columns:1fr;gap:8px}#sx-redesign .sx .sx-focus-choice{flex-direction:row;align-items:center;padding:13px!important;gap:10px}#sx-redesign .sx .sx-focus-choice small{margin-left:auto}#sx-redesign .sx .sx-focus-actions{margin:20px 0}#sx-redesign .sx .sx-map-layout{grid-template-columns:1fr}#sx-redesign .sx .sx-map{padding:30px 22px;min-height:280px}#sx-redesign .sx .sx-inspector{border-left:0;border-top:1px solid var(--sx-line);padding:18px;gap:14px}#sx-redesign .sx .sx-inspector h3{margin:0}#sx-redesign .sx .sx-inspector p{display:none}#sx-redesign .sx .sx-map-mini{margin-top:14px;gap:7px}#sx-redesign .sx .sx-map-mini button{font-size:10px;padding:8px}#sx-redesign .sx .sx-settingrow{align-items:flex-start;flex-wrap:wrap}#sx-redesign .sx .sx-activity th:nth-child(3),#sx-redesign .sx .sx-activity td:nth-child(3){display:none}#sx-redesign .sx[data-layout=canvas] .sx-sidebar .sx-navitem svg{display:none}#sx-redesign .sx[data-layout=canvas] .sx-sidebar .sx-navitem{padding:9px 6px;font-size:10px}#sx-redesign .sx .sx-horizontal .sx-nav .sx-navitem{font-size:10px;padding:7px 4px}}
+@media(pointer:coarse){#sx-redesign .sx button,#sx-redesign .sx .sx-check,#sx-redesign .sx .sx-check input{min-height:44px}#sx-redesign .sx .sx-icon-button{min-width:36px}#sx-redesign .sx input,#sx-redesign .sx select{font-size:16px!important}#sx-redesign .sx .sx-default{min-height:44px}}
+@media(max-width:460px){#sx-redesign .sx{min-height:1040px}#sx-redesign .sx .sx-shell{min-height:1001px}#sx-redesign .sx .sx-inspector{padding:12px 16px;gap:0}#sx-redesign .sx .sx-inspector>:not(.sx-button){display:none}}
+</style>
+<div id="sx-redesign" aria-label="SwitchX 界面方案">
+  <div class="viz-carousel" aria-label="SwitchX 全新界面设计" data-previous-label="上一个方案" data-next-label="下一个方案">
+    <section data-variant="留白工作台" aria-label="留白工作台设计"><div class="sx" data-layout="workbench" aria-label="留白工作台"></div></section>
+    <section data-variant="聚焦启动台" aria-label="聚焦启动台设计" hidden><div class="sx" data-layout="focus" aria-label="聚焦启动台"></div></section>
+    <section data-variant="路由画布" aria-label="路由画布设计" hidden><div class="sx" data-layout="canvas" aria-label="路由画布"></div></section>
+  </div>
+</div>
+<script>
+(() => {
+  const root=document.getElementById('sx-redesign');
+  const icon=name=>`<i data-lucide="${name}" aria-hidden="true"></i>`;
+  const esc=value=>String(value).replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+  const brand=`<div class="sx-brand"><span class="sx-mark" aria-hidden="true"></span><span>switchx<span style="color:var(--sx-accent)">.</span></span></div>`;
+  const pages=[['home','工作台','panels-top-left'],['connections','连接','plug'],['activity','活动','chart-no-axes-combined'],['tools','工具箱','blocks'],['settings','设置','sliders-horizontal']];
+  const originalModels=[
+    {id:'codex-main',name:'Codex · 主力',provider:'ChatGPT',meta:'订阅模型 · 跟随 CLI 目录',selected:true},
+    {id:'codex-fast',name:'Codex · 轻量',provider:'ChatGPT',meta:'订阅模型 · 跟随 CLI 目录',selected:false},
+    {id:'deepseek-flash',name:'DeepSeek Flash',provider:'DeepSeek',meta:'deepseek-flash · Responses',selected:true},
+    {id:'deepseek-reasoner',name:'DeepSeek Reasoner',provider:'DeepSeek',meta:'deepseek-reasoner · Responses',selected:true}
+  ];
+  const symbol=provider=>`<span class="sx-provider-symbol ${provider==='DeepSeek'?'sx-deepseek':''}">${icon(provider==='DeepSeek'?'waves':'asterisk')}</span>`;
+  const button=(label,action,kind='sx-button',extra='')=>`<button type="button" class="${kind} cursor-interaction" data-action="${action}" ${extra}>${label}</button>`;
+  const state=new Map();let activeApp=null;
+  const saved=window.openai?.widgetState?.privateContent||{};
+  const tweaks={appearance:'system',motion:true,density:30};
+  if(['system','light','dark'].includes(saved.appearance))tweaks.appearance=saved.appearance;
+  const initIcons=()=>{if(globalThis.lucide)lucide.createIcons({attrs:{width:16,height:16}})};
+  const getCount=s=>s.models.filter(m=>m.selected).length;
+  const getDefault=s=>s.models.find(m=>m.id===s.defaultId)||{name:'尚未选择',provider:'ChatGPT',id:''};
+  const status=s=>s.running?(s.direct?'直连已启用':'路由已启用'):'待启用';
+  const pill=s=>`<span class="sx-pill ${s.running?'':'sx-wait'}"><span class="sx-dot"></span>${status(s)}</span>`;
+  const nav=s=>`<nav class="sx-nav" aria-label="主导航">${pages.map(([key,label,ic],i)=>`${i===3?'<div class="sx-nav-spacer"></div>':''}${button(icon(ic)+`<span>${label}</span>`,'nav','sx-navitem',`data-page="${key}" ${s.page===key?'aria-current="page"':''}`)}`).join('')}</nav>`;
+  const themeButton=()=>button(icon('sun-moon'),'theme','sx-icon-button','aria-label="切换浅色或深色外观" data-tooltip="切换外观"');
+  const commandButton=()=>button(icon('search')+'<span>快速操作</span><kbd>⌘ K</kbd>','command','sx-search-button');
+  function base(app,s){
+    const layout=app.dataset.layout;
+    const sidebar=`<aside class="sx-sidebar">${brand}<div class="sx-workspace"><span class="sx-workspace-icon">${icon('terminal')}</span><span class="sx-stack"><strong>Codex</strong><small>本机工作空间</small></span></div>${nav(s)}<div class="sx-sidebar-bottom">${button('<span class="sx-dot"></span><span>'+status(s)+'</span>','status','sx-statuslink')}<small>LOCAL FIRST · v0.x</small></div></aside>`;
+    const titlebar='<div class="sx-windowbar" aria-hidden="true"><span></span><span></span><span></span><div class="sx-demo">DESIGN PREVIEW · 演示数据</div></div>';
+    const top=`<div class="sx-topbar"><div class="sx-breadcrumb">Codex ${icon('chevron-right')}<span>${pages.find(p=>p[0]===s.page)[1]}</span></div><div class="sx-row">${commandButton()}${themeButton()}</div></div>`;
+    const horizontal=`<header class="sx-horizontal">${brand}${nav(s)}<div class="sx-row">${button(icon('search'),'command','sx-icon-button','aria-label="快速操作"')}${themeButton()}</div></header>`;
+    app.innerHTML=`${titlebar}<div class="sx-shell">${layout==='focus'?horizontal:sidebar}<main class="sx-main">${layout==='focus'?'':top}<div class="${layout==='focus'?'sx-focus-content':'sx-content'}" data-content>${content(app,s)}</div></main></div><div class="sx-sheet-layer" aria-hidden="true" inert><div class="sx-scrim" data-action="close"></div><section class="sx-sheet" role="dialog" aria-modal="true" aria-label="操作详情"></section></div><div class="sx-toast" role="status" aria-live="polite"></div>`;
+    app.querySelectorAll('button').forEach(b=>b.classList.add('cursor-interaction'));
+    initIcons();applyAppearance(app);
+  }
+  function rail(s){return `<div class="sx-connection-strip"><span class="sx-rail-label">${icon('terminal')}Codex</span><span class="sx-line"></span>${s.direct?'':`<span class="sx-rail-label"><span class="sx-mark" style="width:18px;height:22px;transform:scale(.7)"></span>SwitchX</span><span class="sx-line"></span>`}<span class="sx-rail-label">${s.direct?'DeepSeek':'2 个连接'}</span><span class="sx-state"><span class="sx-dot"></span>${s.running?(s.direct?'已连接 · 直连':'已连接 · 本地路由'):'准备就绪，等待启用'}</span></div>`}
+  function publish(s){return `<div class="sx-publishbar"><div><strong>${s.running?(s.direct?'当前直连 · DeepSeek Flash':'当前模型菜单'):`已选 ${getCount(s)} 个模型`}</strong><p>${s.running?'恢复并停止后，可修改模型与连接。':getCount(s)?'默认 · '+esc(getDefault(s).name)+'，在新会话生效。':'选择至少一个模型，开始预览。'}</p></div><div class="sx-row">${s.running?button('恢复并停止','restore','sx-ghost'):''}${button(icon(s.running?'terminal':'arrow-up-right')+(s.running?'启动 Codex':'预览并启用'),s.running?'launch':'preview','sx-button sx-primary',getCount(s)?'':'disabled')}</div></div>`}
+  function footer(){return `<div class="sx-bottom-note"><span class="sx-row">${icon('folder')} 本机 Codex 工作空间</span>${button('配置与恢复 '+icon('arrow-up-right'),'settings','sx-ghost')}</div>`}
+  function heading(title,subtitle,actions=''){return `<div class="sx-heading"><div><h1>${title}</h1><p>${subtitle}</p></div>${actions}</div>`}
+  function modelList(s){
+    const list=s.models.filter(m=>s.filter!=='selected'||m.selected);
+    return `<div class="sx-sectionline"><div class="sx-row"><h2>我的模型</h2><small>${s.models.length}</small></div><div class="sx-row"><div class="sx-segments" aria-label="模型筛选">${button('全部','filter','',`data-filter="all" aria-pressed="${s.filter==='all'}"`)}${button('已选','filter','',`data-filter="selected" aria-pressed="${s.filter==='selected'}"`)}</div>${button(icon('plus'),'add-model','sx-icon-button',`aria-label="添加模型" data-tooltip="添加模型" ${s.running?'disabled':''}`)}</div></div><div class="sx-table"><div class="sx-tablehead"><span></span><span>模型 / 公开标识</span><span class="sx-provider-column">连接</span><span>默认</span><span></span></div>${list.map(m=>`<div class="sx-modelrow ${s.defaultId===m.id?'sx-is-default':''}" data-model-row="${esc(m.id)}"><label class="sx-check cursor-interaction"><input type="checkbox" data-model-check="${esc(m.id)}" aria-label="将 ${esc(m.name)} 加入模型菜单" ${m.selected?'checked':''} ${s.running?'disabled':''}><span class="sx-checkbox">${icon('check')}</span></label><div><button type="button" class="sx-model-name cursor-interaction" data-action="model" data-id="${esc(m.id)}">${esc(m.name)}</button><div class="sx-model-meta">${esc(m.id)}</div></div><div class="sx-provider-label sx-provider-column">${symbol(m.provider)}${m.provider}</div>${button(s.defaultId===m.id?icon('check')+'默认':icon('circle'),'default','sx-default',`data-id="${esc(m.id)}" aria-label="将 ${esc(m.name)} 设为默认" aria-pressed="${s.defaultId===m.id}" ${s.running?'disabled':''}`)}${button(icon('sliders-horizontal'),'model','sx-icon-button',`data-id="${esc(m.id)}" aria-label="编辑 ${esc(m.name)}"`)}</div>`).join('')||'<div class="sx-empty">还没有选择模型。切回“全部”开始选择。</div>'}</div>`;
+  }
+  function workbench(app,s){return heading('模型，随手可用。','把常用的模型放进 Codex，专注下一次创作。',pill(s))+rail(s)+modelList(s)+publish(s)+footer()}
+  function focus(app,s){const m=getDefault(s);return `<div class="sx-focus-hero"><div class="sx-row" style="justify-content:center">${pill(s)}</div><h1>今天，用谁来创作？</h1><p>选择默认模型，再开启一个新的 Codex 会话。</p></div><div class="sx-focus-current"><div class="sx-row">${symbol(m.provider)}<div><div class="sx-eyebrow">DEFAULT MODEL</div><h2>${esc(m.name)}</h2><span class="sx-muted" style="font-size:11px">${m.provider} · ${m.provider==='ChatGPT'?'个人订阅':'API 连接'}</span></div></div>${button(icon('sliders-horizontal')+'调整','model','sx-ghost',`data-id="${esc(m.id)}"`)}</div><div class="sx-sectionline" style="margin-top:27px;margin-bottom:0"><h3>快速切换</h3>${button('全部模型 '+icon('arrow-right'),'models','sx-ghost')}</div><div class="sx-focus-choices">${s.models.filter(x=>x.id!=='codex-fast').map(x=>button(symbol(x.provider)+`<strong>${esc(x.name)}</strong><small>${x.provider}</small>`,'default','sx-focus-choice',`data-id="${esc(x.id)}" aria-pressed="${s.defaultId===x.id}" ${s.running?'disabled':''}`)).join('')}</div><div class="sx-focus-actions">${button(icon(s.running?'terminal':'arrow-up-right')+(s.running?'启动 Codex':'预览并启用'),s.running?'launch':'preview','sx-button sx-primary')}<p>${s.running?'路由已启用。新会话将使用当前模型菜单。':getCount(s)+' 个模型将出现在菜单中，随时可以恢复。'}</p>${s.running?button('恢复并停止','restore','sx-ghost'):''}</div>${footer()}`}
+  function canvas(app,s){return heading('每条连接，都清晰。','从 Codex 到模型，去向一眼可见。',pill(s))+`<div class="sx-map-layout"><div class="sx-map" role="group" aria-label="Codex 经 SwitchX 连接 ChatGPT 和 DeepSeek"><div class="sx-map-source"><div class="sx-map-node">${icon('terminal')}<strong>Codex</strong><small>本机工作空间</small></div><div class="sx-map-router sx-row"><span class="sx-dot"></span>SwitchX Router</div></div><div class="sx-map-destinations">${['ChatGPT','DeepSeek'].map(p=>button(symbol(p)+`<strong>${p}</strong><small>${s.models.filter(m=>m.provider===p&&m.selected).length} 个模型已选</small>`,'provider','sx-map-node',`data-provider="${p}"`)).join('')}</div></div><aside class="sx-inspector"><div class="sx-eyebrow">MODEL MENU</div><h3>${getCount(s)} 个模型待${s.running?'使用':'发布'}</h3><p>默认模型<br><strong style="color:var(--sx-ink)">${esc(getDefault(s).name)}</strong></p><div class="sx-detail-line"><span>ChatGPT</span><span>订阅</span></div><div class="sx-detail-line"><span>DeepSeek</span><span>API</span></div>${button('编辑模型菜单 '+icon('arrow-up-right'),'models','sx-button')}</aside></div><div class="sx-map-mini" aria-label="默认模型">${s.models.filter(m=>m.selected).map(m=>button((s.defaultId===m.id?icon('check'):'')+esc(m.name),'default','',`data-id="${m.id}" aria-pressed="${m.id===s.defaultId}" ${s.running?'disabled':''}`)).join('')}</div>${publish(s)}${footer()}`}
+  function connections(s){return heading('连接你的模型。','账号、API 与模型，在这里统一管理。',button(icon('plus')+'添加连接','add-provider','sx-button sx-primary',s.running?'disabled':''))+`<div class="sx-split">${['ChatGPT','DeepSeek'].map((p,i)=>`<div class="sx-provider-card"><div class="sx-row">${symbol(p)}<div class="sx-stack"><h2>${p}</h2><small class="sx-muted">${i?'Responses API':'ChatGPT 订阅'}</small></div></div><p>${i?'api.deepseek.com':'个人账号 · 固定绑定'}</p><div class="sx-detail-line"><span>模型</span><span>2 个映射</span></div><div class="sx-detail-line"><span>凭据</span><span class="sx-pill">${i?'已保存':'账号已绑定'}</span></div>${button('管理连接 '+icon('arrow-up-right'),'provider','sx-button',`data-provider="${p}"`)}</div>`).join('')}</div><div class="sx-subsection"><div class="sx-sectionline"><h2>订阅账号</h2>${button(icon('plus')+'添加账号','account','sx-ghost',s.running?'disabled':'')}</div><div class="sx-accountrow"><div class="sx-row"><span class="sx-avatar">P</span><div class="sx-stack"><strong style="font-weight:500">个人账号</strong><small class="sx-muted">1 个连接正在使用 · 演示工作区</small></div></div>${button('账号详情 '+icon('chevron-right'),'account','sx-ghost')}</div></div>${s.running?'<div class="sx-notice">路由运行中。恢复并停止后可修改连接与账号绑定。</div>':''}${footer()}`}
+  function activity(s){const rows=s.empty?[]:[['10:42:18','DeepSeek Flash','1.8 s','已完成'],['10:41:05','Codex · 主力','4.2 s','已完成'],['10:38:27','DeepSeek Flash','0.6 s','已取消']];return heading('每次请求，有迹可循。','查看模型、耗时与结果；敏感内容不出现在记录中。',button(icon('refresh-cw')+'刷新','refresh','sx-button'))+`<div class="sx-sectionline"><h2>最近请求</h2><span class="sx-muted" style="font-size:11px">演示记录 · 今天</span></div><table class="sx-activity"><thead><tr><th>时间</th><th>模型</th><th>耗时</th><th>结果</th><th></th></tr></thead><tbody>${rows.map((r,i)=>`<tr><td class="sx-mono">${r[0]}</td><td>${r[1]}</td><td>${r[2]}</td><td><span class="sx-pill ${i===2?'sx-wait':''}">${r[3]}</span></td><td>${button(icon('chevron-right'),'request','sx-icon-button',`data-request="${i}" aria-label="查看 ${r[0]} 请求详情"`)}</td></tr>`).join('')}</tbody></table>${!rows.length?'<div class="sx-empty">'+icon('inbox')+'还没有请求。启用路由后，请求记录会出现在这里。</div>':''}<div class="sx-bottom-note">此处是交互演示数据，不代表实际模型请求。</div>`}
+  function toolsPage(){return heading('让工作流更顺手。','MCP 与 Skills 作为工具扩展，独立于模型连接。','<span class="sx-pill">规划页面</span>')+`<div class="sx-toolrow">${icon('blocks')}<div class="sx-stack"><h2>MCP 服务</h2><p>按工作空间查看服务及其来源。</p></div>${button('查看方案 '+icon('arrow-up-right'),'mcp','sx-button')}</div><div class="sx-toolrow">${icon('book-open')}<div class="sx-stack"><h2>Skills</h2><p>查看已安装技能与适用范围。</p></div>${button('查看方案 '+icon('arrow-up-right'),'skills','sx-button')}</div><div class="sx-notice">工具管理属于后续设计范围，当前原型展示页面位置与交互入口。</div>`}
+  function settings(s){return heading('让它适合你。','外观、工作空间和配置，各在其位。')+`<div class="sx-settingrow"><div><strong>外观</strong><p>柔和浅色与安静深色。</p></div><div class="sx-segments" aria-label="外观">${[['system','系统'],['light','浅色'],['dark','深色']].map(([v,t])=>button(t,'appearance','',`data-appearance="${v}" aria-pressed="${tweaks.appearance===v}"`)).join('')}</div></div><div class="sx-settingrow"><div><strong>过渡动画</strong><p>同时尊重系统的“减少动态效果”。</p></div><label class="sx-toggle cursor-interaction"><input type="checkbox" aria-label="启用过渡动画" data-motion ${tweaks.motion?'checked':''}><span></span></label></div><div class="sx-settingrow"><div><strong>Codex 工作空间</strong><p class="sx-mono">/Users/demo/.codex</p></div>${button('更改','workspace','sx-button')}</div><div class="sx-settingrow"><div><strong>通用配置</strong><p>集中管理连接共享的普通设置。</p></div>${button('编辑','common','sx-button')}</div><div class="sx-settingrow"><div><strong>配置与恢复</strong><p>${s.running?'SwitchX 正在管理当前配置。':'当前未启用路由；原配置保持完整。'}</p></div>${button(s.running?'恢复并停止':'查看状态',s.running?'restore':'status','sx-button')}</div>`}
+  function content(app,s){if(s.page==='connections')return connections(s);if(s.page==='activity')return activity(s);if(s.page==='tools')return toolsPage();if(s.page==='settings')return settings(s);return app.dataset.layout==='focus'?focus(app,s):app.dataset.layout==='canvas'?canvas(app,s):workbench(app,s)}
+  function paint(app,animate=false){const s=state.get(app);const el=app.querySelector('[data-content]');if(!el){base(app,s);return}el.innerHTML=content(app,s);el.classList.remove('sx-fadein');if(animate){void el.offsetWidth;el.classList.add('sx-fadein')}initIcons();}
+  function syncSelection(app){const s=state.get(app);app.querySelectorAll('[data-model-check]').forEach(input=>{input.checked=!!s.models.find(m=>m.id===input.dataset.modelCheck)?.selected});app.querySelectorAll('[data-model-row]').forEach(row=>row.classList.toggle('sx-is-default',row.dataset.modelRow===s.defaultId));app.querySelectorAll('.sx-default').forEach(b=>{const chosen=b.dataset.id===s.defaultId;b.setAttribute('aria-pressed',String(chosen));b.innerHTML=chosen?icon('check')+'默认':icon('circle')});app.querySelectorAll('.sx-publishbar').forEach(el=>{el.innerHTML=publish(s).replace(/^<div class="sx-publishbar">|<\/div>$/g,'')});initIcons();if(app.dataset.layout!=='workbench'){paint(app,true)}if(s.filter==='selected'){setTimeout(()=>{if(app.querySelector('.sx-sheet-layer.sx-open'))modelMenu(app);else paint(app,true)},tweaks.motion?180:0)}}
+  function toast(app,message){const el=app.querySelector('.sx-toast');clearTimeout(state.get(app).toastTimer);el.innerHTML=icon('check')+`<span>${esc(message)}</span>`;initIcons();el.classList.add('sx-show');state.get(app).toastTimer=setTimeout(()=>el.classList.remove('sx-show'),2600)}
+  function save(app){if(!window.openai?.setWidgetState)return;const s=state.get(app);window.openai.setWidgetState({modelContent:{design:app.getAttribute('aria-label'),page:s.page,appearance:tweaks.appearance},privateContent:{appearance:tweaks.appearance}}).catch(()=>{})}
+  function applyAppearance(app){app.style.colorScheme=tweaks.appearance==='system'?'light dark':tweaks.appearance;app.classList.toggle('sx-reduced',!tweaks.motion)}
+  function appearance(){root.querySelectorAll('.sx').forEach(app=>{applyAppearance(app);if(state.get(app)?.page==='settings')paint(app)});}
+  function changePage(app,page){const s=state.get(app);if(!pages.some(p=>p[0]===page))return;closeSheet(app,true);s.page=page;app.querySelectorAll('.sx-navitem').forEach(b=>{if(b.dataset.page===page)b.setAttribute('aria-current','page');else b.removeAttribute('aria-current')});const crumb=app.querySelector('.sx-breadcrumb span');if(crumb)crumb.textContent=pages.find(p=>p[0]===page)[1];const el=app.querySelector('[data-content]');el.classList.remove('sx-fadein');el.classList.add('sx-out');setTimeout(()=>{paint(app,true);el.classList.remove('sx-out')},tweaks.motion?90:0);save(app)}
+  function sheet(app,title,body,footerHtml='',eyebrow='SWITCHX / '+title){const s=state.get(app);s.focusBefore=app.querySelector('.sx-sheet-layer.sx-open')?s.focusBefore:document.activeElement;const layer=app.querySelector('.sx-sheet-layer');clearTimeout(s.closeTimer);layer.removeAttribute('inert');layer.setAttribute('aria-hidden','false');const el=layer.querySelector('.sx-sheet');el.setAttribute('aria-label',title);el.innerHTML=`<div class="sx-sheet-header"><div><div class="sx-eyebrow">${eyebrow}</div><h2>${title}</h2></div>${button(icon('x'),'close','sx-icon-button','aria-label="关闭详情"')}</div><div class="sx-sheet-body">${body}</div>${footerHtml?`<div class="sx-sheet-footer">${footerHtml}</div>`:''}`;app.querySelector('.sx-shell').inert=true;initIcons();requestAnimationFrame(()=>{layer.classList.add('sx-open');const focus=el.querySelector('input:not([disabled]),select:not([disabled])')||el.querySelector('button');focus?.focus({preventScroll:true})});}
+  function closeSheet(app,immediate=false){const s=state.get(app),layer=app.querySelector('.sx-sheet-layer');if(!layer)return;layer.classList.remove('sx-open');layer.setAttribute('aria-hidden','true');layer.inert=true;app.querySelector('.sx-shell').inert=false;s.focusBefore?.isConnected&&s.focusBefore.focus({preventScroll:true});const clear=()=>{layer.querySelector('.sx-sheet').innerHTML='';s.sheetType=''};if(immediate)clear();else s.closeTimer=setTimeout(clear,tweaks.motion?350:0)}
+  function preview(app){const s=state.get(app);if(!getCount(s)){toast(app,'先选择至少一个模型');return}s.sheetType='preview';sheet(app,'启用前，确认一下。',`<p class="sx-helper">将所选模型加入本机 Codex。配置生效后，从 SwitchX 启动新会话。</p><div class="sx-detail-line"><span>目标工作空间</span><span class="sx-mono">/Users/demo/.codex</span></div><div class="sx-detail-line"><span>默认模型</span><span>${esc(getDefault(s).name)}</span></div><div class="sx-detail-line"><span>发布的模型</span><span>${getCount(s)} 个 · 2 个连接</span></div><div class="sx-diff"><div class="sx-minus">− model = "原有模型"</div><div class="sx-plus">+ model = "${esc(s.defaultId)}"</div><div class="sx-plus">+ model_provider = "switchx_router"</div><div class="sx-plus">+ model_catalog_json = "…"</div></div><div class="sx-step"><span>${icon('check')}</span><div>目录与连接检查<small>演示检查通过</small></div></div><div class="sx-step"><span>${icon('check')}</span><div>恢复点已准备<small>停止时恢复启用前的配置</small></div></div>`,button('确认启用 '+icon('arrow-right'),'enable','sx-button sx-primary')+'<p>设计预览 · 此操作只改变演示状态</p>','PREVIEW & CONNECT')}
+  function editModel(app,id){const s=state.get(app),m=s.models.find(x=>x.id===id);if(!m)return;s.editing=id;s.sheetType='model';sheet(app,m.name,`<div class="sx-row" style="margin-bottom:23px">${symbol(m.provider)}<span>${m.provider}</span><span class="sx-pill">${m.selected?'已加入菜单':'未加入菜单'}</span></div><label class="sx-field">显示名称<input class="sx-input" name="model-name" value="${esc(m.name)}" ${s.running?'disabled':''}></label><label class="sx-field">公开模型 ID<input class="sx-input sx-mono" value="${esc(m.id)}" readonly><span class="sx-helper">在 Codex 模型菜单中使用的唯一标识。</span></label><div class="sx-detail-line"><span>模型来源</span><span>${esc(m.meta)}</span></div><label class="sx-field">默认思考等级<select class="sx-select" name="effort" ${s.running?'disabled':''}><option>跟随模型目录</option><option>medium</option><option>high</option><option>max</option></select></label>${s.running?'<div class="sx-notice">路由运行中。先恢复并停止，再编辑模型。</div>':''}`,button(s.running?'关闭':'保存修改',s.running?'close':'save-model','sx-button sx-primary')+'<p>模型名称与默认值在下次发布时应用</p>','MODEL DETAILS')}
+  function modelMenu(app){const s=state.get(app);sheet(app,'模型菜单',modelList(s),button('完成','close','sx-button sx-primary'),'YOUR MODELS')}
+  function provider(app,name){const s=state.get(app);s.provider=name;sheet(app,name,`<div class="sx-row" style="margin-bottom:22px">${symbol(name)}<span class="sx-pill">${name==='ChatGPT'?'订阅连接':'API 连接'}</span></div><label class="sx-field">连接名称<input name="connection-name" class="sx-input" value="${name}" ${s.running?'disabled':''}></label>${name==='ChatGPT'?'<label class="sx-field">绑定账号<select class="sx-select" '+(s.running?'disabled':'')+'><option>个人账号 · 演示工作区</option><option>跟随 Codex 登录</option></select><span class="sx-helper">保存绑定用于下次发布，不切换 Codex 原生登录。</span></label>':'<label class="sx-field">API 地址<input class="sx-input" value="https://api.deepseek.com" '+(s.running?'disabled':'')+'></label><label class="sx-field">API Key<input class="sx-input" type="password" placeholder="已保存 · 留空保留" autocomplete="off" '+(s.running?'disabled':'')+'><span class="sx-helper">设计预览使用占位凭据。</span></label>'}<div class="sx-detail-line"><span>模型映射</span>${button('查看 2 个模型 '+icon('chevron-right'),'models','sx-ghost')}</div>${button(icon('activity')+'检查连接','check-provider','sx-button','style="margin-top:22px" '+(s.running?'disabled':''))}${s.running?'<div class="sx-notice">当前路由正在使用此连接。编辑前需恢复并停止。</div>':''}`,button(s.running?'关闭':'保存连接',s.running?'close':'save-provider','sx-button sx-primary')+(name==='DeepSeek'&&!s.running?button('预览直连','direct','sx-button'):'')+'<p>保存与启用是两个独立操作</p>','CONNECTION')}
+  function account(app){const s=state.get(app);sheet(app,'订阅账号',`<div class="sx-row" style="margin-bottom:24px"><span class="sx-avatar">P</span><div><strong>个人账号</strong><p class="sx-helper">演示工作区 · 1 个连接使用中</p></div></div><div class="sx-detail-line"><span>绑定连接</span><span>ChatGPT</span></div><div class="sx-detail-line"><span>账号资料</span><span>私有文件保存</span></div><div class="sx-notice">连接绑定与 Codex 入口登录分开管理。修改入口登录前，会先检查和恢复受管配置。</div>${button('导入当前 Codex 账号','import-account','sx-button',s.running?'disabled':'')}`,button('关闭','close','sx-button sx-primary')+'<p>原型不读取或显示任何真实认证资料</p>','ACCOUNTS')}
+  function restore(app){const s=state.get(app);sheet(app,'回到原来的配置。',`<p class="sx-helper">恢复启用前的 Codex 配置，并停止本地路由。</p><div class="sx-step"><span>1</span><div>检查外部修改<small>存在冲突时保留路由，逐项确认</small></div></div><div class="sx-step"><span>2</span><div>等待活动请求结束<small>完成配置恢复后停止路由</small></div></div><div class="sx-step"><span>3</span><div>清理本次发布<small>回到启用前的工作空间状态</small></div></div><div class="sx-notice">演示环境没有配置冲突，可直接恢复。</div>`,button('恢复并停止','confirm-restore','sx-button sx-primary')+button('取消','close','sx-button'),'RESTORE')}
+  function addProvider(app){sheet(app,'添加一个连接',`<p class="sx-helper">先选连接类型，再补充必要信息。</p><label class="sx-field">连接类型<select class="sx-select" name="provider-type"><option>Responses API</option><option>ChatGPT 订阅</option></select></label><label class="sx-field">显示名称<input class="sx-input" name="new-provider-name" placeholder="例如：我的工作连接"></label><div class="sx-notice">下一步进入对应类型的编辑器，保存后再选择要发布的模型。</div>`,button('下一步 '+icon('arrow-right'),'provider-next','sx-button sx-primary'),'NEW CONNECTION')}
+  function addModel(app){const s=state.get(app);if(s.running)return;sheet(app,'添加模型',`<label class="sx-field">所属连接<select class="sx-select" name="new-model-provider"><option>DeepSeek</option><option>ChatGPT</option></select></label><label class="sx-field">模型 ID<input class="sx-input" name="new-model-id" placeholder="例如：my-model"></label><label class="sx-field">显示名称<input class="sx-input" name="new-model-name" placeholder="给模型起一个好记的名字"></label><p class="sx-helper">这是演示映射，添加后出现在当前方案的模型列表中。</p><p class="sx-helper" data-form-error role="alert"></p>`,button('添加到模型菜单','save-new-model','sx-button sx-primary'),'NEW MODEL')}
+  function command(app){sheet(app,'快速操作',`<label class="sx-field">搜索页面或操作<input class="sx-input" name="command-search" placeholder="试试“连接”或“模型”"></label><div data-command-results>${pages.map(([id,label,ic])=>button(icon(ic)+`<span>${label}</span>`+icon('arrow-up-right'),'nav','sx-command-item',`data-page="${id}" data-search-label="${label}"`)).join('')}${button(icon('plus')+'<span>添加模型</span>','add-model','sx-command-item','data-search-label="添加模型"')}</div>`, '<p>Esc 关闭 · ⌘K / Ctrl+K 快速打开</p>','COMMAND MENU')}
+  function showStatus(app){const s=state.get(app);sheet(app,'连接状态',`<div class="sx-row" style="margin-bottom:25px">${pill(s)}</div><div class="sx-detail-line"><span>目标</span><span>本机 Codex</span></div><div class="sx-detail-line"><span>已选模型</span><span>${getCount(s)} 个</span></div><div class="sx-detail-line"><span>配置</span><span>${s.running?'由 SwitchX 管理':'尚未修改'}</span></div><div class="sx-notice">${s.running?'模型和连接当前已锁定。需要调整时，先恢复并停止。':'准备好后可以预览发布，确认配置变化再启用。'}</div>`,button(s.running?'恢复并停止':'预览并启用',s.running?'restore':'preview','sx-button sx-primary'),'LOCAL STATUS')}
+  root.querySelectorAll('.sx').forEach(app=>{state.set(app,{page:'home',models:originalModels.map(m=>({...m})),defaultId:'codex-main',filter:'all',running:false,direct:false,empty:false});base(app,state.get(app));app.addEventListener('pointerdown',()=>{activeApp=app})});
+  root.addEventListener('click',event=>{const target=event.target.closest('[data-action]');if(!target||target.disabled)return;const app=target.closest('.sx');if(!app)return;activeApp=app;const s=state.get(app),action=target.dataset.action;
+    if(action==='nav'){changePage(app,target.dataset.page);return}
+    if(action==='settings'){changePage(app,'settings');return}
+    if(action==='close'){closeSheet(app);return}
+    if(action==='theme'){const light=app.style.colorScheme==='light'||(tweaks.appearance==='system'&&!matchMedia('(prefers-color-scheme:dark)').matches);tweaks.appearance=light?'dark':'light';appearance();save(app);return}
+    if(action==='appearance'){tweaks.appearance=target.dataset.appearance;appearance();save(app);return}
+    if(action==='filter'){s.filter=target.dataset.filter;const layer=target.closest('.sx-sheet');if(layer)modelMenu(app);else paint(app,true);return}
+    if(action==='default'){if(s.running)return;const m=s.models.find(x=>x.id===target.dataset.id);if(!m)return;s.defaultId=m.id;m.selected=true;syncSelection(app);toast(app,`${m.name} 已设为默认`);save(app);return}
+    if(action==='model'){editModel(app,target.dataset.id);return}
+    if(action==='models'){modelMenu(app);return}
+    if(action==='preview'){preview(app);return}
+    if(action==='enable'){target.disabled=true;target.innerHTML=icon('loader-circle')+'正在启用…';initIcons();setTimeout(()=>{s.running=true;s.direct=false;closeSheet(app);paint(app,true);const link=app.querySelector('.sx-statuslink');if(link)link.innerHTML='<span class="sx-dot"></span><span>路由已启用</span>';app.querySelector('.sx-connection-strip')?.classList.add('sx-flowing');toast(app,'路由已启用，可以启动新的 Codex 会话');save(app)},650);return}
+    if(action==='launch'){toast(app,s.direct?'演示：使用 DeepSeek 直连启动新 Codex 会话':'演示：打开使用当前模型菜单的新 Codex 会话');return}
+    if(action==='restore'){restore(app);return}
+    if(action==='confirm-restore'){s.running=false;s.direct=false;closeSheet(app);paint(app,true);const statusLink=app.querySelector('.sx-statuslink');if(statusLink)statusLink.innerHTML='<span class="sx-dot"></span><span>待启用</span>';toast(app,'已恢复原配置，本地路由已停止');return}
+    if(action==='save-model'){const field=app.querySelector('[name="model-name"]');if(!field.value.trim()){field.focus();return}s.models.find(m=>m.id===s.editing).name=field.value.trim().slice(0,48);closeSheet(app);paint(app);toast(app,'模型修改已保存，下次发布时应用');return}
+    if(action==='provider'){provider(app,target.dataset.provider);return}
+    if(action==='add-provider'){addProvider(app);return}
+    if(action==='provider-next'){const isApi=app.querySelector('[name="provider-type"]').selectedIndex===0;provider(app,isApi?'DeepSeek':'ChatGPT');return}
+    if(action==='save-provider'){closeSheet(app);toast(app,'连接已保存，可返回工作台预览启用');return}
+    if(action==='check-provider'){target.disabled=true;target.textContent='检查中…';setTimeout(()=>{if(!target.isConnected)return;target.disabled=false;target.innerHTML=icon('check')+'检查通过 · 演示';initIcons()},650);return}
+    if(action==='direct'){sheet(app,'预览直连',`<p class="sx-helper">只使用 DeepSeek 的默认模型。应用前显示配置变化，原配置保留恢复点。</p><div class="sx-diff"><div class="sx-plus">+ model = "deepseek-flash"</div><div class="sx-plus">+ model_provider = "deepseek"</div></div><div class="sx-notice">直连不经过本地模型路由。此流程为设计演示。</div>`,button('应用直连','direct-apply','sx-button sx-primary'));return}
+    if(action==='direct-apply'){s.running=true;s.direct=true;s.defaultId='deepseek-flash';closeSheet(app);paint(app,true);const link=app.querySelector('.sx-statuslink');if(link)link.innerHTML='<span class="sx-dot"></span><span>直连已启用</span>';toast(app,'演示：直连配置已应用，可从状态入口恢复');return}
+    if(action==='account'||action==='import-account'){if(action==='import-account'){toast(app,'演示：读取当前账号前显示身份与工作区确认');return}account(app);return}
+    if(action==='add-model'){addModel(app);return}
+    if(action==='save-new-model'){const id=app.querySelector('[name="new-model-id"]').value.trim(),name=app.querySelector('[name="new-model-name"]').value.trim(),p=app.querySelector('[name="new-model-provider"]').value;const error=app.querySelector('[data-form-error]');if(!/^[a-zA-Z0-9._/-]{1,60}$/.test(id)||!name){error.textContent='填写模型 ID 和显示名称。ID 使用字母、数字、点、短横线或斜线。';error.style.color='var(--sx-red)';return}if(s.models.some(m=>m.id===id)){error.textContent='这个公开 ID 已存在，请换一个。';error.style.color='var(--sx-red)';return}s.models.push({id,name:name.slice(0,48),provider:p,meta:'手动映射 · 演示',selected:true});closeSheet(app);paint(app,true);toast(app,'模型已加入菜单');return}
+    if(action==='command'){command(app);return}
+    if(action==='status'){showStatus(app);return}
+    if(action==='refresh'){toast(app,'请求列表已刷新 · 演示数据');return}
+    if(action==='request'){const cancelled=target.dataset.request==='2';sheet(app,'请求详情',`<span class="sx-pill ${cancelled?'sx-wait':''}">${cancelled?'已取消':'已完成'}</span><div class="sx-detail-line"><span>模型</span><span>${target.dataset.request==='1'?'Codex · 主力':'DeepSeek Flash'}</span></div><div class="sx-detail-line"><span>用时</span><span>${cancelled?'0.6 s':'1.8 s'}</span></div><div class="sx-detail-line"><span>结束状态</span><span>${cancelled?'客户端取消':'response.completed'}</span></div><div class="sx-notice">仅保留必要的请求元数据，内容与凭据不进入此视图。</div>`,button('关闭','close','sx-button sx-primary'),'REQUEST / DEMO');return}
+    if(action==='workspace'){sheet(app,'Codex 工作空间','<label class="sx-field">配置目录<input class="sx-input" name="workspace" value="/Users/demo/.codex"></label><p class="sx-helper">切换目录前检查待恢复配置；路径只在此演示中使用。</p>',button('保存目录','save-settings','sx-button sx-primary'));return}
+    if(action==='common'){sheet(app,'通用配置','<p class="sx-helper">普通设置供连接继承；凭据、模型路由及 MCP 保留在各自入口。</p><label class="sx-field">默认思考等级<select class="sx-select"><option>跟随模型目录</option><option>high</option><option>medium</option></select></label><div class="sx-settingrow"><div><strong>使用通用配置</strong><p>由各个连接选择是否继承。</p></div><label class="sx-toggle"><input type="checkbox" checked aria-label="使用通用配置"><span></span></label></div>',button('保存','save-settings','sx-button sx-primary'));return}
+    if(action==='save-settings'){closeSheet(app);toast(app,'演示设置已确认');return}
+    if(action==='mcp'||action==='skills'){sheet(app,action==='mcp'?'MCP 服务':'Skills',`<div class="sx-pill">规划内容</div><div class="sx-step"><span>1</span><div>列表按工作空间组织<small>显示来源、路径与启用状态</small></div></div><div class="sx-step"><span>2</span><div>右侧展开详情<small>查看信息，再决定是否编辑</small></div></div><div class="sx-step"><span>3</span><div>变更前显示差异<small>写入前确认影响范围</small></div></div>`,button('返回','close','sx-button sx-primary'));return}
+  });
+  root.addEventListener('change',event=>{const app=event.target.closest('.sx');if(!app)return;const s=state.get(app);if(event.target.matches('[data-model-check]')){if(s.running)return;const m=s.models.find(x=>x.id===event.target.dataset.modelCheck);m.selected=event.target.checked;if(m.id===s.defaultId&&!m.selected)s.defaultId=s.models.find(x=>x.selected)?.id||'';if(!s.defaultId&&m.selected)s.defaultId=m.id;syncSelection(app);save(app)}if(event.target.matches('[data-motion]')){tweaks.motion=event.target.checked;root.querySelectorAll('.sx').forEach(app=>app.classList.toggle('sx-reduced',!tweaks.motion));toast(app,tweaks.motion?'已启用过渡动画':'已减少动态效果')}});
+  root.addEventListener('input',event=>{if(event.target.name==='command-search'){const q=event.target.value.toLowerCase();event.target.closest('.sx-sheet').querySelectorAll('[data-search-label]').forEach(b=>b.hidden=!b.dataset.searchLabel.toLowerCase().includes(q))}});
+  root.addEventListener('keydown',event=>{const app=event.target.closest('.sx');if(!app)return;const layer=app.querySelector('.sx-sheet-layer');if(event.key==='Escape'&&layer.classList.contains('sx-open')){event.preventDefault();closeSheet(app)}if(event.key==='Tab'&&layer.classList.contains('sx-open')){const controls=[...layer.querySelectorAll('button:not(:disabled),input:not(:disabled),select:not(:disabled)')].filter(el=>!el.hidden&&el.offsetParent!==null);const first=controls[0],last=controls[controls.length-1];if(event.shiftKey&&document.activeElement===first){event.preventDefault();last?.focus()}else if(!event.shiftKey&&document.activeElement===last){event.preventDefault();first?.focus()}}});
+  document.addEventListener('keydown',event=>{if((event.metaKey||event.ctrlKey)&&event.key.toLowerCase()==='k'){event.preventDefault();const app=activeApp&&!activeApp.closest('section[data-variant]').hidden?activeApp:root.querySelector('section[data-variant]:not([hidden]) .sx');if(app)command(app)}});
+  window.addEventListener('openai:set_globals',event=>{const value=event.detail?.globals?.widgetState?.privateContent?.appearance;if(['system','light','dark'].includes(value)){tweaks.appearance=value;appearance()}});
+  if(globalThis.Tweak){const tweak=new Tweak({container:root,onChange:()=>{appearance();root.querySelectorAll('.sx').forEach(app=>{const content=app.querySelector('[data-content]');if(content)content.style.padding=tweaks.density+'px'})}});tweak.addSelect(tweaks,'appearance',{label:'外观',options:[{label:'跟随系统',value:'system'},{label:'浅色',value:'light'},{label:'深色',value:'dark'}]});tweak.addToggle(tweaks,'motion',{label:'过渡动画'});tweak.addSlider(tweaks,'density',{label:'页面留白',min:20,max:40,step:2,unit:'px'})}
+})();
+</script>
