@@ -1,3 +1,15 @@
+# SwitchX 界面设计
+
+2026-09-30 采用“留白工作台”方向，并已落地为原生 Slint 界面。工作台合并原来的总览和模型路由；连接页同时管理上游与订阅账号；活动、工具箱和设置构成其他三个导航入口。
+
+三套交互原型保存在本地分支 `design/quiet-workbench-prototype`，提交 `ecf3e5c`，文件为 `docs/design/switchx-redesign-prototype.html`。该文件是会话内设计预览源，不是生产界面。第一套“留白工作台”为本轮采用的方案；“聚焦启动台”和“路由画布”仅保留作设计记录。
+
+生产页面位于 `ui/pages/`，共用动效与抽屉位于 `ui/components.slint`，配色和动效时长在 `ui/tokens.slint`。原生验证与截图见 [验收记录](../acceptance/quiet-workbench-2026-09-30.md)。
+
+下面保留 2026-09-24 的旧设计记录，便于追溯。
+
+---
+
 # SwitchX 视觉方案预览
 
 这是 **Quiet Circuit / 静谧回路** 方向的可点击设计稿，用来评审布局、色彩、信息层次和过渡节奏。正式应用仍采用 Rust + Slint；本设计稿不是产品实现，也不是实际 Codex 界面。

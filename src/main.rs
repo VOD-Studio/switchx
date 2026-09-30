@@ -735,6 +735,18 @@ fn show_provider_editor(
     update_provider_config_preview(app);
 }
 
+fn close_subscription_editor(app: &AppWindow) {
+    app.set_subscription_editor_generation(
+        app.get_subscription_editor_generation().wrapping_add(1),
+    );
+    app.set_subscription_editor_pending(false);
+    app.set_subscription_editor_open(false);
+    app.set_subscription_auth_json("".into());
+    app.set_subscription_auth_error("".into());
+    app.set_common_config_editor_open(false);
+    app.set_icon_picker_open(false);
+}
+
 fn show_subscription_editor(
     app: &AppWindow,
     provider: Option<ProviderRecord>,
@@ -1027,7 +1039,7 @@ fn open_model_editor(app: &AppWindow, provider_id: &str, original_id: &str) -> R
     app.set_fallback_editor_open(false);
     app.set_editor_open(false);
     app.set_edit_key("".into());
-    app.set_active_page(2);
+    app.set_active_page(0);
     update_reasoning_options(app);
     Ok(())
 }
@@ -1125,6 +1137,7 @@ async fn worker(
                                         time: record.time.into(),
                                         route: record.route.into(),
                                         timing: record.timing.into(),
+                                        duration: record.duration.into(),
                                         detail: record.detail.into(),
                                         status: record.status.label().into(),
                                         completed: record.status
@@ -2078,7 +2091,8 @@ async fn worker(
                             let _ = weak.upgrade_in_event_loop(move |app| {
                                 show_result(&app, Ok(snapshot));
                                 app.set_route_preview_ready(false);
-                                app.set_active_page(5);
+                                app.set_connections_tab(1);
+                                app.set_active_page(1);
                             });
                             Ok("已添加订阅连接与 CLI 内置模型资料；请登录后预览发布".to_owned())
                         }
@@ -2198,10 +2212,11 @@ async fn worker(
                                 app.set_default_model(model.into());
                                 app.set_route_preview(preview.into());
                                 app.set_route_preview_ready(ready);
-                                app.set_active_page(2);
+                                app.set_active_page(0);
+                                app.set_publish_drawer_open(true);
                             });
                             summary?;
-                            Ok("已准备 API 路由预览；点击“开启路由”，无需订阅登录".to_owned())
+                            Ok("已准备 API 路由预览；点击“确认启用”，无需订阅登录".to_owned())
                         }
                         _ => Err("未知订阅操作".into()),
                     }
@@ -2389,7 +2404,7 @@ async fn worker(
                             show_action(
                                 &app,
                                 Ok(
-                                    "发布预览已准备；开启路由后点击“启动 Codex”，在新会话选择模型"
+                                    "发布预览已准备；确认启用后点击“启动 Codex”，在新会话选择模型"
                                         .into(),
                                 ),
                             );
@@ -2690,6 +2705,18 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         .enable_all()
         .build()?;
     let app = AppWindow::new()?;
+    #[cfg(target_os = "macos")]
+    {
+        app.global::<Theme>()
+            .set_system_reduced_motion(macos::prefers_reduced_motion());
+        let weak = app.as_weak();
+        app.on_refresh_system_appearance(move || {
+            if let Some(app) = weak.upgrade() {
+                app.global::<Theme>()
+                    .set_system_reduced_motion(macos::prefers_reduced_motion());
+            }
+        });
+    }
     connect_syntax_highlighting(&app);
     let presets = app::PROVIDER_PRESETS
         .iter()
@@ -2846,13 +2873,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let weak = app.as_weak();
     app.on_cancel_subscription_editor(move || {
         if let Some(app) = weak.upgrade() {
-            app.set_subscription_editor_generation(
-                app.get_subscription_editor_generation().wrapping_add(1),
-            );
-            app.set_subscription_editor_pending(false);
-            app.set_subscription_editor_open(false);
-            app.set_common_config_editor_open(false);
-            app.set_icon_picker_open(false);
+            close_subscription_editor(&app);
             let _ = callback_sender.try_send(Command::CancelSubscriptionEditor);
         }
     });
@@ -3796,6 +3817,9 @@ mod tests {
         initialize_provider_icons(&app).unwrap();
         connect_provider_icon_editor(&app);
         app.set_active_page(1);
+        // Commit the initial page change to Slint's change trackers, as the
+        // native event loop does before the next user interaction.
+        slint::platform::update_timers_and_animations();
         show_provider_editor(&app, None, CodexOptions::default(), String::new());
         app.set_edit_name("Custom draft".into());
         app.set_edit_key("synthetic-draft-key".into());
@@ -3843,6 +3867,48 @@ mod tests {
         app.invoke_open_provider_icon_picker();
         app.invoke_choose_provider_icon("".into());
         assert_eq!(app.get_edit_icon_name(), "OpenAI");
+
+        let weak = app.as_weak();
+        app.on_cancel_subscription_editor(move || {
+            if let Some(app) = weak.upgrade() {
+                close_subscription_editor(&app);
+            }
+        });
+        app.set_active_page(0);
+        slint::platform::update_timers_and_animations();
+        assert!(!app.get_subscription_editor_open());
+        assert!(!app.get_icon_picker_open());
+        assert!(app.get_subscription_auth_json().is_empty());
+
+        app.set_active_page(1);
+        show_provider_editor(&app, None, CodexOptions::default(), String::new());
+        app.set_edit_key("synthetic-unsaved-key".into());
+        app.set_active_page(5);
+        slint::platform::update_timers_and_animations();
+        assert!(!app.get_editor_open());
+        assert!(app.get_edit_key().is_empty());
+
+        app.set_config_managed(true);
+        app.set_direct_active(true);
+        assert_eq!(app.get_connection_label(), "直连已启用");
+        app.set_direct_active(false);
+        assert_eq!(app.get_connection_label(), "配置待恢复");
+        app.set_route_running(true);
+        assert_eq!(app.get_connection_label(), "路由已启用");
+        app.set_route_running(false);
+        app.set_config_managed(false);
+        assert_eq!(app.get_connection_label(), "待启用");
+
+        let theme = app.global::<Theme>();
+        theme.set_animations_enabled(true);
+        assert_eq!(theme.get_drawer_motion(), 340);
+        theme.set_system_reduced_motion(true);
+        assert_eq!(theme.get_fast(), 0);
+        assert_eq!(theme.get_page_motion(), 0);
+        assert_eq!(theme.get_drawer_motion(), 0);
+        theme.set_system_reduced_motion(false);
+        theme.set_animations_enabled(false);
+        assert_eq!(theme.get_drawer_motion(), 0);
     }
 
     #[test]

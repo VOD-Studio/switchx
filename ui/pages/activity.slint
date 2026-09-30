@@ -1,6 +1,6 @@
 import { ListView } from "std-widgets.slint";
 import { Theme } from "../tokens.slint";
-import { QuietButton, SurfaceCard, StatusPill } from "../components.slint";
+import { QuietButton, StatusPill } from "../components.slint";
 import { RequestRow } from "../view-models.slint";
 
 export component ActivityPage inherits VerticalLayout {
@@ -8,29 +8,36 @@ export component ActivityPage inherits VerticalLayout {
     in property <[RequestRow]> requests;
     in property <string> request-error;
     callback refresh-requests();
-
-    spacing: 12px;
+    property <int> expanded: -1;
+    spacing: 16px;
     HorizontalLayout {
+        height: 36px;
+        spacing: 10px;
         Text {
-            text: "最近 100 条已结束请求 · " + root.requests.length + " 条";
+            text: "最近请求";
             color: Theme.primary-text;
             font-size: 17px;
+            font-weight: 500;
             vertical-alignment: center;
         }
 
+        Text {
+            text: root.requests.length + " 条 / 最近 100 条";
+            color: Theme.muted-text;
+            font-size: 12px;
+            vertical-alignment: center;
+        }
+
+        Rectangle {
+            horizontal-stretch: 1;
+        }
+
         QuietButton {
-            width: 100px;
-            text: "刷新记录";
+            width: 102px;
+            text: root.busy ? "刷新中…" : "刷新记录";
             enabled: !root.busy;
             clicked => { root.refresh-requests(); }
         }
-    }
-
-    Text {
-        text: "仅记录经过 SwitchX 路由的请求；正文与凭据不保存。手动刷新查看最新结果。";
-        color: Theme.muted-text;
-        font-size: 12px;
-        wrap: word-wrap;
     }
 
     if root.request-error != "": Text {
@@ -38,74 +45,142 @@ export component ActivityPage inherits VerticalLayout {
         color: Theme.warning;
         wrap: word-wrap;
     }
-    if root.requests.length == 0: Text {
-        text: root.busy ? "正在读取请求记录…" : "暂无请求记录。开启模型路由并完成请求后，可在这里查看结果。";
-        color: Theme.muted-text;
-        wrap: word-wrap;
+    if root.requests.length == 0: VerticalLayout {
+        padding: 36px;
+        spacing: 12px;
+        Text {
+            text: "还没有请求记录。";
+            color: Theme.primary-text;
+            font-size: 21px;
+            font-weight: 500;
+            horizontal-alignment: center;
+        }
+
+        Text {
+            text: "启用路由并完成请求后，结果会出现在这里。";
+            color: Theme.muted-text;
+            font-size: 13px;
+            horizontal-alignment: center;
+        }
     }
     ListView {
         vertical-stretch: 1;
-        for request in root.requests: SurfaceCard {
-            height: (request.error == "" ? 132px : 160px) + (request.fallback == "" ? 0px : 28px);
-            VerticalLayout {
-                padding: 14px;
-                spacing: 6px;
-                HorizontalLayout {
+        for request[index] in root.requests: Rectangle {
+            height: root.expanded == index ? (request.fallback == "" ? 180px : 204px) : 83px;
+            animate height {
+                duration: Theme.page-motion;
+                easing: ease-out;
+            }
+            clip: true;
+            background: root.expanded == index ? Theme.panel : transparent;
+            animate background { duration: Theme.fast; }
+            Rectangle {
+                y: parent.height - 1px;
+                height: 1px;
+                background: Theme.border;
+            }
+
+            HorizontalLayout {
+                x: 12px;
+                y: 0px;
+                width: parent.width - 24px;
+                height: 82px;
+                spacing: 15px;
+                VerticalLayout {
+                    alignment: center;
+                    spacing: 5px;
+                    Text {
+                        text: request.route;
+                        color: Theme.primary-text;
+                        font-size: 14px;
+                        font-weight: 500;
+                        overflow: elide;
+                    }
+
                     Text {
                         text: request.time;
                         color: Theme.muted-text;
-                        font-size: 12px;
-                        vertical-alignment: center;
+                        font-size: 11px;
                     }
+                }
 
+                Text {
+                    width: 75px;
+                    text: request.duration;
+                    color: Theme.muted-text;
+                    font-size: 12px;
+                    wrap: word-wrap;
+                    vertical-alignment: center;
+                }
+
+                Rectangle {
+                    width: 170px;
                     StatusPill {
-                        width: request.cancelled ? 176px : 100px;
+                        x: 0px;
+                        y: (parent.height - self.height) / 2;
+                        width: request.cancelled ? 170px : 96px;
                         label: request.status;
                         ink: request.completed ? Theme.success : request.cancelled ? Theme.muted-text : Theme.warning;
+                        fill: request.completed ? Theme.brand-surface : Theme.raised;
                     }
                 }
 
-                Text {
-                    text: request.route;
-                    color: Theme.primary-text;
-                    font-size: 14px;
-                    overflow: elide;
+                QuietButton {
+                    y: (parent.height - self.height) / 2;
+                    width: 66px;
+                    text: root.expanded == index ? "收起" : "详情";
+                    ghost: true;
+                    clicked => { root.expanded = root.expanded == index ? -1 : index; }
                 }
+            }
 
-                if request.fallback != "": Text {
-                    text: request.fallback;
-                    color: Theme.muted-text;
-                    font-size: 12px;
-                    overflow: elide;
-                }
+            Rectangle {
+                x: 12px;
+                y: 83px;
+                width: parent.width - 24px;
+                height: parent.height - 95px;
+                opacity: root.expanded == index ? 1 : 0;
+                animate opacity { duration: Theme.page-motion; }
+                VerticalLayout {
+                    spacing: 6px;
+                    Text {
+                        text: request.timing;
+                        color: Theme.muted-text;
+                        font-size: 12px;
+                        wrap: word-wrap;
+                    }
 
-                Text {
-                    text: request.timing;
-                    color: Theme.muted-text;
-                    font-size: 12px;
-                }
+                    Text {
+                        text: request.detail;
+                        color: Theme.muted-text;
+                        font-size: 12px;
+                        wrap: word-wrap;
+                    }
 
-                Text {
-                    text: request.detail;
-                    color: Theme.muted-text;
-                    font-size: 10px;
-                    overflow: elide;
-                }
-
-                if request.error != "": Text {
-                    text: request.error;
-                    color: request.cancelled ? Theme.muted-text : Theme.warning;
-                    font-size: 12px;
-                    overflow: elide;
+                    if request.fallback != "": Text {
+                        text: request.fallback;
+                        color: Theme.muted-text;
+                        font-size: 12px;
+                        wrap: word-wrap;
+                    }
+                    if request.error != "": Text {
+                        text: request.error;
+                        color: request.cancelled ? Theme.muted-text : Theme.warning;
+                        font-size: 12px;
+                        wrap: word-wrap;
+                    }
+                    Rectangle {
+                        vertical-stretch: 1;
+                    }
                 }
             }
         }
     }
 
     Text {
-        text: "“正常完成”表示已收到上游完成信号；客户端断开无法判断是否由用户主动取消。用量与费用统计尚未接入。";
+        text: "仅保存路由请求的必要元数据，正文与凭据不进入记录。用量与费用统计尚未接入。";
         color: Theme.muted-text;
-        font-size: 12px;
+        font-size: 11px;
         wrap: word-wrap;
     }
 }

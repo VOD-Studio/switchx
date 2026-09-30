@@ -1,6 +1,14 @@
-import { Palette } from "std-widgets.slint";
+import { Palette, ScrollView } from "std-widgets.slint";
 import { Theme } from "tokens.slint";
-import { QuietButton, SurfaceCard, StatusPill } from "components.slint";
+import {
+    QuietButton,
+    QuietCheckBox as CheckBox,
+    QuietComboBox as ComboBox,
+    QuietLineEdit as LineEdit,
+    SurfaceCard,
+    StatusPill,
+    Drawer,
+} from "components.slint";
 import {
     ProviderRow,
     ProviderPresetRow,
@@ -9,7 +17,10 @@ import {
     ModelRow,
     RequestRow,
 } from "view-models.slint";
-import { OverviewPage } from "pages/overview.slint";
+import { AccountsPage } from "pages/accounts.slint";
+import { ProviderEditor } from "editors/provider-editor.slint";
+import { ModelEditor } from "editors/model-editor.slint";
+export { Theme } from "tokens.slint";
 import { ProviderIconPicker } from "editors/provider-icon-picker.slint";
 import { ProvidersPage } from "pages/providers.slint";
 import { SubscriptionEditor } from "editors/subscription-editor.slint";
@@ -31,11 +42,29 @@ export { SyntaxHighlighting, CodeSpan } from "code-editor.slint";
 export component AppWindow inherits Window {
     title: "switchx";
     icon: @image-url("../assets/app-icon.png");
-    preferred-width: 1180px;
-    preferred-height: 800px;
-    min-width: 1040px;
+    preferred-width: 1200px;
+    preferred-height: 820px;
+    min-width: 1000px;
     min-height: 680px;
     background: Theme.background;
+    forward-focus: app-keyboard;
+
+    MenuBar {
+        Menu {
+            title: "导航";
+            MenuItem {
+                title: "快速操作";
+                shortcut: @keys(Control + K);
+                enabled: !root.modal-open;
+                activated => { root.command-open = true; }
+            }
+        }
+    }
+
+    public function set-appearance(dark: bool) {
+        Theme.dark = dark;
+        Palette.color-scheme = dark ? ColorScheme.dark : ColorScheme.light;
+    }
 
     in-out property <int> active-page: 0;
     in-out property <bool> drawer-open: false;
@@ -102,6 +131,7 @@ export component AppWindow inherits Window {
     in-out property <string> config-home: "";
     in-out property <string> config-status: "尚未读取 Codex 配置";
     in-out property <bool> direct-active: false;
+    out property <string> connection-label: root.route-running ? "路由已启用" : root.direct-active ? "直连已启用" : root.config-managed ? "配置待恢复" : "待启用";
     in-out property <string> auth-status: "官方登录状态尚未检查";
     in-out property <[AccountRow]> accounts: [];
     in-out property <string> account-status: "账号列表尚未读取";
@@ -164,8 +194,14 @@ export component AppWindow inherits Window {
         if (root.subscription-editor-open || root.subscription-editor-pending) { root.cancel-subscription-editor(); }
     }
     changed active-page => {
-        if (root.active-page != 1 && root.icon-picker-open) { root.close-provider-icon-picker(); }
-        if (root.active-page != 1 && (root.subscription-editor-open || root.subscription-editor-pending)) { root.cancel-subscription-editor(); }
+        root.page-entered = Theme.page-motion == 0ms;
+        if (root.active-page != 1) {
+            if (root.icon-picker-open) { root.close-provider-icon-picker(); }
+            if (root.subscription-editor-open || root.subscription-editor-pending) { root.cancel-subscription-editor(); }
+            root.editor-open = false;
+            root.edit-key = "";
+        }
+        if (root.active-page != 0) { root.model-editor-open = false; root.fallback-editor-open = false; }
     }
     changed subscription-editor-open => {
         if (!root.subscription-editor-open) {
@@ -203,6 +239,7 @@ export component AppWindow inherits Window {
     changed edit-compact-limit => { if (root.editor-open) { root.update-provider-config-preview(); } }
     changed edit-key => { root.reset-model-discovery(); }
     changed editor-open => {
+        if (!root.editor-open) { root.edit-key = ""; }
         root.reset-model-discovery();
         if (root.editor-open) { root.update-provider-config-preview(); }
     }
@@ -210,7 +247,6 @@ export component AppWindow inherits Window {
     changed model-original-id => { root.reset-model-discovery(); }
     changed model-editor-open => {
         root.reset-model-discovery();
-        if (root.model-editor-open) { root.model-scroll-y = 0px; }
     }
     changed model-reasoning-levels => { root.update-reasoning-options(); }
     changed model-upstream-id => { root.update-model-display-name(); }
@@ -265,651 +301,1198 @@ export component AppWindow inherits Window {
     callback launch-codex();
     callback cancel-route-preview();
     callback poll-route-status();
+    callback refresh-system-appearance();
+    Timer {
+        interval: 5s;
+        running: true;
+        triggered => { root.refresh-system-appearance(); }
+    }
+
     Timer {
         interval: 2s;
         running: root.route-running;
         triggered => { root.poll-route-status(); }
     }
 
-    changed drawer-open => {
-        if (root.drawer-open) { drawer-keyboard.focus(); }
-        else { status-button.focus(); }
+    in-out property <int> connections-tab: 0;
+    changed connections-tab => { root.page-entered = Theme.page-motion == 0ms; }
+    in-out property <bool> publish-drawer-open: false;
+    in-out property <bool> direct-drawer-open: false;
+    in-out property <bool> command-open: false;
+    property <bool> page-entered: true;
+    property <bool> modal-open: root.drawer-open || root.editor-open || root.subscription-editor-open || root.common-config-editor-open || root.icon-picker-open || root.model-editor-open || root.fallback-editor-open || root.publish-drawer-open || root.direct-drawer-open || root.delete-account-confirm || root.command-open;
+    property <string> page-title: root.active-page == 0 ? "模型，随手可用。" : root.active-page == 1 ? "连接你的模型。" : root.active-page == 3 ? "每次请求，有迹可循。" : root.active-page == 4 ? "让工作流更顺手。" : "让它适合你。";
+    property <string> page-label: root.active-page == 0 ? "工作台" : root.active-page == 1 ? "连接" : root.active-page == 3 ? "活动" : root.active-page == 4 ? "工具箱" : "设置";
+    property <string> page-subtitle: root.active-page == 0 ? "把常用的模型放进 Codex，专注下一次创作。" : root.active-page == 1 ? "账号、API 与模型，在这里统一管理。" : root.active-page == 3 ? "查看模型、耗时与结果。" : root.active-page == 4 ? "MCP 与 Skills，独立于模型连接。" : "外观、工作空间和配置，各在其位。";
+    animate background { duration: Theme.page-motion; }
+    Timer {
+        interval: 16ms;
+        running: !root.page-entered;
+        triggered => { root.page-entered = true; }
     }
 
-    drawer-keyboard := FocusScope {
-        width: 0px;
-        enabled: root.drawer-open;
-        key-pressed(event) => {
-            if (event.text == Key.Escape) {
-                root.drawer-open = false;
+    changed modal-open => { if (!root.modal-open) { app-keyboard.focus(); } }
+
+    app-keyboard := FocusScope {
+        capture-key-pressed(event) => {
+            if (!root.modal-open && (event.modifiers.control || event.modifiers.meta) && (event.text == "k" || event.text == "K")) {
+                root.command-open = true;
                 return accept;
             }
             return reject;
         }
-    }
+        quick-command := KeyBinding {
+            keys: @keys(Control + K);
+            enabled: !root.modal-open;
+            activated => { root.command-open = true; }
+        }
 
-    HorizontalLayout {
-        spacing: 0px;
-        Rectangle {
-            width: 208px;
-            background: Theme.panel;
-            border-width: 1px;
-            border-color: Theme.border;
-            VerticalLayout {
-                padding: 20px;
-                spacing: 12px;
-                Text {
-                    text: "switchx";
-                    color: Theme.primary-text;
-                    font-size: 27px;
-                    font-weight: 700;
-                }
+        KeyBinding {
+            keys: @keys(Meta + K);
+            enabled: !root.modal-open;
+            activated => { root.command-open = true; }
+        }
 
-                SurfaceCard {
-                    height: 62px;
-                    background: Theme.raised;
+        FocusScope {
+            enabled: !root.modal-open;
+            HorizontalLayout {
+                spacing: 0px;
+                Rectangle {
+                    width: 180px;
+                    background: Theme.sidebar;
+                    animate background { duration: Theme.page-motion; }
+                    Rectangle {
+                        x: parent.width - 1px;
+                        width: 1px;
+                        background: Theme.border;
+                    }
+
                     VerticalLayout {
-                        padding: 10px;
-                        spacing: 3px;
-                        Text {
-                            text: "Codex";
-                            color: Theme.primary-text;
-                            font-size: 14px;
-                            font-weight: 600;
+                        padding: 14px;
+                        padding-top: 26px;
+                        spacing: 6px;
+                        HorizontalLayout {
+                            height: 42px;
+                            padding-left: 8px;
+                            spacing: 8px;
+                            Image {
+                                y: (parent.height - self.height) / 2;
+                                width: 23px;
+                                height: 25px;
+                                source: @image-url("../assets/ui/brand.svg");
+                                colorize: Theme.brand;
+                            }
+
+                            Text {
+                                text: "switchx.";
+                                color: Theme.primary-text;
+                                font-size: 23px;
+                                font-weight: 600;
+                                vertical-alignment: center;
+                            }
+                        }
+
+                        Rectangle {
+                            height: 12px;
+                        }
+
+                        HorizontalLayout {
+                            height: 54px;
+                            padding-left: 8px;
+                            spacing: 10px;
+                            Rectangle {
+                                y: (parent.height - self.height) / 2;
+                                width: 29px;
+                                height: 29px;
+                                background: Theme.panel;
+                                border-radius: 8px;
+                                Image {
+                                    x: 6px;
+                                    y: 6px;
+                                    width: 17px;
+                                    height: 17px;
+                                    source: @image-url("../assets/ui/code.svg");
+                                    colorize: Theme.primary-text;
+                                }
+                            }
+
+                            VerticalLayout {
+                                alignment: center;
+                                spacing: 4px;
+                                Text {
+                                    text: "Codex";
+                                    color: Theme.primary-text;
+                                    font-size: 13px;
+                                    font-weight: 500;
+                                }
+
+                                Text {
+                                    text: "本机工作空间";
+                                    color: Theme.muted-text;
+                                    font-size: 11px;
+                                }
+                            }
+                        }
+
+                        Rectangle {
+                            height: 14px;
+                        }
+
+                        QuietButton {
+                            text: "工作台";
+                            icon: @image-url("../assets/ui/workbench.svg");
+                            icon-color: Theme.muted-text;
+                            navigation: true;
+                            selected: root.active-page == 0;
+                            left-aligned: true;
+                            height: 40px;
+                            clicked => { root.active-page = 0; }
+                        }
+
+                        QuietButton {
+                            text: "连接";
+                            icon: @image-url("../assets/ui/connections.svg");
+                            icon-color: Theme.muted-text;
+                            navigation: true;
+                            selected: root.active-page == 1;
+                            left-aligned: true;
+                            height: 40px;
+                            clicked => { root.active-page = 1; }
+                        }
+
+                        QuietButton {
+                            text: "活动";
+                            icon: @image-url("../assets/ui/activity.svg");
+                            icon-color: Theme.muted-text;
+                            navigation: true;
+                            selected: root.active-page == 3;
+                            left-aligned: true;
+                            height: 40px;
+                            clicked => { root.active-page = 3; if (!root.busy) { root.refresh-requests(); } }
+                        }
+
+                        Rectangle {
+                            height: 20px;
+                        }
+
+                        QuietButton {
+                            text: "工具箱";
+                            icon: @image-url("../assets/ui/blocks.svg");
+                            icon-color: Theme.muted-text;
+                            navigation: true;
+                            selected: root.active-page == 4;
+                            left-aligned: true;
+                            height: 40px;
+                            clicked => { root.active-page = 4; }
+                        }
+
+                        QuietButton {
+                            text: "设置";
+                            icon: @image-url("../assets/ui/settings.svg");
+                            icon-color: Theme.muted-text;
+                            navigation: true;
+                            selected: root.active-page == 5;
+                            left-aligned: true;
+                            height: 40px;
+                            clicked => { root.active-page = 5; }
+                        }
+
+                        Rectangle {
+                            vertical-stretch: 1;
+                        }
+
+                        QuietButton {
+                            text: "●  " + root.connection-label;
+                            ghost: true;
+                            left-aligned: true;
+                            clicked => { root.drawer-open = true; }
                         }
 
                         Text {
-                            text: "本地工作空间";
+                            text: "LOCAL FIRST";
                             color: Theme.muted-text;
-                            font-size: 11px;
+                            font-size: 10px;
                         }
                     }
                 }
 
+                VerticalLayout {
+                    spacing: 0px;
+                    Rectangle {
+                        height: 57px;
+                        Rectangle {
+                            y: parent.height - 1px;
+                            height: 1px;
+                            background: Theme.border;
+                        }
+
+                        HorizontalLayout {
+                            padding-left: 30px;
+                            padding-right: 24px;
+                            spacing: 8px;
+                            Text {
+                                text: "Codex  ›  " + root.page-label;
+                                color: Theme.muted-text;
+                                font-size: 12px;
+                                vertical-alignment: center;
+                            }
+
+                            Rectangle {
+                                horizontal-stretch: 1;
+                            }
+
+                            QuietButton {
+                                y: (parent.height - self.height) / 2;
+                                width: 126px;
+                                text: "快速操作  " + quick-command.keys.to-string();
+                                ghost: true;
+                                clicked => { root.command-open = true; }
+                            }
+
+                            QuietButton {
+                                y: (parent.height - self.height) / 2;
+                                width: 36px;
+                                text: Theme.dark ? "切换浅色" : "切换深色";
+                                icon-only: true;
+                                ghost: true;
+                                icon: Theme.dark ? @image-url("../assets/ui/sun.svg") : @image-url("../assets/ui/moon.svg");
+                                icon-color: Theme.muted-text;
+                                clicked => { root.set-appearance(!Theme.dark); }
+                            }
+
+                            QuietButton {
+                                y: (parent.height - self.height) / 2;
+                                width: 88px;
+                                text: "连接状态";
+                                ghost: true;
+                                clicked => { root.drawer-open = true; }
+                            }
+                        }
+                    }
+
+                    VerticalLayout {
+                        padding: 28px;
+                        padding-bottom: 16px;
+                        spacing: 18px;
+                        HorizontalLayout {
+                            height: 65px;
+                            spacing: 16px;
+                            VerticalLayout {
+                                spacing: 7px;
+                                Text {
+                                    text: root.page-title;
+                                    color: Theme.primary-text;
+                                    font-size: 28px;
+                                    font-weight: 600;
+                                }
+
+                                Text {
+                                    text: root.page-subtitle;
+                                    color: Theme.muted-text;
+                                    font-size: 13px;
+                                }
+                            }
+
+                            Rectangle {
+                                horizontal-stretch: 1;
+                            }
+
+                            StatusPill {
+                                width: 98px;
+                                label: root.loading ? "读取中…" : "● " + root.connection-label;
+                                ink: root.route-running || root.direct-active ? Theme.success : Theme.warning;
+                                fill: root.route-running || root.direct-active ? Theme.brand-surface : Theme.warning-surface;
+                            }
+                        }
+
+                        if root.error-code != "": Rectangle {
+                            height: 62px;
+                            background: Theme.warning-surface;
+                            border-radius: 8px;
+                            VerticalLayout {
+                                padding: 12px;
+                                spacing: 5px;
+                                Text {
+                                    text: root.error-message;
+                                    color: Theme.error;
+                                    font-size: 13px;
+                                    wrap: word-wrap;
+                                }
+
+                                Text {
+                                    text: root.error-action;
+                                    color: Theme.muted-text;
+                                    font-size: 11px;
+                                    wrap: word-wrap;
+                                }
+                            }
+                        }
+                        Rectangle {
+                            vertical-stretch: 1;
+                            opacity: root.page-entered ? 1 : 0;
+                            animate opacity {
+                                duration: root.page-entered ? Theme.page-motion : 0ms;
+                                easing: ease-out;
+                            }
+                            Rectangle {
+                                y: root.page-entered ? 0px : 7px;
+                                height: parent.height;
+                                animate y {
+                                    duration: root.page-entered ? Theme.page-motion : 0ms;
+                                    easing: ease-out;
+                                }
+                                if root.active-page == 0: RoutingPage {
+                                    busy: root.busy;
+                                    loading: root.loading;
+                                    providers: root.providers;
+                                    models: root.models;
+                                    selected-model-count: root.selected-model-count;
+                                    config-managed: root.config-managed;
+                                    route-managed: root.route-managed;
+                                    route-running: root.route-running;
+                                    direct-active: root.direct-active;
+                                    chatgpt-login-pending: root.chatgpt-login-pending;
+                                    route-status: root.route-status;
+                                    config-home: root.config-home;
+                                    default-model <=> root.default-model;
+                                    model-provider-options: root.model-provider-options;
+                                    model-provider-choice <=> root.model-provider-choice;
+                                    model-scroll-y <=> root.model-scroll-y;
+                                    add-selected-model() => { root.add-selected-model(); }
+                                    begin-model-editor(provider-id, model-id) => { root.begin-model-editor(provider-id, model-id); }
+                                    select-model(id, selected) => { root.select-model(id, selected); }
+                                    edit-fallback(id) => { root.edit-fallback(id); }
+                                    inspect-route() => { root.publish-drawer-open = true; root.inspect-route(); }
+                                    launch-codex() => { root.launch-codex(); }
+                                    show-direct() => { root.direct-drawer-open = true; }
+                                    restore-config(home) => { root.restore-config(home); }
+                                    navigate(page) => { root.active-page = page; }
+                                }
+                                if root.active-page == 1: VerticalLayout {
+                                    spacing: 20px;
+                                    HorizontalLayout {
+                                        height: 36px;
+                                        spacing: 8px;
+                                        QuietButton {
+                                            width: 112px;
+                                            text: "上游连接";
+                                            ghost: true;
+                                            selected: root.connections-tab == 0;
+                                            clicked => { root.connections-tab = 0; }
+                                        }
+
+                                        QuietButton {
+                                            width: 112px;
+                                            text: "订阅账号";
+                                            ghost: true;
+                                            selected: root.connections-tab == 1;
+                                            clicked => { root.connections-tab = 1; }
+                                        }
+
+                                        Rectangle {
+                                            horizontal-stretch: 1;
+                                        }
+                                    }
+
+                                    if root.connections-tab == 0: ProvidersPage {
+                                        loading: root.loading;
+                                        busy: root.busy;
+                                        recovery-only: root.recovery-only;
+                                        providers: root.providers;
+                                        filtered-providers: root.filtered-providers;
+                                        provider-query <=> root.provider-query;
+                                        config-managed: root.config-managed;
+                                        chatgpt-login-pending: root.chatgpt-login-pending;
+                                        refresh(check) => { root.refresh(check); }
+                                        filter-providers(query) => { root.filter-providers(query); }
+                                        begin-provider-editor(id) => { root.begin-provider-editor(id); }
+                                        begin-subscription-editor(id) => { root.begin-subscription-editor(id); }
+                                        check-provider(id) => { root.check-provider(id); }
+                                        preview-direct(id) => { root.selected-provider-id = id; root.direct-drawer-open = true; root.inspect-direct(id, root.config-home); }
+                                        begin-model-editor(provider-id, model-id) => { root.begin-model-editor(provider-id, model-id); }
+                                    }
+                                    if root.connections-tab == 1: AccountsPage {
+                                        busy: root.busy;
+                                        recovery-only: root.recovery-only;
+                                        config-managed: root.config-managed;
+                                        auth-status: root.auth-status;
+                                        accounts: root.accounts;
+                                        account-status: root.account-status;
+                                        login-user-code: root.login-user-code;
+                                        login-url: root.login-url;
+                                        chatgpt-login-pending: root.chatgpt-login-pending;
+                                        route-auth-error: root.route-auth-error;
+                                        subscription-action(action) => { root.subscription-action(action); }
+                                        account-action(action, id) => { root.account-action(action, id); }
+                                        request-account-removal(account) => {
+                                            root.delete-account-id = account.id;
+                                            root.delete-account-label = account.label;
+                                            root.delete-account-references = account.bound-provider-names;
+                                            root.error-code = "";
+                                            root.error-message = "";
+                                            root.error-action = "";
+                                            root.delete-account-confirm = true;
+                                        }
+                                    }
+                                }
+                                if root.active-page == 3: ActivityPage {
+                                    busy: root.busy;
+                                    requests: root.requests;
+                                    request-error: root.request-error;
+                                    refresh-requests() => { root.refresh-requests(); }
+                                }
+                                if root.active-page == 4: VerticalLayout {
+                                    spacing: 22px;
+                                    for item in [
+                                        {
+                                            title: "MCP 服务",
+                                            detail: "按工作空间组织模型可用的工具服务。",
+                                            icon: @image-url("../assets/ui/blocks.svg")
+                                        },
+                                        {
+                                            title: "Skills",
+                                            detail: "集中查看技能、来源与适用范围。",
+                                            icon: @image-url("../assets/ui/folder.svg")
+                                        }
+                                    ]: Rectangle {
+                                        height: 105px;
+                                        Rectangle {
+                                            y: parent.height - 1px;
+                                            height: 1px;
+                                            background: Theme.border;
+                                        }
+
+                                        HorizontalLayout {
+                                            spacing: 18px;
+                                            Image {
+                                                width: 26px;
+                                                height: 26px;
+                                                source: item.icon;
+                                                colorize: Theme.brand;
+                                            }
+
+                                            VerticalLayout {
+                                                alignment: center;
+                                                spacing: 8px;
+                                                Text {
+                                                    text: item.title;
+                                                    color: Theme.primary-text;
+                                                    font-size: 17px;
+                                                    font-weight: 500;
+                                                }
+
+                                                Text {
+                                                    text: item.detail;
+                                                    color: Theme.muted-text;
+                                                    font-size: 13px;
+                                                }
+                                            }
+
+                                            StatusPill {
+                                                label: "尚未接入";
+                                            }
+                                        }
+                                    }
+                                    Text {
+                                        text: "工具管理将在后续版本接入。当前可在各订阅连接的配置中管理已有 MCP 设置。";
+                                        color: Theme.muted-text;
+                                        font-size: 12px;
+                                        wrap: word-wrap;
+                                    }
+
+                                    Rectangle {
+                                        vertical-stretch: 1;
+                                    }
+                                }
+                                if root.active-page == 5: ConfigPage {
+                                    busy: root.busy;
+                                    recovery-only: root.recovery-only;
+                                    config-home <=> root.config-home;
+                                    route-port <=> root.route-port;
+                                    config-status: root.config-status;
+                                    config-managed: root.config-managed;
+                                    chatgpt-login-pending: root.chatgpt-login-pending;
+                                    restore-config(home) => { root.restore-config(home); }
+                                    inspect-config(home) => { root.inspect-config(home); }
+                                    import-current(home) => { root.import-current(home); }
+                                    check-login(home) => { root.check-login(home); }
+                                    open-common-config() => { root.open-common-config(); }
+                                    set-appearance(dark) => { root.set-appearance(dark); }
+                                    show-direct() => { root.direct-drawer-open = true; }
+                                }
+                            }
+                        }
+
+                        if root.action-message != "": HorizontalLayout {
+                            height: 24px;
+                            spacing: 8px;
+                            Text {
+                                text: root.action-message;
+                                color: Theme.muted-text;
+                                font-size: 11px;
+                                overflow: elide;
+                                vertical-alignment: center;
+                            }
+
+                            QuietButton {
+                                width: 50px;
+                                height: 24px;
+                                text: "详情";
+                                ghost: true;
+                                clicked => { root.drawer-open = true; }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    Drawer {
+        open: root.editor-open && !root.icon-picker-open && !root.common-config-editor-open;
+        title: "API 连接";
+        subtitle: "保存连接后，在工作台预览启用。";
+        panel-width: 760px;
+        busy: root.busy;
+        error-message: root.error-code == "" ? "" : root.error-message + " · " + root.error-action;
+        dismissed => { root.editor-open = false; root.edit-key = ""; }
+        ScrollView {
+            VerticalLayout {
+                ProviderEditor {
+                    busy: root.busy;
+                    editor-open <=> root.editor-open;
+                    delete-confirm <=> root.delete-confirm;
+                    edit-id: root.edit-id;
+                    edit-name <=> root.edit-name;
+                    edit-url <=> root.edit-url;
+                    edit-model <=> root.edit-model;
+                    edit-key <=> root.edit-key;
+                    edit-remote-compaction <=> root.edit-remote-compaction;
+                    edit-use-common-config <=> root.edit-use-common-config;
+                    edit-context-1m <=> root.edit-context-1m;
+                    edit-compact-limit <=> root.edit-compact-limit;
+                    edit-config-preview: root.edit-config-preview;
+                    edit-config-error: root.edit-config-error;
+                    provider-presets: root.provider-presets;
+                    edit-preset-id: root.edit-preset-id;
+                    edit-icon-name: root.edit-icon-name;
+                    edit-icon: root.edit-icon;
+                    edit-icon-monochrome: root.edit-icon-monochrome;
+                    fetched-models: root.fetched-models;
+                    fetching-models: root.fetching-models;
+                    discovery-message: root.discovery-message;
+                    discovery-scope: root.discovery-scope;
+                    config-managed: root.config-managed;
+                    border-width: 0px;
+                    background: transparent;
+                    save-provider(id, name, url, model, key) => { root.save-provider(id, name, url, model, key); }
+                    open-common-config() => { root.open-common-config(); }
+                    delete-provider(id) => { root.delete-provider(id); }
+                    apply-provider-preset(id) => { root.apply-provider-preset(id); }
+                    open-provider-preset-link(api-key-page) => { root.open-provider-preset-link(api-key-page); }
+                    open-provider-icon-picker() => { root.open-provider-icon-picker(); }
+                    fetch-models(scope) => { root.fetch-models(scope); }
+                }
+            }
+        }
+    }
+
+    Drawer {
+        open: root.subscription-editor-open && !root.icon-picker-open && !root.common-config-editor-open;
+        title: "ChatGPT 订阅";
+        subtitle: "账号绑定、认证资料与连接配置。";
+        panel-width: 760px;
+        busy: root.busy;
+        error-message: root.error-code == "" ? "" : root.error-message + " · " + root.error-action;
+        dismissed => { root.cancel-subscription-editor(); }
+        SubscriptionEditor {
+            busy: root.busy;
+            border-width: 0px;
+            background: transparent;
+            subscription-id: root.subscription-id;
+            subscription-name <=> root.subscription-name;
+            subscription-binding-label: root.subscription-binding-label;
+            subscription-account-ids: root.subscription-account-ids;
+            subscription-account-options: root.subscription-account-options;
+            subscription-account-choice <=> root.subscription-account-choice;
+            subscription-auth-json <=> root.subscription-auth-json;
+            subscription-auth-error: root.subscription-auth-error;
+            delete-confirm <=> root.delete-confirm;
+            edit-use-common-config <=> root.edit-use-common-config;
+            edit-context-1m <=> root.edit-context-1m;
+            edit-compact-limit <=> root.edit-compact-limit;
+            edit-config-preview <=> root.edit-config-preview;
+            edit-config-error: root.edit-config-error;
+            edit-icon-name: root.edit-icon-name;
+            edit-icon: root.edit-icon;
+            edit-icon-monochrome: root.edit-icon-monochrome;
+            config-managed: root.config-managed;
+            save-subscription(id, name, account-id) => { root.save-subscription(id, name, account-id); }
+            cancel-subscription-editor() => { root.cancel-subscription-editor(); }
+            format-subscription-auth() => { root.format-subscription-auth(); }
+            subscription-auth-edited() => { root.subscription-auth-edited(); }
+            subscription-config-edited() => { root.subscription-config-edited(); }
+            update-subscription-context() => { root.update-subscription-context(); }
+            update-subscription-common() => { root.update-subscription-common(); }
+            open-common-config() => { root.open-common-config(); }
+            delete-provider(id) => { root.delete-provider(id); }
+            open-provider-icon-picker() => { root.open-provider-icon-picker(); }
+            navigate(page) => { root.cancel-subscription-editor(); root.connections-tab = 1; root.active-page = 1; }
+        }
+    }
+
+    Drawer {
+        open: root.model-editor-open;
+        title: "模型设置";
+        subtitle: "修改在下次发布时应用。";
+        panel-width: 700px;
+        busy: root.busy;
+        error-message: root.error-code == "" ? "" : root.error-message + " · " + root.error-action;
+        dismissed => { root.model-editor-open = false; }
+        ScrollView {
+            VerticalLayout {
+                ModelEditor {
+                    busy: root.busy;
+                    fetched-models: root.fetched-models;
+                    fetching-models: root.fetching-models;
+                    discovery-message: root.discovery-message;
+                    discovery-scope: root.discovery-scope;
+                    config-managed: root.config-managed;
+                    border-width: 0px;
+                    background: transparent;
+                    model-editor-open <=> root.model-editor-open;
+                    model-provider-name: root.model-provider-name;
+                    model-upstream-id <=> root.model-upstream-id;
+                    model-public-id <=> root.model-public-id;
+                    model-display-name <=> root.model-display-name;
+                    model-display-name-custom <=> root.model-display-name-custom;
+                    model-source-path <=> root.model-source-path;
+                    model-original-id: root.model-original-id;
+                    model-context-window <=> root.model-context-window;
+                    model-reasoning-levels <=> root.model-reasoning-levels;
+                    model-default-reasoning <=> root.model-default-reasoning;
+                    model-reasoning-options: root.model-reasoning-options;
+                    model-delete-confirm <=> root.model-delete-confirm;
+                    fetch-models(scope) => { root.fetch-models(scope); }
+                    save-model() => { root.save-model(); }
+                    delete-model() => { root.delete-model(); }
+                }
+            }
+        }
+    }
+
+    Drawer {
+        open: root.fallback-editor-open;
+        title: "备用策略";
+        subtitle: "";
+        panel-width: 660px;
+        busy: root.busy;
+        error-message: root.error-code == "" ? "" : root.error-message + " · " + root.error-action;
+        dismissed => { root.fallback-editor-open = false; }
+        SurfaceCard {
+            height: 350px;
+            border-width: 0px;
+            background: transparent;
+            VerticalLayout {
+                padding: 18px;
+                spacing: 10px;
                 Text {
-                    text: "WORKSPACE";
-                    color: Theme.muted-text;
-                    font-size: 10px;
+                    text: "备用上游 · " + root.fallback-primary-label;
+                    color: Theme.primary-text;
+                    font-size: 16px;
+                    font-weight: 600;
+                    overflow: elide;
                 }
 
-                QuietButton {
-                    text: "总览";
-                    selected: root.active-page == 0;
-                    left-aligned: true;
-                    clicked => { root.active-page = 0; }
-                }
-
-                QuietButton {
-                    text: "上游供应商";
-                    selected: root.active-page == 1;
-                    left-aligned: true;
-                    clicked => { root.active-page = 1; }
-                }
-
-                QuietButton {
-                    text: "模型路由";
-                    selected: root.active-page == 2;
-                    left-aligned: true;
-                    clicked => { root.active-page = 2; }
-                }
-
-                QuietButton {
-                    text: "请求与用量";
-                    selected: root.active-page == 3;
-                    left-aligned: true;
-                    enabled: !root.busy;
-                    clicked => { root.active-page = 3; root.refresh-requests(); }
+                ComboBox {
+                    model: root.fallback-options;
+                    current-index <=> root.fallback-choice;
+                    accessible-label: "选择备用上游";
+                    enabled: !root.busy && !root.config-managed;
+                    selected(value) => { root.fallback-consent = false; }
                 }
 
                 Text {
-                    text: "TOOLBOX";
+                    text: "主上游 → 一个备用上游。仅在连接建立失败且请求尚未发送时尝试一次；超时、HTTP 错误和响应中断均不切换。主备实际模型 ID、能力和指令模板须一致。";
                     color: Theme.muted-text;
-                    font-size: 10px;
+                    font-size: 12px;
+                    wrap: word-wrap;
                 }
 
-                QuietButton {
-                    text: "MCP · Skills";
-                    selected: root.active-page == 4;
-                    left-aligned: true;
-                    clicked => { root.active-page = 4; }
+                Text {
+                    text: "选择备用后，请确认该站点的数据区域与隐私要求适用；费用可能变化。备用模型无需单独发布。";
+                    color: Theme.muted-text;
+                    font-size: 12px;
+                    wrap: word-wrap;
                 }
 
-                QuietButton {
-                    text: "配置与恢复";
-                    selected: root.active-page == 5;
-                    left-aligned: true;
-                    clicked => { root.active-page = 5; }
+                CheckBox {
+                    text: "允许在上述条件下把完整请求发送到所选备用站点";
+                    checked <=> root.fallback-consent;
+                    enabled: root.fallback-choice > 0 && !root.busy && !root.config-managed;
+                }
+
+                HorizontalLayout {
+                    spacing: 8px;
+                    QuietButton {
+                        text: "保存备用策略";
+                        primary: true;
+                        enabled: !root.busy && !root.config-managed && (root.fallback-choice == 0 || root.fallback-consent);
+                        clicked => { root.save-fallback(); }
+                    }
+
+                    QuietButton {
+                        text: "取消";
+                        clicked => { root.fallback-editor-open = false; }
+                    }
+                }
+            }
+        }
+    }
+
+    Drawer {
+        open: root.common-config-editor-open && !root.icon-picker-open;
+        title: "通用配置";
+        subtitle: "";
+        panel-width: 760px;
+        busy: root.busy;
+        error-message: root.error-code == "" ? "" : root.error-message + " · " + root.error-action;
+        dismissed => { root.cancel-common-config(); }
+        CommonConfigEditor {
+            busy: root.busy;
+            border-width: 0px;
+            background: transparent;
+            common-config-draft <=> root.common-config-draft;
+            common-config-error: root.common-config-error;
+            common-config-message: root.common-config-message;
+            common-config-current-source: root.common-config-current-source;
+            config-managed: root.config-managed;
+            extract-common-config() => { root.extract-common-config(); }
+            save-common-config() => { root.save-common-config(); }
+            cancel-common-config() => { root.cancel-common-config(); }
+        }
+    }
+
+    Drawer {
+        open: root.icon-picker-open;
+        title: "选择连接头像";
+        subtitle: "";
+        panel-width: 760px;
+        busy: root.busy;
+        error-message: root.error-code == "" ? "" : root.error-message + " · " + root.error-action;
+        dismissed => { root.close-provider-icon-picker(); }
+        if root.icon-picker-open: ProviderIconPicker {
+            busy: root.busy;
+            provider-icons: root.provider-icons;
+            filtered-provider-icons: root.filtered-provider-icons;
+            provider-icon-query <=> root.provider-icon-query;
+            edit-icon-id: root.edit-icon-id;
+            edit-icon-name: root.edit-icon-name;
+            config-managed: root.config-managed;
+            choose-provider-icon(id) => { root.choose-provider-icon(id); }
+            close-provider-icon-picker() => { root.close-provider-icon-picker(); }
+            filter-provider-icons(query) => { root.filter-provider-icons(query); }
+        }
+    }
+
+    Drawer {
+        open: root.delete-account-confirm;
+        title: "移除订阅账号";
+        subtitle: "";
+        panel-width: 580px;
+        busy: root.busy;
+        error-message: root.error-code == "" ? "" : root.error-message + " · " + root.error-action;
+        dismissed => { root.delete-account-confirm = false; root.delete-account-id = ""; }
+        SurfaceCard {
+            border-width: 0px;
+            background: transparent;
+            height: (root.error-code == "" ? 272px : 332px) + (root.delete-account-references == "" ? 0px : 64px);
+            VerticalLayout {
+                padding: 24px;
+                spacing: 14px;
+                Text {
+                    text: "移除 ChatGPT 账号";
+                    color: Theme.primary-text;
+                    font-size: 19px;
+                    font-weight: 600;
+                }
+
+                Text {
+                    text: root.delete-account-label;
+                    color: Theme.primary-text;
+                    font-size: 14px;
+                    overflow: elide;
+                }
+
+                Text {
+                    text: root.delete-account-references == "" ? "将移除此账号在 SwitchX 中保存的登录信息。Codex 配置目录会保留。" : "此账号仍被上游引用。请先重新绑定或删除关联上游，再移除账号。";
+                    color: Theme.muted-text;
+                    font-size: 13px;
+                    wrap: word-wrap;
+                }
+
+                if root.delete-account-references != "": Text {
+                    text: "关联上游：" + root.delete-account-references;
+                    color: Theme.warning;
+                    font-size: 13px;
+                    wrap: word-wrap;
+                }
+
+                if root.error-code != "": Text {
+                    text: root.error-message;
+                    color: Theme.error;
+                    font-size: 13px;
+                    wrap: word-wrap;
                 }
 
                 Rectangle {
                     vertical-stretch: 1;
                 }
 
-                QuietButton {
-                    text: "偏好设置";
-                    selected: root.active-page == 6;
-                    left-aligned: true;
-                    clicked => { root.active-page = 6; }
-                }
+                HorizontalLayout {
+                    spacing: 10px;
+                    QuietButton {
+                        text: "取消";
+                        enabled: !root.busy;
+                        clicked => {
+                            root.delete-account-confirm = false;
+                            root.delete-account-id = "";
+                        }
+                    }
 
-                Text {
-                    text: root.route-running ? "●  模型路由运行中" : root.route-managed ? "●  路由配置待恢复" : "●  路由未启用";
-                    color: root.route-running ? Theme.success : Theme.warning;
-                    font-size: 12px;
+                    QuietButton {
+                        text: "确认移除";
+                        primary: true;
+                        enabled: !root.busy && !root.config-managed && !root.chatgpt-login-pending && root.delete-account-id != "" && root.delete-account-references == "";
+                        clicked => { root.account-action(4, root.delete-account-id); }
+                    }
                 }
             }
         }
+    }
 
+    changed route-running => { if (root.route-running) { root.publish-drawer-open = false; } }
+    changed direct-active => { if (root.direct-active) { root.direct-drawer-open = false; } }
+
+    Drawer {
+        open: root.publish-drawer-open;
+        title: "启用前，确认一下。";
+        subtitle: "检查目录与连接，确认配置变化，再开启新的 Codex 会话。";
+        panel-width: 690px;
+        busy: root.busy;
+        error-message: root.error-code == "" ? "" : root.error-message + " · " + root.error-action;
+        dismissed => {
+            root.publish-drawer-open = false;
+            if (!root.config-managed) { root.cancel-route-preview(); }
+            app-keyboard.focus();
+        }
         VerticalLayout {
-            padding: 32px;
-            spacing: 18px;
+            spacing: 16px;
             HorizontalLayout {
-                spacing: 16px;
-                VerticalLayout {
-                    spacing: 5px;
-                    Text {
-                        text: "YOUR MODELS. ONE PLACE.";
-                        color: Theme.muted-text;
-                        font-size: 11px;
-                    }
-
-                    Text {
-                        text: root.active-page == 0 ? "模型，各就各位。"
-                            : root.active-page == 1 ? (root.icon-picker-open ? "选择上游头像" : root.common-config-editor-open ? "Codex 通用配置" : "上游供应商")
-                            : root.active-page == 2 ? "模型路由"
-                            : root.active-page == 3 ? "请求与用量"
-                            : root.active-page == 4 ? "MCP · Skills"
-                            : root.active-page == 5 ? "配置与恢复" : "偏好设置";
-                        color: Theme.primary-text;
-                        font-size: 28px;
-                        font-weight: 700;
-                    }
+                Text {
+                    text: root.selected-model-count + " 个模型 · 默认 " + root.default-model;
+                    color: Theme.primary-text;
+                    font-size: 13px;
+                    wrap: word-wrap;
                 }
 
-                Rectangle {
-                    horizontal-stretch: 1;
-                }
-
-                QuietButton {
-                    width: 80px;
-                    horizontal-stretch: 0;
-                    text: Theme.dark ? "浅色" : "深色";
-                    clicked => {
-                        Theme.dark = !Theme.dark;
-                        Palette.color-scheme = Theme.dark ? ColorScheme.dark : ColorScheme.light;
-                    }
-                }
-
-                status-button := QuietButton {
-                    width: 104px;
-                    horizontal-stretch: 0;
-                    text: "状态详情";
-                    clicked => { root.drawer-open = true; }
+                StatusPill {
+                    label: root.busy ? "正在检查…" : root.route-preview-ready ? "检查通过" : "等待检查";
+                    ink: root.route-preview-ready ? Theme.success : Theme.warning;
+                    fill: root.route-preview-ready ? Theme.brand-surface : Theme.warning-surface;
                 }
             }
 
             Text {
-                text: root.active-page == 0 ? "一个 Codex，自由连接你信任的每一个模型。" : "这里显示 SwitchX 本地保存的状态。";
+                text: root.config-home;
                 color: Theme.muted-text;
-                font-size: 14px;
+                font-size: 12px;
+                wrap: word-wrap;
             }
 
-            if root.error-code != "": SurfaceCard {
-                height: 74px;
-                border-color: Theme.error;
-                VerticalLayout {
-                    padding: 14px;
-                    spacing: 4px;
-                    Text {
-                        text: root.error-message + " · " + root.error-code;
-                        color: Theme.error;
-                        font-size: 14px;
-                        font-weight: 600;
-                    }
-
-                    Text {
-                        text: root.error-action;
-                        color: Theme.muted-text;
-                        font-size: 12px;
-                    }
-                }
-            }
-            if root.action-message != "": SurfaceCard {
-                height: 64px;
-                Text {
-                    text: root.action-message;
-                    color: Theme.primary-text;
-                    font-size: 13px;
-                    wrap: word-wrap;
-                    vertical-alignment: center;
-                }
-            }
-
-            if root.active-page == 0: OverviewPage {
-                loading: root.loading;
-                error-code: root.error-code;
-                status-text: root.status-text;
-                providers: root.providers;
-                direct-active: root.direct-active;
-                selected-model-count: root.selected-model-count;
-                config-managed: root.config-managed;
-                route-managed: root.route-managed;
-                route-running: root.route-running;
-                navigate(page) => { root.active-page = page; }
-            }
-
-            if root.active-page == 1 && root.icon-picker-open: ProviderIconPicker {
-                busy: root.busy;
-                provider-icons: root.provider-icons;
-                filtered-provider-icons: root.filtered-provider-icons;
-                provider-icon-query <=> root.provider-icon-query;
-                edit-icon-id: root.edit-icon-id;
-                edit-icon-name: root.edit-icon-name;
-                config-managed: root.config-managed;
-                choose-provider-icon(id) => { root.choose-provider-icon(id); }
-                close-provider-icon-picker() => { root.close-provider-icon-picker(); }
-                filter-provider-icons(query) => { root.filter-provider-icons(query); }
-            }
-
-            if root.active-page == 1 && !root.common-config-editor-open && !root.subscription-editor-open && !root.icon-picker-open: ProvidersPage {
-                loading: root.loading;
-                busy: root.busy;
-                recovery-only: root.recovery-only;
-                error-code: root.error-code;
-                providers: root.providers;
-                filtered-providers: root.filtered-providers;
-                provider-query <=> root.provider-query;
-                editor-open <=> root.editor-open;
-                delete-confirm <=> root.delete-confirm;
-                edit-id: root.edit-id;
-                edit-name <=> root.edit-name;
-                edit-url <=> root.edit-url;
-                edit-model <=> root.edit-model;
-                edit-key <=> root.edit-key;
-                edit-remote-compaction <=> root.edit-remote-compaction;
-                edit-use-common-config <=> root.edit-use-common-config;
-                edit-context-1m <=> root.edit-context-1m;
-                edit-compact-limit <=> root.edit-compact-limit;
-                edit-config-preview: root.edit-config-preview;
-                edit-config-error: root.edit-config-error;
-                provider-presets: root.provider-presets;
-                edit-preset-id: root.edit-preset-id;
-                edit-icon-name: root.edit-icon-name;
-                edit-icon: root.edit-icon;
-                edit-icon-monochrome: root.edit-icon-monochrome;
-                fetched-models: root.fetched-models;
-                fetching-models: root.fetching-models;
-                discovery-message: root.discovery-message;
-                discovery-scope: root.discovery-scope;
-                chatgpt-login-pending: root.chatgpt-login-pending;
-                config-managed: root.config-managed;
-                refresh(check-credentials) => { root.refresh(check-credentials); }
-                filter-providers(query) => { root.filter-providers(query); }
-                save-provider(id, name, url, model, key) => { root.save-provider(id, name, url, model, key); }
-                begin-provider-editor(id) => { root.begin-provider-editor(id); }
-                begin-subscription-editor(id) => { root.begin-subscription-editor(id); }
-                open-common-config() => { root.open-common-config(); }
-                delete-provider(id) => { root.delete-provider(id); }
-                check-provider(id) => { root.check-provider(id); }
-                apply-provider-preset(id) => { root.apply-provider-preset(id); }
-                open-provider-preset-link(api-key-page) => { root.open-provider-preset-link(api-key-page); }
-                open-provider-icon-picker() => { root.open-provider-icon-picker(); }
-                fetch-models(scope) => { root.fetch-models(scope); }
-                preview-direct(provider-id) => {
-                    root.selected-provider-id = provider-id;
-                    root.active-page = 5;
-                    root.inspect-direct(provider-id, root.config-home);
-                }
-                begin-model-editor(provider-id, model-id) => { root.begin-model-editor(provider-id, model-id); }
-            }
-
-            if root.active-page == 1 && root.subscription-editor-open && !root.common-config-editor-open && !root.icon-picker-open: SubscriptionEditor {
-                busy: root.busy;
-                subscription-id: root.subscription-id;
-                subscription-name <=> root.subscription-name;
-                subscription-binding-label: root.subscription-binding-label;
-                subscription-account-ids: root.subscription-account-ids;
-                subscription-account-options: root.subscription-account-options;
-                subscription-account-choice <=> root.subscription-account-choice;
-                subscription-auth-json <=> root.subscription-auth-json;
-                subscription-auth-error: root.subscription-auth-error;
-                delete-confirm <=> root.delete-confirm;
-                edit-use-common-config <=> root.edit-use-common-config;
-                edit-context-1m <=> root.edit-context-1m;
-                edit-compact-limit <=> root.edit-compact-limit;
-                edit-config-preview <=> root.edit-config-preview;
-                edit-config-error: root.edit-config-error;
-                edit-icon-name: root.edit-icon-name;
-                edit-icon: root.edit-icon;
-                edit-icon-monochrome: root.edit-icon-monochrome;
-                config-managed: root.config-managed;
-                save-subscription(id, name, account-id) => { root.save-subscription(id, name, account-id); }
-                cancel-subscription-editor() => { root.cancel-subscription-editor(); }
-                format-subscription-auth() => { root.format-subscription-auth(); }
-                subscription-auth-edited() => { root.subscription-auth-edited(); }
-                subscription-config-edited() => { root.subscription-config-edited(); }
-                update-subscription-context() => { root.update-subscription-context(); }
-                update-subscription-common() => { root.update-subscription-common(); }
-                open-common-config() => { root.open-common-config(); }
-                delete-provider(id) => { root.delete-provider(id); }
-                open-provider-icon-picker() => { root.open-provider-icon-picker(); }
-                navigate(page) => { root.active-page = page; }
-            }
-
-            if root.active-page == 1 && root.common-config-editor-open && !root.icon-picker-open: CommonConfigEditor {
-                busy: root.busy;
-                common-config-draft <=> root.common-config-draft;
-                common-config-error: root.common-config-error;
-                common-config-message: root.common-config-message;
-                common-config-current-source: root.common-config-current-source;
-                config-managed: root.config-managed;
-                extract-common-config() => { root.extract-common-config(); }
-                save-common-config() => { root.save-common-config(); }
-                cancel-common-config() => { root.cancel-common-config(); }
-            }
-
-            if root.active-page == 2: RoutingPage {
-                busy: root.busy;
-                providers: root.providers;
-                fetched-models: root.fetched-models;
-                fetching-models: root.fetching-models;
-                discovery-message: root.discovery-message;
-                discovery-scope: root.discovery-scope;
-                config-home: root.config-home;
-                chatgpt-login-pending: root.chatgpt-login-pending;
-                models: root.models;
-                selected-model-count: root.selected-model-count;
-                config-managed: root.config-managed;
-                route-managed: root.route-managed;
-                route-running: root.route-running;
-                route-status: root.route-status;
-                route-port <=> root.route-port;
-                default-model <=> root.default-model;
-                route-preview: root.route-preview;
-                route-preview-ready: root.route-preview-ready;
-                model-editor-open <=> root.model-editor-open;
-                model-provider-name: root.model-provider-name;
-                model-upstream-id <=> root.model-upstream-id;
-                model-public-id <=> root.model-public-id;
-                model-display-name <=> root.model-display-name;
-                model-display-name-custom <=> root.model-display-name-custom;
-                model-source-path <=> root.model-source-path;
-                model-original-id: root.model-original-id;
-                model-context-window <=> root.model-context-window;
-                model-reasoning-levels <=> root.model-reasoning-levels;
-                model-default-reasoning <=> root.model-default-reasoning;
-                model-reasoning-options: root.model-reasoning-options;
-                model-delete-confirm <=> root.model-delete-confirm;
-                model-provider-options: root.model-provider-options;
-                model-provider-choice <=> root.model-provider-choice;
-                model-scroll-y <=> root.model-scroll-y;
-                fallback-editor-open <=> root.fallback-editor-open;
-                fallback-primary-label: root.fallback-primary-label;
-                fallback-options: root.fallback-options;
-                fallback-choice <=> root.fallback-choice;
-                fallback-consent <=> root.fallback-consent;
-                fetch-models(scope) => { root.fetch-models(scope); }
-                restore-config(home) => { root.restore-config(home); }
-                save-model() => { root.save-model(); }
-                delete-model() => { root.delete-model(); }
-                begin-model-editor(provider-id, model-id) => { root.begin-model-editor(provider-id, model-id); }
-                add-selected-model() => { root.add-selected-model(); }
-                select-model(id, selected) => { root.select-model(id, selected); }
-                edit-fallback(id) => { root.edit-fallback(id); }
-                save-fallback() => { root.save-fallback(); }
-                inspect-route() => { root.inspect-route(); }
-                apply-route() => { root.apply-route(); }
-                launch-codex() => { root.launch-codex(); }
-                cancel-route-preview() => { root.cancel-route-preview(); }
-                navigate(page) => { root.active-page = page; }
-            }
-
-            if root.active-page == 3: ActivityPage {
-                busy: root.busy;
-                requests: root.requests;
-                request-error: root.request-error;
-                refresh-requests() => { root.refresh-requests(); }
-            }
-
-            if root.active-page == 4: SurfaceCard {
-                height: 200px;
-                VerticalLayout {
-                    padding: 24px;
-                    spacing: 14px;
-                    Text {
-                        text: "MCP 与 Skills 尚未接入";
-                        color: Theme.primary-text;
-                        font-size: 19px;
-                        font-weight: 600;
-                    }
-
-                    Text {
-                        text: "不会自动导入或执行外部命令。";
-                        color: Theme.muted-text;
-                        font-size: 13px;
-                        wrap: word-wrap;
-                    }
-                }
-            }
-
-            if root.active-page == 5: ConfigPage {
-                busy: root.busy;
-                recovery-only: root.recovery-only;
-                config-home <=> root.config-home;
-                config-status: root.config-status;
-                auth-status: root.auth-status;
-                accounts: root.accounts;
-                account-status: root.account-status;
-                login-user-code: root.login-user-code;
-                login-url: root.login-url;
-                chatgpt-login-pending: root.chatgpt-login-pending;
-                route-auth-error: root.route-auth-error;
-                direct-preview: root.direct-preview;
-                direct-preview-ready: root.direct-preview-ready;
-                config-managed: root.config-managed;
-                apply-direct() => { root.apply-direct(); }
-                restore-config(home) => { root.restore-config(home); }
-                inspect-config(home) => { root.inspect-config(home); }
-                import-current(home) => { root.import-current(home); }
-                check-login(home) => { root.check-login(home); }
-                subscription-action(action) => { root.subscription-action(action); }
-                account-action(action, account-id) => { root.account-action(action, account-id); }
-                request-account-removal(account) => {
-                    root.delete-account-id = account.id;
-                    root.delete-account-label = account.label;
-                    root.delete-account-references = account.bound-provider-names;
-                    root.error-code = "";
-                    root.error-message = "";
-                    root.error-action = "";
-                    root.delete-account-confirm = true;
-                }
-            }
-
-            if root.active-page == 6: SurfaceCard {
-                height: 210px;
-                VerticalLayout {
-                    padding: 24px;
-                    spacing: 18px;
-                    Text {
-                        text: "外观";
-                        color: Theme.primary-text;
-                        font-size: 18px;
-                        font-weight: 600;
-                    }
-
-                    Text {
-                        text: "当前主题仅保存在本次运行中。界面没有持续动画。";
-                        color: Theme.muted-text;
-                        font-size: 13px;
-                    }
-
-                    QuietButton {
-                        text: Theme.dark ? "切换到浅色" : "切换到深色";
-                        clicked => {
-                            Theme.dark = !Theme.dark;
-                            Palette.color-scheme = Theme.dark ? ColorScheme.dark : ColorScheme.light;
+            SurfaceCard {
+                vertical-stretch: 1;
+                background: Theme.background;
+                ScrollView {
+                    content-width: self.visible-width;
+                    horizontal-scrollbar-policy: always-off;
+                    x: 16px;
+                    y: 16px;
+                    width: parent.width - 32px;
+                    height: parent.height - 32px;
+                    VerticalLayout {
+                        Text {
+                            min-width: 0px;
+                            text: root.route-preview == "" ? (root.busy ? "正在检查模型目录、连接与目标配置…" : "检查完成后，配置差异会显示在这里。") : root.route-preview;
+                            color: Theme.primary-text;
+                            font-size: 12px;
+                            wrap: word-wrap;
                         }
                     }
                 }
             }
-        }
-    }
-
-    if root.drawer-open: Rectangle {
-        x: 0px;
-        y: 0px;
-        width: root.width;
-        height: root.height;
-        background: #00000070;
-        TouchArea {
-            clicked => { root.drawer-open = false; }
-        }
-    }
-    if root.drawer-open: Rectangle {
-        x: root.width - 400px;
-        y: 0px;
-        width: 400px;
-        height: root.height;
-        background: Theme.panel;
-        border-width: 1px;
-        border-color: Theme.border;
-        VerticalLayout {
-            padding: 28px;
-            spacing: 18px;
-            Text {
-                text: "连接状态";
-                color: Theme.primary-text;
-                font-size: 22px;
-                font-weight: 700;
-            }
-
-            StatusPill {
-                label: root.route-running ? "模型路由运行中" : root.route-managed ? "配置待恢复" : "未启用路由";
-                ink: root.route-running ? Theme.success : Theme.warning;
-            }
 
             Text {
-                text: root.route-status;
-                color: Theme.primary-text;
-                font-size: 13px;
-                wrap: word-wrap;
-            }
-
-            Text {
-                text: root.status-text;
-                color: Theme.primary-text;
-                font-size: 14px;
-                wrap: word-wrap;
-            }
-
-            Text {
-                text: "本地数据目录";
+                text: root.action-message;
                 color: Theme.muted-text;
                 font-size: 12px;
+                wrap: word-wrap;
             }
 
             Text {
-                text: root.data-path;
-                color: Theme.primary-text;
+                text: "在新会话中使用发布后的模型菜单；跨上游切换请新建会话。停止时恢复启用前的配置。";
+                color: Theme.muted-text;
                 font-size: 12px;
                 wrap: word-wrap;
-            }
-
-            if root.error-code != "": Text {
-                text: root.error-message + " · " + root.error-action;
-                color: Theme.error;
-                font-size: 13px;
-                wrap: word-wrap;
-            }
-            Rectangle {
-                vertical-stretch: 1;
-            }
-
-            QuietButton {
-                text: "关闭";
-                clicked => { root.drawer-open = false; }
-            }
-        }
-    }
-
-    if root.delete-account-confirm: Rectangle {
-        x: 0px;
-        y: 0px;
-        width: root.width;
-        height: root.height;
-        background: #00000070;
-        TouchArea {
-            enabled: !root.busy;
-            clicked => {
-                root.delete-account-confirm = false;
-                root.delete-account-id = "";
-            }
-        }
-    }
-    if root.delete-account-confirm: SurfaceCard {
-        x: (root.width - self.width) / 2;
-        y: (root.height - self.height) / 2;
-        width: 480px;
-        height: (root.error-code == "" ? 272px : 332px) + (root.delete-account-references == "" ? 0px : 64px);
-        VerticalLayout {
-            padding: 24px;
-            spacing: 14px;
-            Text {
-                text: "移除 ChatGPT 账号";
-                color: Theme.primary-text;
-                font-size: 19px;
-                font-weight: 600;
-            }
-
-            Text {
-                text: root.delete-account-label;
-                color: Theme.primary-text;
-                font-size: 14px;
-                overflow: elide;
-            }
-
-            Text {
-                text: root.delete-account-references == "" ? "将移除此账号在 SwitchX 中保存的登录信息。Codex 配置目录会保留。" : "此账号仍被上游引用。请先重新绑定或删除关联上游，再移除账号。";
-                color: Theme.muted-text;
-                font-size: 13px;
-                wrap: word-wrap;
-            }
-
-            if root.delete-account-references != "": Text {
-                text: "关联上游：" + root.delete-account-references;
-                color: Theme.warning;
-                font-size: 13px;
-                wrap: word-wrap;
-            }
-
-            if root.error-code != "": Text {
-                text: root.error-message;
-                color: Theme.error;
-                font-size: 13px;
-                wrap: word-wrap;
-            }
-
-            Rectangle {
-                vertical-stretch: 1;
             }
 
             HorizontalLayout {
                 spacing: 10px;
                 QuietButton {
-                    text: "取消";
-                    enabled: !root.busy;
-                    clicked => {
-                        root.delete-account-confirm = false;
-                        root.delete-account-id = "";
-                    }
+                    text: "重新检查";
+                    enabled: !root.busy && !root.config-managed && !root.chatgpt-login-pending;
+                    clicked => { root.inspect-route(); }
                 }
 
                 QuietButton {
-                    text: "确认移除";
+                    text: root.busy ? "正在处理…" : "确认启用  →";
                     primary: true;
-                    enabled: !root.busy && !root.config-managed && !root.chatgpt-login-pending && root.delete-account-id != "" && root.delete-account-references == "";
-                    clicked => { root.account-action(4, root.delete-account-id); }
+                    enabled: !root.busy && !root.config-managed && !root.chatgpt-login-pending && root.route-preview-ready;
+                    clicked => { root.apply-route(); }
                 }
+            }
+        }
+    }
+
+    Drawer {
+        open: root.direct-drawer-open;
+        title: "直连配置";
+        subtitle: "一个连接，一个默认模型。先查看变更，再应用。";
+        panel-width: 640px;
+        busy: root.busy;
+        error-message: root.error-code == "" ? "" : root.error-message;
+        dismissed => { root.direct-drawer-open = false; app-keyboard.focus(); }
+        VerticalLayout {
+            spacing: 16px;
+            Text {
+                text: root.config-home;
+                color: Theme.muted-text;
+                font-size: 12px;
+                wrap: word-wrap;
+            }
+
+            SurfaceCard {
+                vertical-stretch: 1;
+                background: Theme.background;
+                ScrollView {
+                    content-width: self.visible-width;
+                    horizontal-scrollbar-policy: always-off;
+                    x: 16px;
+                    y: 16px;
+                    width: parent.width - 32px;
+                    height: parent.height - 32px;
+                    VerticalLayout {
+                        Text {
+                            min-width: 0px;
+                            text: root.direct-preview == "" ? (root.direct-active ? root.config-status : "在连接列表选择 API 连接的“直连”，即可查看配置差异。") : root.direct-preview;
+                            color: Theme.primary-text;
+                            font-size: 12px;
+                            wrap: word-wrap;
+                        }
+                    }
+                }
+            }
+
+            Text {
+                text: root.action-message;
+                color: Theme.muted-text;
+                font-size: 12px;
+                wrap: word-wrap;
+            }
+
+            Text {
+                text: "应用前检查模型列表。移动或删除 SwitchX 前，请先恢复原配置。";
+                color: Theme.muted-text;
+                font-size: 12px;
+                wrap: word-wrap;
+            }
+
+            HorizontalLayout {
+                spacing: 10px;
+                QuietButton {
+                    text: "恢复原配置";
+                    enabled: !root.busy && root.config-managed;
+                    clicked => { root.restore-config(root.config-home); }
+                }
+
+                QuietButton {
+                    text: root.busy ? "正在处理…" : "应用直连";
+                    primary: true;
+                    enabled: root.direct-preview-ready && !root.busy && !root.chatgpt-login-pending;
+                    clicked => { root.apply-direct(); }
+                }
+            }
+        }
+    }
+
+    Drawer {
+        open: root.drawer-open;
+        title: "连接状态";
+        subtitle: "当前工作空间与配置管理状态。";
+        panel-width: 440px;
+        busy: root.busy;
+        dismissed => { root.drawer-open = false; app-keyboard.focus(); }
+        VerticalLayout {
+            spacing: 18px;
+            StatusPill {
+                width: 148px;
+                label: "● " + root.connection-label;
+                ink: root.route-running || root.direct-active ? Theme.success : Theme.warning;
+                fill: root.route-running || root.direct-active ? Theme.brand-surface : Theme.warning-surface;
+            }
+
+            ScrollView {
+                vertical-stretch: 1;
+                VerticalLayout {
+                    spacing: 18px;
+                    Text {
+                        text: root.direct-active ? "API 直连配置已应用，在新会话中生效。" : root.route-status;
+                        color: Theme.primary-text;
+                        font-size: 13px;
+                        wrap: word-wrap;
+                    }
+
+                    Text {
+                        text: root.config-status;
+                        color: Theme.muted-text;
+                        font-size: 12px;
+                        wrap: word-wrap;
+                    }
+
+                    Text {
+                        text: root.status-text;
+                        color: Theme.muted-text;
+                        font-size: 12px;
+                        wrap: word-wrap;
+                    }
+
+                    Text {
+                        text: "最近操作";
+                        color: Theme.primary-text;
+                        font-size: 14px;
+                        font-weight: 500;
+                    }
+
+                    Text {
+                        text: root.action-message;
+                        color: Theme.muted-text;
+                        font-size: 12px;
+                        wrap: word-wrap;
+                    }
+
+                    Text {
+                        text: "工作空间";
+                        color: Theme.primary-text;
+                        font-size: 14px;
+                        font-weight: 500;
+                    }
+
+                    Text {
+                        text: root.config-home;
+                        color: Theme.muted-text;
+                        font-size: 12px;
+                        wrap: word-wrap;
+                    }
+
+                    Text {
+                        text: "本地资料";
+                        color: Theme.primary-text;
+                        font-size: 14px;
+                        font-weight: 500;
+                    }
+
+                    Text {
+                        text: root.data-path;
+                        color: Theme.muted-text;
+                        font-size: 12px;
+                        wrap: word-wrap;
+                    }
+
+                    if root.error-code != "": Text {
+                        text: root.error-message + " · " + root.error-action;
+                        color: Theme.error;
+                        font-size: 12px;
+                        wrap: word-wrap;
+                    }
+                }
+            }
+
+            if root.config-managed: QuietButton {
+                text: "恢复并停止";
+                primary: true;
+                enabled: !root.busy;
+                clicked => { root.restore-config(root.config-home); }
+            }
+            QuietButton {
+                text: "配置与恢复  ↗";
+                enabled: !root.busy;
+                clicked => { root.drawer-open = false; root.active-page = 5; }
+            }
+        }
+    }
+
+    Drawer {
+        open: root.command-open;
+        title: "快速操作";
+        subtitle: "常用页面与操作，随手可达。";
+        panel-width: 410px;
+        dismissed => { root.command-open = false; app-keyboard.focus(); }
+        VerticalLayout {
+            spacing: 8px;
+            for item in [
+                { label: "工作台", page: 0 },
+                { label: "连接与账号", page: 1 },
+                { label: "请求活动", page: 3 },
+                { label: "工具箱", page: 4 },
+                { label: "设置与恢复", page: 5 }
+            ]: QuietButton {
+                text: item.label + "  →";
+                left-aligned: true;
+                ghost: true;
+                height: 45px;
+                clicked => { root.command-open = false; root.active-page = item.page; if (item.page == 3 && !root.busy) { root.refresh-requests(); } app-keyboard.focus(); }
+            }
+            Rectangle {
+                height: 1px;
+                background: Theme.border;
+            }
+
+            QuietButton {
+                text: "添加 API 连接";
+                left-aligned: true;
+                height: 45px;
+                ghost: true;
+                enabled: !root.busy && !root.config-managed;
+                clicked => { root.command-open = false; root.begin-provider-editor(""); }
+            }
+
+            QuietButton {
+                text: "添加 ChatGPT 订阅";
+                left-aligned: true;
+                height: 45px;
+                ghost: true;
+                enabled: !root.busy && !root.config-managed && !root.chatgpt-login-pending;
+                clicked => { root.command-open = false; root.begin-subscription-editor(""); }
+            }
+
+            Rectangle {
+                vertical-stretch: 1;
+            }
+
+            Text {
+                text: "Esc 关闭";
+                color: Theme.muted-text;
+                font-size: 11px;
             }
         }
     }

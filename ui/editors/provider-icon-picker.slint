@@ -1,6 +1,10 @@
-import { LineEdit, ScrollView } from "std-widgets.slint";
+import { ScrollView } from "std-widgets.slint";
 import { Theme } from "../tokens.slint";
-import { QuietButton, SurfaceCard } from "../components.slint";
+import {
+    QuietLineEdit as LineEdit,
+    QuietButton,
+    SurfaceCard,
+} from "../components.slint";
 import { ProviderIconRow } from "../view-models.slint";
 
 export component ProviderIconPicker inherits SurfaceCard {

@@ -1,6 +1,10 @@
-import { ComboBox, LineEdit } from "std-widgets.slint";
 import { Theme } from "../tokens.slint";
-import { QuietButton, SurfaceCard } from "../components.slint";
+import {
+    QuietComboBox as ComboBox,
+    QuietButton,
+    SurfaceCard,
+    QuietLineEdit as LineEdit,
+} from "../components.slint";
 
 export component ModelEditor inherits SurfaceCard {
     in property <bool> busy;
