@@ -72,3 +72,23 @@ cargo run --locked --example provider_icons_preview -- /absolute/output/director
 | [1000×680 编辑抽屉](screenshots/quiet-workbench/software-editor-light-1000x680.png) | 生产 Slint 组件的软件渲染，长表单通过滚动访问 |
 
 本机调试 bundle 由 `sh scripts/bundle-macos.sh` 生成于 `target/debug/SwitchX.app`。本轮只做本地提交和构建，没有推送、发布或真实上游调用。
+
+## 共用下拉框样式补齐
+
+工作台连接选择、备用上游、探测模型、默认思考等级和订阅账号绑定统一使用 `QuietComboBox`。输入框和弹层采用现有深浅主题 token、细边框、圆角、柔和阴影；选中行使用绿色底、加粗文字和右侧勾选。弹层与输入框保持 6px 间距，最小宽度为 200px，最多显示六行，长列表可以滚动。展开时箭头旋转，禁用、悬停和键盘焦点状态跟随其他共用控件。
+
+索引与字符串的双向同步继续由 Slint 标准 ComboBox 处理；自定义呈现保留 `model`、`current-index`、`current-value`、`selected` 和 `enabled` 接口。`tests/quiet_combobox.rs` 使用真实共用组件与合成选项，检查初始值、外部写值/索引、鼠标选择、方向键、Enter/Space/Esc、Tab 离开、Home/End 滚动、禁用和空列表。可复现交互和截图：
+
+```sh
+SWITCHX_DROPDOWN_SNAPSHOTS=/absolute/output/directory cargo test --locked --test quiet_combobox
+```
+
+最终 `make check` 通过：Rust/Slint 格式、Clippy、171 项测试；原有本机 Codex 目录检查仍按默认设置忽略。1200×820、1000×680 的深浅布局也通过生产 Slint 软件渲染检查。软件渲染器不实现元素旋转，箭头旋转另在 macOS 原生窗口确认。
+
+使用 `managed_accounts_desktop` 的独立临时 bundle、绝对数据目录及 `CODEX_HOME` 检查最终构建：深浅主题菜单、鼠标选择、方向键/Enter 收起、账号绑定原有选中项，以及 Esc 仅收起菜单而保留编辑抽屉。未保存编辑草稿，未执行登录、刷新或路由操作；退出前确认合成 `config.toml` 未改变，临时应用和资料已清理。调试 bundle 已重新构建。
+
+| 截图 | 来源 |
+| --- | --- |
+| [深色下拉菜单](screenshots/dropdowns/native-workbench-dark.png) | macOS 原生窗口，合成连接，展开箭头与绿色选中行 |
+| [浅色下拉菜单](screenshots/dropdowns/native-workbench-light.png) | macOS 原生窗口，键盘选择后的菜单状态 |
+| [长列表滚动](screenshots/dropdowns/software-long-list-dark.png) | 共用 Slint 组件的软件渲染，十二个合成选项，End 定位到末项 |

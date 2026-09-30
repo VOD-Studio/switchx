@@ -1,4 +1,4 @@
-import { LineEdit, ComboBox } from "std-widgets.slint";
+import { LineEdit, ComboBox, ScrollView } from "std-widgets.slint";
 import { Theme } from "tokens.slint";
 
 export component SurfaceCard inherits Rectangle {
@@ -241,10 +241,202 @@ export component QuietLineEdit inherits LineEdit {
     animate opacity { duration: Theme.fast; }
 }
 
-export component QuietComboBox inherits ComboBox {
+export component QuietComboBox inherits Rectangle {
+    in property <[string]> model <=> selection-state.model;
+    in property <bool> enabled: true;
+    in-out property <int> current-index <=> selection-state.current-index;
+    in-out property <string> current-value <=> selection-state.current-value;
+    out property <bool> has-focus: keyboard.has-focus || root.popup-open;
+    callback selected(string);
+    property <bool> popup-open: popup.is-open;
+    property <int> visible-items: min(6, root.model.length);
+
+    function select(index: int) {
+        if (root.enabled && index >= 0 && index < root.model.length) {
+            root.current-index = index;
+            root.current-value = root.model[index];
+            root.selected(root.current-value);
+        }
+    }
+    function open-popup() {
+        if (root.enabled && root.model.length > 0) { popup.show(); }
+    }
+    function handle-selection-key(event: KeyEvent) -> EventResult {
+        if (event.text == Key.UpArrow) {
+            root.select(max(0, root.current-index - 1));
+            return accept;
+        } else if (event.text == Key.DownArrow) {
+            root.select(min(root.model.length - 1, root.current-index + 1));
+            return accept;
+        } else if (event.text == Key.Home) {
+            root.select(0);
+            return accept;
+        } else if (event.text == Key.End) {
+            root.select(root.model.length - 1);
+            return accept;
+        }
+        return reject;
+    }
+    changed model => { if (root.model.length == 0) { popup.close(); } }
+    changed enabled => { if (!root.enabled) { popup.close(); } }
+
+    min-width: 0px;
     min-height: 36px;
+    preferred-width: 180px;
+    vertical-stretch: 0;
+    border-radius: 8px;
+    border-width: 1px;
+    border-color: root.has-focus ? Theme.brand : touch.has-hover && root.enabled ? Theme.muted-text : Theme.border;
+    background: root.popup-open || touch.pressed || (touch.has-hover && root.enabled) ? Theme.raised : Theme.panel;
     opacity: root.enabled ? 1 : 0.45;
-    animate opacity { duration: Theme.fast; }
+    animate background, border-color, opacity { duration: Theme.fast; }
+    forward-focus: keyboard;
+    accessible-role: combobox;
+    accessible-enabled: root.enabled;
+    accessible-expandable: true;
+    accessible-expanded: root.popup-open;
+    accessible-value <=> root.current-value;
+    accessible-action-expand => { root.open-popup(); }
+
+    // Reuse native index/value synchronization, including external value bindings.
+    selection-state := ComboBox {
+        visible: false;
+        enabled: false;
+        width: 0px;
+        height: 0px;
+        accessible-role: none;
+    }
+
+    Text {
+        x: 12px;
+        width: max(0px, parent.width - 42px);
+        text: root.current-value;
+        color: Theme.primary-text;
+        font-size: 13px;
+        vertical-alignment: center;
+        overflow: elide;
+        accessible-role: none;
+    }
+
+    Image {
+        x: parent.width - 26px;
+        y: (parent.height - self.height) / 2;
+        width: 14px;
+        height: 14px;
+        source: @image-url("../assets/ui/chevron-down.svg");
+        colorize: root.popup-open ? Theme.brand : Theme.muted-text;
+        transform-rotation: root.popup-open ? 180deg : 0deg;
+        animate transform-rotation {
+            duration: Theme.fast;
+            easing: ease-out;
+        }
+        accessible-role: none;
+    }
+
+    touch := TouchArea {
+        enabled: root.enabled;
+        mouse-cursor: pointer;
+        clicked => { keyboard.focus(); root.open-popup(); }
+    }
+
+    keyboard := FocusScope {
+        width: 0px;
+        enabled: root.enabled;
+        key-pressed(event) => {
+            if (event.text == Key.Return || event.text == Key.Space) {
+                root.open-popup();
+                return accept;
+            }
+            return root.handle-selection-key(event);
+        }
+    }
+
+    popup := PopupWindow {
+        x: 0px;
+        y: root.height + 6px;
+        width: max(root.width, 200px);
+        height: root.visible-items * 40px + 10px;
+        close-policy: close-on-click-outside;
+        forward-focus: popup-keyboard;
+
+        popup-keyboard := FocusScope {
+            key-pressed(event) => {
+                if (event.text == Key.Return || event.text == Key.Space || event.text == Key.Escape) {
+                    popup.close();
+                    return accept;
+                } else if (event.text == Key.Tab || event.text == Key.Backtab) {
+                    popup.close();
+                    return reject;
+                }
+                return root.handle-selection-key(event);
+            }
+            Rectangle {
+                background: Theme.panel;
+                border-radius: 10px;
+                border-width: 1px;
+                border-color: Theme.border;
+                drop-shadow-blur: 16px;
+                drop-shadow-offset-y: 5px;
+                drop-shadow-color: Theme.dark ? #00000050 : #18221a18;
+
+                ScrollView {
+                    x: 1px;
+                    y: 1px;
+                    width: parent.width - 2px;
+                    height: parent.height - 2px;
+                    content-y: -max(0, root.current-index - root.visible-items + 1) * 40px;
+                    property <int> selection: root.current-index;
+                    changed selection => {
+                        if (self.content-y + self.selection * 40px < 0px) {
+                            self.content-y = -self.selection * 40px;
+                        } else if (self.content-y + (self.selection + 1) * 40px + 8px > self.height) {
+                            self.content-y = self.height - (self.selection + 1) * 40px - 8px;
+                        }
+                    }
+                    VerticalLayout {
+                        padding: 6px;
+                        spacing: 4px;
+                        alignment: start;
+                        for value[index] in root.model: Rectangle {
+                            height: 36px;
+                            border-radius: 6px;
+                            background: index == root.current-index ? Theme.brand-surface : item-touch.has-hover ? Theme.raised : transparent;
+                            animate background { duration: Theme.fast; }
+                            Text {
+                                x: 10px;
+                                width: max(0px, parent.width - 38px);
+                                text: value;
+                                color: index == root.current-index ? Theme.brand : Theme.primary-text;
+                                font-size: 13px;
+                                font-weight: index == root.current-index ? 600 : 400;
+                                vertical-alignment: center;
+                                overflow: elide;
+                                accessible-role: none;
+                            }
+
+                            if index == root.current-index: Image {
+                                x: parent.width - 24px;
+                                y: (parent.height - self.height) / 2;
+                                width: 14px;
+                                height: 14px;
+                                source: @image-url("../assets/ui/check.svg");
+                                colorize: Theme.brand;
+                                accessible-role: none;
+                            }
+                            accessible-role: list-item;
+                            accessible-label: value;
+                            accessible-value: index == root.current-index ? "已选" : "";
+                            accessible-action-default => { root.select(index); popup.close(); }
+                            item-touch := TouchArea {
+                                mouse-cursor: pointer;
+                                clicked => { root.select(index); popup.close(); }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
 }
 
 // The panel stays mounted through its exit transition. Owners clear credentials
