@@ -1,6 +1,8 @@
 use std::{
     collections::BTreeSet,
-    env, fs,
+    env,
+    ffi::OsStr,
+    fs,
     path::{Path, PathBuf},
     process::Stdio,
     time::Duration,
@@ -185,13 +187,41 @@ pub async fn login_status(home: &Path) -> Result<String, String> {
 }
 
 pub fn cli_executable() -> PathBuf {
-    env::var_os("SWITCHX_CODEX_CLI")
-        .map(PathBuf::from)
+    let search_path = env::var_os("PATH");
+    let standalone = env::var_os("HOME")
+        .map(|home| PathBuf::from(home).join(".local/bin/codex"))
+        .into_iter()
+        .chain(["/opt/homebrew/bin/codex", "/usr/local/bin/codex"].map(PathBuf::from))
+        .collect::<Vec<_>>();
+    let bundled = [
+        "/Applications/ChatGPT.app/Contents/Resources/codex-cli/CodexCLI.app/Contents/MacOS/codex",
+        "/Applications/ChatGPT.app/Contents/Resources/codex",
+    ]
+    .map(PathBuf::from);
+    select_cli(
+        env::var_os("SWITCHX_CODEX_CLI").map(PathBuf::from),
+        search_path.as_deref(),
+        &standalone,
+        &bundled,
+    )
+}
+
+fn select_cli(
+    explicit: Option<PathBuf>,
+    search_path: Option<&OsStr>,
+    standalone: &[PathBuf],
+    bundled: &[PathBuf],
+) -> PathBuf {
+    explicit
         .or_else(|| {
-            [
-                "/Applications/ChatGPT.app/Contents/Resources/codex-cli/CodexCLI.app/Contents/MacOS/codex",
-                "/Applications/ChatGPT.app/Contents/Resources/codex",
-            ].into_iter().map(PathBuf::from).find(|path| path.is_file())
+            search_path
+                .into_iter()
+                .flat_map(env::split_paths)
+                .map(|directory| directory.join("codex"))
+                .chain(standalone.iter().cloned())
+                .chain(bundled.iter().cloned())
+                .filter(|path| is_executable(path))
+                .find_map(|path| fs::canonicalize(path).ok())
         })
         .unwrap_or_else(|| PathBuf::from("codex"))
 }
@@ -573,6 +603,77 @@ printf '%s\n' "$#" "$1" "$CODEX_HOME" "$PWD" "${OPENAI_API_KEY-unset}" "${CODEX_
         fs::write(&path, script.replace("MODEL_REPLY", response)).unwrap();
         fs::set_permissions(&path, fs::Permissions::from_mode(0o700)).unwrap();
         path
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn cli_selection_preserves_explicit_overrides_including_invalid_paths() {
+        let root = CheckHome::new().unwrap();
+        let installed = mock_cli(&root.0, "codex", "");
+        let search_path = env::join_paths([&root.0]).unwrap();
+        for explicit in [
+            mock_cli(&root.0, "explicit-codex", ""),
+            root.0.join("missing-explicit-codex"),
+        ] {
+            assert_eq!(
+                select_cli(
+                    Some(explicit.clone()),
+                    Some(&search_path),
+                    std::slice::from_ref(&installed),
+                    std::slice::from_ref(&installed),
+                ),
+                explicit
+            );
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn cli_selection_prefers_path_and_skips_non_executable_entries() {
+        use std::os::unix::fs::PermissionsExt;
+        let root = CheckHome::new().unwrap();
+        let blocked = root.0.join("blocked-bin");
+        let terminal_bin = root.0.join("terminal-bin");
+        fs::create_dir(&blocked).unwrap();
+        fs::create_dir(&terminal_bin).unwrap();
+        let blocked_cli = mock_cli(&blocked, "codex", "");
+        fs::set_permissions(blocked_cli, fs::Permissions::from_mode(0o600)).unwrap();
+        let terminal = mock_cli(&terminal_bin, "codex", "");
+        let standalone = mock_cli(&root.0, "standalone-codex", "");
+        let bundled = mock_cli(&root.0, "bundled-codex", "");
+        let search_path = env::join_paths([blocked, terminal_bin]).unwrap();
+        assert_eq!(
+            select_cli(None, Some(&search_path), &[standalone], &[bundled],),
+            fs::canonicalize(terminal).unwrap()
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn cli_selection_finds_standalone_with_gui_path_and_falls_back_to_bundle() {
+        let root = CheckHome::new().unwrap();
+        let standalone = mock_cli(&root.0, "standalone-codex", "");
+        let bundled = mock_cli(&root.0, "bundled-codex", "");
+        let gui_path = env::join_paths([root.0.join("system-bin-without-codex")]).unwrap();
+        assert_eq!(
+            select_cli(
+                None,
+                Some(&gui_path),
+                std::slice::from_ref(&standalone),
+                std::slice::from_ref(&bundled),
+            ),
+            fs::canonicalize(&standalone).unwrap()
+        );
+        fs::remove_file(&standalone).unwrap();
+        assert_eq!(
+            select_cli(None, None, &[standalone], std::slice::from_ref(&bundled)),
+            fs::canonicalize(&bundled).unwrap()
+        );
+        fs::remove_file(&bundled).unwrap();
+        assert_eq!(
+            select_cli(None, None, &[], &[bundled]),
+            PathBuf::from("codex")
+        );
     }
 
     #[cfg(unix)]
