@@ -36,7 +36,7 @@ API、订阅、模型、通用配置和发布预览使用侧边抽屉。图标�
 
 `cargo test --test router` 用本地假上游验证精确映射、SSE 首事件直达、认证头隔离、未知模型、本地鉴权，以及订阅账号的工作区绑定、401/403、续期后请求和 compact。它不使用真实供应商凭据，不证明真实上游或真实订阅账号可用。
 
-macOS 可运行 `sh scripts/bundle-macos.sh` 生成仅供本机交互检查的 `target/debug/SwitchX.app`。主窗口关闭后应驻留菜单栏，可从菜单栏重新打开或退出。此调试 bundle 未签名、未公证，不能作为发布包。
+macOS 可运行 `sh scripts/bundle-macos.sh` 生成 `target/debug/SwitchX.app`；传入 `--release` 则使用优化构建，生成 `target/release/SwitchX.app`。主窗口关闭后应驻留菜单栏，可从菜单栏重新打开或退出。两种 bundle 均未签名、未公证，仅供本机检查，不能作为发布包。
 
 应用图标原图保存在 `assets/app-icon.png`，Slint 窗口直接引用它。macOS 打包脚本先通过 `prepare-macos-icon.swift` 为本机准备底稿：macOS 26+ 使用与原图背景匹配的完整不透明方形，避免系统给透明图案再套底板并缩小；较旧系统沿用原图。随后使用系统自带的 `sips` 和 `iconutil` 生成标准与 Retina 尺寸的 `AppIcon.icns`，放入 bundle 的 `Contents/Resources/`，供 Finder 和 Dock 使用。替换原图后重新打包即可更新应用图标。
 
