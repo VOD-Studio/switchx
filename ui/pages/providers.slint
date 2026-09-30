@@ -1,279 +1,198 @@
-import { LineEdit, ScrollView } from "std-widgets.slint";
+import { ListView } from "std-widgets.slint";
 import { Theme } from "../tokens.slint";
-import { QuietButton, SurfaceCard } from "../components.slint";
-import { ProviderRow, ProviderPresetRow } from "../view-models.slint";
-import { ProviderEditor } from "../editors/provider-editor.slint";
+import { QuietButton, QuietLineEdit } from "../components.slint";
+import { ProviderRow } from "../view-models.slint";
 
-export component ProvidersPage inherits ScrollView {
+export component ProvidersPage inherits VerticalLayout {
     in property <bool> loading;
     in property <bool> busy;
     in property <bool> recovery-only;
-    in property <string> error-code;
     in property <[ProviderRow]> providers;
     in property <[ProviderRow]> filtered-providers;
     in-out property <string> provider-query;
-    in-out property <bool> editor-open;
-    in-out property <bool> delete-confirm;
-    in property <string> edit-id;
-    in-out property <string> edit-name;
-    in-out property <string> edit-url;
-    in-out property <string> edit-model;
-    in-out property <string> edit-key;
-    in-out property <bool> edit-remote-compaction;
-    in-out property <bool> edit-use-common-config;
-    in-out property <bool> edit-context-1m;
-    in-out property <string> edit-compact-limit;
-    in property <string> edit-config-preview;
-    in property <string> edit-config-error;
-    in property <[ProviderPresetRow]> provider-presets;
-    in property <string> edit-preset-id;
-    in property <string> edit-icon-name;
-    in property <image> edit-icon;
-    in property <bool> edit-icon-monochrome;
-    in property <[string]> fetched-models;
-    in property <bool> fetching-models;
-    in property <string> discovery-message;
-    in property <int> discovery-scope;
     in property <bool> chatgpt-login-pending;
     in property <bool> config-managed;
     callback refresh(bool);
     callback filter-providers(string);
-    callback save-provider(string, string, string, string, string);
     callback begin-provider-editor(string);
     callback begin-subscription-editor(string);
-    callback open-common-config();
-    callback delete-provider(string);
     callback check-provider(string);
-    callback apply-provider-preset(string);
-    callback open-provider-preset-link(bool);
-    callback open-provider-icon-picker();
-    callback fetch-models(int);
     callback preview-direct(string);
     callback begin-model-editor(string, string);
+    spacing: 16px;
+    HorizontalLayout {
+        height: 36px;
+        spacing: 10px;
+        QuietLineEdit {
+            width: 230px;
+            placeholder-text: "搜索连接";
+            accessible-label: "按名称筛选上游";
+            text <=> root.provider-query;
+            edited(text) => { root.filter-providers(text); }
+        }
 
-    vertical-stretch: 1;
-    VerticalLayout {
+        Rectangle {
+            horizontal-stretch: 1;
+        }
+
+        QuietButton {
+            width: 96px;
+            text: "检查凭据";
+            ghost: true;
+            enabled: !root.busy;
+            clicked => { root.refresh(true); }
+        }
+
+        QuietButton {
+            width: 72px;
+            text: "刷新";
+            ghost: true;
+            enabled: !root.busy;
+            clicked => { root.refresh(false); }
+        }
+
+        QuietButton {
+            width: 110px;
+            text: "+ API 连接";
+            enabled: !root.busy && !root.config-managed;
+            clicked => { root.begin-provider-editor(""); }
+        }
+
+        QuietButton {
+            width: 134px;
+            text: "+ ChatGPT 订阅";
+            primary: true;
+            enabled: !root.busy && !root.config-managed && !root.chatgpt-login-pending;
+            clicked => { root.begin-subscription-editor(""); }
+        }
+    }
+
+    if root.config-managed: Text {
+        text: root.recovery-only ? "先在设置中恢复原配置，再读取连接资料。" : "配置正在管理中。恢复并停止后可修改连接与账号绑定。";
+        color: Theme.warning;
+        font-size: 12px;
+        wrap: word-wrap;
+    }
+    if !root.loading && root.providers.length == 0: VerticalLayout {
+        padding: 36px;
         spacing: 12px;
-        HorizontalLayout {
-            height: 40px;
-            spacing: 8px;
-            Text {
-                text: "已保存的上游元数据";
-                color: Theme.primary-text;
-                font-size: 16px;
-                font-weight: 600;
-            }
-
-            Rectangle {
-                horizontal-stretch: 1;
-            }
-
-            LineEdit {
-                width: 220px;
-                horizontal-stretch: 0;
-                placeholder-text: "按名称筛选";
-                accessible-label: "按名称筛选上游";
-                text <=> root.provider-query;
-                edited(text) => { root.filter-providers(text); }
-            }
-
-            QuietButton {
-                width: 106px;
-                text: "检查凭据";
-                clicked => { root.refresh(true); }
-            }
-
-            QuietButton {
-                width: 70px;
-                text: "刷新";
-                clicked => { root.refresh(false); }
-            }
-
-            QuietButton {
-                width: 92px;
-                text: "添加上游";
-                enabled: !root.busy && !root.config-managed;
-                clicked => { root.begin-provider-editor(""); }
-            }
+        Text {
+            text: "从一个连接开始。";
+            color: Theme.primary-text;
+            font-size: 23px;
+            font-weight: 500;
+            horizontal-alignment: center;
         }
 
-        HorizontalLayout {
-            spacing: 12px;
-            Text {
-                text: "API Key 随上游保存；每个 ChatGPT 订阅连接可独立绑定已保存的账号。";
-                color: Theme.muted-text;
-                font-size: 13px;
-                vertical-alignment: center;
-            }
-
-            QuietButton {
-                text: "添加 ChatGPT 订阅";
-                enabled: !root.busy && !root.config-managed && !root.chatgpt-login-pending;
-                clicked => { root.begin-subscription-editor(""); }
-            }
-        }
-
-        if root.config-managed: Text {
-            text: root.recovery-only ? "旧版资料有配置待恢复。先在“配置与恢复”恢复原配置，再升级并读取上游资料。" : "配置正在管理中。恢复并停止路由后，才能修改上游、模型和账号绑定。";
-            color: Theme.warning;
+        Text {
+            text: "添加 API 连接或 ChatGPT 订阅，再把常用模型放进工作台。";
+            color: Theme.muted-text;
             font-size: 13px;
-            wrap: word-wrap;
+            horizontal-alignment: center;
         }
-
-        if root.editor-open: ProviderEditor {
-            busy: root.busy;
-            editor-open <=> root.editor-open;
-            delete-confirm <=> root.delete-confirm;
-            edit-id: root.edit-id;
-            edit-name <=> root.edit-name;
-            edit-url <=> root.edit-url;
-            edit-model <=> root.edit-model;
-            edit-key <=> root.edit-key;
-            edit-remote-compaction <=> root.edit-remote-compaction;
-            edit-use-common-config <=> root.edit-use-common-config;
-            edit-context-1m <=> root.edit-context-1m;
-            edit-compact-limit <=> root.edit-compact-limit;
-            edit-config-preview: root.edit-config-preview;
-            edit-config-error: root.edit-config-error;
-            provider-presets: root.provider-presets;
-            edit-preset-id: root.edit-preset-id;
-            edit-icon-name: root.edit-icon-name;
-            edit-icon: root.edit-icon;
-            edit-icon-monochrome: root.edit-icon-monochrome;
-            fetched-models: root.fetched-models;
-            fetching-models: root.fetching-models;
-            discovery-message: root.discovery-message;
-            discovery-scope: root.discovery-scope;
-            config-managed: root.config-managed;
-            save-provider(id, name, url, model, key) => { root.save-provider(id, name, url, model, key); }
-            open-common-config() => { root.open-common-config(); }
-            delete-provider(id) => { root.delete-provider(id); }
-            apply-provider-preset(id) => { root.apply-provider-preset(id); }
-            open-provider-preset-link(api-key-page) => { root.open-provider-preset-link(api-key-page); }
-            open-provider-icon-picker() => { root.open-provider-icon-picker(); }
-            fetch-models(scope) => { root.fetch-models(scope); }
-        }
-        if !root.loading && root.error-code == "" && root.providers.length == 0: SurfaceCard {
-            height: 140px;
-            VerticalLayout {
-                padding: 22px;
-                spacing: 10px;
-                Text {
-                    text: "还没有上游";
-                    color: Theme.primary-text;
-                    font-size: 18px;
-                    font-weight: 600;
-                }
-
-                Text {
-                    text: "点击“添加上游”保存 Responses API 连接。";
-                    color: Theme.muted-text;
-                    font-size: 13px;
-                }
-            }
-        }
-        if !root.loading && root.error-code == "" && root.providers.length > 0 && root.filtered-providers.length == 0: SurfaceCard {
-            height: 100px;
-            Text {
-                text: "没有匹配的上游。清除筛选可查看全部记录。";
-                color: Theme.muted-text;
-                font-size: 13px;
-                horizontal-alignment: center;
-                vertical-alignment: center;
-            }
-        }
-        for provider in root.filtered-providers: SurfaceCard {
-            height: (provider.is-subscription ? 132px : 108px) + (provider.auth-error == "" ? 0px : 34px);
-            HorizontalLayout {
-                padding: 20px;
-                spacing: 10px;
-                if provider.icon.width > 0: Image {
-                    width: provider.icon-id == "xiaomimimo" ? 84px : 32px;
-                    height: 32px;
-                    source: provider.icon;
-                    colorize: provider.monochrome ? Theme.primary-text : transparent;
-                    image-fit: contain;
-                    accessible-role: none;
-                }
-                VerticalLayout {
-                    spacing: 7px;
-                    Text {
-                        text: provider.name;
-                        color: Theme.primary-text;
-                        font-size: 16px;
-                        font-weight: 600;
+    }
+    if root.providers.length > 0 && root.filtered-providers.length == 0: Text {
+        text: "没有匹配的连接。试试其他名称。";
+        color: Theme.muted-text;
+        horizontal-alignment: center;
+    }
+    ListView {
+        vertical-stretch: 1;
+        for provider in root.filtered-providers: Rectangle {
+            height: provider.auth-error == "" ? 116px : 144px;
+            Rectangle {
+                height: parent.height - 12px;
+                background: Theme.panel;
+                border-width: 1px;
+                border-color: Theme.border;
+                border-radius: 11px;
+                animate background, border-color { duration: Theme.fast; }
+                HorizontalLayout {
+                    padding: 18px;
+                    spacing: 14px;
+                    Image {
+                        y: (parent.height - self.height) / 2;
+                        width: provider.icon-id == "xiaomimimo" ? 64px : 32px;
+                        height: 32px;
+                        source: provider.icon;
+                        image-fit: contain;
+                        colorize: provider.monochrome ? Theme.primary-text : transparent;
                     }
 
-                    Text {
-                        text: provider.endpoint;
-                        color: Theme.muted-text;
-                        font-size: 12px;
-                    }
-
-                    Text {
-                        text: provider.model-id;
-                        color: Theme.muted-text;
-                        font-size: 12px;
-                    }
-
-                    if provider.is-subscription: Text {
-                        text: provider.binding-label;
-                        color: Theme.muted-text;
-                        font-size: 12px;
-                        overflow: elide;
-                    }
-                    if provider.auth-error != "": Text {
-                        text: provider.auth-error;
-                        color: Theme.error;
-                        font-size: 12px;
-                        wrap: word-wrap;
-                    }
-                }
-
-                Rectangle {
-                    horizontal-stretch: 1;
-                }
-
-                Text {
-                    text: provider.credential-status;
-                    color: Theme.muted-text;
-                    font-size: 12px;
-                }
-
-                QuietButton {
-                    width: 62px;
-                    text: "编辑";
-                    enabled: !root.busy && !root.config-managed;
-                    clicked => {
-                        if provider.is-subscription {
-                            root.begin-subscription-editor(provider.id);
-                            return;
+                    VerticalLayout {
+                        alignment: center;
+                        spacing: 5px;
+                        Text {
+                            text: provider.name;
+                            color: Theme.primary-text;
+                            font-size: 16px;
+                            font-weight: 500;
+                            overflow: elide;
                         }
-                        root.begin-provider-editor(provider.id);
+
+                        Text {
+                            text: provider.is-subscription ? provider.binding-label : provider.endpoint;
+                            color: Theme.muted-text;
+                            font-size: 12px;
+                            overflow: elide;
+                        }
+
+                        Text {
+                            text: provider.credential-status;
+                            color: Theme.muted-text;
+                            font-size: 11px;
+                            overflow: elide;
+                        }
+
+                        if provider.auth-error != "": Text {
+                            text: provider.auth-error;
+                            color: Theme.error;
+                            font-size: 12px;
+                            overflow: elide;
+                        }
                     }
-                }
 
-                QuietButton {
-                    width: 88px;
-                    text: "模型映射";
-                    enabled: !root.busy && !root.config-managed;
-                    clicked => { root.begin-model-editor(provider.id, ""); }
-                }
+                    QuietButton {
+                        y: (parent.height - self.height) / 2;
+                        width: 72px;
+                        text: "模型";
+                        ghost: true;
+                        enabled: !root.busy && !root.config-managed;
+                        clicked => { root.begin-model-editor(provider.id, ""); }
+                    }
 
-                QuietButton {
-                    width: 70px;
-                    text: "检查";
-                    enabled: !root.busy;
-                    clicked => { root.check-provider(provider.id); }
-                }
+                    QuietButton {
+                        y: (parent.height - self.height) / 2;
+                        width: 64px;
+                        text: "检查";
+                        ghost: true;
+                        enabled: !root.busy;
+                        clicked => { root.check-provider(provider.id); }
+                    }
 
-                QuietButton {
-                    width: 70px;
-                    text: "直连";
-                    enabled: !root.busy && !root.config-managed && !root.chatgpt-login-pending && !provider.is-subscription;
-                    clicked => { root.preview-direct(provider.id); }
+                    if !provider.is-subscription: QuietButton {
+                        width: 64px;
+                        text: "直连";
+                        ghost: true;
+                        enabled: !root.busy && !root.config-managed && !root.chatgpt-login-pending;
+                        clicked => { root.preview-direct(provider.id); }
+                    }
+                    QuietButton {
+                        y: (parent.height - self.height) / 2;
+                        width: 106px;
+                        text: "管理连接  ↗";
+                        enabled: !root.busy && !root.config-managed;
+                        clicked => { if provider.is-subscription { root.begin-subscription-editor(provider.id); } else { root.begin-provider-editor(provider.id); } }
+                    }
                 }
             }
         }
+    }
+
+    Text {
+        text: "保存连接后，在工作台预览并启用。账号绑定与 Codex 入口登录分别管理。";
+        color: Theme.muted-text;
+        font-size: 11px;
+        wrap: word-wrap;
     }
 }

@@ -12,6 +12,20 @@ thread_local! {
     static QUIT_HANDLER: RefCell<Option<Box<dyn Fn()>>> = RefCell::new(None);
 }
 
+/// Read on the UI thread; the appearance timer also picks up changes made while
+/// SwitchX is open, without changing the user's animation preference.
+pub fn prefers_reduced_motion() -> bool {
+    let Some(_main_thread) = MainThreadMarker::new() else {
+        return false;
+    };
+    // SAFETY: NSWorkspace's shared instance is valid for the process lifetime,
+    // and this accessor has been available since macOS 10.12.
+    unsafe {
+        let workspace: *mut AnyObject = msg_send![class!(NSWorkspace), sharedWorkspace];
+        msg_send![workspace, accessibilityDisplayShouldReduceMotion]
+    }
+}
+
 unsafe extern "C-unwind" fn should_terminate(
     _delegate: *mut AnyObject,
     _selector: Sel,

@@ -4,10 +4,8 @@
 slint::include_modules!();
 
 use slint::platform::software_renderer::{MinimalSoftwareWindow, RepaintBufferType};
-use slint::platform::{Platform, PointerEventButton, WindowAdapter, WindowEvent};
-use slint::{
-    ComponentHandle, LogicalPosition, ModelRc, PhysicalSize, Rgb8Pixel, SharedPixelBuffer, VecModel,
-};
+use slint::platform::{Platform, WindowAdapter, WindowEvent};
+use slint::{ComponentHandle, ModelRc, PhysicalSize, Rgb8Pixel, SharedPixelBuffer, VecModel};
 use std::{cell::Cell, error::Error, fs, io::Write, path::Path, rc::Rc, time::Duration};
 use switchx::provider_icons;
 
@@ -54,20 +52,10 @@ fn snapshot(
     Ok(())
 }
 
-fn set_theme(window: &MinimalSoftwareWindow, dark: bool, width: u32) {
-    // Theme is private in the generated module. Exercise its existing button in memory.
-    if (render(window).as_slice()[0].r < 128) != dark {
-        let position = LogicalPosition::new(width as f32 - 192.0, 64.0);
-        window.dispatch_event(WindowEvent::PointerPressed {
-            position,
-            button: PointerEventButton::Left,
-        });
-        window.dispatch_event(WindowEvent::PointerReleased {
-            position,
-            button: PointerEventButton::Left,
-        });
-    }
-    assert_eq!(render(window).as_slice()[0].r < 128, dark);
+fn set_theme(app: &AppWindow, window: &MinimalSoftwareWindow, dark: bool) {
+    app.invoke_set_appearance(dark);
+    render(window);
+    assert_eq!(app.global::<Theme>().get_dark(), dark);
 }
 
 fn render_icons(app: &AppWindow, window: &MinimalSoftwareWindow, icons: &[ProviderIconRow]) {
@@ -92,6 +80,8 @@ fn main() -> Result<(), Box<dyn Error>> {
     slint::platform::set_platform(Box::new(PreviewPlatform(window.clone())))?;
     let app = AppWindow::new()?;
     app.set_loading(false);
+    app.global::<Theme>().set_animations_enabled(false);
+    let layout_only = std::env::args().any(|arg| arg == "--layout-only");
     app.set_active_page(1);
     app.set_status_text("离屏预览 · 合成资料".into());
     let icons = provider_icons::PROVIDER_ICONS
@@ -135,16 +125,78 @@ fn main() -> Result<(), Box<dyn Error>> {
     ]));
     app.set_providers(providers.clone());
     app.set_filtered_providers(providers);
+    app.set_model_provider_ids(ModelRc::new(VecModel::from(vec![
+        "preview-subscription".into(),
+        "preview-custom".into(),
+    ])));
+    app.set_model_provider_options(ModelRc::new(VecModel::from(vec![
+        "ChatGPT".into(),
+        "合成 API 连接".into(),
+    ])));
     app.set_provider_icons(ModelRc::new(VecModel::from(icons.clone())));
 
-    for (width, height) in [(1180, 800), (1040, 680)] {
+    app.set_config_home("/isolated/codex".into());
+    app.set_models(ModelRc::new(VecModel::from(
+        (0..9)
+            .map(|index| ModelRow {
+                provider_id: if index < 2 {
+                    "preview-subscription"
+                } else {
+                    "preview-custom"
+                }
+                .into(),
+                provider_name: if index < 2 {
+                    "ChatGPT"
+                } else {
+                    "合成 API 连接"
+                }
+                .into(),
+                display_name: match index {
+                    0 => "Codex · 主力".into(),
+                    1 => "Codex · 轻量".into(),
+                    _ => format!("编程模型 {}", index + 1).into(),
+                },
+                public_id: format!("sx-preview-{}", index + 1).into(),
+                upstream_model: format!("synthetic-model-{}", index + 1).into(),
+                saved: true,
+                ready: true,
+                included: index < 3,
+                is_subscription: index < 2,
+                ..Default::default()
+            })
+            .collect::<Vec<_>>(),
+    )));
+    app.set_selected_model_count(3);
+    app.set_default_model("sx-preview-1".into());
+    app.set_requests(ModelRc::new(VecModel::from(vec![RequestRow {
+        time: "2026-09-30 10:42:18".into(),
+        route: "sx-preview-3 → 合成 API 连接".into(),
+        duration: "1.8 s".into(),
+        timing: "总耗时 1800 ms · 响应头 120 ms · 首事件 340 ms · 上游 HTTP 200".into(),
+        detail: "合成请求 · 仅用于布局检查".into(),
+        status: "正常完成".into(),
+        completed: true,
+        ..Default::default()
+    }])));
+    for (width, height) in [(1200, 820), (1000, 680)] {
         app.window().set_size(PhysicalSize::new(width, height));
         for dark in [false, true] {
             let suffix = format!("{}-{width}x{height}", if dark { "dark" } else { "light" });
-            set_theme(&window, dark, width);
+            set_theme(&app, &window, dark);
             app.set_icon_picker_open(false);
             app.set_editor_open(false);
             app.set_subscription_editor_open(false);
+            app.set_active_page(0);
+            snapshot(&window, output, &format!("workbench-{suffix}"))?;
+            app.set_active_page(3);
+            snapshot(&window, output, &format!("activity-{suffix}"))?;
+            app.set_active_page(5);
+            snapshot(&window, output, &format!("settings-{suffix}"))?;
+            app.set_active_page(1);
+            snapshot(&window, output, &format!("connections-{suffix}"))?;
+            if layout_only {
+                continue;
+            }
             // Exercise every icon at the actual picker size, including those below the first screen.
             render_icons(&app, &window, &icons);
             snapshot(&window, output, &format!("providers-{suffix}"))?;
@@ -183,10 +235,14 @@ fn main() -> Result<(), Box<dyn Error>> {
             snapshot(&window, output, &format!("search-empty-{suffix}"))?;
         }
     }
+    if layout_only {
+        println!("Synthetic Slint layout previews: {}", output.display());
+        return Ok(());
+    }
     window.dispatch_event(WindowEvent::ScaleFactorChanged { scale_factor: 2.0 });
     app.window().set_size(PhysicalSize::new(2360, 1600));
     for dark in [false, true] {
-        set_theme(&window, dark, 1180);
+        set_theme(&app, &window, dark);
         render_icons(&app, &window, &icons);
     }
     println!("Synthetic software-rendered previews: {}", output.display());

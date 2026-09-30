@@ -324,6 +324,7 @@ pub struct RequestView {
     pub time: String,
     pub route: String,
     pub timing: String,
+    pub duration: String,
     pub detail: String,
     pub status: RequestStatus,
     pub error: String,
@@ -374,6 +375,11 @@ pub fn load_requests(data_dir: &Path) -> Result<Vec<RequestView>, AppError> {
                         .map(|status| status.to_string())
                         .unwrap_or_else(|| "—".into())
                 ),
+                duration: if record.duration_ms >= 1_000 {
+                    format!("{:.1} s", record.duration_ms as f64 / 1_000.0)
+                } else {
+                    format!("{} ms", record.duration_ms)
+                },
                 detail: format!("请求 {} · 路由版本 {}", record.id, record.generation),
                 status: record.status,
                 error: record

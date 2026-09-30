@@ -9,7 +9,11 @@ use std::{
 
 use base64::{Engine, engine::general_purpose::URL_SAFE_NO_PAD};
 use serde_json::json;
-use switchx::{accounts::AccountManager, app, chatgpt, storage::AccountBinding};
+use switchx::{
+    accounts::AccountManager,
+    app, chatgpt,
+    storage::{AccountBinding, RequestRecord, RequestStatus, Store},
+};
 
 struct Fixture(PathBuf);
 
@@ -154,6 +158,46 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         "synthetic-api-model",
         "synthetic-api-key".into(),
     )?;
+    // The activity page can be reviewed without sending any model request.
+    let store = Store::open(&data.join("switchx.sqlite"))?;
+    let api_provider_id = store
+        .providers()?
+        .into_iter()
+        .find(|provider| provider.name == "API · 合成连接")
+        .unwrap()
+        .id;
+    for (index, status) in [
+        RequestStatus::Completed,
+        RequestStatus::Failed,
+        RequestStatus::Cancelled,
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        store.put_request(&RequestRecord {
+            id: format!("synthetic-ui-request-{index}"),
+            started_at_ms: chrono::Utc::now().timestamp_millis() - index as i64 * 60_000,
+            public_model: Some("synthetic-api-model".into()),
+            provider_id: Some(api_provider_id.clone()),
+            upstream_model: Some("synthetic-api-model".into()),
+            generation: "synthetic-desktop-preview".into(),
+            http_status: Some(if status == RequestStatus::Failed {
+                503
+            } else {
+                200
+            }),
+            headers_ms: Some(120),
+            first_event_ms: Some(340),
+            duration_ms: 1_800,
+            status,
+            error_code: match status {
+                RequestStatus::Failed => Some("upstream_http_error".into()),
+                RequestStatus::Cancelled => Some("client_disconnected".into()),
+                _ => None,
+            },
+            fallback_from: None,
+        })?;
+    }
     let bundle = fixture_bundle(&root.0, &binary, &data, &home)?;
     println!("Open the synthetic fixture bundle: {}", bundle.display());
     println!(

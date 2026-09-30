@@ -1,10 +1,12 @@
+import { LineEdit, ComboBox } from "std-widgets.slint";
 import { Theme } from "tokens.slint";
 
 export component SurfaceCard inherits Rectangle {
     background: Theme.panel;
     border-width: 1px;
     border-color: Theme.border;
-    border-radius: 16px;
+    border-radius: 11px;
+    animate background, border-color { duration: Theme.page-motion; }
     @children
 }
 
@@ -12,54 +14,97 @@ export component StatusPill inherits Rectangle {
     in property <string> label;
     in property <color> ink: Theme.muted-text;
     in property <color> fill: Theme.raised;
-    width: 112px;
-    height: 27px;
-    border-radius: 8px;
+    width: 100px;
+    height: 26px;
+    border-radius: 6px;
     background: fill;
-
+    animate background { duration: Theme.fast; }
     Text {
         text: root.label;
         color: root.ink;
-        font-size: 12px;
-        font-weight: 600;
+        font-size: 11px;
+        font-weight: 500;
         horizontal-alignment: center;
         vertical-alignment: center;
+        animate color { duration: Theme.fast; }
     }
 }
 
 export component QuietButton inherits Rectangle {
     in property <string> text;
     in property <image> icon;
-    in property <length> icon-width: 18px;
-    in property <length> icon-height: 18px;
+    in property <length> icon-width: 16px;
+    in property <length> icon-height: 16px;
     in property <brush> icon-color: transparent;
     in property <bool> icon-only: false;
     in property <bool> stacked-icon: false;
     in property <bool> selected: false;
     in property <bool> primary: false;
+    in property <bool> ghost: false;
+    in property <bool> navigation: false;
     in property <bool> left-aligned: false;
     in property <bool> enabled <=> hit-area.enabled;
     callback clicked;
+    property <length> press-offset: hit-area.pressed && root.enabled ? 1px : 0px;
+    animate press-offset {
+        duration: Theme.fast;
+        easing: ease-out;
+    }
 
     height: 36px;
-    min-width: 80px;
+    min-width: root.icon-only ? 36px : 64px;
     horizontal-stretch: 1;
     vertical-stretch: 0;
-    border-radius: 9px;
-    opacity: root.enabled ? 1 : 0.45;
-    border-width: 1px;
-    border-color: selected ? Theme.brand : Theme.border;
-    background: primary ? Theme.brand : selected ? Theme.brand-surface : hit-area.has-hover ? Theme.raised : Theme.panel;
-    animate background { duration: 120ms; }
+    border-radius: 8px;
+    opacity: root.enabled ? 1 : 0.42;
+    border-width: root.ghost || root.navigation ? 0px : 1px;
+    border-color: root.primary ? Theme.solid : root.selected ? Theme.brand : hit-area.has-hover ? Theme.muted-text : Theme.border;
+    background: root.primary ? (hit-area.pressed ? Theme.brand : Theme.solid)
+        : root.navigation && root.selected ? Theme.panel
+        : root.selected ? Theme.brand-surface
+        : hit-area.has-hover || hit-area.pressed ? Theme.raised
+        : root.ghost || root.navigation ? transparent : Theme.panel;
+    animate background, border-color, opacity {
+        duration: Theme.fast;
+        easing: ease-out;
+    }
     forward-focus: key-focus;
     accessible-role: button;
     accessible-enabled: root.enabled;
     accessible-label: root.text;
     accessible-action-default => { if (root.enabled) { root.clicked(); } }
 
+    if root.icon-only: Tooltip {
+        Rectangle {
+            background: Theme.solid;
+            border-radius: 6px;
+            max-width: 360px;
+            VerticalLayout {
+                padding: 9px;
+                Text {
+                    text: root.text;
+                    color: Theme.on-brand;
+                    font-size: 12px;
+                    wrap: word-wrap;
+                }
+            }
+        }
+    }
+
+    Rectangle {
+        x: 0px;
+        width: 3px;
+        height: 14px;
+        y: (parent.height - self.height) / 2;
+        border-radius: 2px;
+        background: Theme.brand;
+        opacity: root.navigation && root.selected ? 1 : 0;
+        animate opacity { duration: Theme.fast; }
+    }
+
     if root.icon.width > 0: Image {
         x: root.icon-only || root.stacked-icon ? (parent.width - self.width) / 2 : 12px;
-        y: root.stacked-icon ? 16px : (parent.height - self.height) / 2;
+        y: (root.stacked-icon ? 16px : (parent.height - self.height) / 2) + root.press-offset;
         width: root.icon-width;
         height: root.icon-height;
         source: root.icon;
@@ -67,51 +112,231 @@ export component QuietButton inherits Rectangle {
         colorize: root.icon-color;
         accessible-role: none;
     }
-
     if !root.icon-only: Text {
-        x: !root.stacked-icon && root.icon.width > 0 ? root.icon-width + 20px : 12px;
-        y: root.stacked-icon ? root.icon-height + 24px : 0px;
+        x: !root.stacked-icon && root.icon.width > 0 ? root.icon-width + 21px : 12px;
+        y: (root.stacked-icon ? root.icon-height + 24px : 0px) + root.press-offset;
         width: parent.width - self.x - 12px;
-        height: parent.height - self.y;
+        height: parent.height - (root.stacked-icon ? self.y : 0px);
         text: root.text;
-        color: root.primary ? Theme.on-brand : root.selected ? Theme.brand : Theme.primary-text;
-        font-size: 13px;
+        color: root.primary ? Theme.on-brand : root.selected && !root.navigation ? Theme.brand : root.ghost && !hit-area.has-hover ? Theme.muted-text : Theme.primary-text;
+        font-size: 12px;
         font-weight: root.selected || root.primary ? 600 : 400;
         horizontal-alignment: root.left-aligned ? left : center;
         vertical-alignment: center;
         overflow: elide;
         accessible-role: none;
+        animate color { duration: Theme.fast; }
     }
-
     if root.icon-only && root.icon.width == 0: Text {
         text: "+";
         color: Theme.muted-text;
-        font-size: 30px;
+        font-size: 24px;
         horizontal-alignment: center;
         vertical-alignment: center;
         accessible-role: none;
     }
-
     hit-area := TouchArea {
-        clicked => { if (root.enabled) { root.clicked(); } }
+        mouse-cursor: root.enabled ? pointer : default;
+        clicked => { if (root.enabled) { key-focus.focus(); root.clicked(); } }
     }
 
     key-focus := FocusScope {
-        x: 0px;
         width: 0px;
         enabled <=> root.enabled;
         key-pressed(event) => {
             if (event.text == Key.Space || event.text == Key.Return) {
-                hit-area.clicked();
+                if (root.enabled) { root.clicked(); }
                 return accept;
             }
             return reject;
         }
     }
 
-    if key-focus.has-focus: Rectangle {
-        border-radius: 9px;
+    Rectangle {
+        border-radius: 8px;
         border-width: 2px;
         border-color: Theme.brand;
+        opacity: key-focus.has-focus ? 1 : 0;
+        animate opacity { duration: Theme.fast; }
+    }
+}
+
+export component QuietCheckBox inherits Rectangle {
+    in property <string> text;
+    in-out property <bool> checked;
+    in property <bool> enabled: true;
+    callback toggled;
+    height: 32px;
+    min-width: root.text == "" ? 30px : label.preferred-width + 32px;
+    vertical-stretch: 0;
+    opacity: root.enabled ? 1 : 0.45;
+    animate opacity { duration: Theme.fast; }
+    forward-focus: keyboard;
+    accessible-role: checkbox;
+    accessible-label: root.text;
+    accessible-checked: root.checked;
+    accessible-enabled: root.enabled;
+    accessible-action-default => { root.toggle(); }
+    function toggle() {
+        if (root.enabled) { root.checked = !root.checked; root.toggled(); }
+    }
+    Rectangle {
+        x: 3px;
+        y: (parent.height - self.height) / 2;
+        width: 17px;
+        height: 17px;
+        border-radius: 4px;
+        border-width: 1px;
+        border-color: root.checked || touch.has-hover || keyboard.has-focus ? Theme.brand : Theme.border;
+        background: root.checked ? Theme.brand : Theme.panel;
+        animate background, border-color { duration: Theme.fast; }
+        Image {
+            x: 2px;
+            y: root.checked ? 2px : 4px;
+            width: 13px;
+            height: 13px;
+            source: @image-url("../assets/ui/check.svg");
+            accessible-role: none;
+            colorize: Theme.on-brand;
+            opacity: root.checked ? 1 : 0;
+            animate y, opacity {
+                duration: Theme.fast;
+                easing: ease-out;
+            }
+        }
+    }
+
+    label := Text {
+        x: 30px;
+        width: max(0px, parent.width - 30px);
+        text: root.text;
+        accessible-role: none;
+        color: Theme.primary-text;
+        font-size: 12px;
+        vertical-alignment: center;
+    }
+
+    touch := TouchArea {
+        enabled: root.enabled;
+        mouse-cursor: pointer;
+        clicked => { keyboard.focus(); root.toggle(); }
+    }
+
+    keyboard := FocusScope {
+        width: 0px;
+        enabled: root.enabled;
+        key-pressed(event) => {
+            if (event.text == Key.Space) { root.toggle(); return accept; }
+            return reject;
+        }
+    }
+}
+
+// Keep native text editing, selection, IME and masked-password behavior.
+export component QuietLineEdit inherits LineEdit {
+    min-width: 0px;
+    min-height: 36px;
+    font-size: 13px;
+    opacity: root.enabled ? 1 : 0.5;
+    animate opacity { duration: Theme.fast; }
+}
+
+export component QuietComboBox inherits ComboBox {
+    min-height: 36px;
+    opacity: root.enabled ? 1 : 0.45;
+    animate opacity { duration: Theme.fast; }
+}
+
+// The panel stays mounted through its exit transition. Owners clear credentials
+// when open becomes false, independently of the visual animation.
+export component Drawer inherits Rectangle {
+    in property <bool> open;
+    in property <bool> busy: false;
+    in property <string> title;
+    in property <string> subtitle: "";
+    in property <string> error-message: "";
+    in property <length> panel-width: 660px;
+    callback dismissed();
+    property <float> reveal: root.open ? 1 : 0;
+    animate reveal {
+        duration: Theme.drawer-motion;
+        easing: cubic-bezier(0.2, 0.75, 0.25, 1);
+    }
+    visible: root.reveal > 0;
+    accessible-role: none;
+    changed open => { if (root.open) { keyboard.focus(); } }
+    FocusScope {
+        // Focus remains inside the modal's subtree during keyboard navigation.
+        enabled: root.open;
+        keyboard := FocusScope {
+            key-pressed(event) => {
+                if (event.text == Key.Escape && !root.busy) { root.dismissed(); return accept; }
+                return reject;
+            }
+            Rectangle {
+                background: Theme.scrim;
+                opacity: root.reveal;
+                TouchArea {
+                    enabled: root.open && !root.busy;
+                    clicked => { root.dismissed(); }
+                }
+            }
+
+            Rectangle {
+                x: root.width - self.width * root.reveal;
+                width: min(root.panel-width, root.width);
+                height: root.height;
+                background: Theme.panel;
+                border-width: 1px;
+                border-color: Theme.border;
+                // Consume panel clicks so they never reach the scrim.
+                TouchArea { }
+
+                VerticalLayout {
+                    padding: 26px;
+                    spacing: 18px;
+                    HorizontalLayout {
+                        spacing: 12px;
+                        VerticalLayout {
+                            spacing: 5px;
+                            Text {
+                                text: root.title;
+                                color: Theme.primary-text;
+                                font-size: 23px;
+                                font-weight: 600;
+                            }
+
+                            if root.subtitle != "": Text {
+                                text: root.subtitle;
+                                color: Theme.muted-text;
+                                font-size: 12px;
+                                wrap: word-wrap;
+                            }
+                        }
+
+                        QuietButton {
+                            text: "关闭";
+                            width: 36px;
+                            icon-only: true;
+                            icon: @image-url("../assets/ui/close.svg");
+                            icon-color: Theme.muted-text;
+                            ghost: true;
+                            enabled: !root.busy;
+                            clicked => { root.dismissed(); }
+                        }
+                    }
+
+                    if root.error-message != "": Text {
+                        text: root.error-message;
+                        color: Theme.error;
+                        font-size: 12px;
+                        wrap: word-wrap;
+                    }
+                    @children
+                }
+
+                if !root.open: TouchArea { }
+            }
+        }
     }
 }
