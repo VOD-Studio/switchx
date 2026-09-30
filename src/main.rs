@@ -2705,6 +2705,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     app.set_provider_presets(ModelRc::new(VecModel::from(presets)));
     initialize_provider_icons(&app)?;
     let tray = SwitchXTray::new()?;
+    #[cfg(target_os = "macos")]
+    {
+        // Slint defers native tray creation until its change handlers run.
+        slint::platform::update_timers_and_animations();
+        if let Err(error) = macos::use_template_tray_icon("switchx") {
+            eprintln!("SwitchX menu bar appearance: {error}");
+        }
+    }
     let window = app.as_weak();
     tray.on_show_app(move || {
         if let Some(app) = window.upgrade() {
