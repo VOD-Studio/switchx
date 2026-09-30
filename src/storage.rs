@@ -839,6 +839,20 @@ impl Store {
         Self::write_model(&self.connection, model)
     }
 
+    pub fn set_models_enabled(&self, public_ids: &[String], enabled: bool) -> Result<()> {
+        let transaction = self.connection.unchecked_transaction()?;
+        for public_id in public_ids {
+            if transaction.execute(
+                "UPDATE published_models SET enabled = ?1 WHERE public_id = ?2",
+                params![enabled, public_id],
+            )? != 1
+            {
+                return Err(rusqlite::Error::InvalidQuery);
+            }
+        }
+        transaction.commit()
+    }
+
     fn write_model(connection: &Connection, model: &ModelRecord) -> Result<()> {
         let changed = connection.execute(
             "INSERT INTO published_models (provider_id, public_id, display_name, upstream_model, metadata, enabled, fallback_provider_id)

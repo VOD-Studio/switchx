@@ -104,7 +104,7 @@ enum Command {
         default_reasoning: String,
     },
     DeleteModel(String),
-    SelectModel(String, bool),
+    SelectModels(Vec<String>, bool),
     SaveFallback(String, Option<String>),
     InspectRoute {
         home: String,
@@ -180,6 +180,7 @@ fn show_result(app: &AppWindow, result: Result<Snapshot, AppError>) {
     match result {
         Ok(snapshot) => {
             let selected_count = snapshot.models.iter().filter(|model| model.enabled).count();
+            let selectable_count = snapshot.models.iter().filter(|model| model.ready).count();
             if !snapshot
                 .models
                 .iter()
@@ -196,6 +197,7 @@ fn show_result(app: &AppWindow, result: Result<Snapshot, AppError>) {
                 );
             }
             app.set_selected_model_count(selected_count as i32);
+            app.set_selectable_model_count(selectable_count as i32);
             app.set_models(ModelRc::new(VecModel::from(
                 snapshot
                     .models
@@ -2355,11 +2357,11 @@ async fn worker(
                     );
                 });
             }
-            Command::SelectModel(provider, enabled) => {
+            Command::SelectModels(public_ids, enabled) => {
                 let result = directory
                     .as_ref()
                     .map_err(|error| error.message().to_owned())
-                    .and_then(|directory| app::select_model(directory, &provider, enabled));
+                    .and_then(|directory| app::select_models(directory, &public_ids, enabled));
                 if result.is_ok() {
                     route_session.discard_preview();
                 }
@@ -3325,7 +3327,24 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             queue(
                 &app,
                 &callback_sender,
-                Command::SelectModel(provider.into(), enabled),
+                Command::SelectModels(vec![provider.into()], enabled),
+            );
+        }
+    });
+    let callback_sender = sender.clone();
+    let weak = app.as_weak();
+    app.on_select_models(move |enabled, selected_only| {
+        if let Some(app) = weak.upgrade() {
+            let public_ids = app
+                .get_models()
+                .iter()
+                .filter(|model| model.ready && (!selected_only || model.included))
+                .map(|model| model.public_id.into())
+                .collect();
+            queue(
+                &app,
+                &callback_sender,
+                Command::SelectModels(public_ids, enabled),
             );
         }
     });
