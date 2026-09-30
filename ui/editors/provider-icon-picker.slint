@@ -65,6 +65,7 @@ export component ProviderIconPicker inherits SurfaceCard {
             provider-icon-search := LineEdit {
                 init => { self.focus(); }
                 height: 36px;
+                icon: @image-url("../../assets/ui/search.svg");
                 text <=> root.provider-icon-query;
                 placeholder-text: "搜索图标名称，例如 OpenAI、DeepSeek";
                 accessible-label: "搜索上游头像";

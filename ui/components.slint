@@ -1,4 +1,4 @@
-import { LineEdit, ComboBox, ScrollView } from "std-widgets.slint";
+import { ComboBox, ScrollView } from "std-widgets.slint";
 import { Theme } from "tokens.slint";
 
 export component SurfaceCard inherits Rectangle {
@@ -232,13 +232,178 @@ export component QuietCheckBox inherits Rectangle {
     }
 }
 
-// Keep native text editing, selection, IME and masked-password behavior.
-export component QuietLineEdit inherits LineEdit {
+// Style the field while TextInput keeps editing, selection, IME and password masking.
+export component QuietLineEdit inherits Rectangle {
+    in-out property <string> text <=> input.text;
+    in property <bool> enabled <=> input.enabled;
+    in property <bool> read-only <=> input.read-only;
+    in property <InputType> input-type <=> input.input-type;
+    in property <InputMethodHints> input-method-hints <=> input.input-method-hints;
+    in property <string> placeholder-text;
+    in property <image> icon;
+    in property <length> font-size <=> input.font-size;
+    in property <string> font-family <=> input.font-family;
+    in property <bool> font-italic <=> input.font-italic;
+    in property <TextHorizontalAlignment> horizontal-alignment <=> input.horizontal-alignment;
+    out property <bool> has-focus: input.has-focus;
+    callback accepted(string);
+    callback edited(string);
+    callback key-pressed(KeyEvent) -> EventResult;
+    callback key-released(KeyEvent) -> EventResult;
+
+    public function set-selection-offsets(anchor: int, focus: int) { input.set-selection-offsets(anchor, focus); }
+    public function select-all() { input.select-all(); }
+    public function clear-selection() { input.clear-selection(); }
+    public function cut() { input.cut(); }
+    public function copy() { input.copy(); }
+    public function paste() { input.paste(); }
+    public function undo() { input.undo(); }
+    public function redo() { input.redo(); }
+
     min-width: 0px;
     min-height: 36px;
-    font-size: 13px;
-    opacity: root.enabled ? 1 : 0.5;
-    animate opacity { duration: Theme.fast; }
+    preferred-width: 180px;
+    horizontal-stretch: 1;
+    vertical-stretch: 0;
+    border-radius: 8px;
+    border-width: 1px;
+    border-color: root.has-focus && root.enabled ? Theme.brand : hover.has-hover && root.enabled ? Theme.muted-text : Theme.border;
+    background: !root.enabled || (hover.has-hover && !root.has-focus) ? Theme.raised : Theme.panel;
+    opacity: root.enabled ? 1 : 0.45;
+    animate background, border-color, opacity {
+        duration: Theme.fast;
+        easing: ease-out;
+    }
+    forward-focus: input;
+    accessible-role: text-input;
+    accessible-enabled: root.enabled;
+    accessible-read-only: root.read-only;
+    accessible-placeholder-text: root.placeholder-text;
+    accessible-value: root.input-type == InputType.password ? "" : root.text;
+    accessible-action-set-value(value) => { if (root.enabled && !root.read-only) { root.text = value; root.edited(value); } }
+    accessible-action-set-selection-offsets(anchor, focus) => { input.set-selection-offsets(anchor, focus); }
+
+    Rectangle {
+        x: -3px;
+        y: -3px;
+        width: parent.width + 6px;
+        height: parent.height + 6px;
+        border-radius: 11px;
+        border-width: 2px;
+        border-color: Theme.brand.with-alpha(Theme.dark ? 0.2 : 0.16);
+        opacity: root.has-focus && root.enabled ? 1 : 0;
+        animate opacity {
+            duration: Theme.fast;
+            easing: ease-out;
+        }
+        accessible-role: none;
+    }
+
+    if root.icon.width > 0: Image {
+        x: 12px;
+        y: (parent.height - self.height) / 2;
+        width: 16px;
+        height: 16px;
+        source: root.icon;
+        colorize: root.has-focus ? Theme.brand : Theme.muted-text;
+        animate colorize { duration: Theme.fast; }
+        accessible-role: none;
+    }
+
+    hover := TouchArea {
+        enabled: root.enabled;
+        mouse-cursor: MouseCursor.text;
+        clicked => { input.focus(); }
+
+        ContextMenuArea {
+            x: root.icon.width > 0 ? 38px : 12px;
+            y: 1px;
+            width: max(0px, parent.width - self.x - 12px);
+            height: parent.height - 2px;
+            Menu {
+                MenuItem {
+                    title: "撤销";
+                    enabled: !root.read-only;
+                    activated => { input.undo(); }
+                }
+
+                MenuItem {
+                    title: "重做";
+                    enabled: !root.read-only;
+                    activated => { input.redo(); }
+                }
+
+                MenuSeparator { }
+
+                MenuItem {
+                    title: "剪切";
+                    enabled: !root.read-only && root.text != "";
+                    activated => { input.cut(); }
+                }
+
+                MenuItem {
+                    title: "复制";
+                    enabled: root.text != "";
+                    activated => { input.copy(); }
+                }
+
+                MenuItem {
+                    title: "粘贴";
+                    enabled: !root.read-only;
+                    activated => { input.paste(); }
+                }
+
+                MenuItem {
+                    title: "全选";
+                    enabled: root.text != "";
+                    activated => { input.select-all(); }
+                }
+            }
+
+            Rectangle {
+                clip: true;
+                Text {
+                    width: parent.width;
+                    height: parent.height;
+                    text: root.text == "" && input.preedit-text == "" ? root.placeholder-text : "";
+                    color: Theme.muted-text;
+                    font-size: root.font-size;
+                    font-family: root.font-family;
+                    font-italic: root.font-italic;
+                    horizontal-alignment: root.horizontal-alignment;
+                    vertical-alignment: center;
+                    overflow: elide;
+                    accessible-role: none;
+                }
+
+                input := TextInput {
+                    property <length> scroll-x;
+                    x: min(0px, max(parent.width - self.width - self.text-cursor-width, self.scroll-x));
+                    width: max(parent.width - self.text-cursor-width, self.preferred-width);
+                    height: parent.height;
+                    font-size: 13px;
+                    single-line: true;
+                    horizontal-alignment: left;
+                    vertical-alignment: center;
+                    color: Theme.primary-text;
+                    selection-background-color: Theme.brand-surface;
+                    selection-foreground-color: Theme.primary-text;
+                    accessible-role: none;
+                    accepted => { root.accepted(self.text); }
+                    edited => { root.edited(self.text); }
+                    key-pressed(event) => { root.key-pressed(event) }
+                    key-released(event) => { root.key-released(event) }
+                    cursor-position-changed(position) => {
+                        if position.x + self.scroll-x < 0px {
+                            self.scroll-x = -position.x;
+                        } else if position.x + self.scroll-x > parent.width - self.text-cursor-width {
+                            self.scroll-x = parent.width - position.x - self.text-cursor-width;
+                        }
+                    }
+                }
+            }
+        }
+    }
 }
 
 export component QuietComboBox inherits Rectangle {
