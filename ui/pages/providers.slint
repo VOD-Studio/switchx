@@ -25,6 +25,7 @@ export component ProvidersPage inherits VerticalLayout {
         spacing: 10px;
         QuietLineEdit {
             width: 230px;
+            icon: @image-url("../../assets/ui/search.svg");
             placeholder-text: "搜索连接";
             accessible-label: "按名称筛选上游";
             text <=> root.provider-query;

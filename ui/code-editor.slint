@@ -24,10 +24,14 @@ export component CodeEditor inherits Rectangle {
     background: Theme.raised;
     border-width: 1px;
     border-color: input.has-focus ? Theme.brand : Theme.border;
-    border-radius: 4px;
+    border-radius: 8px;
     horizontal-stretch: 1;
     forward-focus: input;
     opacity: root.enabled ? 1 : 0.6;
+    animate background, border-color, opacity {
+        duration: Theme.fast;
+        easing: ease-out;
+    }
     accessible-role: text-input;
     accessible-enabled: root.enabled;
     accessible-read-only: root.read-only;
