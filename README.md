@@ -72,7 +72,7 @@ M1 收口检查（2026-09-24，macOS 调试 bundle，隔离的 `SWITCHX_DATA_DIR
 
 SQLite 自动升级至 v10，保留原有资料；旧版数据库存在恢复日志时先完成恢复。API Key 仅从 SQLite 读取，数据库中缺少 Key 时须在编辑表单重新输入。本地路由令牌也改存 SQLite；程序不再依赖 keyring，不读取、迁移或清理旧钥匙串条目。已有旧 helper 配置须先恢复，再重新预览应用；新的 helper 使用显式绝对数据目录。合成存储、独立 helper 与本机 CLI 检查已通过，见 [本地令牌保存检查](docs/acceptance/M3-local-token-storage-2026-09-29.md)。
 
-“配置与恢复”页面可选择绝对路径的 Codex 配置目录、读取当前配置、将当前自定义上游的**元数据**填入新建表单，以及查看 `codex login status` 报告的 ChatGPT 登录、API Key 登录或未知状态。“导入当前上游”不复制原配置中的凭据，也不读取 `auth.json`；新建上游须重新输入自己的 API Key。ChatGPT 账号另有明确的“导入当前 Codex 账号”入口，见下文。`SWITCHX_CODEX_CLI` 可指向要检查的 CLI；默认优先使用本机 ChatGPT.app 内的 CLI。
+“配置与恢复”页面可选择绝对路径的 Codex 配置目录、读取当前配置、将当前自定义上游的**元数据**填入新建表单，以及查看 `codex login status` 报告的 ChatGPT 登录、API Key 登录或未知状态。“导入当前上游”不复制原配置中的凭据，也不读取 `auth.json`；新建上游须重新输入自己的 API Key。ChatGPT 账号另有明确的“导入当前 Codex 账号”入口，见下文。`SWITCHX_CODEX_CLI` 显式指定的 CLI 始终优先；默认先查找 `PATH` 中的 CLI，再检查 `~/.local/bin/codex`、`/opt/homebrew/bin/codex` 和 `/usr/local/bin/codex`，最后回退到 ChatGPT.app 内置 CLI。常见独立安装路径也会在 Finder 启动、`PATH` 较短时检查；自动发现只选择可执行文件，并解析为绝对路径。模型列表、登录、目录检查与启动使用同一选择规则。
 
 添加和编辑供应商时提供以下 Codex 配置选项，界面与操作参考 `others/cc-switch`：
 
