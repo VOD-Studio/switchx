@@ -9,8 +9,8 @@ slint::slint! {
     export { Theme } from "../ui/tokens.slint";
 
     export component DropdownWindow inherits Window {
-        width: 360px;
-        height: 420px;
+        preferred-width: 360px;
+        preferred-height: 420px;
         background: Theme.background;
         in-out property <[string]> options: ["ChatGPT 订阅", "DeepSeek"];
         in-out property <int> choice;
