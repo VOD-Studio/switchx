@@ -20,7 +20,9 @@ CODEX_HOME="$(mktemp -d)" npx -y @openai/codex@0.156.1 \
 
 macOS 可运行 `sh scripts/bundle-macos.sh` 生成仅供本机交互检查的 `target/debug/SwitchX.app`。主窗口关闭后应驻留菜单栏，可从菜单栏重新打开或退出。此调试 bundle 未签名、未公证，不能作为发布包。
 
-应用图标原图保存在 `assets/app-icon.png`，Slint 窗口直接引用它。macOS 打包脚本使用系统自带的 `sips` 和 `iconutil` 生成标准与 Retina 尺寸的 `AppIcon.icns`，放入 bundle 的 `Contents/Resources/`，供 Finder 和 Dock 使用。替换原图后重新打包即可更新应用图标。
+应用图标原图保存在 `assets/app-icon.png`，Slint 窗口直接引用它。macOS 打包脚本先通过 `prepare-macos-icon.swift` 为本机准备底稿：macOS 26+ 使用与原图背景匹配的完整不透明方形，避免系统给透明图案再套底板并缩小；较旧系统沿用原图。随后使用系统自带的 `sips` 和 `iconutil` 生成标准与 Retina 尺寸的 `AppIcon.icns`，放入 bundle 的 `Contents/Resources/`，供 Finder 和 Dock 使用。替换原图后重新打包即可更新应用图标。
+
+`swift scripts/check-macos-icon.swift /absolute/path/to/SwitchX.app` 通过原生图标服务检查原图蓝紫色细节的实际缩放，防止透明底板造成二次内缩。可选第二个参数保存系统渲染截图；[尺寸修复验收](docs/acceptance/app-icon-sizing-2026-09-30.md)记录原因与前后对比。
 
 菜单栏图标使用 `assets/tray.svg` 中的单色猫咪与开关线稿，透明背景、18pt 显示高度。macOS 将它标记为原生模板图像，由系统根据菜单栏背景和菜单选中状态着色；图标颜色不跟随 SwitchX 窗口内的主题切换。
 

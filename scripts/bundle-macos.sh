@@ -12,13 +12,15 @@ cp "$repo_root/assets/providers/NOTICE.md" "$bundle/Contents/Resources/Provider-
 
 icon_tmp=$(mktemp -d)
 trap 'rm -rf "$icon_tmp"' 0
+icon_source="$icon_tmp/AppIcon.png"
+swift "$repo_root/scripts/prepare-macos-icon.swift" "$repo_root/assets/app-icon.png" "$icon_source"
 iconset="$icon_tmp/AppIcon.iconset"
 mkdir -p "$iconset"
 for size in 16 32 128 256 512; do
-    sips -z "$size" "$size" "$repo_root/assets/app-icon.png" \
+    sips -z "$size" "$size" "$icon_source" \
         --out "$iconset/icon_${size}x${size}.png" >/dev/null
     retina_size=$((size * 2))
-    sips -z "$retina_size" "$retina_size" "$repo_root/assets/app-icon.png" \
+    sips -z "$retina_size" "$retina_size" "$icon_source" \
         --out "$iconset/icon_${size}x${size}@2x.png" >/dev/null
 done
 iconutil -c icns "$iconset" -o "$bundle/Contents/Resources/AppIcon.icns"
