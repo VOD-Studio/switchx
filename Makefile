@@ -8,6 +8,9 @@ SLINT_FILES := $(shell find ui -type f -name '*.slint' | sort)
 build:
 	cargo build --locked
 
+release:
+	./scripts/bundle-macos.sh --release
+
 lint:
 	cargo clippy --locked --all-targets -- -D warnings
 
