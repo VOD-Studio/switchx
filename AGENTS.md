@@ -12,6 +12,7 @@ SwitchX is a Rust 2024 desktop app with a Slint interface. `src/main.rs` starts 
 - `cargo fmt --all -- --check`: check Rust formatting; run `cargo fmt --all` to apply it.
 - `cargo clippy --all-targets -- -D warnings`: check Rust code across targets.
 - `sh scripts/bundle-macos.sh`: create a local debug app at `target/debug/SwitchX.app` on macOS.
+- `sh scripts/bundle-macos.sh --release`: create a local release app at `target/release/SwitchX.app` on macOS.
 
 ## Coding Style & Naming Conventions
 
