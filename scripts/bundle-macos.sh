@@ -22,4 +22,6 @@ for size in 16 32 128 256 512; do
         --out "$iconset/icon_${size}x${size}@2x.png" >/dev/null
 done
 iconutil -c icns "$iconset" -o "$bundle/Contents/Resources/AppIcon.icns"
+# Let Finder notice updated resources when rebuilding an existing app bundle.
+touch "$bundle"
 echo "$bundle"
