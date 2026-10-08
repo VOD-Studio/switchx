@@ -4865,12 +4865,20 @@ dependencies = [
  "serde",
  "serde_json",
  "slint",
- "slint-build",
  "subtle",
+ "switchx-ui",
  "tokio",
  "toml_edit",
  "zeroize",
  "zstd",
+]
+
+[[package]]
+name = "switchx-ui"
+version = "0.1.0"
+dependencies = [
+ "slint",
+ "slint-build",
 ]
 
 [[package]]

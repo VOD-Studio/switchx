@@ -4,6 +4,14 @@ version = "0.1.0"
 edition = "2024"
 publish = false
 
+[workspace]
+members = ["crates/switchx-ui"]
+default-members = ["."]
+resolver = "3"
+
+[workspace.dependencies]
+slint = "=1.18.1"
+
 [dependencies]
 axum = "0.8.9"
 base64 = "0.22.1"
@@ -14,7 +22,8 @@ reqwest = { version = "0.13.5", default-features = false, features = ["rustls", 
 rusqlite = { version = "0.40.2", features = ["bundled"] }
 serde = { version = "1.0.228", features = ["derive"] }
 serde_json = "1.0.151"
-slint = "=1.18.1"
+slint.workspace = true
+switchx-ui = { path = "crates/switchx-ui" }
 subtle = "2.6.1"
 tokio = { version = "1.53.1", features = ["rt-multi-thread", "time", "net", "macros", "sync", "process", "signal", "io-util"] }
 toml_edit = "0.25.15"
@@ -23,9 +32,6 @@ zstd = { version = "0.14.0", default-features = false }
 
 [target.'cfg(target_os = "macos")'.dependencies]
 objc2 = "0.6.4"
-
-[build-dependencies]
-slint-build = "=1.18.1"
 
 [profile.dev]
 debug = "line-tables-only"

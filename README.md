@@ -14,7 +14,7 @@ CODEX_HOME="$(mktemp -d)" npx -y @openai/codex@0.156.1 \
 
 开发过程中，改业务库运行 `make check-lib`，改桌面入口运行 `make check-app`，改路由运行 `make test-router`；完成功能点后运行 `make check` 做完整检查。`make` 默认仍然构建应用。
 
-生成 UI 集中在 `src/ui.rs`，主程序、集成测试和预览通过 `switchx::ui` 引用，减少整套 Slint 代码的重复编译。开发构建使用 `line-tables-only` 调试信息；需要完整变量调试信息时可运行 `CARGO_PROFILE_DEV_DEBUG=full cargo build --locked`。编译并发保持原有设置。生成代码及界面对照见 [构建成本调整记录](docs/acceptance/build-memory-2026-10-08.md)。
+生成 UI 由独立的 `crates/switchx-ui/` 编译，主程序、集成测试和预览继续通过 `switchx::ui` 引用。修改业务 Rust 代码可以复用 UI 编译产物；UI 构建脚本仍跟踪根目录的 `ui/` 与资源文件。开发构建使用 `line-tables-only` 调试信息；需要调试业务或 UI 变量时可运行 `CARGO_PROFILE_DEV_DEBUG=full cargo build --locked`。编译并发保持原有设置。生成代码及界面对照见 [构建成本调整记录](docs/acceptance/build-memory-2026-10-08.md)。
 
 界面代码按职责组织：`ui/pages/` 放工作台、连接、账号、请求记录和设置页面，`ui/editors/` 放编辑表单与头像选择器，`ui/view-models.slint` 定义展示数据。`ui/app.slint` 保留窗口布局、导航、跨页状态、凭据草稿清理和 Rust 回调接口；页面通过属性绑定与操作回调接入。基础控件、代码编辑器和主题分别在 `components.slint`、`code-editor.slint`、`tokens.slint` 中。`make format` 与 `make format-check` 会递归处理 `ui/` 下的 Slint 文件。
 
