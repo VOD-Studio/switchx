@@ -16,3 +16,4 @@ pub mod requests;
 pub mod routed;
 pub mod routing;
 pub mod storage;
+pub mod ui;

@@ -3,7 +3,7 @@ use slint::platform::{Key, Platform, PointerEventButton, WindowAdapter, WindowEv
 use slint::{ComponentHandle, LogicalPosition, ModelRc, PhysicalSize, VecModel};
 use std::{cell::Cell, io::Write, rc::Rc};
 
-slint::include_modules!();
+use switchx::ui::{AppWindow, ModelRow, Theme};
 
 struct PreviewPlatform(Rc<MinimalSoftwareWindow>);
 

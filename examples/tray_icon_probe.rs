@@ -2,7 +2,7 @@
 //! Run: cargo run --example tray_icon_probe
 //! No provider data, credentials, or Codex configuration are read.
 
-slint::include_modules!();
+use switchx::ui::{AppWindow, SwitchXTray};
 
 #[cfg(target_os = "macos")]
 #[path = "../src/macos.rs"]

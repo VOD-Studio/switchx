@@ -1,7 +1,9 @@
 //! Render synthetic provider avatar previews with the real Slint UI, without native windows.
 //! Run: cargo run --example provider_icons_preview -- /absolute/output/directory
 
-slint::include_modules!();
+use switchx::ui::{
+    AccountRow, AppWindow, ModelRow, ProviderIconRow, ProviderRow, RequestRow, Theme,
+};
 
 use slint::platform::software_renderer::{MinimalSoftwareWindow, RepaintBufferType};
 use slint::platform::{Platform, WindowAdapter, WindowEvent};
