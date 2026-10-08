@@ -16,6 +16,6 @@ pub mod requests;
 pub mod routed;
 pub mod routing;
 pub mod storage;
-pub mod ui;
+pub use switchx_ui as ui;
 pub mod xai;
 pub mod xai_responses;

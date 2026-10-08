@@ -2,7 +2,7 @@
 
 ## Project Structure & Module Organization
 
-SwitchX is a Rust 2024 desktop app with a Slint interface. `src/main.rs` starts the app; `src/lib.rs` exposes modules for the catalog, routing, storage, credentials, and Codex configuration. Slint views and design tokens live in `ui/`, with the tray icon in `assets/`. `tests/router.rs` holds integration tests; `tests/fixtures/` contains synthetic catalog and configuration samples. Runnable probes live in `examples/`. See `README.md` for implemented behavior and `docs/SWITCHX-PLAN.md` for the longer term design. macOS bundle inputs are in `packaging/macos/` and `scripts/`.
+SwitchX is a Rust 2024 desktop app with a Slint interface. `src/main.rs` starts the app; `src/lib.rs` exposes modules for the catalog, routing, storage, credentials, and Codex configuration. `crates/switchx-ui/` compiles the generated UI separately; `switchx::ui` re-exports its types. Slint views and design tokens live in `ui/`, with the tray icon in `assets/`. `tests/router.rs` holds integration tests; `tests/fixtures/` contains synthetic catalog and configuration samples. Runnable probes live in `examples/`. See `README.md` for implemented behavior and `docs/SWITCHX-PLAN.md` for the longer term design. macOS bundle inputs are in `packaging/macos/` and `scripts/`.
 
 ## Build, Test, and Development Commands
 

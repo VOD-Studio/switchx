@@ -12,10 +12,10 @@ release:
 	./scripts/bundle-macos.sh --release
 
 lint:
-	cargo clippy --locked --all-targets -- -D warnings
+	cargo clippy --locked --workspace --all-targets -- -D warnings
 
 format: require-slint-lsp
-	cargo fix --allow-dirty
+	cargo fix --workspace --allow-dirty
 	cargo fmt --all
 	$(SLINT_LSP) format -i $(SLINT_FILES)
 
@@ -30,7 +30,7 @@ require-slint-lsp:
 	@command -v $(SLINT_LSP) >/dev/null || { echo 'Install slint-lsp 1.18.1: cargo install slint-lsp --version 1.18.1 --locked' >&2; exit 1; }
 
 test:
-	cargo test --locked
+	cargo test --locked --workspace
 
 check: format-check lint test
 
