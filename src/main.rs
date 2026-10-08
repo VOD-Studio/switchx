@@ -1,4 +1,7 @@
-slint::include_modules!();
+use switchx::ui::{
+    AccountRow, AppWindow, CodeSpan, ModelRow, ProviderIconRow, ProviderPresetRow, ProviderRow,
+    RequestRow, SwitchXTray, SyntaxHighlighting, Theme,
+};
 
 #[cfg(target_os = "macos")]
 mod macos;
