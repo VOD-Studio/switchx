@@ -3102,12 +3102,15 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     if credential_command()? {
         return Ok(());
     }
+    #[cfg(target_os = "macos")]
+    macos::configure_window()?;
     let runtime = tokio::runtime::Builder::new_multi_thread()
         .enable_all()
         .build()?;
     let app = AppWindow::new()?;
     #[cfg(target_os = "macos")]
     {
+        app.set_native_titlebar_overlay(true);
         app.global::<Theme>()
             .set_system_reduced_motion(macos::prefers_reduced_motion());
         let weak = app.as_weak();
