@@ -52,6 +52,7 @@ export component AppWindow inherits Window {
     min-height: 680px;
     background: Theme.background;
     forward-focus: app-keyboard;
+    in property <bool> native-titlebar-overlay: false;
     property <Point> dropdown-viewport: { x: root.width, y: root.height };
     init => { DropdownViewport.size = root.dropdown-viewport; }
     changed dropdown-viewport => { DropdownViewport.size = root.dropdown-viewport; }
@@ -419,9 +420,14 @@ export component AppWindow inherits Window {
                         background: Theme.border;
                     }
 
+                    WindowMoveArea {
+                        height: 44px;
+                        enabled: root.native-titlebar-overlay && !root.full-screen;
+                    }
+
                     VerticalLayout {
                         padding: 14px;
-                        padding-top: 26px;
+                        padding-top: root.native-titlebar-overlay && !root.full-screen ? 44px : 26px;
                         spacing: 6px;
                         HorizontalLayout {
                             height: 42px;
@@ -589,8 +595,9 @@ export component AppWindow inherits Window {
                                 vertical-alignment: center;
                             }
 
-                            Rectangle {
+                            WindowMoveArea {
                                 horizontal-stretch: 1;
+                                enabled: root.native-titlebar-overlay && !root.full-screen;
                             }
 
                             QuietButton {

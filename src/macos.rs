@@ -1,4 +1,4 @@
-//! AppKit tray appearance and Quit recovery (including Command-Q and the Dock).
+//! AppKit window/tray appearance and Quit recovery (including Command-Q and the Dock).
 
 use std::{cell::RefCell, ffi::CStr};
 
@@ -7,6 +7,21 @@ use objc2::{
     runtime::{AnyObject, Imp, Sel},
     sel,
 };
+use slint::winit_030::winit::platform::macos::WindowAttributesExtMacOS;
+
+/// Keep native window controls while drawing the UI behind a transparent titlebar.
+/// Select before creating any Slint components so the first frame has this style.
+pub fn configure_window() -> Result<(), slint::PlatformError> {
+    slint::BackendSelector::new()
+        .backend_name("winit".into())
+        .with_winit_window_attributes_hook(|attributes| {
+            attributes
+                .with_title_hidden(true)
+                .with_titlebar_transparent(true)
+                .with_fullsize_content_view(true)
+        })
+        .select()
+}
 
 thread_local! {
     static QUIT_HANDLER: RefCell<Option<Box<dyn Fn()>>> = RefCell::new(None);
