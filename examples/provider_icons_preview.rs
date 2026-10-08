@@ -192,6 +192,8 @@ fn main() -> Result<(), Box<dyn Error>> {
             snapshot(&window, output, &format!("activity-{suffix}"))?;
             app.set_active_page(5);
             snapshot(&window, output, &format!("settings-{suffix}"))?;
+            app.set_active_page(4);
+            snapshot(&window, output, &format!("toolbox-{suffix}"))?;
             app.set_active_page(1);
             snapshot(&window, output, &format!("connections-{suffix}"))?;
             if layout_only {
