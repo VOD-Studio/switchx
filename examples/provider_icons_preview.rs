@@ -136,6 +136,25 @@ fn main() -> Result<(), Box<dyn Error>> {
     app.set_provider_icons(ModelRc::new(VecModel::from(icons.clone())));
 
     app.set_config_home("/isolated/codex".into());
+    app.set_account_status("已保存 2 个账号 · 各上游绑定独立管理".into());
+    app.set_auth_status("此目录的官方登录状态尚未检查".into());
+    app.set_accounts(ModelRc::new(VecModel::from(vec![
+        AccountRow {
+            id: "synthetic-account-a".into(),
+            label: "synthetic-a@example.invalid".into(),
+            workspace: "synthetic-workspace-a".into(),
+            bound_provider_count: 1,
+            ..Default::default()
+        },
+        AccountRow {
+            id: "synthetic-account-b".into(),
+            label: "synthetic-b@example.invalid".into(),
+            workspace: "synthetic-workspace-b".into(),
+            is_default: true,
+            is_active: true,
+            ..Default::default()
+        },
+    ])));
     app.set_models(ModelRc::new(VecModel::from(
         (0..9)
             .map(|index| ModelRow {
@@ -195,7 +214,17 @@ fn main() -> Result<(), Box<dyn Error>> {
             app.set_active_page(4);
             snapshot(&window, output, &format!("toolbox-{suffix}"))?;
             app.set_active_page(1);
+            app.set_connections_tab(0);
             snapshot(&window, output, &format!("connections-{suffix}"))?;
+            app.set_connections_tab(1);
+            snapshot(&window, output, &format!("accounts-{suffix}"))?;
+            window.dispatch_event(WindowEvent::PointerScrolled {
+                position: slint::LogicalPosition::new(width as f32 - 50.0, height as f32 - 80.0),
+                delta_x: 0.0,
+                delta_y: -1000.0,
+            });
+            snapshot(&window, output, &format!("accounts-actions-{suffix}"))?;
+            app.set_connections_tab(0);
             if layout_only {
                 continue;
             }

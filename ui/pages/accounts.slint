@@ -55,7 +55,7 @@ export component AccountsPage inherits ScrollView {
                 }
 
                 Text {
-                    text: "账号可绑定到多个订阅上游。写入 Codex 登录只设置客户端入口登录，不改变各上游的绑定。";
+                    text: "添加或导入只保存账号，供订阅上游绑定；设为默认不会切换当前 Codex 登录。";
                     color: Theme.muted-text;
                     font-size: 12px;
                     wrap: word-wrap;
@@ -222,8 +222,45 @@ export component AccountsPage inherits ScrollView {
                     }
                 }
 
+                HorizontalLayout {
+                    spacing: 8px;
+                    VerticalLayout {
+                        horizontal-stretch: 1;
+                        spacing: 4px;
+                        Text {
+                            text: "当前 Codex 登录";
+                            color: Theme.primary-text;
+                            font-size: 13px;
+                            font-weight: 600;
+                        }
+
+                        Text {
+                            text: root.auth-status;
+                            color: Theme.muted-text;
+                            font-size: 12px;
+                            wrap: word-wrap;
+                        }
+                    }
+
+                    if !root.chatgpt-login-pending: QuietButton {
+                        width: 180px;
+                        horizontal-stretch: 0;
+                        text: "重新登录当前 Codex";
+                        enabled: !root.busy;
+                        clicked => { root.subscription-action(1); }
+                    }
+
+                    QuietButton {
+                        width: 138px;
+                        horizontal-stretch: 0;
+                        text: "检查 Codex 登录";
+                        enabled: !root.busy && !root.chatgpt-login-pending;
+                        clicked => { root.subscription-action(2); }
+                    }
+                }
+
                 Text {
-                    text: root.auth-status;
+                    text: "重新登录或写入账号会先恢复配置、停止当前路由；各上游绑定不变，完成后请重新发布并启动新会话。";
                     color: Theme.muted-text;
                     font-size: 12px;
                     wrap: word-wrap;
@@ -231,31 +268,22 @@ export component AccountsPage inherits ScrollView {
 
                 HorizontalLayout {
                     spacing: 8px;
-
-                    if !root.chatgpt-login-pending: QuietButton {
-                        text: "Codex 原生登录";
-                        enabled: !root.busy;
-                        clicked => { root.subscription-action(1); }
-                    }
-
                     QuietButton {
-                        text: "检查 Codex 登录";
-                        enabled: !root.busy && !root.chatgpt-login-pending;
-                        clicked => { root.subscription-action(2); }
-                    }
-
-                    QuietButton {
+                        width: 152px;
+                        horizontal-stretch: 0;
                         text: "切回 API 预览";
                         enabled: !root.busy && !root.chatgpt-login-pending;
                         clicked => { root.subscription-action(4); }
                     }
-                }
 
-                Text {
-                    text: "设为默认只影响默认账号选择。写入 Codex 登录是独立操作，会先恢复受管配置；之后请重新发布并启动新会话。";
-                    color: Theme.muted-text;
-                    font-size: 12px;
-                    wrap: word-wrap;
+                    Text {
+                        text: "恢复并停止当前路由，预览已选 API 模型；确认启用后生效。";
+                        color: Theme.muted-text;
+                        font-size: 12px;
+                        wrap: word-wrap;
+                        vertical-alignment: center;
+                        horizontal-stretch: 1;
+                    }
                 }
             }
         }
