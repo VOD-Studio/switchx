@@ -49,6 +49,7 @@ export component StatusPill inherits Rectangle {
 
 export component QuietButton {
     in property <string> text;
+    in property <string> description: "";
     in property <image> icon;
     in property <length> icon-width: 16px;
     in property <length> icon-height: 16px;
@@ -83,7 +84,7 @@ export component QuietButton {
     forward-focus: key-focus;
     accessible-role: button;
     accessible-enabled: root.enabled;
-    accessible-label: root.text;
+    accessible-label: root.text + (root.description == "" ? "" : "，" + root.description);
     accessible-action-default => { if (root.enabled) { root.clicked(); } }
 
     // Keep visual effects off the root so repeated buttons remain reusable subcomponents.
@@ -139,18 +140,29 @@ export component QuietButton {
         }
         if !root.icon-only: Text {
             x: !root.stacked-icon && root.icon.width > 0 ? root.icon-width + 21px : 12px;
-            y: (root.stacked-icon ? root.icon-height + 24px : 0px) + root.press-offset;
+            y: (root.description != "" ? 14px : root.stacked-icon ? root.icon-height + 24px : 0px) + root.press-offset;
             width: parent.width - self.x - 12px;
-            height: parent.height - (root.stacked-icon ? self.y : 0px);
+            height: root.description != "" ? 20px : parent.height - (root.stacked-icon ? self.y : 0px);
             text: root.text;
             color: root.primary ? Theme.on-brand : root.selected && !root.navigation ? Theme.brand : root.ghost && !hit-area.has-hover ? Theme.muted-text : Theme.primary-text;
-            font-size: 12px;
+            font-size: root.description != "" ? 14px : 12px;
             font-weight: root.selected || root.primary ? 600 : 400;
             horizontal-alignment: root.left-aligned ? left : center;
             vertical-alignment: center;
             overflow: elide;
             accessible-role: none;
             animate color { duration: Theme.fast; }
+        }
+        if root.description != "": Text {
+            x: root.icon.width > 0 ? root.icon-width + 21px : 12px;
+            y: 38px + root.press-offset;
+            width: parent.width - self.x - 12px;
+            height: 18px;
+            text: root.description;
+            color: Theme.muted-text;
+            font-size: 12px;
+            overflow: elide;
+            accessible-role: none;
         }
         if root.icon-only && root.icon.width == 0: Text {
             text: "+";
@@ -719,6 +731,7 @@ export component QuietComboBox inherits Rectangle {
 // The panel stays mounted through its exit transition. Owners clear credentials
 // when open becomes false, independently of the visual animation.
 export component Drawer inherits Rectangle {
+    forward-focus: keyboard;
     in property <bool> open;
     in property <bool> busy: false;
     in property <string> title;

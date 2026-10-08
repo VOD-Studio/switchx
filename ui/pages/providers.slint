@@ -14,6 +14,7 @@ export component ProvidersPage inherits VerticalLayout {
     in property <bool> config-managed;
     callback refresh(bool);
     callback filter-providers(string);
+    callback add-connection();
     callback begin-provider-editor(string);
     callback begin-subscription-editor(string);
     callback begin-xai-editor(string);
@@ -54,25 +55,11 @@ export component ProvidersPage inherits VerticalLayout {
         }
 
         QuietButton {
-            width: 110px;
-            text: "+ API 连接";
-            enabled: !root.busy && !root.config-managed;
-            clicked => { root.begin-provider-editor(""); }
-        }
-
-        QuietButton {
-            width: 134px;
-            text: "+ ChatGPT 订阅";
+            width: 120px;
+            text: "+ 添加连接";
             primary: true;
-            enabled: !root.busy && !root.config-managed && !root.chatgpt-login-pending;
-            clicked => { root.begin-subscription-editor(""); }
-        }
-
-        QuietButton {
-            width: 112px;
-            text: "+ Grok 订阅";
             enabled: !root.busy && !root.config-managed;
-            clicked => { root.begin-xai-editor(""); }
+            clicked => { root.add-connection(); }
         }
     }
 

@@ -7,7 +7,6 @@ import {
     QuietComboBox as ComboBox,
 } from "../components.slint";
 import { CodeEditor } from "../code-editor.slint";
-import { ProviderPresetRow } from "../view-models.slint";
 
 export component ProviderEditor inherits SurfaceCard {
     in property <bool> busy;
@@ -24,7 +23,6 @@ export component ProviderEditor inherits SurfaceCard {
     in-out property <string> edit-compact-limit;
     in property <string> edit-config-preview;
     in property <string> edit-config-error;
-    in property <[ProviderPresetRow]> provider-presets;
     in property <string> edit-preset-id;
     in property <string> edit-icon-name;
     in property <image> edit-icon;
@@ -37,12 +35,11 @@ export component ProviderEditor inherits SurfaceCard {
     callback save-provider(string, string, string, string, string);
     callback open-common-config();
     callback delete-provider(string);
-    callback apply-provider-preset(string);
     callback open-provider-preset-link(bool);
     callback open-provider-icon-picker();
     callback fetch-models(int);
 
-    height: 782px + (root.edit-id == "" ? 92px : 0px) + (root.edit-preset-id != "" ? 58px : 0px) + (root.discovery-scope == 0 && (root.fetched-models.length > 0 || root.discovery-message != "") ? 68px : 0px) + (root.edit-config-error != "" ? 48px : 0px);
+    height: 782px + (root.edit-preset-id != "" ? 58px : 0px) + (root.discovery-scope == 0 && (root.fetched-models.length > 0 || root.discovery-message != "") ? 68px : 0px) + (root.edit-config-error != "" ? 48px : 0px);
     VerticalLayout {
         padding: 16px;
         spacing: 7px;
@@ -51,37 +48,6 @@ export component ProviderEditor inherits SurfaceCard {
             color: Theme.primary-text;
             font-size: 17px;
             font-weight: 600;
-        }
-
-        if root.edit-id == "": Text {
-            text: "官方 API 预设";
-            color: Theme.muted-text;
-            font-size: 12px;
-        }
-
-        if root.edit-id == "": HorizontalLayout {
-            spacing: 8px;
-            QuietButton {
-                text: "自定义配置";
-                selected: root.edit-preset-id == "";
-                enabled: !root.busy;
-                clicked => {
-                    if (root.edit-preset-id != "") { root.apply-provider-preset(""); }
-                }
-            }
-
-            for preset in root.provider-presets: QuietButton {
-                text: preset.name;
-                icon: preset.icon;
-                icon-width: preset.id == "xiaomimimo" ? 64px : 18px;
-                min-width: preset.id == "xiaomimimo" ? 160px : 118px;
-                icon-color: preset.monochrome ? Theme.primary-text : transparent;
-                selected: root.edit-preset-id == preset.id;
-                enabled: !root.busy;
-                clicked => {
-                    if (root.edit-preset-id != preset.id) { root.apply-provider-preset(preset.id); }
-                }
-            }
         }
 
         if root.edit-preset-id != "": HorizontalLayout {
