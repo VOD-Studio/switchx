@@ -1,3 +1,4 @@
+import { XaiEditor } from "editors/xai-editor.slint";
 import { Palette } from "std-widgets.slint";
 import { QuietScrollView as ScrollView } from "scroll-view.slint";
 import { Theme } from "tokens.slint";
@@ -85,6 +86,19 @@ export component AppWindow inherits Window {
     in-out property <[ProviderRow]> filtered-providers: [];
     in-out property <string> provider-query: "";
     in-out property <bool> editor-open: false;
+    in-out property <bool> xai-editor-open: false;
+    in-out property <string> xai-provider-id: "";
+    in-out property <string> xai-provider-name: "";
+    in-out property <[string]> xai-account-ids: [];
+    in-out property <[string]> xai-account-options: [];
+    in-out property <int> xai-account-choice: 0;
+    in-out property <[AccountRow]> xai-accounts: [];
+    in-out property <string> xai-status: "Grok 账号列表尚未读取";
+    in-out property <string> xai-user-code: "";
+    in-out property <string> xai-login-url: "";
+    in-out property <bool> xai-pending: false;
+    in-out property <string> xai-login-id: "";
+    property <bool> delete-account-grok: false;
     in-out property <bool> subscription-editor-open: false;
     in-out property <string> subscription-id: "";
     in-out property <string> subscription-name: "";
@@ -204,6 +218,7 @@ export component AppWindow inherits Window {
         if (root.active-page != 1) {
             if (root.icon-picker-open) { root.close-provider-icon-picker(); }
             if (root.subscription-editor-open || root.subscription-editor-pending) { root.cancel-subscription-editor(); }
+            root.xai-editor-open = false;
             root.editor-open = false;
             root.edit-key = "";
         }
@@ -261,6 +276,9 @@ export component AppWindow inherits Window {
     callback filter-providers(string);
     callback save-provider(string, string, string, string, string);
     callback begin-provider-editor(string);
+    callback begin-xai-editor(string);
+    callback save-xai();
+    callback xai-account-action(int, string);
     callback begin-subscription-editor(string);
     callback save-subscription(string, string, string);
     callback cancel-subscription-editor();
@@ -327,7 +345,7 @@ export component AppWindow inherits Window {
     in-out property <bool> direct-drawer-open: false;
     in-out property <bool> command-open: false;
     property <bool> page-entered: true;
-    property <bool> modal-open: root.drawer-open || root.editor-open || root.subscription-editor-open || root.common-config-editor-open || root.icon-picker-open || root.model-editor-open || root.fallback-editor-open || root.publish-drawer-open || root.direct-drawer-open || root.delete-account-confirm || root.command-open;
+    property <bool> modal-open: root.drawer-open || root.xai-editor-open || root.editor-open || root.subscription-editor-open || root.common-config-editor-open || root.icon-picker-open || root.model-editor-open || root.fallback-editor-open || root.publish-drawer-open || root.direct-drawer-open || root.delete-account-confirm || root.command-open;
     property <string> page-title: root.active-page == 0 ? "模型，随手可用。" : root.active-page == 1 ? "连接你的模型。" : root.active-page == 3 ? "每次请求，有迹可循。" : root.active-page == 4 ? "让工作流更顺手。" : "让它适合你。";
     property <string> page-label: root.active-page == 0 ? "工作台" : root.active-page == 1 ? "连接" : root.active-page == 3 ? "活动" : root.active-page == 4 ? "工具箱" : "设置";
     property <string> page-subtitle: root.active-page == 0 ? "把常用的模型放进 Codex，专注下一次创作。" : root.active-page == 1 ? "账号、API 与模型，在这里统一管理。" : root.active-page == 3 ? "查看模型、耗时与结果。" : root.active-page == 4 ? "MCP 与 Skills，独立于模型连接。" : "外观、工作空间和配置，各在其位。";
@@ -659,7 +677,7 @@ export component AppWindow inherits Window {
                                     route-managed: root.route-managed;
                                     route-running: root.route-running;
                                     direct-active: root.direct-active;
-                                    chatgpt-login-pending: root.chatgpt-login-pending;
+                                    chatgpt-login-pending: root.chatgpt-login-pending || root.xai-pending;
                                     route-status: root.route-status;
                                     config-home: root.config-home;
                                     default-model <=> root.default-model;
@@ -711,10 +729,11 @@ export component AppWindow inherits Window {
                                         filtered-providers: root.filtered-providers;
                                         provider-query <=> root.provider-query;
                                         config-managed: root.config-managed;
-                                        chatgpt-login-pending: root.chatgpt-login-pending;
+                                        chatgpt-login-pending: root.chatgpt-login-pending || root.xai-pending;
                                         refresh(check) => { root.refresh(check); }
                                         filter-providers(query) => { root.filter-providers(query); }
                                         begin-provider-editor(id) => { root.begin-provider-editor(id); }
+                                        begin-xai-editor(id) => { root.begin-xai-editor(id); }
                                         begin-subscription-editor(id) => { root.begin-subscription-editor(id); }
                                         check-provider(id) => { root.check-provider(id); }
                                         preview-direct(id) => { root.selected-provider-id = id; root.direct-drawer-open = true; root.inspect-direct(id, root.config-home); }
@@ -731,9 +750,26 @@ export component AppWindow inherits Window {
                                         login-url: root.login-url;
                                         chatgpt-login-pending: root.chatgpt-login-pending;
                                         route-auth-error: root.route-auth-error;
+                                        xai-accounts: root.xai-accounts;
+                                        xai-status: root.xai-status;
+                                        xai-user-code: root.xai-user-code;
+                                        xai-login-url: root.xai-login-url;
+                                        xai-pending: root.xai-pending;
+                                        xai-account-action(action, id) => { root.xai-account-action(action, id); }
+                                        request-xai-removal(account) => {
+                                            root.delete-account-grok = true;
+                                            root.delete-account-id = account.id;
+                                            root.delete-account-label = account.label;
+                                            root.delete-account-references = account.bound-provider-names;
+                                            root.error-code = "";
+                                            root.error-message = "";
+                                            root.error-action = "";
+                                            root.delete-account-confirm = true;
+                                        }
                                         subscription-action(action) => { root.subscription-action(action); }
                                         account-action(action, id) => { root.account-action(action, id); }
                                         request-account-removal(account) => {
+                                            root.delete-account-grok = false;
                                             root.delete-account-id = account.id;
                                             root.delete-account-label = account.label;
                                             root.delete-account-references = account.bound-provider-names;
@@ -822,7 +858,7 @@ export component AppWindow inherits Window {
                                     route-port <=> root.route-port;
                                     config-status: root.config-status;
                                     config-managed: root.config-managed;
-                                    chatgpt-login-pending: root.chatgpt-login-pending;
+                                    chatgpt-login-pending: root.chatgpt-login-pending || root.xai-pending;
                                     restore-config(home) => { root.restore-config(home); }
                                     inspect-config(home) => { root.inspect-config(home); }
                                     import-current(home) => { root.import-current(home); }
@@ -949,6 +985,27 @@ export component AppWindow inherits Window {
             delete-provider(id) => { root.delete-provider(id); }
             open-provider-icon-picker() => { root.open-provider-icon-picker(); }
             navigate(page) => { root.cancel-subscription-editor(); root.connections-tab = 1; root.active-page = 1; }
+        }
+    }
+
+    Drawer {
+        open: root.xai-editor-open;
+        title: "Grok 订阅连接";
+        subtitle: "账号绑定在下次发布时应用。";
+        dismissed => { root.xai-editor-open = false; root.delete-confirm = false; }
+        XaiEditor {
+            busy: root.busy;
+            config-managed: root.config-managed;
+            provider-id: root.xai-provider-id;
+            provider-name <=> root.xai-provider-name;
+            accounts: root.xai-account-options;
+            choice <=> root.xai-account-choice;
+            delete-confirm <=> root.delete-confirm;
+            error: root.error-message;
+            save => { root.save-xai(); }
+            cancel => { root.xai-editor-open = false; root.delete-confirm = false; }
+            delete-provider(id) => { root.delete-provider(id); }
+            manage-accounts => { root.xai-editor-open = false; root.connections-tab = 1; root.active-page = 1; root.xai-account-action(0, ""); }
         }
     }
 
@@ -1122,7 +1179,7 @@ export component AppWindow inherits Window {
                 padding: 24px;
                 spacing: 14px;
                 Text {
-                    text: "移除 ChatGPT 账号";
+                    text: root.delete-account-grok ? "移除 Grok 账号" : "移除 ChatGPT 账号";
                     color: Theme.primary-text;
                     font-size: 19px;
                     font-weight: 600;
@@ -1136,7 +1193,7 @@ export component AppWindow inherits Window {
                 }
 
                 Text {
-                    text: root.delete-account-references == "" ? "将移除此账号在 SwitchX 中保存的登录信息。Codex 配置目录会保留。" : "此账号仍被上游引用。请先重新绑定或删除关联上游，再移除账号。";
+                    text: root.delete-account-references == "" ? "将移除此账号在 SwitchX 中保存的登录信息。" : "此账号仍被上游引用。请先重新绑定或删除关联上游，再移除账号。";
                     color: Theme.muted-text;
                     font-size: 13px;
                     wrap: word-wrap;
@@ -1174,8 +1231,8 @@ export component AppWindow inherits Window {
                     QuietButton {
                         text: "确认移除";
                         primary: true;
-                        enabled: !root.busy && !root.config-managed && !root.chatgpt-login-pending && root.delete-account-id != "" && root.delete-account-references == "";
-                        clicked => { root.account-action(4, root.delete-account-id); }
+                        enabled: !root.busy && !root.config-managed && !root.chatgpt-login-pending && !root.xai-pending && root.delete-account-id != "" && root.delete-account-references == "";
+                        clicked => { if root.delete-account-grok { root.xai-account-action(4, root.delete-account-id); } else { root.account-action(4, root.delete-account-id); } }
                     }
                 }
             }
@@ -1261,14 +1318,14 @@ export component AppWindow inherits Window {
                 spacing: 10px;
                 QuietButton {
                     text: "重新检查";
-                    enabled: !root.busy && !root.config-managed && !root.chatgpt-login-pending;
+                    enabled: !root.busy && !root.config-managed && !root.chatgpt-login-pending && !root.xai-pending;
                     clicked => { root.inspect-route(); }
                 }
 
                 QuietButton {
                     text: root.busy ? "正在处理…" : "确认启用  →";
                     primary: true;
-                    enabled: !root.busy && !root.config-managed && !root.chatgpt-login-pending && root.route-preview-ready;
+                    enabled: !root.busy && !root.config-managed && !root.chatgpt-login-pending && !root.xai-pending && root.route-preview-ready;
                     clicked => { root.apply-route(); }
                 }
             }
@@ -1339,7 +1396,7 @@ export component AppWindow inherits Window {
                 QuietButton {
                     text: root.busy ? "正在处理…" : "应用直连";
                     primary: true;
-                    enabled: root.direct-preview-ready && !root.busy && !root.chatgpt-login-pending;
+                    enabled: root.direct-preview-ready && !root.busy && !root.chatgpt-login-pending && !root.xai-pending;
                     clicked => { root.apply-direct(); }
                 }
             }
@@ -1492,7 +1549,7 @@ export component AppWindow inherits Window {
                 left-aligned: true;
                 height: 45px;
                 ghost: true;
-                enabled: !root.busy && !root.config-managed && !root.chatgpt-login-pending;
+                enabled: !root.busy && !root.config-managed && !root.chatgpt-login-pending && !root.xai-pending;
                 clicked => { root.command-open = false; root.begin-subscription-editor(""); }
             }
 

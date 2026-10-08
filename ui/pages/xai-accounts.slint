@@ -1,0 +1,155 @@
+import { Theme } from "../tokens.slint";
+import {
+    QuietButton,
+    QuietLineEdit as LineEdit,
+    SurfaceCard,
+} from "../components.slint";
+import { AccountRow } from "../view-models.slint";
+export component XaiAccounts inherits SurfaceCard {
+    in property <bool> busy;
+    in property <bool> config-managed;
+    in property <bool> pending;
+    in property <[AccountRow]> accounts;
+    in property <string> status;
+    in property <string> user-code;
+    in property <string> login-url;
+    callback action(int, string);
+    callback request-removal(AccountRow);
+    height: 168px + root.accounts.length * 80px + (root.pending ? 184px : 0px);
+    border-width: 0px;
+    background: transparent;
+    VerticalLayout {
+        padding: 0px;
+        spacing: 10px;
+        HorizontalLayout {
+            height: 36px;
+            Text {
+                text: "Grok 订阅账号";
+                font-size: 17px;
+                font-weight: 600;
+                color: Theme.primary-text;
+                vertical-alignment: center;
+                horizontal-stretch: 1;
+            }
+
+            QuietButton {
+                width: 88px;
+                horizontal-stretch: 0;
+                text: "刷新列表";
+                enabled: !root.busy && !root.pending;
+                clicked => { root.action(0, ""); }
+            }
+
+            QuietButton {
+                width: 190px;
+                horizontal-stretch: 0;
+                text: "添加 / 重新登录 Grok";
+                primary: true;
+                enabled: !root.busy && !root.pending && !root.config-managed;
+                clicked => { root.action(1, ""); }
+            }
+        }
+
+        Text {
+            text: root.status;
+            color: Theme.primary-text;
+            font-size: 13px;
+            wrap: word-wrap;
+        }
+
+        Text {
+            text: "在 xAI 官方页面完成授权，再将账号绑定到 Grok 上游。";
+            color: Theme.muted-text;
+            font-size: 12px;
+            wrap: word-wrap;
+        }
+
+        for account in root.accounts: Rectangle {
+            height: 70px;
+            background: Theme.raised;
+            border-width: 1px;
+            border-color: Theme.border;
+            border-radius: 10px;
+            HorizontalLayout {
+                padding: 12px;
+                spacing: 8px;
+                VerticalLayout {
+                    horizontal-stretch: 1;
+                    spacing: 5px;
+                    Text {
+                        text: account.label;
+                        color: Theme.primary-text;
+                        font-size: 14px;
+                        overflow: elide;
+                    }
+
+                    Text {
+                        text: account.workspace + " · " + account.bound-provider-count + " 个上游引用";
+                        color: Theme.muted-text;
+                        font-size: 12px;
+                        overflow: elide;
+                    }
+                }
+
+                QuietButton {
+                    width: 92px;
+                    horizontal-stretch: 0;
+                    text: account.is-default ? "默认账号" : "设为默认";
+                    selected: account.is-default;
+                    enabled: !root.busy && !root.config-managed && !root.pending && !account.is-default && !account.requires-reauth;
+                    clicked => { root.action(2, account.id); }
+                }
+
+                QuietButton {
+                    width: 80px;
+                    horizontal-stretch: 0;
+                    text: "移除";
+                    enabled: !root.busy && !root.config-managed && !root.pending;
+                    clicked => { root.request-removal(account); }
+                }
+            }
+        }
+        if root.pending: Rectangle {
+            height: 174px;
+            background: Theme.brand-surface;
+            border-radius: 10px;
+            VerticalLayout {
+                padding: 12px;
+                spacing: 8px;
+                HorizontalLayout {
+                    Text {
+                        text: "在已打开的官方页面完成验证码登录。";
+                        color: Theme.primary-text;
+                        font-size: 13px;
+                        horizontal-stretch: 1;
+                        wrap: word-wrap;
+                    }
+
+                    QuietButton {
+                        text: "取消登录";
+                        enabled: !root.busy;
+                        clicked => { root.action(3, ""); }
+                    }
+                }
+
+                LineEdit {
+                    text: root.user-code;
+                    read-only: true;
+                    accessible-label: "Grok 登录验证码，可选择复制";
+                }
+
+                LineEdit {
+                    text: root.login-url;
+                    read-only: true;
+                    accessible-label: "Grok 官方登录页面地址，可选择复制";
+                }
+            }
+        }
+        Text {
+            text: "登录与保存上游不会启用路由。模型权限与额度以账号的实际请求结果为准。";
+            color: Theme.muted-text;
+            font-size: 12px;
+            wrap: word-wrap;
+        }
+    }
+}

@@ -4,12 +4,13 @@ use rusqlite::{Connection, OpenFlags, Result, params};
 
 use crate::credentials::Secret;
 
-const SCHEMA_VERSION: i64 = 10;
+const SCHEMA_VERSION: i64 = 11;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ProviderKind {
     ApiKey,
     Chatgpt,
+    XaiOAuth,
 }
 
 impl ProviderKind {
@@ -17,6 +18,7 @@ impl ProviderKind {
         match self {
             Self::ApiKey => "api_key",
             Self::Chatgpt => "chatgpt",
+            Self::XaiOAuth => "xai_oauth",
         }
     }
 }
@@ -79,6 +81,8 @@ pub struct SessionAuthContext {
     pub workspace_id: Option<String>,
     pub backend_origin: Option<String>,
     pub routing_override: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub upstream_model: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -171,7 +175,7 @@ impl Store {
     fn open_compatible(path: &Path, flags: OpenFlags) -> Result<Self> {
         let connection = Connection::open_with_flags(path, flags)?;
         let version: i64 = connection.query_row("PRAGMA user_version", [], |row| row.get(0))?;
-        if !matches!(version, 8 | 9 | SCHEMA_VERSION) {
+        if !matches!(version, 8 | 9 | 10 | SCHEMA_VERSION) {
             return Err(rusqlite::Error::InvalidQuery);
         }
         connection.prepare("SELECT settings_config FROM providers LIMIT 0")?;
@@ -360,6 +364,42 @@ impl Store {
                  COMMIT;",
             )?;
         }
+        if version < 11 {
+            // Rebuild with foreign keys disabled outside the transaction; keep every mapping,
+            // setting and existing credential byte while broadening the provider CHECK.
+            connection.execute_batch("PRAGMA foreign_keys = OFF;")?;
+            let migration = (|| {
+                let transaction = connection.unchecked_transaction()?;
+                transaction.execute_batch(
+                    "CREATE TABLE providers_v11 (
+                        id TEXT PRIMARY KEY NOT NULL, name TEXT NOT NULL, base_url TEXT NOT NULL,
+                        model_id TEXT NOT NULL DEFAULT '', credential_ref TEXT,
+                        codex_options TEXT NOT NULL DEFAULT '', settings_config TEXT NOT NULL DEFAULT '{}',
+                        kind TEXT NOT NULL DEFAULT 'api_key' CHECK (kind IN ('api_key', 'chatgpt', 'xai_oauth')),
+                        account_binding TEXT CHECK ((kind = 'api_key' AND account_binding IS NULL)
+                            OR (kind = 'chatgpt' AND account_binding IS NOT NULL)
+                            OR (kind = 'xai_oauth' AND account_binding IS NOT NULL AND account_binding != 'native')),
+                        icon_id TEXT
+                    );
+                    INSERT INTO providers_v11 SELECT id, name, base_url, model_id, credential_ref,
+                        codex_options, settings_config, kind, account_binding, icon_id FROM providers;
+                    DROP TABLE providers;
+                    ALTER TABLE providers_v11 RENAME TO providers;"
+                )?;
+                let violations: i64 = transaction.query_row(
+                    "SELECT count(*) FROM pragma_foreign_key_check",
+                    [],
+                    |row| row.get(0),
+                )?;
+                if violations != 0 {
+                    return Err(rusqlite::Error::InvalidQuery);
+                }
+                transaction.pragma_update(None, "user_version", 11)?;
+                transaction.commit()
+            })();
+            connection.execute_batch("PRAGMA foreign_keys = ON;")?;
+            migration?;
+        }
         Ok(Self { connection })
     }
 
@@ -512,8 +552,12 @@ impl Store {
     ) -> Result<()> {
         let binding = match (provider.kind, &provider.account_binding) {
             (ProviderKind::ApiKey, None) => None,
-            (ProviderKind::Chatgpt, Some(binding))
-                if key.is_none() && !require_existing_key && provider.credential_ref.is_none() =>
+            (ProviderKind::Chatgpt | ProviderKind::XaiOAuth, Some(binding))
+                if !(provider.kind == ProviderKind::XaiOAuth
+                    && *binding == AccountBinding::Native)
+                    && key.is_none()
+                    && !require_existing_key
+                    && provider.credential_ref.is_none() =>
             {
                 Some(binding.encode()?)
             }
@@ -915,7 +959,7 @@ impl Store {
     pub fn deselect_subscription_models(&self) -> Result<()> {
         self.connection.execute(
             "UPDATE published_models SET enabled = 0 WHERE provider_id IN
-                (SELECT id FROM providers WHERE kind = 'chatgpt')",
+                (SELECT id FROM providers WHERE kind != 'api_key')",
             [],
         )?;
         Ok(())
@@ -947,12 +991,19 @@ fn provider_from_row(row: &rusqlite::Row<'_>) -> Result<ProviderRecord> {
     let kind = match kind.as_str() {
         "api_key" => ProviderKind::ApiKey,
         "chatgpt" => ProviderKind::Chatgpt,
+        "xai_oauth" => ProviderKind::XaiOAuth,
         _ => return Err(rusqlite::Error::InvalidQuery),
     };
     let binding: Option<String> = row.get(6)?;
     let account_binding = match (kind, binding) {
         (ProviderKind::ApiKey, None) => None,
-        (ProviderKind::Chatgpt, Some(binding)) => Some(AccountBinding::decode(&binding)?),
+        (ProviderKind::Chatgpt | ProviderKind::XaiOAuth, Some(binding)) => {
+            let binding = AccountBinding::decode(&binding)?;
+            if kind == ProviderKind::XaiOAuth && binding == AccountBinding::Native {
+                return Err(rusqlite::Error::InvalidQuery);
+            }
+            Some(binding)
+        }
         _ => return Err(rusqlite::Error::InvalidQuery),
     };
     Ok(ProviderRecord {
@@ -1034,6 +1085,98 @@ mod tests {
     }
 
     #[test]
+    fn v10_migration_preserves_credentials_mappings_fallbacks_and_session_contexts() {
+        let path = std::env::temp_dir().join(format!(
+            "switchx-v10-xai-{}.sqlite",
+            crate::app::new_id().unwrap()
+        ));
+        let store = Store::open(&path).unwrap();
+        let primary = ProviderRecord {
+            credential_ref: None,
+            ..api_provider()
+        };
+        let mut backup = primary.clone();
+        backup.id = "backup".into();
+        let key = Secret::new("synthetic-v10-key".into());
+        store
+            .put_provider_with_models_options_and_key(&primary, &[], Some("saved-options"), &key)
+            .unwrap();
+        store.put_provider(&backup).unwrap();
+        let model = ModelRecord {
+            provider_id: primary.id.clone(),
+            public_id: "v10-model".into(),
+            display_name: "Fixture".into(),
+            upstream_model: "same-model".into(),
+            metadata: "saved-metadata".into(),
+            enabled: true,
+            fallback_provider_id: Some(backup.id.clone()),
+        };
+        store.put_model(&model).unwrap();
+        store.connection.execute_batch(r#"INSERT INTO session_bindings VALUES ('root', '{"provider_id":"legacy","account_id":null,"workspace_id":null,"backend_origin":null,"routing_override":null}'); PRAGMA foreign_keys = OFF;"#).unwrap();
+        // Genuine v10 checks reject xai_oauth until the transactional rebuild.
+        store.connection.execute_batch(
+            "BEGIN IMMEDIATE;
+             CREATE TABLE old_providers (
+                id TEXT PRIMARY KEY NOT NULL, name TEXT NOT NULL, base_url TEXT NOT NULL,
+                model_id TEXT NOT NULL DEFAULT '', credential_ref TEXT,
+                codex_options TEXT NOT NULL DEFAULT '', settings_config TEXT NOT NULL DEFAULT '{}',
+                kind TEXT NOT NULL DEFAULT 'api_key' CHECK (kind IN ('api_key', 'chatgpt')),
+                account_binding TEXT CHECK ((kind = 'api_key' AND account_binding IS NULL) OR (kind = 'chatgpt' AND account_binding IS NOT NULL)), icon_id TEXT);
+             INSERT INTO old_providers SELECT * FROM providers;
+             DROP TABLE providers;
+             ALTER TABLE old_providers RENAME TO providers;
+             PRAGMA user_version = 10;
+             COMMIT;"
+        ).unwrap();
+        drop(store);
+        let store = Store::open(&path).unwrap();
+        assert_eq!(store.provider(&primary.id).unwrap(), Some(primary.clone()));
+        assert_eq!(store.models().unwrap(), vec![model]);
+        assert_eq!(
+            store
+                .provider_api_key(&primary.id)
+                .unwrap()
+                .unwrap()
+                .expose(),
+            key.expose()
+        );
+        assert_eq!(
+            store.provider_codex_options(&primary.id).unwrap(),
+            "saved-options"
+        );
+        let context: String = store
+            .connection
+            .query_row(
+                "SELECT context FROM session_bindings WHERE session_id='root'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert!(
+            serde_json::from_str::<SessionAuthContext>(&context)
+                .unwrap()
+                .upstream_model
+                .is_none()
+        );
+        let grok = ProviderRecord {
+            id: "grok".into(),
+            name: "Grok".into(),
+            base_url: crate::xai::BASE_URL.into(),
+            model_id: "grok-4.5".into(),
+            credential_ref: None,
+            kind: ProviderKind::XaiOAuth,
+            account_binding: Some(AccountBinding::Default),
+            icon_id: None,
+        };
+        store.put_provider(&grok).unwrap();
+        assert_eq!(store.provider("grok").unwrap(), Some(grok));
+        store.delete_provider("backup").unwrap();
+        assert!(store.models().unwrap()[0].fallback_provider_id.is_none());
+        drop(store);
+        std::fs::remove_file(path).unwrap();
+    }
+
+    #[test]
     fn v9_icon_migration_and_credentials_readers_preserve_saved_data() {
         let path = std::env::temp_dir().join(format!(
             "switchx-icon-migration-{}.sqlite",
@@ -1056,7 +1199,7 @@ mod tests {
             .execute_batch("ALTER TABLE providers DROP COLUMN icon_id; PRAGMA user_version = 9;")
             .unwrap();
         drop(store);
-        for expected_version in [9, 10] {
+        for expected_version in [9, SCHEMA_VERSION] {
             let before = std::fs::read(&path).unwrap();
             let readonly = Store::open_credentials_read_only(&path).unwrap();
             assert_eq!(
@@ -1364,6 +1507,7 @@ mod tests {
             workspace_id: Some("workspace-a".into()),
             backend_origin: Some("https://chatgpt.com".into()),
             routing_override: Some("NO_CONSTRAINT".into()),
+            upstream_model: None,
         };
         let mut b = a.clone();
         b.provider_id = "b".into();

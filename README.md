@@ -1,8 +1,8 @@
 # switchx
 
-Rust + Slint 原生桌面应用。M2 直连已完成 macOS / DeepSeek 验收，M3 已实现模型目录、API 与 ChatGPT 订阅账号路由；目前仍为模型路由预览版，真实官方上游和认证生命周期尚待验收。完整范围见 `docs/SWITCHX-PLAN.md`。
+Rust + Slint 原生桌面应用。M2 直连已完成 macOS / DeepSeek 验收，M3 已实现模型目录、API、ChatGPT 与 Grok 订阅账号路由；目前仍为模型路由预览版，真实官方上游和认证生命周期尚待验收。完整范围见 `docs/SWITCHX-PLAN.md`。
 
-原生界面现可管理上游、直连配置、模型资料、多个 ChatGPT 账号与 loopback 路由。SQLite 保存供应商配置、明文 API Key、本地路由令牌、模型资料和账号绑定；ChatGPT OAuth 账号单独保存在私有 JSON 文件中。API Key 保存方式按用户选择对齐 CC Switch，详见下文。仓库中的**合成目录夹具**仅用于测试，不能作为真实模型能力或发布模板；`catalog_probe` 仍只输出夹具，不读取账号、凭据或现有 Codex 配置。
+原生界面现可管理上游、直连配置、模型资料、多个 ChatGPT / Grok 账号与 loopback 路由。SQLite 保存供应商配置、明文 API Key、本地路由令牌、模型资料和账号绑定；ChatGPT 与 Grok OAuth 账号分别保存在私有 JSON 文件中。API Key 保存方式按用户选择对齐 CC Switch，详见下文。仓库中的**合成目录夹具**仅用于测试，不能作为真实模型能力或发布模板；`catalog_probe` 仍只输出夹具，不读取账号、凭据或现有 Codex 配置。
 
 ```sh
 cargo run
@@ -16,6 +16,31 @@ CODEX_HOME="$(mktemp -d)" npx -y @openai/codex@0.156.1 \
 
 界面代码按职责组织：`ui/pages/` 放工作台、连接、账号、请求记录和设置页面，`ui/editors/` 放编辑表单与头像选择器，`ui/view-models.slint` 定义展示数据。`ui/app.slint` 保留窗口布局、导航、跨页状态、凭据草稿清理和 Rust 回调接口；页面通过属性绑定与操作回调接入。基础控件、代码编辑器和主题分别在 `components.slint`、`code-editor.slint`、`tokens.slint` 中。`make format` 与 `make format-check` 会递归处理 `ui/` 下的 Slint 文件。
 
+### Grok 账号登录与上游路由
+
+在「连接 → 订阅账号」添加 Grok 账号，浏览器会打开 xAI 官方设备码授权页面。支持取消、重新登录、多个账号、默认账号和失效状态；重新授权同一身份更新原账号。随后在「连接」添加 Grok 订阅连接，选择默认账号或固定账号，在工作台选择模型并预览、启用路由。保存账号和连接不会启用路由，也不会写入 Codex 的 `auth.json`。
+
+Grok OAuth 使用 Grok CLI 的公开客户端身份，认证端点从 `https://auth.x.ai/.well-known/openid-configuration` 发现并限制在该官方源；它不是 SwitchX 独立注册的 OAuth 客户端。能否推理、可用模型、订阅权限和额度需用真实账号验收。xAI API Key 通道与 Grok 订阅的计费分开。
+
+账号刷新凭据单独保存在 `SWITCHX_DATA_DIR/xai_oauth_auth.json`，Unix 权限为 `0600`；access token 只在内存中缓存。上游固定为 `https://api.x.ai/v1/responses`，本地路由逐请求注入保存账号的 token，丢弃客户端 OpenAI 认证与工作区头。账号绑定在发布时固定，账号不能参与自动备用切换；删除前需要解除上游引用。
+
+新增连接先保存一个未启用的 `grok-4.5` 映射（500k 上下文，low / medium / high / xhigh）。模型设置支持使用绑定账号获取 `/models`，并手动增加或修改映射；目录列出模型不代表有推理权限。发布预览会把原配置中不在所选 Grok 模型资料允许范围内的思考档位改为该模型的默认档位；恢复时还原原值。原生 Responses 兼容层展平 namespace 函数工具、恢复返回名称、移除不支持的私有字段，并处理根部联合工具 schema；无法表示的自定义工具会明确拒绝。沿用 `shell_command` 函数工具资料，导入 freeform 工具资料后可能被拒绝。
+
+Grok 的加密思考内容仅允许在已登记、上游 / 账号 / 模型相同的会话中回传。跨账号、跨模型或 API / ChatGPT 切换需要新会话；不支持远程 compact、`previous_response_id` 或服务器 conversation 续接。Grok OAuth 配置走现有本地令牌 helper，不依赖 Codex 的 OpenAI 登录。
+
+SQLite 升级到 schema v11，保留原有 API Key、模型、备用映射和设置；旧配置恢复记录未处理前不会升级。本地测试不使用真实凭据：
+
+```sh
+cargo test --locked --lib xai
+cargo test --locked --test router xai
+cargo build --locked
+cargo run --locked --example xai_cli_probe
+# 可选：打开一次性的原生界面夹具，退出后删除临时目录
+cargo run --locked --example xai_cli_probe -- --desktop
+```
+
+探针只调用本地模拟认证和上游，使用隔离 `CODEX_HOME`，检查工具执行、加密思考回传、配置恢复和本地令牌清理。它不证明真实 Grok 订阅可用。验收过程和原生截图见 [Grok OAuth 验收](docs/acceptance/grok-oauth-2026-10-08.md)。
+
 ### 留白工作台
 
 2026-09-30 的原生界面采用米白 / 石墨底色与鼠尾草绿，收拢为五个导航入口：
@@ -23,7 +48,7 @@ CODEX_HOME="$(mktemp -d)" npx -y @openai/codex@0.156.1 \
 | 页面 | 操作 |
 | --- | --- |
 | 工作台 | 选择模型、设默认、筛选已选项、编辑映射与备用策略、预览启用、启动 Codex、恢复停止 |
-| 连接 | 管理 API 与 ChatGPT 订阅连接；在“订阅账号”中管理账号与独立的原生登录操作 |
+| 连接 | 管理 API、ChatGPT 与 Grok 订阅连接；在“订阅账号”中管理账号与独立的原生登录操作 |
 | 活动 | 查看最近请求的结果与耗时，展开单条详情 |
 | 工具箱 | 保留 MCP / Skills 的位置，明确标注尚未接入 |
 | 设置 | 外观、动画、目标目录、通用配置、本地端口和配置恢复 |

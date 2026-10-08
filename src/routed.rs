@@ -33,6 +33,7 @@ struct PreparedRoute {
     token_reference: String,
     local_token: Secret,
     accounts: HashMap<String, ResolvedAccount>,
+    xai_accounts: HashMap<String, String>,
     publication: Publication,
     models: Vec<ModelRecord>,
     providers: Vec<ProviderRecord>,
@@ -70,6 +71,8 @@ pub struct RouteSession {
     active: Option<ActiveRoute>,
     account_manager: Option<(PathBuf, crate::accounts::AccountManager)>,
     local_probe: Option<LocalProbe>,
+    xai_manager: Option<(PathBuf, crate::xai::AccountManager)>,
+    xai_probe: Option<SocketAddr>,
 }
 
 impl RouteSession {
@@ -111,9 +114,62 @@ impl RouteSession {
         Ok(manager)
     }
 
+    /// Synthetic probes only; managed OAuth and route publication use production paths.
+    pub fn with_xai_probe(
+        data_dir: &Path,
+        oauth_origin: &str,
+        responses: SocketAddr,
+    ) -> Result<Self, String> {
+        if responses.ip() != std::net::IpAddr::V4(std::net::Ipv4Addr::LOCALHOST) {
+            return Err("Grok 测试上游必须是 IPv4 回环地址".into());
+        }
+        Ok(Self {
+            xai_manager: Some((
+                data_dir.into(),
+                crate::xai::AccountManager::open_mock(data_dir, oauth_origin)?,
+            )),
+            xai_probe: Some(responses),
+            ..Self::default()
+        })
+    }
+
+    fn xai_manager(&mut self, data_dir: &Path) -> Result<crate::xai::AccountManager, String> {
+        if let Some((directory, manager)) = &self.xai_manager {
+            if directory != data_dir {
+                return Err("Grok 数据目录已变化，请重新打开路由".into());
+            }
+            return Ok(manager.clone());
+        }
+        let manager = crate::xai::AccountManager::open(data_dir)?;
+        self.xai_manager = Some((data_dir.into(), manager.clone()));
+        Ok(manager)
+    }
+
+    fn resolve_xai_accounts(
+        &mut self,
+        data_dir: &Path,
+        providers: &[ProviderRecord],
+    ) -> Result<HashMap<String, String>, String> {
+        let mut accounts = HashMap::new();
+        for provider in providers
+            .iter()
+            .filter(|provider| provider.kind == ProviderKind::XaiOAuth)
+        {
+            crate::xai::validate_provider(provider)?;
+            let account = self
+                .xai_manager(data_dir)?
+                .resolve_binding(provider.account_binding.as_ref().unwrap())?;
+            accounts.insert(provider.id.clone(), account.id);
+        }
+        Ok(accounts)
+    }
+
     pub async fn wait_for_accounts(&self) -> Result<(), String> {
         if let Some((_, manager)) = &self.account_manager {
             manager.wait_for_idle().await?;
+        }
+        if let Some((_, manager)) = &self.xai_manager {
+            manager.wait_for_idle().await;
         }
         Ok(())
     }
@@ -259,6 +315,7 @@ impl RouteSession {
         let accounts = self
             .resolve_accounts(state_dir, config_home, &cli_path, &providers)
             .await?;
+        let xai_accounts = self.resolve_xai_accounts(state_dir, &providers)?;
         let switch =
             PreparedSwitch::inspect(&target, state_dir, &publication, address, default_model)?;
         let remote_direct_only = providers
@@ -277,6 +334,36 @@ impl RouteSession {
             switch.with_codex_options(&options, &config_state.common)?
         } else if !config_state.common.is_empty() {
             switch.with_common_config(&config_state.common)?
+        } else {
+            switch
+        };
+        let switch = if providers.iter().any(|provider| {
+            provider.id == config_provider_id && provider.kind == ProviderKind::XaiOAuth
+        }) {
+            let model = publication.catalog["models"]
+                .as_array()
+                .and_then(|models| models.iter().find(|model| model["slug"] == default_model))
+                .ok_or("Grok 默认模型资料缺失")?;
+            let proposed: toml_edit::DocumentMut = switch
+                .preview
+                .proposed
+                .parse()
+                .map_err(|_| "Grok 路由配置无效")?;
+            let effort = proposed
+                .get("model_reasoning_effort")
+                .and_then(toml_edit::Item::as_str);
+            let supported = model["supported_reasoning_levels"].as_array();
+            if effort.is_some_and(|effort| {
+                supported
+                    .is_some_and(|levels| !levels.iter().any(|level| level["effort"] == effort))
+            }) {
+                let default = model["default_reasoning_level"]
+                    .as_str()
+                    .ok_or("Grok 模型资料缺少可用默认思考档位")?;
+                switch.with_common_config(&format!("model_reasoning_effort = \"{default}\"\n"))?
+            } else {
+                switch
+            }
         } else {
             switch
         };
@@ -370,6 +457,19 @@ impl RouteSession {
         } else {
             format!("{summary}\n{destinations}")
         };
+        let summary = if xai_accounts.is_empty() {
+            summary
+        } else {
+            let mut bindings = xai_accounts
+                .iter()
+                .map(|(provider, account)| format!("Grok 上游 {provider} · 保存账号 {account}"))
+                .collect::<Vec<_>>();
+            bindings.sort();
+            format!(
+                "{summary}\n{}\nGrok 账号在发布时固定；更换账号或模型请启动新会话。",
+                bindings.join("\n")
+            )
+        };
         let summary = if config_state.options.is_some() || !config_state.common.is_empty() {
             format!(
                 "{summary}\nCodex 窗口与通用配置使用默认模型的供应商设置{}",
@@ -395,6 +495,7 @@ impl RouteSession {
             token_reference,
             local_token,
             accounts,
+            xai_accounts,
             publication,
             models,
             providers,
@@ -437,6 +538,9 @@ impl RouteSession {
         let resolved = self
             .resolve_accounts(state_dir, config_home, &prepared.cli_path, &providers)
             .await?;
+        if self.resolve_xai_accounts(state_dir, &providers)? != prepared.xai_accounts {
+            return Err("Grok 绑定账号已变化，请重新预览路由".into());
+        }
         if resolved != prepared.accounts {
             return Err("订阅账号、工作区或区域路由已变化，请重新预览".into());
         }
@@ -448,6 +552,33 @@ impl RouteSession {
         };
         let mut upstreams = HashMap::new();
         for provider in &providers {
+            if provider.kind == ProviderKind::XaiOAuth {
+                let manager = self.xai_manager(state_dir)?;
+                let id = &prepared.xai_accounts[&provider.id];
+                let token = manager.credential(id).await?;
+                let base_url = self
+                    .xai_probe
+                    .map(|address| format!("http://{address}"))
+                    .unwrap_or(crate::xai::BASE_URL.into());
+                let available = direct::fetch_models(&base_url, token.expose()).await?;
+                for model in models
+                    .iter()
+                    .filter(|model| model.provider_id == provider.id)
+                {
+                    if !available.contains(&model.upstream_model) {
+                        return Err(format!(
+                            "{} 的 Grok 账号目录中没有 {}",
+                            provider.name, model.upstream_model
+                        ));
+                    }
+                }
+                let upstream = match self.xai_probe {
+                    Some(address) => Upstream::xai_mock(address, manager, id.clone())?,
+                    None => Upstream::xai(manager, id.clone())?,
+                };
+                upstreams.insert(provider.id.clone(), upstream);
+                continue;
+            }
             if provider.kind == ProviderKind::Chatgpt {
                 let account = &resolved[&provider.id];
                 let catalog = chatgpt::catalog().await?;
@@ -775,8 +906,12 @@ fn selected_inputs(state_dir: &Path) -> Result<(Vec<ModelRecord>, Vec<ProviderRe
             .find(|provider| provider.id == model.provider_id)
             .ok_or("所选模型的上游已不存在")?;
         direct::validate_provider(&provider.name, &provider.base_url, &model.upstream_model)?;
-        if provider.kind == ProviderKind::Chatgpt {
-            chatgpt::validate_provider(provider)?;
+        if provider.kind != ProviderKind::ApiKey {
+            if provider.kind == ProviderKind::Chatgpt {
+                chatgpt::validate_provider(provider)?;
+            } else {
+                crate::xai::validate_provider(provider)?;
+            }
             if model.fallback_provider_id.is_some()
                 || models.iter().any(|model| {
                     model.fallback_provider_id.as_deref() == Some(provider.id.as_str())

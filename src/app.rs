@@ -422,6 +422,13 @@ fn request_error_message(code: &str) -> &'static str {
         "chatgpt_unauthorized" => "官方认证被拒绝；Codex 会尝试续期，仍失败时请恢复并重新登录",
         "chatgpt_forbidden" => "官方账号没有此模型或工作区权限，请检查订阅与模型选择",
         "chatgpt_account_changed" => "工作区已变化，请恢复并重新发布路由",
+        "xai_auth_required" | "xai_unauthorized" => "Grok 账号凭据不可用，请重新登录并发布路由",
+        "xai_forbidden" => "Grok 账号没有此模型权限或额度，请检查账号",
+        "unsupported_xai_tool" | "unsupported_xai_tool_schema" => {
+            "Grok 不支持此工具形态，请使用函数工具模型资料"
+        }
+        "xai_tool_name_collision" => "Grok 工具名称展平后冲突，请修改工具名称",
+        "invalid_xai_response" | "xai_response_too_large" => "Grok 响应格式或大小无效",
         "chatgpt_auth_required" | "chatgpt_account_required" => {
             "缺少订阅认证或工作区，请在目标 Codex 中完成 ChatGPT 登录"
         }
@@ -580,7 +587,9 @@ fn model_view(
 }
 
 fn provider_view(provider: ProviderRecord, store: &Store, check_credentials: bool) -> ProviderView {
-    let credential_status = if provider.kind == crate::storage::ProviderKind::Chatgpt {
+    let credential_status = if provider.kind == crate::storage::ProviderKind::XaiOAuth {
+        "Grok OAuth · 发布时核对账号绑定"
+    } else if provider.kind == crate::storage::ProviderKind::Chatgpt {
         "订阅凭据由绑定账号提供"
     } else {
         match store.has_provider_api_key(&provider.id) {
@@ -711,7 +720,7 @@ fn save_provider_inner(
     };
     if old
         .as_ref()
-        .is_some_and(|provider| provider.kind == crate::storage::ProviderKind::Chatgpt)
+        .is_some_and(|provider| provider.kind != crate::storage::ProviderKind::ApiKey)
     {
         return Err("请使用订阅连接编辑器修改名称或绑定账号".into());
     }
@@ -961,7 +970,7 @@ pub fn save_fallback(
                 .provider(id)
                 .map_err(|_| "无法读取上游资料")?
                 .ok_or("上游不存在")?;
-            if provider.kind == crate::storage::ProviderKind::Chatgpt {
+            if provider.kind != crate::storage::ProviderKind::ApiKey {
                 return Err("订阅账号不参与自动备用切换，请主动选择目标模型".into());
             }
             validate_provider(&provider.name, &provider.base_url, &model.upstream_model)?;
@@ -993,8 +1002,8 @@ pub fn delete_model(data_dir: &Path, public_id: &str) -> Result<(), String> {
 }
 
 pub fn provider_credential(data_dir: &Path, provider: &ProviderRecord) -> Result<Secret, String> {
-    if provider.kind == crate::storage::ProviderKind::Chatgpt {
-        return Err("订阅凭据由目标 Codex 管理，请使用官方登录".into());
+    if provider.kind != crate::storage::ProviderKind::ApiKey {
+        return Err("OAuth 上游凭据由账号管理器注入，请使用订阅路由".into());
     }
     let store = open_store(data_dir).map_err(|error| error.message())?;
     store
