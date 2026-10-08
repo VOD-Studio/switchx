@@ -1,0 +1,96 @@
+import { QuietScrollView as ScrollView } from "../scroll-view.slint";
+import { QuietButton } from "../components.slint";
+import { Theme } from "../tokens.slint";
+import { ProviderPresetRow } from "../view-models.slint";
+
+component ConnectionChoice inherits QuietButton {
+    height: 76px;
+    left-aligned: true;
+    icon-width: 32px;
+    icon-height: 32px;
+    border-radius: 10px;
+}
+
+export component ConnectionPicker inherits ScrollView {
+    in property <bool> busy;
+    in property <bool> config-managed;
+    in property <bool> chatgpt-login-pending;
+    in property <[ProviderPresetRow]> provider-presets;
+    callback select-api(string);
+    callback select-chatgpt();
+    callback select-grok();
+
+    VerticalLayout {
+        spacing: 14px;
+        alignment: start;
+        Text {
+            height: 16px;
+            text: "订阅账号";
+            color: Theme.muted-text;
+            font-size: 12px;
+        }
+
+        HorizontalLayout {
+            height: 76px;
+            spacing: 12px;
+            ConnectionChoice {
+                text: "ChatGPT 订阅";
+                description: root.chatgpt-login-pending ? "等待账号登录完成" : "使用 ChatGPT 账号连接 Codex";
+                icon: @image-url("../../assets/providers/icons/openai.svg");
+                icon-color: Theme.brand;
+                enabled: !root.busy && !root.config-managed && !root.chatgpt-login-pending;
+                clicked => { root.select-chatgpt(); }
+            }
+
+            ConnectionChoice {
+                text: "Grok 订阅";
+                description: "使用 xAI 账号连接 Grok";
+                icon: @image-url("../../assets/providers/icons/xai.svg");
+                icon-color: Theme.primary-text;
+                enabled: !root.busy && !root.config-managed;
+                clicked => { root.select-grok(); }
+            }
+        }
+
+        Text {
+            height: 16px;
+            text: "API 连接";
+            color: Theme.muted-text;
+            font-size: 12px;
+        }
+
+        ConnectionChoice {
+            text: "自定义配置";
+            description: "手动填写 API 地址、模型和 API Key";
+            icon: @image-url("../../assets/ui/settings.svg");
+            icon-color: Theme.muted-text;
+            enabled: !root.busy && !root.config-managed;
+            clicked => { root.select-api(""); }
+        }
+
+        for row in ceil(root.provider-presets.length / 2): HorizontalLayout {
+            height: 76px;
+            spacing: 12px;
+            for column in 2: ConnectionChoice {
+                property <int> preset-index: row * 2 + column;
+                property <ProviderPresetRow> preset: root.provider-presets[self.preset-index];
+                visible: self.preset-index < root.provider-presets.length;
+                text: self.preset.name;
+                description: "官方 API · 预填地址和模型";
+                icon: self.preset.icon;
+                icon-width: self.preset.id == "xiaomimimo" ? 64px : 32px;
+                icon-color: self.preset.monochrome ? Theme.primary-text : transparent;
+                enabled: !root.busy && !root.config-managed;
+                clicked => { root.select-api(self.preset.id); }
+            }
+        }
+
+        Text {
+            height: 18px;
+            text: "选择连接后继续配置，保存后在工作台预览并启用。";
+            color: Theme.muted-text;
+            font-size: 12px;
+            wrap: word-wrap;
+        }
+    }
+}

@@ -521,6 +521,7 @@ fn show_xai_editor(
     app.set_editor_open(false);
     app.set_subscription_editor_open(false);
     app.set_xai_editor_open(true);
+    app.set_connection_picker_open(false);
 }
 
 fn discard_account_previews(app: &AppWindow) {
@@ -792,14 +793,41 @@ fn connect_provider_icon_editor(app: &AppWindow) {
     });
 }
 
+fn apply_provider_preset(app: &AppWindow, id: &str) {
+    if app.get_busy() || app.get_config_managed() || !app.get_edit_id().is_empty() {
+        return;
+    }
+    let preset = app::PROVIDER_PRESETS.iter().find(|preset| preset.id == id);
+    if preset.is_none() && !id.is_empty() {
+        return;
+    }
+    let brand = app
+        .get_provider_presets()
+        .iter()
+        .find(|preset| preset.id == id)
+        .unwrap_or_default();
+    app.set_edit_key("".into());
+    app.set_edit_preset_url(preset.map_or("", |preset| preset.base_url).into());
+    app.set_edit_name(preset.map_or("", |preset| preset.name).into());
+    app.set_edit_url(preset.map_or("", |preset| preset.base_url).into());
+    app.set_edit_model(preset.map_or("", |preset| preset.model_id).into());
+    app.set_edit_preset_id(brand.id);
+    app.set_edit_preset_icon(brand.icon);
+    app.set_edit_preset_monochrome(brand.monochrome);
+    set_editor_provider_icon(app, "", ProviderKind::ApiKey, &app.get_edit_url());
+}
+
 fn show_provider_editor(
     app: &AppWindow,
     provider: Option<ProviderRecord>,
     options: CodexOptions,
     common: String,
 ) {
+    let selected_preset = (provider.is_none() && app.get_connection_picker_open())
+        .then(|| app.get_connection_preset_id());
     app.set_editor_open(false);
     app.set_subscription_editor_open(false);
+    app.set_xai_editor_open(false);
     app.set_common_config_editor_open(false);
     app.set_icon_picker_open(false);
     app.set_common_config_saved(common.into());
@@ -859,6 +887,10 @@ fn show_provider_editor(
     app.set_delete_confirm(false);
     app.set_busy(false);
     app.set_editor_open(true);
+    app.set_connection_picker_open(false);
+    if let Some(preset) = selected_preset {
+        apply_provider_preset(app, &preset);
+    }
     update_provider_config_preview(app);
 }
 
@@ -952,6 +984,7 @@ fn show_subscription_editor(
     app.set_subscription_account_options(ModelRc::new(VecModel::from(account_options)));
     app.set_subscription_account_choice(choice);
     app.set_editor_open(false);
+    app.set_xai_editor_open(false);
     app.set_edit_key("".into());
     app.set_common_config_editor_open(false);
     app.set_model_editor_open(false);
@@ -967,6 +1000,7 @@ fn show_subscription_editor(
     app.set_subscription_auth_error("".into());
     app.set_config_editor_updating(false);
     app.set_subscription_editor_open(true);
+    app.set_connection_picker_open(false);
     app.set_active_page(1);
     app.set_busy(false);
 }
@@ -3426,35 +3460,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     });
     connect_provider_icon_editor(&app);
     let weak = app.as_weak();
-    app.on_apply_provider_preset(move |id| {
-        let Some(app) = weak.upgrade() else {
-            return;
-        };
-        if app.get_busy() || app.get_config_managed() || !app.get_edit_id().is_empty() {
-            return;
-        }
-        let preset = app::PROVIDER_PRESETS
-            .iter()
-            .find(|preset| preset.id == id.as_str());
-        if preset.is_none() && !id.is_empty() {
-            return;
-        }
-        let brand = app
-            .get_provider_presets()
-            .iter()
-            .find(|preset| preset.id == id)
-            .unwrap_or_default();
-        app.set_edit_key("".into());
-        app.set_edit_preset_url(preset.map_or("", |preset| preset.base_url).into());
-        app.set_edit_name(preset.map_or("", |preset| preset.name).into());
-        app.set_edit_url(preset.map_or("", |preset| preset.base_url).into());
-        app.set_edit_model(preset.map_or("", |preset| preset.model_id).into());
-        app.set_edit_preset_id(brand.id);
-        app.set_edit_preset_icon(brand.icon);
-        app.set_edit_preset_monochrome(brand.monochrome);
-        set_editor_provider_icon(&app, "", ProviderKind::ApiKey, &app.get_edit_url());
-    });
-    let weak = app.as_weak();
     app.on_open_provider_preset_link(move |api_key| {
         let Some(app) = weak.upgrade() else {
             return;
@@ -4221,6 +4226,226 @@ mod tests {
                 icon.id
             );
         }
+    }
+
+    #[test]
+    fn unified_connection_picker_routes_choices_and_clears_credentials() {
+        use slint::platform::{
+            Key, Platform, PointerEventButton, WindowAdapter, WindowEvent,
+            software_renderer::MinimalSoftwareWindow,
+        };
+        use std::{cell::Cell, fs, io::Write, rc::Rc};
+
+        struct PreviewPlatform(Rc<MinimalSoftwareWindow>);
+        impl Platform for PreviewPlatform {
+            fn create_window_adapter(&self) -> Result<Rc<dyn WindowAdapter>, slint::PlatformError> {
+                Ok(self.0.clone())
+            }
+        }
+        let window = MinimalSoftwareWindow::new(Default::default());
+        slint::platform::set_platform(Box::new(PreviewPlatform(window.clone()))).unwrap();
+        let app = AppWindow::new().unwrap();
+        app.global::<Theme>().set_animations_enabled(false);
+        app.set_loading(false);
+        app.set_active_page(1);
+        initialize_provider_icons(&app).unwrap();
+        app.set_provider_presets(ModelRc::new(VecModel::from(
+            app::PROVIDER_PRESETS
+                .iter()
+                .map(|preset| ProviderPresetRow {
+                    id: preset.id.into(),
+                    name: preset.name.into(),
+                    icon: slint::Image::load_from_svg_data(preset.icon).unwrap(),
+                    monochrome: preset.monochrome,
+                })
+                .collect::<Vec<_>>(),
+        )));
+        let calls = Rc::new(Cell::new(0));
+        let weak = app.as_weak();
+        let count = calls.clone();
+        app.on_begin_provider_editor(move |id| {
+            assert!(id.is_empty());
+            count.set(count.get() + 1);
+            show_provider_editor(
+                &weak.upgrade().unwrap(),
+                None,
+                CodexOptions::default(),
+                String::new(),
+            );
+        });
+        let weak = app.as_weak();
+        let count = calls.clone();
+        app.on_begin_subscription_editor(move |id| {
+            assert!(id.is_empty());
+            count.set(count.get() + 1);
+            show_subscription_editor(
+                &weak.upgrade().unwrap(),
+                None,
+                Vec::new(),
+                String::new(),
+                CodexOptions::default(),
+                String::new(),
+                Secret::new(String::new()),
+            );
+        });
+        let weak = app.as_weak();
+        let count = calls.clone();
+        app.on_begin_xai_editor(move |id| {
+            assert!(id.is_empty());
+            count.set(count.get() + 1);
+            show_xai_editor(&weak.upgrade().unwrap(), None, Vec::new());
+        });
+        let weak = app.as_weak();
+        app.on_cancel_subscription_editor(move || {
+            close_subscription_editor(&weak.upgrade().unwrap())
+        });
+        let click = |x, y| {
+            let position = slint::LogicalPosition::new(x, y);
+            window.dispatch_event(WindowEvent::PointerMoved { position });
+            window.dispatch_event(WindowEvent::PointerPressed {
+                position,
+                button: PointerEventButton::Left,
+            });
+            window.dispatch_event(WindowEvent::PointerReleased {
+                position,
+                button: PointerEventButton::Left,
+            });
+            slint::platform::update_timers_and_animations();
+        };
+        let escape = || {
+            window.dispatch_event(WindowEvent::KeyPressed {
+                text: Key::Escape.into(),
+            });
+            window.dispatch_event(WindowEvent::KeyReleased {
+                text: Key::Escape.into(),
+            });
+            slint::platform::update_timers_and_animations();
+        };
+        let draw = |name: &str| {
+            slint::platform::update_timers_and_animations();
+            let size = WindowAdapter::size(window.as_ref());
+            let mut pixels =
+                slint::SharedPixelBuffer::<slint::Rgb8Pixel>::new(size.width, size.height);
+            window.request_redraw();
+            window.draw_if_needed(|renderer| {
+                renderer.render(pixels.make_mut_slice(), size.width as usize);
+            });
+            if let Some(output) = std::env::var_os("SWITCHX_CONNECTION_SNAPSHOTS") {
+                let output = PathBuf::from(output);
+                assert!(output.is_absolute());
+                fs::create_dir_all(&output).unwrap();
+                let mut file = fs::File::create(output.join(format!("{name}.ppm"))).unwrap();
+                write!(file, "P6\n{} {}\n255\n", size.width, size.height).unwrap();
+                file.write_all(pixels.as_bytes()).unwrap();
+            }
+        };
+        app.show().unwrap();
+        for (width, height) in [(1200, 820), (1000, 680)] {
+            app.window()
+                .set_size(slint::PhysicalSize::new(width, height));
+            let left = width as f32 - 734.0;
+            for dark in [false, true] {
+                app.invoke_set_appearance(dark);
+                let suffix = format!("{}-{width}x{height}", if dark { "dark" } else { "light" });
+                draw(&format!("connections-{suffix}"));
+                click(width as f32 - 100.0, 282.0);
+                assert!(app.get_connection_picker_open());
+                draw(&format!("picker-{suffix}"));
+                click(left + 90.0, 200.0);
+                assert!(app.get_subscription_editor_open());
+                assert!(!app.get_connection_picker_open());
+                draw(&format!("chatgpt-{suffix}"));
+                app.set_subscription_auth_json("synthetic-unsaved-credential".into());
+                click(left + 50.0, 148.0);
+                assert!(app.get_connection_picker_open());
+                assert!(app.get_subscription_auth_json().is_empty());
+                draw("back-from-chatgpt");
+                click(left + 440.0, 200.0);
+                assert!(app.get_xai_editor_open());
+                draw(&format!("grok-{suffix}"));
+                click(left + 50.0, 148.0);
+                assert!(app.get_connection_picker_open());
+                assert!(!app.get_xai_editor_open());
+                draw("back-from-grok");
+                click(left + 90.0, 320.0);
+                assert!(app.get_editor_open());
+                assert!(app.get_edit_url().is_empty());
+                draw(&format!("custom-api-{suffix}"));
+                app.set_edit_key("synthetic-unsaved-key".into());
+                escape();
+                assert!(!app.get_editor_open());
+                assert!(app.get_edit_key().is_empty());
+                for (index, preset) in app::PROVIDER_PRESETS.iter().enumerate() {
+                    app.invoke_open_connection_picker();
+                    draw("before-api-preset");
+                    click(
+                        left + 90.0 + (index % 2) as f32 * 350.0,
+                        410.0 + (index / 2) as f32 * 90.0,
+                    );
+                    assert!(app.get_editor_open(), "{}", preset.id);
+                    assert_eq!(app.get_edit_preset_id(), preset.id);
+                    assert_eq!(app.get_edit_name(), preset.name);
+                    assert_eq!(app.get_edit_url(), preset.base_url);
+                    assert_eq!(app.get_edit_model(), preset.model_id);
+                    if index == 0 {
+                        draw(&format!("preset-api-{suffix}"));
+                    }
+                    app.set_edit_key("synthetic-unsaved-key".into());
+                    draw("before-back-from-api");
+                    click(left + 50.0, 148.0);
+                    assert!(app.get_connection_picker_open());
+                    assert!(app.get_edit_key().is_empty());
+                }
+                escape();
+                assert!(!app.get_connection_picker_open());
+            }
+        }
+        app.invoke_open_connection_picker();
+        draw("before-disabled-choices");
+        let before = calls.get();
+        for (busy, managed, pending) in [
+            (true, false, false),
+            (false, true, false),
+            (false, false, true),
+        ] {
+            app.set_busy(busy);
+            app.set_config_managed(managed);
+            app.set_chatgpt_login_pending(pending);
+            draw("disabled-choice");
+            click(356.0, 200.0);
+            assert_eq!(calls.get(), before);
+        }
+        app.set_busy(false);
+        app.set_config_managed(false);
+        app.set_chatgpt_login_pending(false);
+        draw("before-scrim-close");
+        click(80.0, 400.0);
+        assert!(!app.get_connection_picker_open());
+        app.invoke_open_connection_picker();
+        draw("before-chatgpt-close");
+        click(356.0, 200.0);
+        app.set_subscription_auth_json("synthetic-unsaved-credential".into());
+        escape();
+        assert!(!app.get_subscription_editor_open());
+        assert!(app.get_subscription_auth_json().is_empty());
+        app.invoke_open_connection_picker();
+        draw("before-grok-close");
+        click(706.0, 200.0);
+        draw("grok-before-close");
+        click(964.0, 84.0);
+        assert!(!app.get_xai_editor_open());
+        for (busy, managed) in [(true, false), (false, true)] {
+            app.set_busy(busy);
+            app.set_config_managed(managed);
+            app.invoke_open_connection_picker();
+            assert!(!app.get_connection_picker_open());
+        }
+        app.set_busy(false);
+        app.set_config_managed(false);
+        app.invoke_open_connection_picker();
+        app.set_active_page(5);
+        draw("after-navigation");
+        assert!(!app.get_connection_picker_open());
     }
 
     #[test]
