@@ -35,3 +35,6 @@ objc2 = "0.6.4"
 
 [profile.dev]
 debug = "line-tables-only"
+
+[profile.dev.package."*"]
+debug = false
