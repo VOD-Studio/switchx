@@ -701,6 +701,9 @@ pub fn search(query: &str) -> Vec<&'static ProviderIcon> {
 
 /// Defaults use the saved provider kind and exact known endpoint, never its name.
 pub fn default_icon_id(kind: ProviderKind, base_url: &str) -> &'static str {
+    if kind == ProviderKind::XaiOAuth {
+        return "grok";
+    }
     if kind == ProviderKind::Chatgpt {
         "openai"
     } else {

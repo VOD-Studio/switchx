@@ -55,6 +55,16 @@ enum Command {
         generation: i32,
     },
     CancelSubscriptionEditor,
+    BeginXaiEditor(String),
+    SaveXai {
+        id: String,
+        name: String,
+        account_id: String,
+    },
+    XaiAccount {
+        action: i32,
+        id: String,
+    },
     SaveSubscription {
         id: String,
         name: String,
@@ -208,7 +218,7 @@ fn show_result(app: &AppWindow, result: Result<Snapshot, AppError>) {
                     .map(|model| ModelRow {
                         is_subscription: snapshot.providers.iter().any(|provider| {
                             provider.id == model.provider_id
-                                && provider.kind == ProviderKind::Chatgpt
+                                && provider.kind != ProviderKind::ApiKey
                         }),
                         binding_label: snapshot
                             .providers
@@ -268,7 +278,8 @@ fn show_result(app: &AppWindow, result: Result<Snapshot, AppError>) {
                         base_url: provider.base_url.into(),
                         model_id: provider.model_id.into(),
                         credential_status: provider.credential_status.into(),
-                        is_subscription: provider.kind == ProviderKind::Chatgpt,
+                        is_subscription: provider.kind != ProviderKind::ApiKey,
+                        is_grok: provider.kind == ProviderKind::XaiOAuth,
                         binding_label: provider.binding_label.into(),
                         auth_error: "".into(),
                         preset_id: provider.preset_id.into(),
@@ -380,6 +391,7 @@ fn account_view(data_dir: &Path, home: &Path) -> Result<AccountView, String> {
                     label: account.label.into(),
                     workspace: account.workspace_id.into(),
                     is_default: account.is_default,
+                    requires_reauth: false,
                     bound_provider_count: names.len() as i32,
                     bound_provider_names: names.join("、").into(),
                 }
@@ -399,6 +411,116 @@ fn show_accounts(app: &AppWindow, view: Result<AccountView, String>) {
         }
         Err(error) => app.set_account_status(error.into()),
     }
+}
+
+fn xai_account_view(data_dir: &Path) -> Result<Vec<AccountRow>, String> {
+    let accounts = switchx::xai::AccountManager::open(data_dir)?.list()?;
+    let default_id = accounts
+        .iter()
+        .find(|a| a.is_default)
+        .map(|a| a.id.as_str());
+    let providers = Store::open_read_only(&data_dir.join("switchx.sqlite"))
+        .map_err(|_| "无法读取 Grok 上游引用")?
+        .providers()
+        .map_err(|_| "无法读取 Grok 上游引用")?;
+    Ok(accounts
+        .iter()
+        .map(|account| {
+            let names: Vec<_> = providers
+                .iter()
+                .filter(|p| {
+                    p.kind == ProviderKind::XaiOAuth
+                        && match &p.account_binding {
+                            Some(AccountBinding::Fixed(id)) => id == &account.id,
+                            Some(AccountBinding::Default) => {
+                                default_id == Some(account.id.as_str())
+                            }
+                            _ => false,
+                        }
+                })
+                .map(|p| p.name.clone())
+                .collect();
+            AccountRow {
+                id: account.id.clone().into(),
+                label: account.label.clone().into(),
+                workspace: if account.requires_reauth {
+                    "凭据失效，请重新登录"
+                } else {
+                    "已保存授权"
+                }
+                .into(),
+                is_default: account.is_default,
+                is_active: false,
+                requires_reauth: account.requires_reauth,
+                bound_provider_count: names.len() as i32,
+                bound_provider_names: names.join("、").into(),
+            }
+        })
+        .collect())
+}
+
+fn show_xai_accounts(app: &AppWindow, view: Result<Vec<AccountRow>, String>) {
+    match view {
+        Ok(rows) => {
+            app.set_xai_status(format!("已保存 {} 个 Grok 账号", rows.len()).into());
+            app.set_xai_accounts(ModelRc::new(VecModel::from(rows)));
+        }
+        Err(error) => app.set_xai_status(error.into()),
+    }
+}
+
+fn show_xai_editor(
+    app: &AppWindow,
+    provider: Option<ProviderRecord>,
+    accounts: Vec<switchx::xai::AccountInfo>,
+) {
+    let mut ids = vec![slint::SharedString::from("@default")];
+    let mut options = vec![slint::SharedString::from(
+        "跟随默认 Grok 账号（发布时固定）",
+    )];
+    let mut choice = 0;
+    for account in accounts.into_iter().filter(|a| !a.requires_reauth) {
+        if provider.as_ref().and_then(|p| p.account_binding.as_ref())
+            == Some(&AccountBinding::Fixed(account.id.clone()))
+        {
+            choice = ids.len() as i32;
+        }
+        ids.push(account.id.into());
+        options.push(account.label.into());
+    }
+    // A deleted/expired fixed account must be explicitly rebound, never silently defaulted.
+    if let Some(AccountBinding::Fixed(id)) =
+        provider.as_ref().and_then(|p| p.account_binding.as_ref())
+        && choice == 0
+    {
+        choice = ids.len() as i32;
+        ids.push(id.clone().into());
+        options.push("原账号不可用，请重新选择".into());
+    }
+    app.set_xai_provider_id(
+        provider
+            .as_ref()
+            .map(|p| p.id.clone())
+            .unwrap_or_default()
+            .into(),
+    );
+    app.set_xai_provider_name(
+        provider
+            .as_ref()
+            .map(|p| p.name.clone())
+            .unwrap_or("Grok".into())
+            .into(),
+    );
+    app.set_xai_account_ids(ModelRc::new(VecModel::from(ids)));
+    app.set_xai_account_options(ModelRc::new(VecModel::from(options)));
+    app.set_xai_account_choice(choice);
+    app.set_delete_confirm(false);
+    app.set_error_code("".into());
+    app.set_error_message("".into());
+    app.set_busy(false);
+    app.set_editor_open(false);
+    app.set_subscription_editor_open(false);
+    app.set_xai_editor_open(true);
 }
 
 fn discard_account_previews(app: &AppWindow) {
@@ -1072,6 +1194,8 @@ async fn worker(
     )> = None;
     let mut route_session = RouteSession::default();
     let mut pending_login: Option<(watch::Sender<bool>, tokio::task::JoinHandle<()>)> = None;
+    let mut pending_xai_login: Option<(watch::Sender<bool>, tokio::task::JoinHandle<()>)> = None;
+    let mut xai_manager: Option<switchx::xai::AccountManager> = None;
     let mut account_home = client::default_home().ok();
     let mut subscription_auth: Option<SubscriptionAuthDraft> = None;
     while let Some(command) = receiver.recv().await {
@@ -1167,7 +1291,195 @@ async fn worker(
                     .as_ref()
                     .map_err(|error| *error)
                     .and_then(|path| load_snapshot(path, check_credentials));
-                let _ = weak.upgrade_in_event_loop(move |app| show_result(&app, result));
+                let accounts = directory.as_ref().ok().map(|path| xai_account_view(path));
+                let _ = weak.upgrade_in_event_loop(move |app| {
+                    show_result(&app, result);
+                    if let Some(view) = accounts {
+                        show_xai_accounts(&app, view);
+                    }
+                });
+            }
+            Command::BeginXaiEditor(id) => {
+                let result = (|| {
+                    let data_dir = directory.as_ref().map_err(|e| e.message())?;
+                    app::ensure_editable(data_dir)?;
+                    let provider = if id.is_empty() {
+                        None
+                    } else {
+                        let provider = app::load_provider(data_dir, &id)?;
+                        switchx::xai::validate_provider(&provider)?;
+                        Some(provider)
+                    };
+                    Ok::<_, String>((
+                        provider,
+                        switchx::xai::AccountManager::open(data_dir)?.list()?,
+                    ))
+                })();
+                let _ = weak.upgrade_in_event_loop(move |app| match result {
+                    Ok((provider, accounts)) => show_xai_editor(&app, provider, accounts),
+                    Err(error) => show_action(&app, Err(error)),
+                });
+            }
+            Command::SaveXai {
+                id,
+                name,
+                account_id,
+            } => {
+                let result = (|| {
+                    let data_dir = directory.as_ref().map_err(|e| e.message())?;
+                    let binding = if account_id == "@default" {
+                        AccountBinding::Default
+                    } else {
+                        AccountBinding::Fixed(account_id)
+                    };
+                    switchx::xai::save_provider(
+                        data_dir,
+                        (!id.is_empty()).then_some(id.as_str()),
+                        &name,
+                        binding,
+                    )
+                })();
+                let snapshot = result
+                    .as_ref()
+                    .ok()
+                    .and_then(|_| directory.as_ref().ok())
+                    .map(|path| load_snapshot(path, false));
+                if result.is_ok() {
+                    prepared = None;
+                    route_session.discard_preview();
+                }
+                let accounts = directory.as_ref().ok().map(|path| xai_account_view(path));
+                let _ = weak.upgrade_in_event_loop(move |app| {
+                    if let Some(view) = accounts {
+                        show_xai_accounts(&app, view);
+                    }
+                    if let Some(snapshot) = snapshot {
+                        show_result(&app, snapshot);
+                        app.set_xai_editor_open(false);
+                        discard_account_previews(&app);
+                    }
+                    show_action(
+                        &app,
+                        result.map(|()| "Grok 连接与账号绑定已保存；在工作台预览并启用路由".into()),
+                    );
+                });
+            }
+            Command::XaiAccount { action, id } => {
+                let result = async {
+                    let data_dir = directory.as_ref().map_err(|e| e.message())?;
+                    if action == 3 {
+                        if let Some((cancel, task)) = pending_xai_login.take() {
+                            cancel.send_replace(true);
+                            let _ = task.await;
+                        }
+                        let _ = weak.upgrade_in_event_loop(|app| {
+                            app.set_xai_pending(false);
+                            app.set_xai_user_code("".into());
+                            app.set_xai_login_url("".into());
+                            app.set_xai_login_id("".into());
+                        });
+                        return Ok("Grok 登录已取消".into());
+                    }
+                    if pending_xai_login
+                        .as_ref()
+                        .is_some_and(|(_, task)| !task.is_finished())
+                    {
+                        return Err("请先完成或取消 Grok 登录".into());
+                    }
+                    let manager = match &xai_manager {
+                        Some(manager) => manager.clone(),
+                        None => {
+                            let manager = switchx::xai::AccountManager::open(data_dir)?;
+                            xai_manager = Some(manager.clone());
+                            manager
+                        }
+                    };
+                    match action {
+                        0 => Ok("已刷新 Grok 账号列表".into()),
+                        1 => {
+                            app::ensure_editable(data_dir)?;
+                            let login = manager.start_login().await?;
+                            open_provider_link(&login.verification_url)?;
+                            let login_id = app::new_id()?;
+                            let ui_id = login_id.clone();
+                            let url = login.verification_url.clone();
+                            let code = login.user_code.clone();
+                            let _ = weak.upgrade_in_event_loop(move |app| {
+                                app.set_xai_login_id(ui_id.into());
+                                app.set_xai_pending(true);
+                                app.set_xai_login_url(url.into());
+                                app.set_xai_user_code(code.into());
+                            });
+                            let (cancel, receiver) = watch::channel(false);
+                            let window = weak.clone();
+                            let data_dir = data_dir.clone();
+                            let task = tokio::spawn(async move {
+                                let result = login.finish(receiver).await;
+                                let view = xai_account_view(&data_dir);
+                                let _ = window.upgrade_in_event_loop(move |app| {
+                                    if app.get_xai_login_id() != login_id.as_str() {
+                                        return;
+                                    }
+                                    app.set_xai_pending(false);
+                                    app.set_xai_user_code("".into());
+                                    app.set_xai_login_url("".into());
+                                    show_xai_accounts(&app, view);
+                                    match result {
+                                        Ok(account) => app.set_action_message(
+                                            format!(
+                                                "Grok 账号 {} 已保存，可绑定到 Grok 上游",
+                                                account.label
+                                            )
+                                            .into(),
+                                        ),
+                                        Err(error) => {
+                                            app.set_xai_status(error.clone().into());
+                                            app.set_action_message(error.into());
+                                        }
+                                    }
+                                    discard_account_previews(&app);
+                                });
+                            });
+                            pending_xai_login = Some((cancel, task));
+                            Ok("已打开 xAI 官方页面，等待验证码授权".into())
+                        }
+                        2 => {
+                            app::ensure_editable(data_dir)?;
+                            manager.set_default(&id).await?;
+                            prepared = None;
+                            route_session.discard_preview();
+                            Ok("默认 Grok 账号已更新，请重新预览路由".into())
+                        }
+                        4 => {
+                            app::ensure_editable(data_dir)?;
+                            let rows = xai_account_view(data_dir)?;
+                            if rows
+                                .iter()
+                                .any(|a| a.id == id.as_str() && a.bound_provider_count > 0)
+                            {
+                                return Err("Grok 账号仍被上游引用，请先重新绑定或删除连接".into());
+                            }
+                            manager.remove(&id).await?;
+                            prepared = None;
+                            route_session.discard_preview();
+                            let _ = weak.upgrade_in_event_loop(|app| {
+                                app.set_delete_account_confirm(false);
+                                app.set_delete_account_id("".into());
+                            });
+                            Ok("Grok 账号已移除".into())
+                        }
+                        _ => Err("未知 Grok 账号操作".into()),
+                    }
+                }
+                .await;
+                let accounts = directory.as_ref().ok().map(|path| xai_account_view(path));
+                let _ = weak.upgrade_in_event_loop(move |app| {
+                    if let Some(view) = accounts {
+                        show_xai_accounts(&app, view);
+                    }
+                    discard_account_previews(&app);
+                    show_action(&app, result);
+                });
             }
             Command::BeginProviderEditor { id, home: target } => {
                 let result = (|| {
@@ -1177,7 +1489,7 @@ async fn worker(
                         (None, CodexOptions::for_common(&common)?)
                     } else {
                         let provider = app::load_provider(data_dir, &id)?;
-                        if provider.kind == ProviderKind::Chatgpt {
+                        if provider.kind != ProviderKind::ApiKey {
                             return Err("请使用订阅连接编辑器修改名称和账号绑定".into());
                         }
                         let state = app::load_provider_config(data_dir, &id)?;
@@ -1537,11 +1849,16 @@ async fn worker(
                     .as_ref()
                     .ok()
                     .map(|path| load_snapshot(path, false));
+                let accounts = directory.as_ref().ok().map(|path| xai_account_view(path));
                 let _ = weak.upgrade_in_event_loop(move |app| {
+                    if let Some(view) = accounts {
+                        show_xai_accounts(&app, view);
+                    }
                     if let Some(snapshot) = snapshot {
                         show_result(&app, snapshot);
                         if was_deleted {
                             app.set_editor_open(false);
+                            app.set_xai_editor_open(false);
                             app.set_subscription_editor_open(false);
                             app.set_direct_preview_ready(false);
                             app.set_route_preview_ready(false);
@@ -1558,6 +1875,24 @@ async fn worker(
                         app::load_provider(path, &id).map(|provider| (path, provider))
                     });
                 let result = match result {
+                    Ok((data_dir, provider)) if provider.kind == ProviderKind::XaiOAuth => {
+                        async {
+                            let manager = switchx::xai::AccountManager::open(data_dir)?;
+                            let account = manager.resolve_binding(
+                                provider
+                                    .account_binding
+                                    .as_ref()
+                                    .ok_or("Grok 账号绑定缺失")?,
+                            )?;
+                            let token = manager.credential(&account.id).await?;
+                            direct::check_models(&provider, token.expose()).await?;
+                            Ok(format!(
+                                "{}：Grok 账号目录已连通；实际推理权限尚未验证",
+                                provider.name
+                            ))
+                        }
+                        .await
+                    }
                     Ok((data_dir, provider)) if provider.kind == ProviderKind::Chatgpt => {
                         async {
                             let target = home(&target)?;
@@ -1610,6 +1945,19 @@ async fn worker(
             } => {
                 let result = async {
                     let data_dir = directory.as_ref().map_err(|error| error.message())?;
+                    if !provider.is_empty() {
+                        let selected = app::load_provider(data_dir, &provider)?;
+                        if selected.kind == ProviderKind::XaiOAuth {
+                            switchx::xai::validate_provider(&selected)?;
+                            let manager = switchx::xai::AccountManager::open(data_dir)?;
+                            let account = manager
+                                .resolve_binding(selected.account_binding.as_ref().unwrap())?;
+                            let token = manager.credential(&account.id).await?;
+                            return direct::fetch_models(switchx::xai::BASE_URL, token.expose())
+                                .await
+                                .map(|models| (models, false));
+                        }
+                    }
                     let is_subscription = !provider.is_empty()
                         && app::load_provider(data_dir, &provider)?.kind == ProviderKind::Chatgpt;
                     if is_subscription {
@@ -2468,6 +2816,13 @@ async fn worker(
                 });
             }
             Command::Quit => {
+                if let Some((cancel, task)) = pending_xai_login.take() {
+                    cancel.send_replace(true);
+                    let _ = task.await;
+                }
+                if let Some(manager) = &xai_manager {
+                    manager.wait_for_idle().await;
+                }
                 if let Some((cancel, task)) = pending_login.take() {
                     cancel.send_replace(true);
                     let _ = task.await;
@@ -2581,6 +2936,13 @@ async fn worker(
                 .into(),
             );
         });
+    }
+    if let Some((cancel, task)) = pending_xai_login {
+        cancel.send_replace(true);
+        let _ = task.await;
+    }
+    if let Some(manager) = xai_manager {
+        manager.wait_for_idle().await;
     }
     if let Some((cancel, task)) = pending_login {
         cancel.send_replace(true);
@@ -2827,6 +3189,47 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 Command::BeginProviderEditor {
                     id: id.into(),
                     home: app.get_config_home().into(),
+                },
+            );
+        }
+    });
+    let callback_sender = sender.clone();
+    let weak = app.as_weak();
+    app.on_begin_xai_editor(move |id| {
+        if let Some(app) = weak.upgrade() {
+            queue(&app, &callback_sender, Command::BeginXaiEditor(id.into()));
+        }
+    });
+    let callback_sender = sender.clone();
+    let weak = app.as_weak();
+    app.on_save_xai(move || {
+        if let Some(app) = weak.upgrade() {
+            let account_id = app
+                .get_xai_account_ids()
+                .row_data(app.get_xai_account_choice().max(0) as usize)
+                .map(|v| v.to_string())
+                .unwrap_or_default();
+            queue(
+                &app,
+                &callback_sender,
+                Command::SaveXai {
+                    id: app.get_xai_provider_id().into(),
+                    name: app.get_xai_provider_name().into(),
+                    account_id,
+                },
+            );
+        }
+    });
+    let callback_sender = sender.clone();
+    let weak = app.as_weak();
+    app.on_xai_account_action(move |action, id| {
+        if let Some(app) = weak.upgrade() {
+            queue(
+                &app,
+                &callback_sender,
+                Command::XaiAccount {
+                    action,
+                    id: id.into(),
                 },
             );
         }

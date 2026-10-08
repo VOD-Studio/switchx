@@ -46,6 +46,10 @@ pub struct Upstream {
 
 enum UpstreamAuth {
     ApiKey(Secret),
+    XaiOAuth {
+        manager: crate::xai::AccountManager,
+        id: String,
+    },
     Chatgpt {
         account: Mutex<Option<HeaderValue>>,
         routing_override: Option<HeaderValue>,
@@ -170,7 +174,38 @@ impl Upstream {
         Ok(upstream)
     }
 
+    pub fn xai(manager: crate::xai::AccountManager, id: String) -> Result<Self, String> {
+        manager.resolve_binding(&crate::storage::AccountBinding::Fixed(id.clone()))?;
+        Ok(Self {
+            responses_url: Url::parse(&format!("{}/responses", crate::xai::BASE_URL)).unwrap(),
+            auth: UpstreamAuth::XaiOAuth { manager, id },
+        })
+    }
+
+    /// Synthetic inference only; OAuth credentials still follow the production manager.
+    pub fn xai_mock(
+        address: SocketAddr,
+        manager: crate::xai::AccountManager,
+        id: String,
+    ) -> Result<Self, String> {
+        if address.ip() != IpAddr::V4(Ipv4Addr::LOCALHOST) {
+            return Err("mock must use IPv4 loopback".into());
+        }
+        let mut upstream = Self::xai(manager, id)?;
+        upstream.responses_url = Url::parse(&format!("http://{address}/responses")).unwrap();
+        Ok(upstream)
+    }
+
     fn is_chatgpt(&self) -> bool {
+        matches!(
+            self.auth,
+            UpstreamAuth::Chatgpt { .. } | UpstreamAuth::ManagedChatgpt { .. }
+        )
+    }
+    fn is_xai(&self) -> bool {
+        matches!(self.auth, UpstreamAuth::XaiOAuth { .. })
+    }
+    fn is_oauth(&self) -> bool {
         !matches!(self.auth, UpstreamAuth::ApiKey(_))
     }
 
@@ -185,9 +220,15 @@ impl Upstream {
             workspace_id: None,
             backend_origin: None,
             routing_override: None,
+            upstream_model: None,
         };
         let (account, routing_override) = match &self.auth {
             UpstreamAuth::ApiKey(_) => return Ok(context),
+            UpstreamAuth::XaiOAuth { id, .. } => {
+                context.account_id = Some(id.clone());
+                context.backend_origin = Some(self.responses_url.origin().ascii_serialization());
+                return Ok(context);
+            }
             UpstreamAuth::Chatgpt {
                 account,
                 routing_override,
@@ -242,6 +283,18 @@ impl Upstream {
         headers: &HeaderMap,
         local_token: &Secret,
     ) -> Result<HeaderMap, &'static str> {
+        if let UpstreamAuth::XaiOAuth { manager, id } = &self.auth {
+            let token = manager
+                .credential(id)
+                .await
+                .map_err(|_| "xai_auth_required")?;
+            let mut output = HeaderMap::new();
+            let mut bearer = HeaderValue::from_str(&format!("Bearer {}", token.expose()))
+                .map_err(|_| "xai_auth_required")?;
+            bearer.set_sensitive(true);
+            output.insert(header::AUTHORIZATION, bearer);
+            return Ok(output);
+        }
         if let UpstreamAuth::ManagedChatgpt {
             manager,
             id,
@@ -286,6 +339,7 @@ impl Upstream {
     ) -> Result<HeaderMap, &'static str> {
         let mut output = HeaderMap::new();
         match &self.auth {
+            UpstreamAuth::XaiOAuth { .. } => return Err("xai_auth_required"),
             UpstreamAuth::ApiKey(key) => {
                 let mut bearer = HeaderValue::from_str(&format!("Bearer {}", key.expose()))
                     .map_err(|_| "invalid_upstream_credential")?;
@@ -431,9 +485,9 @@ impl RouterState {
                 ));
             }
             if binding.fallback_provider_id.as_ref().is_some_and(|id| {
-                upstreams[&binding.provider_id].is_chatgpt() || upstreams[id].is_chatgpt()
+                upstreams[&binding.provider_id].is_oauth() || upstreams[id].is_oauth()
             }) {
-                return Err("ChatGPT accounts cannot participate in automatic fallback".into());
+                return Err("OAuth accounts cannot participate in automatic fallback".into());
             }
         }
         let uses_chatgpt = upstreams.values().any(Upstream::is_chatgpt);
@@ -906,7 +960,11 @@ async fn forward(
             "JSON object is required",
         );
     };
-    let Some(public_id) = object.get("model").and_then(Value::as_str) else {
+    let Some(public_id) = object
+        .get("model")
+        .and_then(Value::as_str)
+        .map(str::to_owned)
+    else {
         return request_error(
             &mut tracker,
             StatusCode::BAD_REQUEST,
@@ -915,7 +973,7 @@ async fn forward(
         );
     };
     tracker.record.public_model = Some(public_id.chars().take(256).collect());
-    let Some(binding) = state.publication.routes.get(public_id) else {
+    let Some(binding) = state.publication.routes.get(&public_id) else {
         return request_error(
             &mut tracker,
             StatusCode::NOT_FOUND,
@@ -926,6 +984,24 @@ async fn forward(
     tracker.record.provider_id = Some(binding.provider_id.clone());
     tracker.record.upstream_model = Some(binding.upstream_model.clone());
     let official = state.upstreams[&binding.provider_id].is_chatgpt();
+    let xai = state.upstreams[&binding.provider_id].is_xai();
+    let compatibility = if xai {
+        object.insert("model".into(), binding.upstream_model.clone().into());
+        match crate::xai_responses::Compatibility::request(&mut request) {
+            Ok(compatibility) => Some(compatibility),
+            Err(code) => {
+                return request_error(
+                    &mut tracker,
+                    StatusCode::UNPROCESSABLE_ENTITY,
+                    code,
+                    "Grok cannot represent this tool or request; use a supported function-tool model profile",
+                );
+            }
+        }
+    } else {
+        None
+    };
+    let object = request.as_object_mut().unwrap();
     if object
         .get("previous_response_id")
         .is_some_and(|value| !value.is_null())
@@ -952,7 +1028,7 @@ async fn forward(
                 );
             }
         };
-        let context = match state.upstreams[&binding.provider_id]
+        let mut context = match state.upstreams[&binding.provider_id]
             .session_context(&binding.provider_id, &headers)
         {
             Ok(context) => context,
@@ -965,6 +1041,9 @@ async fn forward(
                 );
             }
         };
+        if xai {
+            context.upstream_model = Some(binding.upstream_model.clone());
+        }
         let routing_hint = match single_header(&headers, "x-codex-routing-hint") {
             Ok(value) => value,
             Err(code) => {
@@ -1054,7 +1133,14 @@ async fn forward(
             );
         }
     };
-    if !official && object.get("input").is_some_and(opaque_input) {
+    if !official
+        && object.get("input").is_some_and(|input| {
+            opaque_input(input)
+                && !(xai
+                    && state.session_store.is_some()
+                    && crate::xai_responses::replayable_input(input))
+        })
+    {
         return request_error(
             &mut tracker,
             StatusCode::UNPROCESSABLE_ENTITY,
@@ -1156,6 +1242,35 @@ async fn forward(
     let status = upstream_response.status();
     tracker.record.http_status = Some(status.as_u16());
     tracker.record.headers_ms = Some(tracker.elapsed_ms());
+    if xai && !status.is_success() {
+        let code = match status.as_u16() {
+            401 => "xai_unauthorized",
+            403 => "xai_forbidden",
+            _ => "upstream_http_error",
+        };
+        if status == StatusCode::UNAUTHORIZED
+            && let UpstreamAuth::XaiOAuth { manager, id } =
+                &state.upstreams[&binding.provider_id].auth
+            && let Some(rejected) = outbound_headers
+                .get(header::AUTHORIZATION)
+                .and_then(|value| value.to_str().ok())
+                .and_then(|value| value.strip_prefix("Bearer "))
+        {
+            manager.invalidate_access(id, rejected);
+        }
+        let mut response = request_error(
+            &mut tracker,
+            status,
+            code,
+            "Grok upstream rejected the request; check account permissions and model availability",
+        );
+        if let Some(value) = upstream_response.headers().get(header::RETRY_AFTER) {
+            response
+                .headers_mut()
+                .insert(header::RETRY_AFTER, value.clone());
+        }
+        return response;
+    }
     if !status.is_success() {
         let code = if official && status == StatusCode::UNAUTHORIZED {
             state.set_chatgpt_error(&binding.provider_id, 1);
@@ -1170,6 +1285,19 @@ async fn forward(
     } else if official {
         state.set_chatgpt_error(&binding.provider_id, 0);
     }
+    let compatibility = compatibility.map(|compatibility| {
+        compatibility.with_sse(
+            upstream_response
+                .headers()
+                .get(header::CONTENT_TYPE)
+                .and_then(|v| v.to_str().ok())
+                .is_some_and(|v| {
+                    v.split(';')
+                        .next()
+                        .is_some_and(|v| v.trim().eq_ignore_ascii_case("text/event-stream"))
+                }),
+        )
+    });
     let content_type = upstream_response
         .headers()
         .get(header::CONTENT_TYPE)
@@ -1205,8 +1333,9 @@ async fn forward(
             tracker,
             cancellation,
             false,
+            compatibility,
         ),
-        |(mut upstream, mut observer, mut tracker, mut cancellation, ended)| async move {
+        |(mut upstream, mut observer, mut tracker, mut cancellation, ended, mut compatibility)| async move {
             if ended {
                 return None;
             }
@@ -1219,13 +1348,36 @@ async fn forward(
                 chunk = upstream.next() => chunk,
             };
             let (item, ended) = match chunk {
-                Some(Ok(bytes)) => match observer.feed(&bytes, &mut tracker) {
-                    Ok(()) => (Ok(bytes), false),
-                    Err(code) => {
-                        tracker.finish(RequestStatus::Interrupted, Some(code));
-                        (Err(std::io::Error::other(code)), true)
+                Some(Ok(bytes)) => {
+                    let bytes = match compatibility
+                        .as_mut()
+                        .map(|compatibility| compatibility.feed(&bytes, false))
+                    {
+                        Some(Ok(bytes)) => Bytes::from(bytes),
+                        Some(Err(code)) => {
+                            tracker.finish(RequestStatus::Interrupted, Some(code));
+                            return Some((
+                                Err(std::io::Error::other(code)),
+                                (
+                                    upstream,
+                                    observer,
+                                    tracker,
+                                    cancellation,
+                                    true,
+                                    compatibility,
+                                ),
+                            ));
+                        }
+                        None => bytes,
+                    };
+                    match observer.feed(&bytes, &mut tracker) {
+                        Ok(()) => (Ok(bytes), false),
+                        Err(code) => {
+                            tracker.finish(RequestStatus::Interrupted, Some(code));
+                            (Err(std::io::Error::other(code)), true)
+                        }
                     }
-                },
+                }
                 Some(Err(error)) => {
                     let code = if error.is_timeout() {
                         "upstream_timeout"
@@ -1236,11 +1388,44 @@ async fn forward(
                     (Err(std::io::Error::other(code)), true)
                 }
                 None => {
+                    if let Some(compatibility) = &mut compatibility {
+                        match compatibility.feed(&[], true) {
+                            Ok(bytes) if !bytes.is_empty() => {
+                                if let Err(code) = observer.feed(&bytes, &mut tracker) {
+                                    tracker.finish(RequestStatus::Interrupted, Some(code));
+                                    return None;
+                                }
+                                observer.eof(&mut tracker);
+                                return Some((
+                                    Ok(Bytes::from(bytes)),
+                                    (upstream, observer, tracker, cancellation, true, None),
+                                ));
+                            }
+                            Err(code) => {
+                                tracker.finish(RequestStatus::Interrupted, Some(code));
+                                return Some((
+                                    Err(std::io::Error::other(code)),
+                                    (upstream, observer, tracker, cancellation, true, None),
+                                ));
+                            }
+                            _ => {}
+                        }
+                    }
                     observer.eof(&mut tracker);
                     return None;
                 }
             };
-            Some((item, (upstream, observer, tracker, cancellation, ended)))
+            Some((
+                item,
+                (
+                    upstream,
+                    observer,
+                    tracker,
+                    cancellation,
+                    ended,
+                    compatibility,
+                ),
+            ))
         },
     );
     response

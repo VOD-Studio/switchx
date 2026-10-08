@@ -75,6 +75,9 @@ impl PreparedDirectSwitch {
         if !helper_is_usable(helper_path) {
             return Err("SwitchX credential helper is unavailable".into());
         }
+        if provider.kind != crate::storage::ProviderKind::ApiKey {
+            return Err("OAuth 上游必须通过本地路由使用".into());
+        }
         validate_provider(&provider.name, &provider.base_url, &provider.model_id)?;
         if !valid_id(&provider.id) {
             return Err("provider id is invalid".into());

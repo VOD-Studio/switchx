@@ -1,0 +1,103 @@
+import { Theme } from "../tokens.slint";
+import {
+    QuietButton,
+    QuietLineEdit as LineEdit,
+    QuietComboBox as ComboBox,
+    SurfaceCard,
+} from "../components.slint";
+export component XaiEditor inherits SurfaceCard {
+    in property <bool> busy;
+    in property <bool> config-managed;
+    in property <string> provider-id;
+    in-out property <string> provider-name;
+    in property <[string]> accounts;
+    in-out property <int> choice;
+    in-out property <bool> delete-confirm;
+    in property <string> error;
+    callback save();
+    callback cancel();
+    callback delete-provider(string);
+    callback manage-accounts();
+    VerticalLayout {
+        padding: 18px;
+        spacing: 16px;
+        Text {
+            text: root.provider-id == "" ? "添加 Grok 订阅连接" : "编辑 Grok 订阅连接";
+            color: Theme.primary-text;
+            font-size: 17px;
+            font-weight: 600;
+        }
+
+        Text {
+            text: "连接名称";
+            color: Theme.primary-text;
+            font-size: 13px;
+        }
+
+        LineEdit {
+            text <=> root.provider-name;
+            placeholder-text: "例如：我的 Grok";
+            accessible-label: "Grok 连接名称";
+        }
+
+        Text {
+            text: "绑定账号";
+            color: Theme.primary-text;
+            font-size: 13px;
+        }
+
+        ComboBox {
+            model: root.accounts;
+            current-index <=> root.choice;
+            enabled: !root.busy;
+        }
+
+        QuietButton {
+            text: "管理 Grok 账号";
+            enabled: !root.busy;
+            clicked => { root.manage-accounts(); }
+        }
+
+        Text {
+            text: "保存后可在模型设置中获取目录并添加映射，再到工作台预览并启用路由。";
+            color: Theme.muted-text;
+            font-size: 13px;
+            wrap: word-wrap;
+        }
+
+        if root.error != "": Text {
+            text: root.error;
+            color: Theme.error;
+            font-size: 13px;
+            wrap: word-wrap;
+        }
+        Rectangle {
+            vertical-stretch: 1;
+        }
+
+        HorizontalLayout {
+            spacing: 8px;
+            if root.provider-id != "": QuietButton {
+                text: root.delete-confirm ? "确认删除连接" : "删除连接";
+                enabled: !root.busy && !root.config-managed;
+                clicked => { if root.delete-confirm { root.delete-provider(root.provider-id); } else { root.delete-confirm = true; } }
+            }
+            Rectangle {
+                horizontal-stretch: 1;
+            }
+
+            QuietButton {
+                text: "取消";
+                enabled: !root.busy;
+                clicked => { root.cancel(); }
+            }
+
+            QuietButton {
+                text: "保存";
+                primary: true;
+                enabled: !root.busy && !root.config-managed && root.provider-name != "" && root.accounts.length > 0;
+                clicked => { root.save(); }
+            }
+        }
+    }
+}

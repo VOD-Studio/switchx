@@ -1861,7 +1861,7 @@ fn write_marker(
     private_replace(&home.join(MARKER_NAME), &bytes, expected)
 }
 
-fn ensure_directory(path: &Path) -> Result<(), String> {
+pub(crate) fn ensure_directory(path: &Path) -> Result<(), String> {
     if !path.is_absolute() {
         return Err("账号或 Codex 数据目录必须是绝对路径".into());
     }
@@ -1893,7 +1893,7 @@ fn lock_store(dir: &Path) -> Result<File, String> {
     Ok(file)
 }
 
-fn read_private(path: &Path) -> Result<Option<Vec<u8>>, String> {
+pub(crate) fn read_private(path: &Path) -> Result<Option<Vec<u8>>, String> {
     let bytes =
         files::read_config(path).map_err(|_| "无法读取账号或 Codex 文件；必须是普通文件")?;
     if bytes.as_ref().is_some_and(|bytes| bytes.len() > MAX_BYTES) {
@@ -1902,7 +1902,11 @@ fn read_private(path: &Path) -> Result<Option<Vec<u8>>, String> {
     Ok(bytes)
 }
 
-fn private_replace(path: &Path, bytes: &[u8], expected: &Option<Vec<u8>>) -> Result<(), String> {
+pub(crate) fn private_replace(
+    path: &Path,
+    bytes: &[u8],
+    expected: &Option<Vec<u8>>,
+) -> Result<(), String> {
     let permissions: Option<Permissions> = {
         #[cfg(unix)]
         {

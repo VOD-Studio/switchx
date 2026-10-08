@@ -2,6 +2,8 @@ use std::{collections::HashMap, io, sync::Arc, time::Duration};
 
 #[path = "router/managed_accounts.rs"]
 mod managed_accounts;
+#[path = "router/xai.rs"]
+mod xai;
 
 use axum::{
     Json, Router,

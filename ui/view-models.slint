@@ -7,6 +7,7 @@ export struct ProviderRow {
     credential-status: string,
     auth-error: string,
     is-subscription: bool,
+    is-grok: bool,
     binding-label: string,
     preset-id: string,
     icon-id: string,
@@ -34,6 +35,7 @@ export struct AccountRow {
     workspace: string,
     is-default: bool,
     is-active: bool,
+    requires-reauth: bool,
     bound-provider-count: int,
     bound-provider-names: string,
 }

@@ -16,6 +16,7 @@ export component ProvidersPage inherits VerticalLayout {
     callback filter-providers(string);
     callback begin-provider-editor(string);
     callback begin-subscription-editor(string);
+    callback begin-xai-editor(string);
     callback check-provider(string);
     callback preview-direct(string);
     callback begin-model-editor(string, string);
@@ -24,7 +25,7 @@ export component ProvidersPage inherits VerticalLayout {
         height: 36px;
         spacing: 10px;
         QuietLineEdit {
-            width: 230px;
+            width: 190px;
             icon: @image-url("../../assets/ui/search.svg");
             placeholder-text: "搜索连接";
             accessible-label: "按名称筛选上游";
@@ -66,6 +67,13 @@ export component ProvidersPage inherits VerticalLayout {
             enabled: !root.busy && !root.config-managed && !root.chatgpt-login-pending;
             clicked => { root.begin-subscription-editor(""); }
         }
+
+        QuietButton {
+            width: 112px;
+            text: "+ Grok 订阅";
+            enabled: !root.busy && !root.config-managed;
+            clicked => { root.begin-xai-editor(""); }
+        }
     }
 
     if root.config-managed: Text {
@@ -86,7 +94,7 @@ export component ProvidersPage inherits VerticalLayout {
         }
 
         Text {
-            text: "添加 API 连接或 ChatGPT 订阅，再把常用模型放进工作台。";
+            text: "添加 API 连接、ChatGPT 或 Grok 订阅，再把常用模型放进工作台。";
             color: Theme.muted-text;
             font-size: 13px;
             horizontal-alignment: center;
@@ -183,7 +191,7 @@ export component ProvidersPage inherits VerticalLayout {
                         width: 106px;
                         text: "管理连接  ↗";
                         enabled: !root.busy && !root.config-managed;
-                        clicked => { if provider.is-subscription { root.begin-subscription-editor(provider.id); } else { root.begin-provider-editor(provider.id); } }
+                        clicked => { if provider.is-grok { root.begin-xai-editor(provider.id); } else if provider.is-subscription { root.begin-subscription-editor(provider.id); } else { root.begin-provider-editor(provider.id); } }
                     }
                 }
             }

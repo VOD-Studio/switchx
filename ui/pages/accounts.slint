@@ -1,3 +1,4 @@
+import { XaiAccounts } from "xai-accounts.slint";
 import { QuietScrollView as ScrollView } from "../scroll-view.slint";
 import { Theme } from "../tokens.slint";
 import {
@@ -17,10 +18,18 @@ export component AccountsPage inherits ScrollView {
     in property <string> login-url;
     in property <bool> chatgpt-login-pending;
     in property <string> route-auth-error;
+    in property <[AccountRow]> xai-accounts;
+    in property <string> xai-status;
+    in property <string> xai-user-code;
+    in property <string> xai-login-url;
+    in property <bool> xai-pending;
+    callback xai-account-action(int, string);
+    callback request-xai-removal(AccountRow);
     callback subscription-action(int);
     callback account-action(int, string);
     callback request-account-removal(AccountRow);
     VerticalLayout {
+        spacing: 18px;
         SurfaceCard {
             height: 328px + root.accounts.length * 94px + (root.accounts.length == 0 ? 40px : 0px) + (root.chatgpt-login-pending ? 172px : 0px);
             border-width: 0px;
@@ -286,6 +295,18 @@ export component AccountsPage inherits ScrollView {
                     }
                 }
             }
+        }
+
+        XaiAccounts {
+            busy: root.busy;
+            config-managed: root.config-managed;
+            accounts: root.xai-accounts;
+            status: root.xai-status;
+            user-code: root.xai-user-code;
+            login-url: root.xai-login-url;
+            pending: root.xai-pending;
+            action(action, id) => { root.xai-account-action(action, id); }
+            request-removal(account) => { root.request-xai-removal(account); }
         }
     }
 }
