@@ -3,7 +3,7 @@
 SLINT_LSP ?= slint-lsp
 SLINT_FILES := $(shell find ui -type f -name '*.slint' | sort)
 
-.PHONY: build lint format format-check test check require-slint-lsp
+.PHONY: build lint format format-check test check check-lib check-app test-router require-slint-lsp
 
 build:
 	cargo build --locked
@@ -33,3 +33,12 @@ test:
 	cargo test --locked
 
 check: format-check lint test
+
+check-lib:
+	cargo check --locked --lib
+
+check-app:
+	cargo check --locked --bin switchx
+
+test-router:
+	cargo test --locked --test router

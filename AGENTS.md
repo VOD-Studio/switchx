@@ -7,6 +7,10 @@ SwitchX is a Rust 2024 desktop app with a Slint interface. `src/main.rs` starts 
 ## Build, Test, and Development Commands
 
 - `cargo run`: build and launch the native app.
+- `make check-lib`: check business-library changes without generating machine code.
+- `make check-app`: check the desktop binary during development.
+- `make test-router`: run the focused routing integration tests.
+- During iteration, use the focused target relevant to the change; run `make check` for the complete formatting, Clippy, and test checks before committing a completed feature.
 - `cargo test`: run unit and integration tests.
 - `cargo test --test router`: check exact model routing, streaming, and credential isolation against local mock upstreams.
 - `cargo fmt --all -- --check`: check Rust formatting; run `cargo fmt --all` to apply it.
