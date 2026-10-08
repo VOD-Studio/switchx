@@ -193,11 +193,14 @@ export component ConfigPage inherits ScrollView {
                 }
             }
 
-            QuietLineEdit {
+            VerticalLayout {
                 width: 110px;
-                text <=> root.route-port;
-                accessible-label: "本地路由端口";
-                enabled: !root.busy && !root.config-managed;
+                alignment: center;
+                QuietLineEdit {
+                    text <=> root.route-port;
+                    accessible-label: "本地路由端口";
+                    enabled: !root.busy && !root.config-managed;
+                }
             }
         }
 
