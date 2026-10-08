@@ -7,12 +7,23 @@ export global DropdownViewport {
     in-out property <Point> size;
 }
 
-export component SurfaceCard inherits Rectangle {
-    background: Theme.panel;
-    border-width: 1px;
-    border-color: Theme.border;
-    border-radius: 11px;
-    animate background, border-color { duration: Theme.page-motion; }
+export component SurfaceCard {
+    in property <brush> background: Theme.panel;
+    in property <length> border-width: 1px;
+    in property <color> border-color: Theme.border;
+    in property <length> border-radius: 11px;
+    preferred-width: 100%;
+    preferred-height: 100%;
+    Rectangle {
+        width: root.width;
+        height: root.height;
+        background: root.background;
+        border-width: root.border-width;
+        border-color: root.border-color;
+        border-radius: root.border-radius;
+        animate background, border-color { duration: Theme.page-motion; }
+    }
+
     @children
 }
 
@@ -36,7 +47,7 @@ export component StatusPill inherits Rectangle {
     }
 }
 
-export component QuietButton inherits Rectangle {
+export component QuietButton {
     in property <string> text;
     in property <image> icon;
     in property <length> icon-width: 16px;
@@ -61,86 +72,104 @@ export component QuietButton inherits Rectangle {
     min-width: root.icon-only ? 36px : 64px;
     horizontal-stretch: 1;
     vertical-stretch: 0;
-    border-radius: 8px;
-    opacity: root.enabled ? 1 : 0.42;
-    border-width: root.ghost || root.navigation ? 0px : 1px;
-    border-color: root.primary ? Theme.solid : root.selected ? Theme.brand : hit-area.has-hover ? Theme.muted-text : Theme.border;
-    background: root.primary ? (hit-area.pressed ? Theme.brand : Theme.solid)
+    in property <length> border-radius: 8px;
+    in property <length> border-width: root.ghost || root.navigation ? 0px : 1px;
+    in property <color> border-color: root.primary ? Theme.solid : root.selected ? Theme.brand : hit-area.has-hover ? Theme.muted-text : Theme.border;
+    in property <brush> background: root.primary ? (hit-area.pressed ? Theme.brand : Theme.solid)
         : root.navigation && root.selected ? Theme.panel
         : root.selected ? Theme.brand-surface
         : hit-area.has-hover || hit-area.pressed ? Theme.raised
         : root.ghost || root.navigation ? transparent : Theme.panel;
-    animate background, border-color, opacity {
-        duration: Theme.fast;
-        easing: ease-out;
-    }
     forward-focus: key-focus;
     accessible-role: button;
     accessible-enabled: root.enabled;
     accessible-label: root.text;
     accessible-action-default => { if (root.enabled) { root.clicked(); } }
 
-    if root.icon-only: Tooltip {
-        Rectangle {
-            background: Theme.solid;
-            border-radius: 6px;
-            max-width: 360px;
-            VerticalLayout {
-                padding: 9px;
-                Text {
-                    text: root.text;
-                    color: Theme.on-brand;
-                    font-size: 12px;
-                    wrap: word-wrap;
+    // Keep visual effects off the root so repeated buttons remain reusable subcomponents.
+    Rectangle {
+        width: root.width;
+        height: root.height;
+        border-radius: root.border-radius;
+        border-width: root.border-width;
+        border-color: root.border-color;
+        background: root.background;
+        opacity: root.enabled ? 1 : 0.42;
+        animate background, border-color, opacity {
+            duration: Theme.fast;
+            easing: ease-out;
+        }
+        if root.icon-only: Tooltip {
+            Rectangle {
+                background: Theme.solid;
+                border-radius: 6px;
+                max-width: 360px;
+                VerticalLayout {
+                    padding: 9px;
+                    Text {
+                        text: root.text;
+                        color: Theme.on-brand;
+                        font-size: 12px;
+                        wrap: word-wrap;
+                    }
                 }
             }
         }
+
+        Rectangle {
+            x: 0px;
+            width: 3px;
+            height: 14px;
+            y: (parent.height - self.height) / 2;
+            border-radius: 2px;
+            background: Theme.brand;
+            opacity: root.navigation && root.selected ? 1 : 0;
+            animate opacity { duration: Theme.fast; }
+        }
+
+        if root.icon.width > 0: Image {
+            x: root.icon-only || root.stacked-icon ? (parent.width - self.width) / 2 : 12px;
+            y: (root.stacked-icon ? 16px : (parent.height - self.height) / 2) + root.press-offset;
+            width: root.icon-width;
+            height: root.icon-height;
+            source: root.icon;
+            image-fit: contain;
+            colorize: root.icon-color;
+            accessible-role: none;
+        }
+        if !root.icon-only: Text {
+            x: !root.stacked-icon && root.icon.width > 0 ? root.icon-width + 21px : 12px;
+            y: (root.stacked-icon ? root.icon-height + 24px : 0px) + root.press-offset;
+            width: parent.width - self.x - 12px;
+            height: parent.height - (root.stacked-icon ? self.y : 0px);
+            text: root.text;
+            color: root.primary ? Theme.on-brand : root.selected && !root.navigation ? Theme.brand : root.ghost && !hit-area.has-hover ? Theme.muted-text : Theme.primary-text;
+            font-size: 12px;
+            font-weight: root.selected || root.primary ? 600 : 400;
+            horizontal-alignment: root.left-aligned ? left : center;
+            vertical-alignment: center;
+            overflow: elide;
+            accessible-role: none;
+            animate color { duration: Theme.fast; }
+        }
+        if root.icon-only && root.icon.width == 0: Text {
+            text: "+";
+            color: Theme.muted-text;
+            font-size: 24px;
+            horizontal-alignment: center;
+            vertical-alignment: center;
+            accessible-role: none;
+        }
+
+        Rectangle {
+            border-radius: 8px;
+            border-width: 2px;
+            border-color: Theme.brand;
+            opacity: key-focus.has-focus ? 1 : 0;
+            animate opacity { duration: Theme.fast; }
+        }
     }
 
-    Rectangle {
-        x: 0px;
-        width: 3px;
-        height: 14px;
-        y: (parent.height - self.height) / 2;
-        border-radius: 2px;
-        background: Theme.brand;
-        opacity: root.navigation && root.selected ? 1 : 0;
-        animate opacity { duration: Theme.fast; }
-    }
-
-    if root.icon.width > 0: Image {
-        x: root.icon-only || root.stacked-icon ? (parent.width - self.width) / 2 : 12px;
-        y: (root.stacked-icon ? 16px : (parent.height - self.height) / 2) + root.press-offset;
-        width: root.icon-width;
-        height: root.icon-height;
-        source: root.icon;
-        image-fit: contain;
-        colorize: root.icon-color;
-        accessible-role: none;
-    }
-    if !root.icon-only: Text {
-        x: !root.stacked-icon && root.icon.width > 0 ? root.icon-width + 21px : 12px;
-        y: (root.stacked-icon ? root.icon-height + 24px : 0px) + root.press-offset;
-        width: parent.width - self.x - 12px;
-        height: parent.height - (root.stacked-icon ? self.y : 0px);
-        text: root.text;
-        color: root.primary ? Theme.on-brand : root.selected && !root.navigation ? Theme.brand : root.ghost && !hit-area.has-hover ? Theme.muted-text : Theme.primary-text;
-        font-size: 12px;
-        font-weight: root.selected || root.primary ? 600 : 400;
-        horizontal-alignment: root.left-aligned ? left : center;
-        vertical-alignment: center;
-        overflow: elide;
-        accessible-role: none;
-        animate color { duration: Theme.fast; }
-    }
-    if root.icon-only && root.icon.width == 0: Text {
-        text: "+";
-        color: Theme.muted-text;
-        font-size: 24px;
-        horizontal-alignment: center;
-        vertical-alignment: center;
-        accessible-role: none;
-    }
     hit-area := TouchArea {
         mouse-cursor: root.enabled ? pointer : default;
         clicked => { if (root.enabled) { key-focus.focus(); root.clicked(); } }
@@ -156,14 +185,6 @@ export component QuietButton inherits Rectangle {
             }
             return reject;
         }
-    }
-
-    Rectangle {
-        border-radius: 8px;
-        border-width: 2px;
-        border-color: Theme.brand;
-        opacity: key-focus.has-focus ? 1 : 0;
-        animate opacity { duration: Theme.fast; }
     }
 }
 
