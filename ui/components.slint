@@ -634,6 +634,8 @@ export component QuietComboBox inherits Rectangle {
                     y: 1px;
                     width: parent.width - 2px;
                     height: parent.height - 2px;
+                    vertical-scrollbar-policy: root.model.length * 40px + 8px > self.height ? as-needed : always-off;
+                    horizontal-scrollbar-policy: always-off;
                     content-y: -max(0, root.current-index - root.visible-items + 1) * 40px;
                     property <int> selection: root.current-index;
                     changed selection => {
