@@ -191,6 +191,7 @@ export component RoutingPage inherits Rectangle {
                         padding-right: 20px;
                         spacing: 12px;
                         QuietCheckBox {
+                            y: (parent.height - self.height) / 2;
                             width: 64px;
                             text: "全选";
                             accessible-label: self.checked ? "取消全选可发布模型" : "全选可发布模型";
