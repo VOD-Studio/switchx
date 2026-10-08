@@ -774,6 +774,7 @@ export component AppWindow inherits Window {
                                         HorizontalLayout {
                                             spacing: 18px;
                                             Image {
+                                                y: (parent.height - self.height) / 2;
                                                 width: 26px;
                                                 height: 26px;
                                                 source: item.icon;
@@ -798,6 +799,7 @@ export component AppWindow inherits Window {
                                             }
 
                                             StatusPill {
+                                                y: (parent.height - self.height) / 2;
                                                 label: "尚未接入";
                                             }
                                         }
