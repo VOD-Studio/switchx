@@ -434,6 +434,48 @@ fn account_view(data_dir: &Path, home: &Path) -> Result<AccountView, String> {
     })
 }
 
+/// Applies account rows by id. Replacing the model would recreate every account
+/// card and replay its entry motion on each quota refresh or time update.
+fn sync_account_rows(
+    model: ModelRc<AccountRow>,
+    rows: Vec<AccountRow>,
+    replace: impl FnOnce(ModelRc<AccountRow>),
+) {
+    let Some(current) = model.as_any().downcast_ref::<VecModel<AccountRow>>() else {
+        replace(ModelRc::new(VecModel::from(rows)));
+        return;
+    };
+    let mut index = 0;
+    while index < current.row_count() {
+        let id = current.row_data(index).unwrap_or_default().id;
+        if rows.iter().any(|row| row.id == id) {
+            index += 1;
+        } else {
+            current.remove(index);
+        }
+    }
+    let count = rows.len();
+    for (index, row) in rows.into_iter().enumerate() {
+        let found = (index..current.row_count())
+            .find(|&old| current.row_data(old).is_some_and(|old| old.id == row.id));
+        match found {
+            Some(old) if old == index => {
+                if current.row_data(index).as_ref() != Some(&row) {
+                    current.set_row_data(index, row);
+                }
+            }
+            Some(old) => {
+                current.remove(old);
+                current.insert(index, row);
+            }
+            None => current.insert(index, row),
+        }
+    }
+    while current.row_count() > count {
+        current.remove(current.row_count() - 1);
+    }
+}
+
 fn show_accounts(app: &AppWindow, view: Result<AccountView, String>) {
     match view {
         Ok(mut view) => {
@@ -445,7 +487,9 @@ fn show_accounts(app: &AppWindow, view: Result<AccountView, String>) {
                     row.codex_quota = old.codex_quota;
                 }
             }
-            app.set_accounts(ModelRc::new(VecModel::from(view.rows)));
+            sync_account_rows(app.get_accounts(), view.rows, |model| {
+                app.set_accounts(model)
+            });
             app.set_selected_account_id(view.selected.into());
             app.set_account_status(view.status.into());
             app.set_account_error("".into());
@@ -526,7 +570,9 @@ fn show_xai_accounts(app: &AppWindow, view: Result<Vec<AccountRow>, String>) {
             }
             app.set_xai_status(format!("已保存 {} 个 Grok 账号", rows.len()).into());
             app.set_xai_account_error("".into());
-            app.set_xai_accounts(ModelRc::new(VecModel::from(rows)));
+            sync_account_rows(app.get_xai_accounts(), rows, |model| {
+                app.set_xai_accounts(model)
+            });
             if app.get_active_page() == 1 && app.get_connections_tab() == 1 {
                 let unread = app
                     .get_xai_accounts()
@@ -626,7 +672,7 @@ fn tick_codex_quotas(app: &AppWindow, now: i64) {
             row
         })
         .collect::<Vec<_>>();
-    app.set_accounts(ModelRc::new(VecModel::from(rows)));
+    sync_account_rows(app.get_accounts(), rows, |model| app.set_accounts(model));
 }
 
 fn update_codex_quota(
@@ -675,7 +721,7 @@ fn update_codex_quota(
         Err(error) => quota.error = error.into(),
     }
     update_codex_quota_times(quota, chrono::Utc::now().timestamp());
-    app.set_accounts(ModelRc::new(VecModel::from(rows)));
+    sync_account_rows(app.get_accounts(), rows, |model| app.set_accounts(model));
 }
 
 fn refresh_codex_quota(app: &AppWindow, sender: &mpsc::Sender<Command>, id: &str) {
@@ -695,7 +741,7 @@ fn refresh_codex_quota(app: &AppWindow, sender: &mpsc::Sender<Command>, id: &str
             requests.push((row.id.to_string(), request_id));
         }
     }
-    app.set_accounts(ModelRc::new(VecModel::from(rows)));
+    sync_account_rows(app.get_accounts(), rows, |model| app.set_accounts(model));
     if !requests.is_empty()
         && let Err(error) = sender.try_send(Command::CodexQuota {
             requests,
@@ -719,7 +765,9 @@ fn update_xai_quota_times(app: &AppWindow, now: i64) {
     for row in &mut rows {
         update_quota_times(&mut row.quota, now);
     }
-    app.set_xai_accounts(ModelRc::new(VecModel::from(rows)));
+    sync_account_rows(app.get_xai_accounts(), rows, |model| {
+        app.set_xai_accounts(model)
+    });
 }
 
 fn update_xai_quota(
@@ -763,7 +811,9 @@ fn update_xai_quota(
         Err(error) => row.quota.error = error.into(),
     }
     update_quota_times(&mut row.quota, chrono::Utc::now().timestamp());
-    app.set_xai_accounts(ModelRc::new(VecModel::from(rows)));
+    sync_account_rows(app.get_xai_accounts(), rows, |model| {
+        app.set_xai_accounts(model)
+    });
 }
 
 fn refresh_xai_quota(app: &AppWindow, sender: &mpsc::Sender<Command>, id: &str) {
@@ -783,7 +833,9 @@ fn refresh_xai_quota(app: &AppWindow, sender: &mpsc::Sender<Command>, id: &str) 
             requests.push((row.id.to_string(), request_id));
         }
     }
-    app.set_xai_accounts(ModelRc::new(VecModel::from(rows)));
+    sync_account_rows(app.get_xai_accounts(), rows, |model| {
+        app.set_xai_accounts(model)
+    });
     if !requests.is_empty()
         && let Err(error) = sender.try_send(Command::XaiQuota(requests))
     {
@@ -2060,7 +2112,9 @@ async fn worker(
                                         {
                                             row.quota = XaiQuotaRow::default();
                                         }
-                                        app.set_xai_accounts(ModelRc::new(VecModel::from(rows)));
+                                        sync_account_rows(app.get_xai_accounts(), rows, |model| {
+                                            app.set_xai_accounts(model)
+                                        });
                                     }
                                     show_xai_accounts(&app, view);
                                     match result {
@@ -3063,7 +3117,9 @@ async fn worker(
                                 ..row
                             })
                             .collect::<Vec<_>>();
-                        app.set_accounts(ModelRc::new(VecModel::from(rows)));
+                        sync_account_rows(app.get_accounts(), rows, |model| {
+                            app.set_accounts(model)
+                        });
                     }
                     if let Some(accounts) = accounts {
                         show_accounts(&app, accounts);
@@ -4716,6 +4772,37 @@ mod tests {
         let row = app.get_accounts().row_data(0).unwrap();
         assert!(!row.codex_quota.loading);
         assert_eq!(row.codex_quota.error, "后台繁忙，请稍后刷新额度");
+    }
+
+    #[test]
+    fn account_updates_keep_the_model_so_cards_are_not_recreated() {
+        let row = |id: &str, label: &str| AccountRow {
+            id: id.into(),
+            label: label.into(),
+            ..Default::default()
+        };
+        let ids = |model: &ModelRc<AccountRow>| {
+            model
+                .iter()
+                .map(|row| row.id.to_string())
+                .collect::<Vec<_>>()
+        };
+        let model = ModelRc::new(VecModel::from(vec![row("a", "A"), row("b", "B")]));
+        let replace = |_| panic!("an existing account model must be updated in place");
+        sync_account_rows(model.clone(), vec![row("a", "A2"), row("b", "B")], replace);
+        assert_eq!(model.row_data(0).unwrap().label, "A2");
+        sync_account_rows(model.clone(), vec![row("c", "C"), row("a", "A2")], replace);
+        assert_eq!(ids(&model), ["c", "a"]);
+        sync_account_rows(model.clone(), vec![row("a", "A2"), row("c", "C")], replace);
+        assert_eq!(ids(&model), ["a", "c"]);
+        sync_account_rows(model.clone(), Vec::new(), replace);
+        assert_eq!(model.row_count(), 0);
+
+        let mut replaced = None;
+        sync_account_rows(ModelRc::default(), vec![row("a", "A")], |model| {
+            replaced = Some(model)
+        });
+        assert_eq!(ids(&replaced.unwrap()), ["a"]);
     }
 
     #[test]
