@@ -24,6 +24,7 @@ const ISSUER: &str = "https://auth.x.ai";
 const CLIENT_ID: &str = "b1a00492-073a-47ea-816f-4c329264a828";
 const SCOPE: &str = "openid profile email offline_access grok-cli:access api:access";
 const MAX_RESPONSE: usize = 64 * 1024;
+pub use crate::xai_quota::Quota;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct AccountInfo {
@@ -356,6 +357,10 @@ impl AccountManager {
         })
         .await
         .map_err(|_| "Grok 凭据刷新任务失败")?
+    }
+    pub async fn quota(&self, id: &str) -> Result<Quota, String> {
+        let token = self.credential(id).await?;
+        crate::xai_quota::fetch(&self.0.client, crate::xai_quota::ENDPOINT, &token).await
     }
     async fn refresh(&self, id: &str) -> Result<Secret, String> {
         let _lock = self.lock()?;

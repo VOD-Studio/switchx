@@ -18,4 +18,5 @@ pub mod routing;
 pub mod storage;
 pub use switchx_ui as ui;
 pub mod xai;
+mod xai_quota;
 pub mod xai_responses;

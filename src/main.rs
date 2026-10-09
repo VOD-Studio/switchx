@@ -1,6 +1,6 @@
 use switchx::ui::{
     AccountRow, AppWindow, CodeSpan, ModelRow, ProviderIconRow, ProviderPresetRow, ProviderRow,
-    RequestRow, SwitchXTray, SyntaxHighlighting, Theme,
+    RequestRow, SwitchXTray, SyntaxHighlighting, Theme, XaiQuotaRow,
 };
 
 #[cfg(target_os = "macos")]
@@ -65,6 +65,7 @@ enum Command {
         action: i32,
         id: String,
     },
+    XaiQuota(Vec<(String, String)>),
     SaveSubscription {
         id: String,
         name: String,
@@ -415,6 +416,7 @@ fn account_view(data_dir: &Path, home: &Path) -> Result<AccountView, String> {
                     requires_reauth: false,
                     bound_provider_count: names.len() as i32,
                     bound_provider_names: names.join("、").into(),
+                    ..Default::default()
                 }
             })
             .collect(),
@@ -475,6 +477,7 @@ fn xai_account_view(data_dir: &Path) -> Result<Vec<AccountRow>, String> {
                 requires_reauth: account.requires_reauth,
                 bound_provider_count: names.len() as i32,
                 bound_provider_names: names.join("、").into(),
+                ..Default::default()
             }
         })
         .collect())
@@ -482,11 +485,140 @@ fn xai_account_view(data_dir: &Path) -> Result<Vec<AccountRow>, String> {
 
 fn show_xai_accounts(app: &AppWindow, view: Result<Vec<AccountRow>, String>) {
     match view {
-        Ok(rows) => {
+        Ok(mut rows) => {
+            let previous = app.get_xai_accounts();
+            for row in &mut rows {
+                if let Some(old) = previous.iter().find(|old| old.id == row.id) {
+                    row.quota = old.quota;
+                }
+            }
             app.set_xai_status(format!("已保存 {} 个 Grok 账号", rows.len()).into());
             app.set_xai_accounts(ModelRc::new(VecModel::from(rows)));
+            if app.get_active_page() == 1 && app.get_connections_tab() == 1 {
+                let unread = app
+                    .get_xai_accounts()
+                    .iter()
+                    .filter(|row| row.quota.request_id.is_empty())
+                    .map(|row| row.id)
+                    .collect::<Vec<_>>();
+                for id in unread {
+                    app.invoke_xai_account_action(5, id);
+                }
+            }
         }
         Err(error) => app.set_xai_status(error.into()),
+    }
+}
+
+fn update_quota_times(quota: &mut XaiQuotaRow, now: i64) {
+    if let Ok(queried) = quota.queried_at.parse::<i64>() {
+        let elapsed = (now - queried).max(0);
+        quota.updated_label = match elapsed {
+            0..=59 => "刚刚更新".into(),
+            60..=3599 => format!("{} 分钟前更新", elapsed / 60).into(),
+            3600..=86399 => format!("{} 小时前更新", elapsed / 3600).into(),
+            _ => format!("{} 天前更新", elapsed / 86400).into(),
+        };
+    }
+    quota.reset_label = match quota.resets_at.parse::<i64>() {
+        Ok(reset) if reset <= now => "已到重置时间，请刷新".into(),
+        Ok(reset) => {
+            let minutes = ((reset - now) + 59) / 60;
+            match minutes {
+                0..=59 => format!("{minutes} 分钟后重置"),
+                60..=1439 => format!("{} 小时 {} 分后重置", minutes / 60, minutes % 60),
+                _ => format!("{} 天 {} 小时后重置", minutes / 1440, minutes / 60 % 24),
+            }
+            .into()
+        }
+        _ => "官方未提供重置时间".into(),
+    };
+}
+
+fn update_xai_quota_times(app: &AppWindow, now: i64) {
+    let mut rows = app.get_xai_accounts().iter().collect::<Vec<_>>();
+    for row in &mut rows {
+        update_quota_times(&mut row.quota, now);
+    }
+    app.set_xai_accounts(ModelRc::new(VecModel::from(rows)));
+}
+
+fn update_xai_quota(
+    app: &AppWindow,
+    id: &str,
+    request_id: &str,
+    result: Result<switchx::xai::Quota, String>,
+) {
+    let mut rows = app.get_xai_accounts().iter().collect::<Vec<_>>();
+    let Some(row) = rows
+        .iter_mut()
+        .find(|row| row.id == id && row.quota.request_id == request_id)
+    else {
+        return; // Removed accounts and superseded requests must not receive old results.
+    };
+    row.quota.loading = false;
+    match result {
+        Ok(quota) => {
+            row.quota.has_value = true;
+            row.quota.remaining_percent = quota.remaining_percent;
+            row.quota.period_label = quota.period_label.into();
+            row.quota.resets_at = quota
+                .resets_at
+                .map(|v| v.to_string())
+                .unwrap_or_default()
+                .into();
+            row.quota.queried_at = quota.queried_at.to_string().into();
+            row.quota.reset_detail = quota
+                .resets_at
+                .and_then(|v| chrono::DateTime::from_timestamp(v, 0))
+                .map(|v| {
+                    format!(
+                        "重置于 {}",
+                        v.with_timezone(&chrono::Local).format("%m月%d日 %H:%M")
+                    )
+                })
+                .unwrap_or_default()
+                .into();
+            row.quota.error = "".into();
+        }
+        Err(error) => row.quota.error = error.into(),
+    }
+    update_quota_times(&mut row.quota, chrono::Utc::now().timestamp());
+    app.set_xai_accounts(ModelRc::new(VecModel::from(rows)));
+}
+
+fn refresh_xai_quota(app: &AppWindow, sender: &mpsc::Sender<Command>, id: &str) {
+    if app.get_recovery_only() || app.get_xai_pending() {
+        return;
+    }
+    let mut rows = app.get_xai_accounts().iter().collect::<Vec<_>>();
+    let mut requests = Vec::new();
+    for row in &mut rows {
+        if (id.is_empty() || row.id == id) && !row.quota.loading && !row.requires_reauth {
+            let Ok(request_id) = app::new_id() else {
+                continue;
+            };
+            row.quota.request_id = request_id.clone().into();
+            row.quota.loading = true;
+            row.quota.error = "".into();
+            requests.push((row.id.to_string(), request_id));
+        }
+    }
+    app.set_xai_accounts(ModelRc::new(VecModel::from(rows)));
+    if !requests.is_empty()
+        && let Err(error) = sender.try_send(Command::XaiQuota(requests))
+    {
+        let command = error.into_inner();
+        if let Command::XaiQuota(requests) = command {
+            for (id, request_id) in requests {
+                update_xai_quota(
+                    app,
+                    &id,
+                    &request_id,
+                    Err("后台繁忙，请稍后刷新额度".into()),
+                );
+            }
+        }
     }
 }
 
@@ -1436,8 +1568,10 @@ async fn worker(
     let mut account_home = client::default_home().ok();
     let mut subscription_auth: Option<SubscriptionAuthDraft> = None;
     let mut provider_checks = tokio::task::JoinSet::new();
+    let mut xai_quota_queries = tokio::task::JoinSet::new();
     while let Some(command) = receiver.recv().await {
         while provider_checks.try_join_next().is_some() {}
+        while xai_quota_queries.try_join_next().is_some() {}
         let recovery_only = directory
             .as_ref()
             .ok()
@@ -1611,6 +1745,30 @@ async fn worker(
                     );
                 });
             }
+            Command::XaiQuota(requests) => {
+                let manager = directory
+                    .as_ref()
+                    .map_err(|e| e.message().to_owned())
+                    .and_then(|path| {
+                        if xai_manager.is_none() {
+                            xai_manager = Some(switchx::xai::AccountManager::open(path)?);
+                        }
+                        Ok(xai_manager.as_ref().unwrap().clone())
+                    });
+                for (id, request_id) in requests {
+                    let manager = manager.clone();
+                    let window = weak.clone();
+                    xai_quota_queries.spawn(async move {
+                        let result = match manager {
+                            Ok(manager) => manager.quota(&id).await,
+                            Err(error) => Err(error),
+                        };
+                        let _ = window.upgrade_in_event_loop(move |app| {
+                            update_xai_quota(&app, &id, &request_id, result);
+                        });
+                    });
+                }
+            }
             Command::XaiAccount { action, id } => {
                 let result = async {
                     let data_dir = directory.as_ref().map_err(|e| e.message())?;
@@ -1670,15 +1828,29 @@ async fn worker(
                                     app.set_xai_pending(false);
                                     app.set_xai_user_code("".into());
                                     app.set_xai_login_url("".into());
+                                    // Reauthorization supersedes queries using previous credentials.
+                                    if let Ok(account) = &result {
+                                        let mut rows =
+                                            app.get_xai_accounts().iter().collect::<Vec<_>>();
+                                        if let Some(row) =
+                                            rows.iter_mut().find(|row| row.id == account.id)
+                                        {
+                                            row.quota = XaiQuotaRow::default();
+                                        }
+                                        app.set_xai_accounts(ModelRc::new(VecModel::from(rows)));
+                                    }
                                     show_xai_accounts(&app, view);
                                     match result {
-                                        Ok(account) => app.set_action_message(
-                                            format!(
-                                                "Grok 账号 {} 已保存，可绑定到 Grok 上游",
-                                                account.label
-                                            )
-                                            .into(),
-                                        ),
+                                        Ok(account) => {
+                                            app.set_action_message(
+                                                format!(
+                                                    "Grok 账号 {} 已保存，可绑定到 Grok 上游",
+                                                    account.label
+                                                )
+                                                .into(),
+                                            );
+                                            app.invoke_xai_account_action(5, account.id.into());
+                                        }
                                         Err(error) => {
                                             app.set_xai_status(error.clone().into());
                                             app.set_action_message(error.into());
@@ -1726,6 +1898,9 @@ async fn worker(
                     }
                     discard_account_previews(&app);
                     show_action(&app, result);
+                    if action == 0 {
+                        app.invoke_xai_account_action(5, "".into());
+                    }
                 });
             }
             Command::BeginProviderEditor { id, home: target } => {
@@ -3057,6 +3232,8 @@ async fn worker(
                 });
             }
             Command::Quit => {
+                xai_quota_queries.abort_all();
+                while xai_quota_queries.join_next().await.is_some() {}
                 while provider_checks.join_next().await.is_some() {}
                 if let Some((cancel, task)) = pending_xai_login.take() {
                     cancel.send_replace(true);
@@ -3179,6 +3356,8 @@ async fn worker(
             );
         });
     }
+    xai_quota_queries.abort_all();
+    while xai_quota_queries.join_next().await.is_some() {}
     while provider_checks.join_next().await.is_some() {}
     if let Some((cancel, task)) = pending_xai_login {
         cancel.send_replace(true);
@@ -3470,6 +3649,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let weak = app.as_weak();
     app.on_xai_account_action(move |action, id| {
         if let Some(app) = weak.upgrade() {
+            if action == 5 {
+                refresh_xai_quota(&app, &callback_sender, &id);
+                return;
+            }
+            if action == 6 {
+                update_xai_quota_times(&app, chrono::Utc::now().timestamp());
+                return;
+            }
             queue(
                 &app,
                 &callback_sender,
@@ -4117,6 +4304,176 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn grok_quota_refresh_keeps_last_success_and_ignores_outdated_account_results() {
+        use slint::platform::{Platform, WindowAdapter, software_renderer::MinimalSoftwareWindow};
+        use std::rc::Rc;
+        struct PreviewPlatform(Rc<MinimalSoftwareWindow>);
+        impl Platform for PreviewPlatform {
+            fn create_window_adapter(&self) -> Result<Rc<dyn WindowAdapter>, slint::PlatformError> {
+                Ok(self.0.clone())
+            }
+        }
+        let window = MinimalSoftwareWindow::new(Default::default());
+        slint::platform::set_platform(Box::new(PreviewPlatform(window.clone()))).unwrap();
+        let app = AppWindow::new().unwrap();
+        app.set_xai_accounts(ModelRc::new(VecModel::from(vec![
+            AccountRow {
+                id: "a".into(),
+                label: "A".into(),
+                ..Default::default()
+            },
+            AccountRow {
+                id: "b".into(),
+                label: "B".into(),
+                ..Default::default()
+            },
+            AccountRow {
+                id: "expired".into(),
+                requires_reauth: true,
+                ..Default::default()
+            },
+        ])));
+        let (sender, mut receiver) = mpsc::channel(2);
+        refresh_xai_quota(&app, &sender, "a");
+        assert!(!app.get_busy());
+        let Command::XaiQuota(first) = receiver.try_recv().unwrap() else {
+            panic!("quota command")
+        };
+        assert_eq!(first.len(), 1);
+        assert_eq!(first[0].0, "a");
+        refresh_xai_quota(&app, &sender, "");
+        let Command::XaiQuota(second) = receiver.try_recv().unwrap() else {
+            panic!("quota command")
+        };
+        assert_eq!(second.len(), 1);
+        assert_eq!(second[0].0, "b");
+        let now = chrono::Utc::now().timestamp();
+        let quota = switchx::xai::Quota {
+            remaining_percent: 98.0,
+            resets_at: Some(now + 7 * 86400),
+            queried_at: now,
+            period_label: "每周额度",
+        };
+        update_xai_quota(&app, "a", &first[0].1, Ok(quota.clone()));
+        assert!(app.get_xai_accounts().row_data(0).unwrap().quota.has_value);
+        assert_eq!(
+            app.get_xai_accounts()
+                .row_data(0)
+                .unwrap()
+                .quota
+                .updated_label,
+            "刚刚更新"
+        );
+        let rows = app.get_xai_accounts().iter().collect::<Vec<_>>();
+        show_xai_accounts(&app, Ok(rows));
+        assert!(app.get_xai_accounts().row_data(1).unwrap().quota.loading);
+        refresh_xai_quota(&app, &sender, "a");
+        let Command::XaiQuota(retry) = receiver.try_recv().unwrap() else {
+            panic!("quota command")
+        };
+        update_xai_quota(&app, "a", &first[0].1, Err("过时结果".into()));
+        assert!(app.get_xai_accounts().row_data(0).unwrap().quota.loading);
+        update_xai_quota(&app, "a", &retry[0].1, Err("模拟网络失败".into()));
+        let row = app.get_xai_accounts().row_data(0).unwrap();
+        assert!(!row.quota.loading);
+        assert_eq!(row.quota.remaining_percent, 98.0);
+        assert_eq!(row.quota.queried_at, now.to_string());
+        assert_eq!(row.quota.error, "模拟网络失败");
+        let mut time = row.quota;
+        update_quota_times(&mut time, now + 3600);
+        assert_eq!(time.updated_label, "1 小时前更新");
+        update_quota_times(&mut time, now + 7 * 86400);
+        assert_eq!(time.reset_label, "已到重置时间，请刷新");
+        app.set_xai_accounts(ModelRc::default());
+        update_xai_quota(&app, "b", &second[0].1, Ok(quota));
+        assert_eq!(app.get_xai_accounts().row_count(), 0);
+        show_xai_accounts(
+            &app,
+            Ok(vec![AccountRow {
+                id: "a".into(),
+                ..Default::default()
+            }]),
+        );
+        drop(receiver);
+        refresh_xai_quota(&app, &sender, "a");
+        let row = app.get_xai_accounts().row_data(0).unwrap();
+        assert!(!row.quota.loading);
+        assert!(!row.quota.error.is_empty());
+        assert!(!app.get_busy());
+
+        // A timer or background response must not move the user's scrolled account page.
+        app.set_xai_accounts(ModelRc::new(VecModel::from(vec![AccountRow {
+            id: "a".into(),
+            label: "preview@example.invalid".into(),
+            quota: XaiQuotaRow {
+                request_id: "scroll-check".into(),
+                ..Default::default()
+            },
+            ..Default::default()
+        }])));
+        let quota = switchx::xai::Quota {
+            remaining_percent: 98.0,
+            resets_at: Some(now + 7 * 86400),
+            queried_at: now,
+            period_label: "每周额度",
+        };
+        update_xai_quota(&app, "a", "scroll-check", Ok(quota.clone()));
+        app.global::<Theme>().set_animations_enabled(false);
+        app.global::<Theme>().set_dark(true);
+        app.set_loading(false);
+        app.set_active_page(1);
+        app.set_connections_tab(1);
+        app.window().set_size(slint::PhysicalSize::new(1000, 680));
+        app.show().unwrap();
+        let draw = || {
+            slint::platform::update_timers_and_animations();
+            let mut pixels = slint::SharedPixelBuffer::<slint::Rgb8Pixel>::new(1000, 680);
+            window.request_redraw();
+            window.draw_if_needed(|renderer| {
+                renderer.render(pixels.make_mut_slice(), 1000);
+            });
+            pixels
+        };
+        draw();
+        window.dispatch_event(slint::platform::WindowEvent::PointerScrolled {
+            position: slint::LogicalPosition::new(940.0, 580.0),
+            delta_x: 0.0,
+            delta_y: -2000.0,
+        });
+        let before = draw();
+        let pixel = before.as_slice()[585 * 1000 + 296];
+        assert_eq!(
+            (pixel.r, pixel.g, pixel.b),
+            (167, 196, 171),
+            "quota meter must be visible after scrolling"
+        );
+        update_xai_quota_times(&app, now + 120);
+        assert_eq!(
+            app.get_xai_accounts()
+                .row_data(0)
+                .unwrap()
+                .quota
+                .updated_label,
+            "2 分钟前更新"
+        );
+        let after = draw();
+        let pixel = after.as_slice()[585 * 1000 + 296];
+        assert_eq!(
+            (pixel.r, pixel.g, pixel.b),
+            (167, 196, 171),
+            "time update must keep the card in view"
+        );
+        update_xai_quota(&app, "a", "scroll-check", Ok(quota));
+        let after = draw();
+        let pixel = after.as_slice()[585 * 1000 + 296];
+        assert_eq!(
+            (pixel.r, pixel.g, pixel.b),
+            (167, 196, 171),
+            "background result must keep the card in view"
+        );
+    }
 
     #[test]
     fn checking_one_provider_keeps_other_connections_interactive() {

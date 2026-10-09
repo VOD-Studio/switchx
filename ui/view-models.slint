@@ -35,6 +35,20 @@ export struct ProviderIconRow {
     monochrome: bool,
 }
 
+export struct XaiQuotaRow {
+    has-value: bool,
+    remaining-percent: float,
+    period-label: string,
+    resets-at: string,
+    queried-at: string,
+    reset-label: string,
+    reset-detail: string,
+    updated-label: string,
+    loading: bool,
+    request-id: string,
+    error: string,
+}
+
 export struct AccountRow {
     id: string,
     label: string,
@@ -44,6 +58,7 @@ export struct AccountRow {
     requires-reauth: bool,
     bound-provider-count: int,
     bound-provider-names: string,
+    quota: XaiQuotaRow,
 }
 
 export struct ModelRow {
