@@ -1,3 +1,4 @@
+import { QuotaWindow } from "../quota-window.slint";
 import { Theme } from "../tokens.slint";
 import {
     QuietButton,
@@ -144,62 +145,8 @@ export component XaiAccounts inherits SurfaceCard {
                 width: parent.width - 74px;
                 height: 38px;
                 spacing: 6px;
-                if account.quota.has-value: HorizontalLayout {
-                    height: 18px;
-                    spacing: 10px;
-                    Text {
-                        width: 60px;
-                        horizontal-stretch: 0;
-                        text: account.quota.period-label;
-                        color: Theme.muted-text;
-                        font-size: 12px;
-                        vertical-alignment: center;
-                    }
-
-                    meter := Rectangle {
-                        height: 5px;
-                        y: (parent.height - self.height) / 2;
-                        min-width: 70px;
-                        max-width: 240px;
-                        horizontal-stretch: 1;
-                        border-radius: 3px;
-                        background: Theme.raised;
-                        accessible-role: progress-indicator;
-                        accessible-label: account.quota.period-label + "剩余 " + round(account.quota.remaining-percent) + "%";
-                        accessible-value: round(account.quota.remaining-percent) + "%";
-                        Rectangle {
-                            x: 0px;
-                            y: 0px;
-                            width: parent.width * max(0, min(100, account.quota.remaining-percent)) / 100;
-                            height: parent.height;
-                            border-radius: 3px;
-                            background: account.quota.remaining-percent <= 0 ? Theme.error : account.quota.remaining-percent < 10 ? Theme.warning : Theme.brand;
-                            animate width {
-                                duration: Theme.page-motion;
-                                easing: ease-out;
-                            }
-                        }
-                    }
-
-                    Text {
-                        width: 82px;
-                        horizontal-stretch: 0;
-                        text: "剩余 " + round(account.quota.remaining-percent) + "%";
-                        color: account.quota.remaining-percent <= 0 ? Theme.error : account.quota.remaining-percent < 10 ? Theme.warning : Theme.primary-text;
-                        font-size: 12px;
-                        font-weight: 600;
-                        vertical-alignment: center;
-                    }
-
-                    Text {
-                        min-width: 184px;
-                        horizontal-stretch: 1;
-                        text: account.quota.reset-label;
-                        color: Theme.muted-text;
-                        font-size: 12px;
-                        horizontal-alignment: right;
-                        vertical-alignment: center;
-                    }
+                if account.quota.has-value: QuotaWindow {
+                    quota: account.quota;
                 }
                 if !account.quota.has-value: Text {
                     height: 18px;

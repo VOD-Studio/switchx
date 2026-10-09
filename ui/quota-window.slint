@@ -1,0 +1,80 @@
+import { Theme } from "tokens.slint";
+import { XaiQuotaRow } from "view-models.slint";
+
+export component QuotaWindow inherits HorizontalLayout {
+    in property <XaiQuotaRow> quota;
+    in property <length> label-width: 60px;
+    height: 18px;
+    spacing: 10px;
+    Text {
+        width: root.label-width;
+        horizontal-stretch: 0;
+        text: root.quota.period-label;
+        color: Theme.muted-text;
+        font-size: 12px;
+        vertical-alignment: center;
+    }
+
+    Rectangle {
+        height: 5px;
+        y: (parent.height - self.height) / 2;
+        min-width: 70px;
+        max-width: 240px;
+        horizontal-stretch: 1;
+        border-radius: 3px;
+        background: Theme.raised;
+        accessible-role: progress-indicator;
+        accessible-label: root.quota.period-label + "剩余 " + round(root.quota.remaining-percent) + "%";
+        accessible-value: round(root.quota.remaining-percent) + "%";
+        Rectangle {
+            x: 0px;
+            y: 0px;
+            width: parent.width * max(0, min(100, root.quota.remaining-percent)) / 100;
+            height: parent.height;
+            border-radius: 3px;
+            background: root.quota.remaining-percent <= 0 ? Theme.error : root.quota.remaining-percent < 10 ? Theme.warning : Theme.brand;
+            animate width {
+                duration: Theme.page-motion;
+                easing: ease-out;
+            }
+        }
+    }
+
+    Text {
+        width: 82px;
+        horizontal-stretch: 0;
+        text: "剩余 " + round(root.quota.remaining-percent) + "%";
+        color: root.quota.remaining-percent <= 0 ? Theme.error : root.quota.remaining-percent < 10 ? Theme.warning : Theme.primary-text;
+        font-size: 12px;
+        font-weight: 600;
+        vertical-alignment: center;
+    }
+
+    Text {
+        min-width: 184px;
+        horizontal-stretch: 1;
+        text: root.quota.reset-label;
+        color: Theme.muted-text;
+        font-size: 12px;
+        horizontal-alignment: right;
+        vertical-alignment: center;
+    }
+}
+
+export component QuotaWindowDetail inherits VerticalLayout {
+    in property <XaiQuotaRow> quota;
+    height: 36px;
+    spacing: 4px;
+    QuotaWindow {
+        quota: root.quota;
+        label-width: 74px;
+    }
+
+    Text {
+        height: 14px;
+        text: root.quota.reset-detail;
+        font-size: 11px;
+        color: Theme.muted-text;
+        vertical-alignment: center;
+    }
+}

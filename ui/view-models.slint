@@ -49,6 +49,21 @@ export struct XaiQuotaRow {
     error: string,
 }
 
+export struct CodexQuotaRow {
+    has-value: bool,
+    primary-window: XaiQuotaRow,
+    secondary-window: XaiQuotaRow,
+    credits-label: string,
+    reset-expiries: string,
+    resets-label: string,
+    resets-warning: bool,
+    queried-at: string,
+    updated-label: string,
+    loading: bool,
+    request-id: string,
+    error: string,
+}
+
 export struct AccountRow {
     id: string,
     label: string,
@@ -59,6 +74,8 @@ export struct AccountRow {
     bound-provider-count: int,
     bound-provider-names: string,
     quota: XaiQuotaRow,
+    credential-generation: string,
+    codex-quota: CodexQuotaRow,
 }
 
 export struct ModelRow {

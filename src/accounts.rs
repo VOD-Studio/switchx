@@ -18,6 +18,7 @@ use serde_json::{Value, json};
 use tokio::sync::{Mutex as AsyncMutex, oneshot, watch};
 use zeroize::{Zeroize, Zeroizing};
 
+pub use crate::codex_quota::{Quota, Window as QuotaWindow};
 use crate::{app, config_transaction as files, credentials::Secret, storage::AccountBinding};
 
 const STORE_NAME: &str = "codex_oauth_auth.json";
@@ -34,6 +35,7 @@ pub struct AccountInfo {
     pub label: String,
     pub workspace_id: String,
     pub is_default: bool,
+    pub authenticated_at_ms: i64,
 }
 
 #[derive(Debug)]
@@ -60,6 +62,8 @@ struct Endpoints {
     poll: String,
     token: String,
     verification: String,
+    usage: String,
+    resets: String,
 }
 
 impl Default for Endpoints {
@@ -69,6 +73,8 @@ impl Default for Endpoints {
             poll: "https://auth.openai.com/api/accounts/deviceauth/token".into(),
             token: "https://auth.openai.com/oauth/token".into(),
             verification: "https://auth.openai.com/codex/device".into(),
+            usage: crate::codex_quota::USAGE_ENDPOINT.into(),
+            resets: crate::codex_quota::RESETS_ENDPOINT.into(),
         }
     }
 }
@@ -151,6 +157,7 @@ impl Drop for StoreSession {
 enum CredentialUse {
     Native,
     Preview,
+    Quota,
 }
 
 struct CancelOnDrop(watch::Sender<bool>);
@@ -285,6 +292,8 @@ impl AccountManager {
                 poll: format!("{origin}/poll"),
                 token: format!("{origin}/token"),
                 verification: "https://auth.openai.com/codex/device".into(),
+                usage: format!("{origin}/usage"),
+                resets: format!("{origin}/resets"),
             },
         )
     }
@@ -782,6 +791,28 @@ impl AccountManager {
             .map(|_| ())
     }
 
+    /// Query this managed account without activating or writing its native Codex login.
+    pub async fn quota(&self, id: &str, native_home: &Path) -> Result<Quota, String> {
+        let credential = self
+            .credential_operation(id, native_home, false, CredentialUse::Quota)
+            .await
+            .map_err(|error| {
+                if error.starts_with("原生登录与绑定账号共用凭据且需要续期或同步")
+                {
+                    "当前 Codex 登录需要续期；请先检查并续期原生登录，再刷新额度".into()
+                } else {
+                    error
+                }
+            })?;
+        crate::codex_quota::fetch(
+            &self.0.client,
+            &self.0.endpoints.usage,
+            &self.0.endpoints.resets,
+            &credential,
+        )
+        .await
+    }
+
     /// Preparation can adopt this account's native renewal but never writes the native home.
     pub async fn credential_for_route(
         &self,
@@ -832,8 +863,9 @@ impl AccountManager {
         if usage == CredentialUse::Native {
             ensure_directory(home)?;
         } else if !home.is_absolute()
-            || !fs::symlink_metadata(home)
-                .is_ok_and(|metadata| metadata.is_dir() && !metadata.file_type().is_symlink())
+            || (usage == CredentialUse::Preview
+                && !fs::symlink_metadata(home)
+                    .is_ok_and(|metadata| metadata.is_dir() && !metadata.file_type().is_symlink()))
         {
             return Err("Codex 配置目录必须是存在的绝对路径普通目录".into());
         }
@@ -843,7 +875,7 @@ impl AccountManager {
             None
         };
         let mut snapshot = read_home(home, &session.state.store)?;
-        if usage == CredentialUse::Preview
+        if usage != CredentialUse::Native
             && snapshot.live.as_ref().is_some_and(|live| {
                 matches_identity(&session.state.store.accounts[id], &live.identity)
                     && token_expiry(&live.access_token).is_none_or(|expiry| {
@@ -859,7 +891,7 @@ impl AccountManager {
         if snapshot.active_id.as_deref() == Some(id) {
             self.sync_snapshot(&mut session, &snapshot)?;
         }
-        if usage == CredentialUse::Preview {
+        if usage != CredentialUse::Native {
             self.guard_native_preview(&mut session, id, &snapshot)?;
         }
         let token = self
@@ -1523,6 +1555,7 @@ fn info(account: &StoredAccount, store: &Store) -> AccountInfo {
         label: account.label.clone(),
         workspace_id: account.workspace_id.clone(),
         is_default: store.default_account_id.as_deref() == Some(&account.id),
+        authenticated_at_ms: account.authenticated_at_ms,
     }
 }
 
@@ -2066,6 +2099,8 @@ mod tests {
                     poll: format!("{origin}/poll"),
                     token: format!("{origin}/token"),
                     verification: "https://auth.openai.com/codex/device".into(),
+                    usage: format!("{origin}/usage"),
+                    resets: format!("{origin}/resets"),
                 },
                 task,
             }
@@ -2076,6 +2111,93 @@ mod tests {
         fn drop(&mut self) {
             self.task.abort();
         }
+    }
+
+    #[tokio::test]
+    async fn quota_pins_each_managed_account_and_preserves_native_files() {
+        use axum::{http::HeaderMap, routing::get};
+        let server = MockServer::new(Router::new()
+            .route("/token", post(|axum::Form(form): axum::Form<HashMap<String, String>>| async move {
+                let (user, workspace) = match form["refresh_token"].as_str() {
+                    "synthetic-a" => ("user-a", "workspace-a"),
+                    "synthetic-b" => ("user-b", "workspace-b"),
+                    _ => panic!("quota must not renew the native account"),
+                };
+                Json(token_reply(user, workspace, &format!("renewed-{user}")))
+            }))
+            .route("/usage", get(|headers: HeaderMap| async move {
+                let (user, used) = match headers["chatgpt-account-id"].to_str().unwrap() {
+                    "workspace-a" => ("user-a", 25),
+                    "workspace-b" => ("user-b", 50),
+                    _ => panic!("quota must use the selected workspace"),
+                };
+                assert_eq!(headers["authorization"].to_str().unwrap(), format!("Bearer {}", access_token(&format!("renewed-{user}"))));
+                Json(json!({"rate_limit":{"primary_window":{"used_percent":used,"limit_window_seconds":18000}}}))
+            }))
+            .route("/resets", get(|| async { (StatusCode::FORBIDDEN, "private-secret") }))
+        ).await;
+        let home = TestHome::new();
+        let manager =
+            AccountManager::open_with_endpoints(&home.data(), server.endpoints.clone()).unwrap();
+        home.seed("user-a", "workspace-a", "synthetic-a", 1_700_000_000_000);
+        let a = manager.import_current(&home.home()).unwrap();
+        home.seed("user-b", "workspace-b", "synthetic-b", 1_700_000_001_000);
+        let b = manager.import_current(&home.home()).unwrap();
+        home.seed(
+            "native-user",
+            "native-workspace",
+            "native-refresh",
+            1_700_000_002_000,
+        );
+        fs::write(
+            home.home().join("config.toml"),
+            "# preserve native config\n",
+        )
+        .unwrap();
+        let original = fs::read(home.home().join("auth.json")).unwrap();
+        let marker = fs::read(home.home().join(MARKER_NAME)).unwrap();
+        // A fresh process has no import-time access-token cache and must renew A/B.
+        let manager =
+            AccountManager::open_with_endpoints(&home.data(), server.endpoints.clone()).unwrap();
+        let native_home = home.home();
+        let (qa, qb) = tokio::join!(
+            manager.quota(&a.id, &native_home),
+            manager.quota(&b.id, &native_home)
+        );
+        assert_eq!(qa.unwrap().windows[0].remaining_percent, 75.0);
+        assert_eq!(qb.unwrap().windows[0].remaining_percent, 50.0);
+        assert_eq!(fs::read(home.home().join("auth.json")).unwrap(), original);
+        assert_eq!(
+            fs::read_to_string(home.home().join("config.toml")).unwrap(),
+            "# preserve native config\n"
+        );
+        assert_eq!(fs::read(home.home().join(MARKER_NAME)).unwrap(), marker);
+        let absent = home.0.join("absent-native-home");
+        assert_eq!(
+            manager.quota(&a.id, &absent).await.unwrap().windows[0].remaining_percent,
+            75.0
+        );
+        assert!(!absent.exists());
+        let mut expired: Value = serde_json::from_slice(&synthetic_auth(
+            "user-a",
+            "workspace-a",
+            "renewed-user-a",
+            Utc::now().timestamp_millis(),
+        ))
+        .unwrap();
+        expired["tokens"]["access_token"] = jwt(json!({"exp":1})).into();
+        let expired = serde_json::to_vec(&expired).unwrap();
+        fs::write(home.home().join("auth.json"), &expired).unwrap();
+        let store = fs::read(home.data().join(STORE_NAME)).unwrap();
+        assert!(
+            manager
+                .quota(&a.id, &home.home())
+                .await
+                .unwrap_err()
+                .contains("请先检查并续期原生登录")
+        );
+        assert_eq!(fs::read(home.home().join("auth.json")).unwrap(), expired);
+        assert_eq!(fs::read(home.data().join(STORE_NAME)).unwrap(), store);
     }
 
     #[test]
