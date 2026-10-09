@@ -152,6 +152,8 @@ ChatGPT 订阅上游默认显示 OpenAI 绿色头像；API 预设继续按准确
 
 统一添加弹窗的本地验证与深浅主题截图见 [添加连接验收记录](docs/acceptance/M3-connection-picker-2026-10-08.md)。
 
+连接卡片的“检查”按连接独立执行，显示实际检查步骤和已耗时；等待超过 10 秒时提示仍在等待响应。成功结果和失败原因保留在对应卡片，失败后可点“重试”。其他连接和页面操作保持可用，刷新列表保留检查状态，重新保存连接会清除旧结果。检查核对登录资料或读取模型目录，必要时沿用原有凭据续期流程，不发送推理请求。成功提示会注明实际推理或工具调用权限尚未验证。
+
 | 官方预设 | API 地址 | 默认模型 | 核对来源 |
 | --- | --- | --- | --- |
 | DeepSeek | `https://api.deepseek.com` | `deepseek-flash` | [官方 Codex 指南](https://api-docs.deepseek.com/quick_start/agent_integrations/codex/) |

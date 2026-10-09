@@ -81,6 +81,7 @@ enum Command {
         id: String,
         home: String,
         check_id: String,
+        started: std::time::Instant,
     },
     FetchModels {
         scope: i32,
@@ -268,6 +269,16 @@ fn show_result(app: &AppWindow, result: Result<Snapshot, AppError>) {
                 .providers
                 .into_iter()
                 .map(|provider| {
+                    let previous = checking
+                        .iter()
+                        .find(|row| {
+                            row.id == provider.id
+                                && row.name == provider.name
+                                && row.base_url == provider.base_url
+                                && row.model_id == provider.model_id
+                                && row.binding_label == provider.binding_label
+                        })
+                        .unwrap_or_default();
                     let brand = provider_icon_row(
                         app,
                         resolved_provider_icon_id(
@@ -277,11 +288,6 @@ fn show_result(app: &AppWindow, result: Result<Snapshot, AppError>) {
                         ),
                     );
                     ProviderRow {
-                        check_id: checking
-                            .iter()
-                            .find(|row| row.id == provider.id)
-                            .map(|row| row.check_id)
-                            .unwrap_or_default(),
                         id: provider.id.into(),
                         name: provider.name.into(),
                         endpoint: provider.endpoint.into(),
@@ -296,6 +302,7 @@ fn show_result(app: &AppWindow, result: Result<Snapshot, AppError>) {
                         icon_id: brand.id,
                         icon: brand.icon,
                         monochrome: brand.monochrome,
+                        ..previous
                     }
                 })
                 .collect::<Vec<_>>();
@@ -1079,12 +1086,13 @@ fn connect_provider_checks(app: &AppWindow, sender: &mpsc::Sender<Command>) {
             id: id.to_string(),
             home: app.get_config_home().into(),
             check_id: check_id.clone(),
+            started: std::time::Instant::now(),
         }) {
             let message = match error {
                 TrySendError::Full(_) => "操作仍在执行，请稍后重试",
                 TrySendError::Closed(_) => "后台状态通道已停止",
             };
-            finish_provider_check(&app, &id, &check_id, Err(message.into()));
+            finish_provider_check(&app, &id, &check_id, 0, Err(message.into()));
         }
     });
 }
@@ -1096,6 +1104,16 @@ fn set_provider_check_id(app: &AppWindow, id: &str, check_id: &str) {
         .map(|mut row| {
             if row.id == id {
                 row.check_id = check_id.into();
+                row.check_stage = if check_id.is_empty() {
+                    ""
+                } else {
+                    "读取连接资料"
+                }
+                .into();
+                row.check_elapsed_ms = 0;
+                row.check_message = "".into();
+                row.check_detail = "".into();
+                row.check_failed = false;
             }
             row
         })
@@ -1104,20 +1122,54 @@ fn set_provider_check_id(app: &AppWindow, id: &str, check_id: &str) {
     filter_providers(app, &app.get_provider_query());
 }
 
+fn update_provider_check(
+    app: &AppWindow,
+    id: &str,
+    check_id: &str,
+    update: impl Fn(&mut ProviderRow),
+) {
+    let mut changed = false;
+    let rows = app
+        .get_providers()
+        .iter()
+        .map(|mut row| {
+            if row.id == id && row.check_id == check_id {
+                update(&mut row);
+                changed = true;
+            }
+            row
+        })
+        .collect::<Vec<_>>();
+    if changed {
+        app.set_providers(ModelRc::new(VecModel::from(rows)));
+        filter_providers(app, &app.get_provider_query());
+    }
+}
+
+struct ProviderCheckResult {
+    message: String,
+    detail: String,
+}
+
 fn finish_provider_check(
     app: &AppWindow,
     id: &str,
     check_id: &str,
-    result: Result<String, String>,
+    elapsed_ms: i32,
+    result: Result<ProviderCheckResult, String>,
 ) {
-    if app
-        .get_providers()
-        .iter()
-        .any(|row| row.id == id && row.check_id == check_id)
-    {
-        set_provider_check_id(app, id, "");
-        show_action_feedback(app, result);
-    }
+    update_provider_check(app, id, check_id, |row| {
+        row.check_id = "".into();
+        row.check_stage = "".into();
+        row.check_elapsed_ms = elapsed_ms;
+        row.check_failed = result.is_err();
+        let (message, detail) = match &result {
+            Ok(result) => (result.message.as_str(), result.detail.as_str()),
+            Err(error) => ("检查失败", error.as_str()),
+        };
+        row.check_message = message.into();
+        row.check_detail = detail.into();
+    });
 }
 
 fn home(text: &str) -> Result<PathBuf, String> {
@@ -1303,10 +1355,12 @@ async fn check_provider(
     data: Result<(PathBuf, ProviderRecord), String>,
     target: &str,
     xai_manager: Option<switchx::xai::AccountManager>,
-) -> Result<String, String> {
+    progress: impl Fn(&str),
+) -> Result<ProviderCheckResult, String> {
     let (data_dir, provider) = data?;
     match provider.kind {
         ProviderKind::XaiOAuth => {
+            progress("核对账号绑定");
             let manager = xai_manager.ok_or("Grok 账号状态不可用")?;
             let account = manager.resolve_binding(
                 provider
@@ -1314,14 +1368,17 @@ async fn check_provider(
                     .as_ref()
                     .ok_or("Grok 账号绑定缺失")?,
             )?;
+            progress("读取账号凭据");
             let token = manager.credential(&account.id).await?;
+            progress("读取模型目录");
             direct::check_models(&provider, token.expose()).await?;
-            Ok(format!(
-                "{}：Grok 账号目录已连通；实际推理权限尚未验证",
-                provider.name
-            ))
+            Ok(ProviderCheckResult {
+                message: "模型目录已连通".into(),
+                detail: "尚未验证实际推理权限".into(),
+            })
         }
         ProviderKind::Chatgpt => {
+            progress("核对账号绑定");
             let target = home(target)?;
             let manager = AccountManager::open(&data_dir)?;
             let account = manager
@@ -1333,24 +1390,31 @@ async fn check_provider(
                 )
                 .await?;
             if let Some(account) = account {
+                progress("读取账号凭据");
                 manager.credential(&account.id, &target).await?;
-                Ok(format!(
-                    "{}：绑定账号凭据可读取；实际官方请求权限尚未验证",
-                    provider.name
-                ))
+                Ok(ProviderCheckResult {
+                    message: "账号凭据可读取".into(),
+                    detail: "尚未验证实际官方请求权限".into(),
+                })
             } else {
+                progress("读取登录状态");
                 let status = chatgpt::account(&target, false).await?;
                 status.require_chatgpt()?;
-                Ok(format!("{}：{}", provider.name, status.label()))
+                Ok(ProviderCheckResult {
+                    message: "登录状态可读取".into(),
+                    detail: "尚未验证实际官方请求权限".into(),
+                })
             }
         }
         ProviderKind::ApiKey => {
+            progress("读取 API 凭据");
             let token = app::provider_credential(&data_dir, &provider)?;
+            progress("读取模型目录");
             direct::check_models(&provider, token.expose()).await?;
-            Ok(format!(
-                "{}：/models 已连通，目录包含 {}；Responses 工具调用尚未验证",
-                provider.name, provider.model_id
-            ))
+            Ok(ProviderCheckResult {
+                message: "模型目录已连通".into(),
+                detail: format!("已找到 {}；尚未验证推理与工具调用", provider.model_id),
+            })
         }
     }
 }
@@ -1396,7 +1460,7 @@ async fn worker(
             };
             let _ = weak.upgrade_in_event_loop(move |app| {
                 if let Some((id, check_id)) = check {
-                    finish_provider_check(&app, &id, &check_id, Err("请先恢复原配置".into()));
+                    finish_provider_check(&app, &id, &check_id, 0, Err("请先恢复原配置".into()));
                 }
                 app.set_recovery_only(true);
                 app.set_loading(false);
@@ -2056,6 +2120,7 @@ async fn worker(
                 id,
                 home: target,
                 check_id,
+                started,
             } => {
                 let data = directory
                     .as_ref()
@@ -2070,10 +2135,45 @@ async fn worker(
                 let manager = xai_manager.clone();
                 let weak = weak.clone();
                 provider_checks.spawn(async move {
-                    let result = check_provider(data, &target, manager).await;
-                    let _ = weak.upgrade_in_event_loop(move |app| {
-                        finish_provider_check(&app, &id, &check_id, result);
-                    });
+                    let progress = |stage: &str| {
+                        let stage = stage.to_owned();
+                        let id = id.clone();
+                        let check_id = check_id.clone();
+                        let _ = weak.upgrade_in_event_loop(move |app| {
+                            update_provider_check(&app, &id, &check_id, |row| {
+                                row.check_stage = stage.as_str().into();
+                            });
+                        });
+                    };
+                    let request = check_provider(data, &target, manager, progress);
+                    tokio::pin!(request);
+                    let mut timer = tokio::time::interval(std::time::Duration::from_secs(1));
+                    timer.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+                    loop {
+                        let elapsed_ms =
+                            || started.elapsed().as_millis().min(i32::MAX as u128) as i32;
+                        tokio::select! {
+                            result = &mut request => {
+                                let elapsed_ms = elapsed_ms();
+                                let id = id.clone();
+                                let check_id = check_id.clone();
+                                let _ = weak.upgrade_in_event_loop(move |app| {
+                                    finish_provider_check(&app, &id, &check_id, elapsed_ms, result);
+                                });
+                                break;
+                            }
+                            _ = timer.tick() => {
+                                let elapsed_ms = elapsed_ms();
+                                let id = id.clone();
+                                let check_id = check_id.clone();
+                                let _ = weak.upgrade_in_event_loop(move |app| {
+                                    update_provider_check(&app, &id, &check_id, |row| {
+                                        row.check_elapsed_ms = elapsed_ms;
+                                    });
+                                });
+                            }
+                        }
+                    }
                 });
             }
             Command::FetchModels {
@@ -4038,11 +4138,17 @@ mod tests {
         app.global::<Theme>().set_animations_enabled(false);
         app.set_loading(false);
         app.set_active_page(1);
+        initialize_provider_icons(&app).unwrap();
+        let openai = provider_icon_row(&app, "openai");
+        let grok = provider_icon_row(&app, "grok");
         let providers = ModelRc::new(VecModel::from(vec![
             ProviderRow {
                 id: "synthetic-chatgpt".into(),
                 name: "ChatGPT".into(),
                 is_subscription: true,
+                icon: openai.icon,
+                icon_id: openai.id,
+                monochrome: openai.monochrome,
                 ..Default::default()
             },
             ProviderRow {
@@ -4050,6 +4156,9 @@ mod tests {
                 name: "Grok".into(),
                 is_subscription: true,
                 is_grok: true,
+                icon: grok.icon,
+                icon_id: grok.id,
+                monochrome: grok.monochrome,
                 ..Default::default()
             },
         ]));
@@ -4126,6 +4235,8 @@ mod tests {
                 app.set_error_message("".into());
                 app.set_error_action("".into());
                 app.set_action_message("".into());
+                set_provider_check_id(&app, "synthetic-chatgpt", "");
+                set_provider_check_id(&app, "synthetic-grok", "");
                 draw();
                 // Use the real callback to start one check, then click the other row's controls.
                 click(width as f32 - 220.0, 374.0);
@@ -4138,6 +4249,26 @@ mod tests {
                 };
                 assert_eq!(id, "synthetic-chatgpt");
                 let chatgpt_check = check_id;
+                update_provider_check(&app, "synthetic-chatgpt", &chatgpt_check, |row| {
+                    row.check_stage = "读取登录状态".into();
+                    row.check_elapsed_ms = 12500;
+                });
+                assert_eq!(
+                    app.get_providers().row_data(0).unwrap().check_stage,
+                    "读取登录状态"
+                );
+                assert_eq!(
+                    app.get_filtered_providers()
+                        .row_data(0)
+                        .unwrap()
+                        .check_elapsed_ms,
+                    12500
+                );
+                // Reset the slow hint before the fixed-coordinate interaction checks.
+                update_provider_check(&app, "synthetic-chatgpt", &chatgpt_check, |row| {
+                    row.check_elapsed_ms = 2000
+                });
+                draw();
                 app.invoke_check_provider("synthetic-chatgpt".into());
                 assert!(
                     receiver.try_recv().is_err(),
@@ -4158,9 +4289,21 @@ mod tests {
                     &app,
                     "synthetic-chatgpt",
                     &chatgpt_check,
-                    Ok("合成检查结果".into()),
+                    2300,
+                    Ok(ProviderCheckResult {
+                        message: "登录状态可读取".into(),
+                        detail: "尚未验证实际官方请求权限".into(),
+                    }),
                 );
                 assert!(app.get_busy(), "a check must not unlock another operation");
+                let completed = app.get_providers().row_data(0).unwrap();
+                assert_eq!(completed.check_message, "登录状态可读取");
+                assert_eq!(completed.check_elapsed_ms, 2300);
+                assert!(!completed.check_failed);
+                assert!(
+                    app.get_action_message().is_empty(),
+                    "check results must remain in their own row"
+                );
                 assert!(!app.get_providers().row_data(1).unwrap().check_id.is_empty());
                 app.set_busy(false);
                 // Saving and rechecking a connection invalidates its old completion.
@@ -4169,17 +4312,173 @@ mod tests {
                 let Ok(Command::Check { check_id, .. }) = receiver.try_recv() else {
                     panic!("a saved connection can be checked again");
                 };
-                finish_provider_check(&app, "synthetic-grok", &grok_check, Err("过时结果".into()));
+                finish_provider_check(
+                    &app,
+                    "synthetic-grok",
+                    &grok_check,
+                    3000,
+                    Err("过时结果".into()),
+                );
+                update_provider_check(&app, "synthetic-grok", &grok_check, |row| {
+                    row.check_stage = "过时步骤".into()
+                });
                 assert_eq!(app.get_providers().row_data(1).unwrap().check_id, check_id);
-                finish_provider_check(&app, "synthetic-grok", &check_id, Err("合成失败".into()));
+                assert_ne!(
+                    app.get_providers().row_data(1).unwrap().check_stage,
+                    "过时步骤"
+                );
+                finish_provider_check(
+                    &app,
+                    "synthetic-grok",
+                    &check_id,
+                    1500,
+                    Err("合成失败".into()),
+                );
                 assert!(app.get_providers().row_data(1).unwrap().check_id.is_empty());
-                assert_eq!(app.get_error_message(), "合成失败");
+                assert!(app.get_providers().row_data(1).unwrap().check_failed);
+                assert_eq!(
+                    app.get_providers().row_data(1).unwrap().check_detail,
+                    "合成失败"
+                );
+                assert!(app.get_error_message().is_empty());
             }
         }
+        let mut snapshot = Snapshot {
+            providers: app
+                .get_providers()
+                .iter()
+                .map(|row| app::ProviderView {
+                    id: row.id.into(),
+                    name: row.name.into(),
+                    icon_id: row.icon_id.into(),
+                    endpoint: row.endpoint.into(),
+                    base_url: row.base_url.into(),
+                    model_id: row.model_id.into(),
+                    credential_status: "合成凭据状态",
+                    preset_id: "",
+                    kind: if row.is_grok {
+                        ProviderKind::XaiOAuth
+                    } else {
+                        ProviderKind::Chatgpt
+                    },
+                    binding_label: row.binding_label.into(),
+                })
+                .collect(),
+            models: Vec::new(),
+            credentials_checked: false,
+        };
+        app.set_provider_query("Grok".into());
+        show_result(&app, Ok(snapshot.clone()));
+        assert_eq!(
+            app.get_filtered_providers()
+                .row_data(0)
+                .unwrap()
+                .check_detail,
+            "合成失败"
+        );
+        set_provider_check_id(&app, "synthetic-grok", "refresh-check");
+        update_provider_check(&app, "synthetic-grok", "refresh-check", |row| {
+            row.check_stage = "读取模型目录".into();
+            row.check_elapsed_ms = 3500;
+        });
+        show_result(&app, Ok(snapshot.clone()));
+        let refreshed = app.get_filtered_providers().row_data(0).unwrap();
+        assert_eq!(refreshed.check_id, "refresh-check");
+        assert_eq!(refreshed.check_stage, "读取模型目录");
+        assert_eq!(refreshed.check_elapsed_ms, 3500);
+        snapshot.providers[1].name = "Grok Updated".into();
+        show_result(&app, Ok(snapshot));
+        finish_provider_check(
+            &app,
+            "synthetic-grok",
+            "refresh-check",
+            4000,
+            Err("过时配置的结果".into()),
+        );
+        assert!(
+            app.get_filtered_providers()
+                .row_data(0)
+                .unwrap()
+                .check_message
+                .is_empty()
+        );
         drop(receiver);
         app.invoke_check_provider("synthetic-grok".into());
         assert!(app.get_providers().row_data(1).unwrap().check_id.is_empty());
-        assert_eq!(app.get_error_message(), "后台状态通道已停止");
+        assert_eq!(
+            app.get_providers().row_data(1).unwrap().check_detail,
+            "后台状态通道已停止"
+        );
+        assert!(app.get_error_message().is_empty());
+    }
+
+    #[tokio::test]
+    async fn provider_checks_report_real_stages_and_keep_upstream_errors_private() {
+        use axum::{Json, Router, http::StatusCode, routing::get};
+        use std::sync::Mutex;
+        use tokio::net::TcpListener;
+
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(
+            axum::serve(
+                listener,
+                Router::new()
+                    .route(
+                        "/ok/models",
+                        get(|| async {
+                            Json(serde_json::json!({"data": [{"id": "synthetic-model"}]}))
+                        }),
+                    )
+                    .route(
+                        "/denied/models",
+                        get(|| async {
+                            (StatusCode::UNAUTHORIZED, "synthetic-secret-from-upstream")
+                        }),
+                    ),
+            )
+            .into_future(),
+        );
+        let data =
+            std::env::temp_dir().join(format!("switchx-check-progress-{}", app::new_id().unwrap()));
+        std::fs::create_dir_all(&data).unwrap();
+        let store = Store::open(&data.join("switchx.sqlite")).unwrap();
+        for id in ["ok", "denied"] {
+            let provider = ProviderRecord {
+                id: id.into(),
+                name: id.into(),
+                base_url: format!("http://{address}/{id}"),
+                model_id: "synthetic-model".into(),
+                credential_ref: None,
+                kind: ProviderKind::ApiKey,
+                account_binding: None,
+                icon_id: None,
+            };
+            store
+                .put_provider_with_models_options_and_key(
+                    &provider,
+                    &[],
+                    None,
+                    &Secret::new("synthetic-key".into()),
+                )
+                .unwrap();
+            let stages = Mutex::new(Vec::new());
+            let result = check_provider(Ok((data.clone(), provider)), "", None, |stage| {
+                stages.lock().unwrap().push(stage.to_owned())
+            })
+            .await;
+            assert_eq!(*stages.lock().unwrap(), ["读取 API 凭据", "读取模型目录"]);
+            if id == "ok" {
+                let result = result.unwrap();
+                assert_eq!(result.message, "模型目录已连通");
+                assert!(result.detail.contains("尚未验证推理与工具调用"));
+            } else {
+                assert_eq!(result.err().unwrap(), "上游模型目录返回 HTTP 401");
+            }
+        }
+        drop(store);
+        server.abort();
+        std::fs::remove_dir_all(data).unwrap();
     }
 
     #[tokio::test]
@@ -4259,6 +4558,7 @@ mod tests {
                 id: "slow".into(),
                 home: String::new(),
                 check_id: "slow-check".into(),
+                started: std::time::Instant::now(),
             })
             .await
             .unwrap();
@@ -4270,6 +4570,7 @@ mod tests {
                 id: "fast".into(),
                 home: String::new(),
                 check_id: "fast-check".into(),
+                started: std::time::Instant::now(),
             })
             .await
             .unwrap();

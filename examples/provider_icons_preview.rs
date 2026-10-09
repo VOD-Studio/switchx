@@ -7,7 +7,9 @@ use switchx::ui::{
 
 use slint::platform::software_renderer::{MinimalSoftwareWindow, RepaintBufferType};
 use slint::platform::{Platform, WindowAdapter, WindowEvent};
-use slint::{ComponentHandle, ModelRc, PhysicalSize, Rgb8Pixel, SharedPixelBuffer, VecModel};
+use slint::{
+    ComponentHandle, Model, ModelRc, PhysicalSize, Rgb8Pixel, SharedPixelBuffer, VecModel,
+};
 use std::{cell::Cell, error::Error, fs, io::Write, path::Path, rc::Rc, time::Duration};
 use switchx::provider_icons;
 
@@ -212,6 +214,45 @@ fn main() -> Result<(), Box<dyn Error>> {
         completed: true,
         ..Default::default()
     }])));
+    if std::env::args().any(|arg| arg == "--check-progress") {
+        let original = app.get_providers().iter().collect::<Vec<_>>();
+        for (width, height) in [(1200, 820), (1000, 680)] {
+            app.window().set_size(PhysicalSize::new(width, height));
+            for dark in [false, true] {
+                set_theme(&app, &window, dark);
+                let suffix = format!("{}-{width}x{height}", if dark { "dark" } else { "light" });
+                for state in ["checking", "slow", "results", "concurrent"] {
+                    let mut rows = original.clone();
+                    rows[0].name = "ChatGPT 订阅".into();
+                    rows[0].binding_label = "绑定：原生 Codex 登录（合成资料）".into();
+                    if state == "results" {
+                        rows[0].check_message = "登录状态可读取".into();
+                        rows[0].check_detail = "尚未验证实际官方请求权限".into();
+                        rows[0].check_elapsed_ms = 2300;
+                        rows[1].check_failed = true;
+                        rows[1].check_message = "检查失败".into();
+                        rows[1].check_detail = "上游模型目录返回 HTTP 401".into();
+                        rows[1].check_elapsed_ms = 1600;
+                    } else {
+                        rows[0].check_id = "synthetic-check-a".into();
+                        rows[0].check_stage = "读取登录状态".into();
+                        rows[0].check_elapsed_ms = if state == "slow" { 12500 } else { 2300 };
+                        if state == "concurrent" {
+                            rows[1].check_id = "synthetic-check-b".into();
+                            rows[1].check_stage = "读取模型目录".into();
+                            rows[1].check_elapsed_ms = 1800;
+                        }
+                    }
+                    let rows = ModelRc::new(VecModel::from(rows));
+                    app.set_providers(rows.clone());
+                    app.set_filtered_providers(rows);
+                    snapshot(&window, output, &format!("check-{state}-{suffix}"))?;
+                }
+            }
+        }
+        println!("Synthetic connection-check previews: {}", output.display());
+        return Ok(());
+    }
     for (width, height) in [(1200, 820), (1000, 680)] {
         app.window().set_size(PhysicalSize::new(width, height));
         for dark in [false, true] {
