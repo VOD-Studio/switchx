@@ -77,7 +77,11 @@ enum Command {
     ExtractCommonConfig(String),
     SaveCommonConfig(String),
     Delete(String),
-    Check(String, String),
+    Check {
+        id: String,
+        home: String,
+        check_id: String,
+    },
     FetchModels {
         scope: i32,
         generation: i32,
@@ -192,6 +196,7 @@ fn show_result(app: &AppWindow, result: Result<Snapshot, AppError>) {
     app.set_busy(false);
     match result {
         Ok(snapshot) => {
+            let checking = app.get_providers();
             let selected_count = snapshot.models.iter().filter(|model| model.enabled).count();
             let selectable_count = snapshot.models.iter().filter(|model| model.ready).count();
             if !snapshot
@@ -272,6 +277,11 @@ fn show_result(app: &AppWindow, result: Result<Snapshot, AppError>) {
                         ),
                     );
                     ProviderRow {
+                        check_id: checking
+                            .iter()
+                            .find(|row| row.id == provider.id)
+                            .map(|row| row.check_id)
+                            .unwrap_or_default(),
                         id: provider.id.into(),
                         name: provider.name.into(),
                         endpoint: provider.endpoint.into(),
@@ -317,6 +327,10 @@ fn show_result(app: &AppWindow, result: Result<Snapshot, AppError>) {
 
 fn show_action(app: &AppWindow, result: Result<String, String>) {
     app.set_busy(false);
+    show_action_feedback(app, result);
+}
+
+fn show_action_feedback(app: &AppWindow, result: Result<String, String>) {
     match result {
         Ok(message) => {
             app.set_action_message(message.into());
@@ -1037,6 +1051,75 @@ fn queue(app: &AppWindow, sender: &mpsc::Sender<Command>, command: Command) {
     }
 }
 
+fn connect_provider_checks(app: &AppWindow, sender: &mpsc::Sender<Command>) {
+    let sender = sender.clone();
+    let weak = app.as_weak();
+    app.on_check_provider(move |id| {
+        let Some(app) = weak.upgrade() else {
+            return;
+        };
+        if app.get_busy()
+            || app.get_recovery_only()
+            || !app
+                .get_providers()
+                .iter()
+                .any(|row| row.id == id && row.check_id.is_empty())
+        {
+            return;
+        }
+        let check_id = match app::new_id() {
+            Ok(id) => id,
+            Err(error) => {
+                show_action_feedback(&app, Err(error));
+                return;
+            }
+        };
+        set_provider_check_id(&app, &id, &check_id);
+        if let Err(error) = sender.try_send(Command::Check {
+            id: id.to_string(),
+            home: app.get_config_home().into(),
+            check_id: check_id.clone(),
+        }) {
+            let message = match error {
+                TrySendError::Full(_) => "操作仍在执行，请稍后重试",
+                TrySendError::Closed(_) => "后台状态通道已停止",
+            };
+            finish_provider_check(&app, &id, &check_id, Err(message.into()));
+        }
+    });
+}
+
+fn set_provider_check_id(app: &AppWindow, id: &str, check_id: &str) {
+    let rows = app
+        .get_providers()
+        .iter()
+        .map(|mut row| {
+            if row.id == id {
+                row.check_id = check_id.into();
+            }
+            row
+        })
+        .collect::<Vec<_>>();
+    app.set_providers(ModelRc::new(VecModel::from(rows)));
+    filter_providers(app, &app.get_provider_query());
+}
+
+fn finish_provider_check(
+    app: &AppWindow,
+    id: &str,
+    check_id: &str,
+    result: Result<String, String>,
+) {
+    if app
+        .get_providers()
+        .iter()
+        .any(|row| row.id == id && row.check_id == check_id)
+    {
+        set_provider_check_id(app, id, "");
+        show_action_feedback(app, result);
+    }
+}
+
 fn home(text: &str) -> Result<PathBuf, String> {
     let path = PathBuf::from(text);
     client::config_path(&path)?;
@@ -1216,6 +1299,62 @@ fn update_reasoning_options(app: &AppWindow) {
     app.set_model_reasoning_options(ModelRc::new(VecModel::from(options)));
 }
 
+async fn check_provider(
+    data: Result<(PathBuf, ProviderRecord), String>,
+    target: &str,
+    xai_manager: Option<switchx::xai::AccountManager>,
+) -> Result<String, String> {
+    let (data_dir, provider) = data?;
+    match provider.kind {
+        ProviderKind::XaiOAuth => {
+            let manager = xai_manager.ok_or("Grok 账号状态不可用")?;
+            let account = manager.resolve_binding(
+                provider
+                    .account_binding
+                    .as_ref()
+                    .ok_or("Grok 账号绑定缺失")?,
+            )?;
+            let token = manager.credential(&account.id).await?;
+            direct::check_models(&provider, token.expose()).await?;
+            Ok(format!(
+                "{}：Grok 账号目录已连通；实际推理权限尚未验证",
+                provider.name
+            ))
+        }
+        ProviderKind::Chatgpt => {
+            let target = home(target)?;
+            let manager = AccountManager::open(&data_dir)?;
+            let account = manager
+                .resolve_binding(
+                    provider
+                        .account_binding
+                        .as_ref()
+                        .ok_or("订阅账号绑定缺失")?,
+                )
+                .await?;
+            if let Some(account) = account {
+                manager.credential(&account.id, &target).await?;
+                Ok(format!(
+                    "{}：绑定账号凭据可读取；实际官方请求权限尚未验证",
+                    provider.name
+                ))
+            } else {
+                let status = chatgpt::account(&target, false).await?;
+                status.require_chatgpt()?;
+                Ok(format!("{}：{}", provider.name, status.label()))
+            }
+        }
+        ProviderKind::ApiKey => {
+            let token = app::provider_credential(&data_dir, &provider)?;
+            direct::check_models(&provider, token.expose()).await?;
+            Ok(format!(
+                "{}：/models 已连通，目录包含 {}；Responses 工具调用尚未验证",
+                provider.name, provider.model_id
+            ))
+        }
+    }
+}
+
 async fn worker(
     mut receiver: mpsc::Receiver<Command>,
     weak: slint::Weak<AppWindow>,
@@ -1232,7 +1371,9 @@ async fn worker(
     let mut xai_manager: Option<switchx::xai::AccountManager> = None;
     let mut account_home = client::default_home().ok();
     let mut subscription_auth: Option<SubscriptionAuthDraft> = None;
+    let mut provider_checks = tokio::task::JoinSet::new();
     while let Some(command) = receiver.recv().await {
+        while provider_checks.try_join_next().is_some() {}
         let recovery_only = directory
             .as_ref()
             .ok()
@@ -1249,7 +1390,14 @@ async fn worker(
                     | Command::Quit
             )
         {
-            let _ = weak.upgrade_in_event_loop(|app| {
+            let check = match &command {
+                Command::Check { id, check_id, .. } => Some((id.clone(), check_id.clone())),
+                _ => None,
+            };
+            let _ = weak.upgrade_in_event_loop(move |app| {
+                if let Some((id, check_id)) = check {
+                    finish_provider_check(&app, &id, &check_id, Err("请先恢复原配置".into()));
+                }
                 app.set_recovery_only(true);
                 app.set_loading(false);
                 app.set_config_managed(true);
@@ -1388,6 +1536,7 @@ async fn worker(
                         show_xai_accounts(&app, view);
                     }
                     if let Some(snapshot) = snapshot {
+                        set_provider_check_id(&app, &id, "");
                         show_result(&app, snapshot);
                         app.set_xai_editor_open(false);
                         discard_account_previews(&app);
@@ -1730,6 +1879,7 @@ async fn worker(
                     .map(|(path, home)| account_view(path, home));
                 let _ = weak.upgrade_in_event_loop(move |app| {
                     if let Some(snapshot) = snapshot {
+                        set_provider_check_id(&app, &id, "");
                         show_result(&app, snapshot);
                         app.set_subscription_editor_open(false);
                         discard_account_previews(&app);
@@ -1860,6 +2010,7 @@ async fn worker(
                 let _ = weak.upgrade_in_event_loop(move |app| {
                     show_action(&app, result.map(|()| "上游与 API Key 已保存到本机".into()));
                     if let Some(snapshot) = snapshot {
+                        set_provider_check_id(&app, &id, "");
                         show_result(&app, snapshot);
                         app.set_editor_open(false);
                         app.set_subscription_editor_open(false);
@@ -1901,73 +2052,29 @@ async fn worker(
                     show_action(&app, result.map(|()| "上游已删除".into()));
                 });
             }
-            Command::Check(id, target) => {
-                let result = directory
+            Command::Check {
+                id,
+                home: target,
+                check_id,
+            } => {
+                let data = directory
                     .as_ref()
                     .map_err(|error| error.message().to_owned())
                     .and_then(|path| {
-                        app::load_provider(path, &id).map(|provider| (path, provider))
+                        let provider = app::load_provider(path, &id)?;
+                        if provider.kind == ProviderKind::XaiOAuth && xai_manager.is_none() {
+                            xai_manager = Some(switchx::xai::AccountManager::open(path)?);
+                        }
+                        Ok((path.clone(), provider))
                     });
-                let result = match result {
-                    Ok((data_dir, provider)) if provider.kind == ProviderKind::XaiOAuth => {
-                        async {
-                            let manager = switchx::xai::AccountManager::open(data_dir)?;
-                            let account = manager.resolve_binding(
-                                provider
-                                    .account_binding
-                                    .as_ref()
-                                    .ok_or("Grok 账号绑定缺失")?,
-                            )?;
-                            let token = manager.credential(&account.id).await?;
-                            direct::check_models(&provider, token.expose()).await?;
-                            Ok(format!(
-                                "{}：Grok 账号目录已连通；实际推理权限尚未验证",
-                                provider.name
-                            ))
-                        }
-                        .await
-                    }
-                    Ok((data_dir, provider)) if provider.kind == ProviderKind::Chatgpt => {
-                        async {
-                            let target = home(&target)?;
-                            let manager = AccountManager::open(data_dir)?;
-                            let account = manager
-                                .resolve_binding(
-                                    provider
-                                        .account_binding
-                                        .as_ref()
-                                        .ok_or("订阅账号绑定缺失")?,
-                                )
-                                .await?;
-                            if let Some(account) = account {
-                                manager.credential(&account.id, &target).await?;
-                                Ok(format!(
-                                    "{}：绑定账号凭据可读取；实际官方请求权限尚未验证",
-                                    provider.name
-                                ))
-                            } else {
-                                let status = chatgpt::account(&target, false).await?;
-                                status.require_chatgpt()?;
-                                Ok(format!("{}：{}", provider.name, status.label()))
-                            }
-                        }
-                        .await
-                    }
-                    Ok((data_dir, provider)) => match app::provider_credential(data_dir, &provider)
-                    {
-                        Ok(token) => direct::check_models(&provider, token.expose()).await.map(
-                            |()| {
-                                format!(
-                                    "{}：/models 已连通，目录包含 {}；Responses 工具调用尚未验证",
-                                    provider.name, provider.model_id
-                                )
-                            },
-                        ),
-                        Err(error) => Err(error),
-                    },
-                    Err(error) => Err(error),
-                };
-                let _ = weak.upgrade_in_event_loop(move |app| show_action(&app, result));
+                let manager = xai_manager.clone();
+                let weak = weak.clone();
+                provider_checks.spawn(async move {
+                    let result = check_provider(data, &target, manager).await;
+                    let _ = weak.upgrade_in_event_loop(move |app| {
+                        finish_provider_check(&app, &id, &check_id, result);
+                    });
+                });
             }
             Command::FetchModels {
                 scope,
@@ -2850,6 +2957,7 @@ async fn worker(
                 });
             }
             Command::Quit => {
+                while provider_checks.join_next().await.is_some() {}
                 if let Some((cancel, task)) = pending_xai_login.take() {
                     cancel.send_replace(true);
                     let _ = task.await;
@@ -2971,6 +3079,7 @@ async fn worker(
             );
         });
     }
+    while provider_checks.join_next().await.is_some() {}
     if let Some((cancel, task)) = pending_xai_login {
         cancel.send_replace(true);
         let _ = task.await;
@@ -3519,17 +3628,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             queue(&app, &callback_sender, Command::Delete(id.into()));
         }
     });
-    let callback_sender = sender.clone();
-    let weak = app.as_weak();
-    app.on_check_provider(move |id| {
-        if let Some(app) = weak.upgrade() {
-            queue(
-                &app,
-                &callback_sender,
-                Command::Check(id.into(), app.get_config_home().into()),
-            );
-        }
-    });
+    connect_provider_checks(&app, &sender);
     let callback_sender = sender.clone();
     let weak = app.as_weak();
     app.on_fetch_models(move |scope| {
@@ -3918,6 +4017,283 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn checking_one_provider_keeps_other_connections_interactive() {
+        use slint::platform::{
+            Platform, PointerEventButton, WindowAdapter, WindowEvent,
+            software_renderer::MinimalSoftwareWindow,
+        };
+        use std::rc::Rc;
+
+        struct PreviewPlatform(Rc<MinimalSoftwareWindow>);
+        impl Platform for PreviewPlatform {
+            fn create_window_adapter(&self) -> Result<Rc<dyn WindowAdapter>, slint::PlatformError> {
+                Ok(self.0.clone())
+            }
+        }
+        let window = MinimalSoftwareWindow::new(Default::default());
+        slint::platform::set_platform(Box::new(PreviewPlatform(window.clone()))).unwrap();
+        let app = AppWindow::new().unwrap();
+        app.global::<Theme>().set_animations_enabled(false);
+        app.set_loading(false);
+        app.set_active_page(1);
+        let providers = ModelRc::new(VecModel::from(vec![
+            ProviderRow {
+                id: "synthetic-chatgpt".into(),
+                name: "ChatGPT".into(),
+                is_subscription: true,
+                ..Default::default()
+            },
+            ProviderRow {
+                id: "synthetic-grok".into(),
+                name: "Grok".into(),
+                is_subscription: true,
+                is_grok: true,
+                ..Default::default()
+            },
+        ]));
+        app.set_providers(providers.clone());
+        app.set_filtered_providers(providers);
+        let (sender, mut receiver) = mpsc::channel(8);
+        connect_provider_checks(&app, &sender);
+        app.on_begin_xai_editor({
+            let sender = sender.clone();
+            let weak = app.as_weak();
+            move |id| {
+                queue(
+                    &weak.upgrade().unwrap(),
+                    &sender,
+                    Command::BeginXaiEditor(id.into()),
+                )
+            }
+        });
+        app.show().unwrap();
+        let draw = || {
+            slint::platform::update_timers_and_animations();
+            let size = WindowAdapter::size(window.as_ref());
+            let mut pixels =
+                slint::SharedPixelBuffer::<slint::Rgb8Pixel>::new(size.width, size.height);
+            window.request_redraw();
+            window.draw_if_needed(|renderer| {
+                renderer.render(pixels.make_mut_slice(), size.width as usize);
+            });
+            if let Some(output) = std::env::var_os("SWITCHX_PROVIDER_CHECK_SNAPSHOTS") {
+                use std::io::Write;
+                let output = PathBuf::from(output);
+                assert!(output.is_absolute());
+                std::fs::create_dir_all(&output).unwrap();
+                let theme = if app.global::<Theme>().get_dark() {
+                    "dark"
+                } else {
+                    "light"
+                };
+                let checking = app
+                    .get_providers()
+                    .iter()
+                    .filter(|row| !row.check_id.is_empty())
+                    .count();
+                let name = format!(
+                    "{theme}-{}x{}-{checking}checking-busy{}.ppm",
+                    size.width,
+                    size.height,
+                    app.get_busy()
+                );
+                let mut file = std::fs::File::create(output.join(name)).unwrap();
+                write!(file, "P6\n{} {}\n255\n", size.width, size.height).unwrap();
+                file.write_all(pixels.as_bytes()).unwrap();
+            }
+        };
+        let click = |x, y| {
+            let position = slint::LogicalPosition::new(x, y);
+            window.dispatch_event(WindowEvent::PointerMoved { position });
+            window.dispatch_event(WindowEvent::PointerPressed {
+                position,
+                button: PointerEventButton::Left,
+            });
+            window.dispatch_event(WindowEvent::PointerReleased {
+                position,
+                button: PointerEventButton::Left,
+            });
+            draw();
+        };
+        for (width, height) in [(1200, 820), (1000, 680)] {
+            app.window()
+                .set_size(slint::PhysicalSize::new(width, height));
+            for dark in [false, true] {
+                app.invoke_set_appearance(dark);
+                app.set_error_code("".into());
+                app.set_error_message("".into());
+                app.set_error_action("".into());
+                app.set_action_message("".into());
+                draw();
+                // Use the real callback to start one check, then click the other row's controls.
+                click(width as f32 - 220.0, 374.0);
+                assert!(
+                    !app.get_busy(),
+                    "one provider check must not lock the whole app"
+                );
+                let Ok(Command::Check { id, check_id, .. }) = receiver.try_recv() else {
+                    panic!("the first check must be queued");
+                };
+                assert_eq!(id, "synthetic-chatgpt");
+                let chatgpt_check = check_id;
+                app.invoke_check_provider("synthetic-chatgpt".into());
+                assert!(
+                    receiver.try_recv().is_err(),
+                    "duplicate checks must be ignored"
+                );
+                click(width as f32 - 220.0, 490.0);
+                let Ok(Command::Check { id, check_id, .. }) = receiver.try_recv() else {
+                    panic!("the other connection must still be checkable");
+                };
+                assert_eq!(id, "synthetic-grok");
+                let grok_check = check_id;
+                click(width as f32 - 114.0, 490.0);
+                assert!(
+                    matches!(receiver.try_recv(), Ok(Command::BeginXaiEditor(id)) if id == "synthetic-grok")
+                );
+                assert!(app.get_busy());
+                finish_provider_check(
+                    &app,
+                    "synthetic-chatgpt",
+                    &chatgpt_check,
+                    Ok("合成检查结果".into()),
+                );
+                assert!(app.get_busy(), "a check must not unlock another operation");
+                assert!(!app.get_providers().row_data(1).unwrap().check_id.is_empty());
+                app.set_busy(false);
+                // Saving and rechecking a connection invalidates its old completion.
+                set_provider_check_id(&app, "synthetic-grok", "");
+                app.invoke_check_provider("synthetic-grok".into());
+                let Ok(Command::Check { check_id, .. }) = receiver.try_recv() else {
+                    panic!("a saved connection can be checked again");
+                };
+                finish_provider_check(&app, "synthetic-grok", &grok_check, Err("过时结果".into()));
+                assert_eq!(app.get_providers().row_data(1).unwrap().check_id, check_id);
+                finish_provider_check(&app, "synthetic-grok", &check_id, Err("合成失败".into()));
+                assert!(app.get_providers().row_data(1).unwrap().check_id.is_empty());
+                assert_eq!(app.get_error_message(), "合成失败");
+            }
+        }
+        drop(receiver);
+        app.invoke_check_provider("synthetic-grok".into());
+        assert!(app.get_providers().row_data(1).unwrap().check_id.is_empty());
+        assert_eq!(app.get_error_message(), "后台状态通道已停止");
+    }
+
+    #[tokio::test]
+    async fn provider_checks_overlap_without_blocking_other_commands() {
+        use axum::{Json, Router, routing::get};
+        use std::{sync::Arc, time::Duration};
+        use tokio::{net::TcpListener, sync::Notify, time::timeout};
+
+        let slow_started = Arc::new(Notify::new());
+        let release_slow = Arc::new(Notify::new());
+        let fast_started = Arc::new(Notify::new());
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(
+            axum::serve(
+                listener,
+                Router::new()
+                    .route(
+                        "/slow/models",
+                        get({
+                            let started = slow_started.clone();
+                            let release = release_slow.clone();
+                            move || {
+                                let started = started.clone();
+                                let release = release.clone();
+                                async move {
+                                    started.notify_one();
+                                    release.notified().await;
+                                    Json(serde_json::json!({"data": [{"id": "synthetic-model"}]}))
+                                }
+                            }
+                        }),
+                    )
+                    .route(
+                        "/fast/models",
+                        get({
+                            let started = fast_started.clone();
+                            move || {
+                                let started = started.clone();
+                                async move {
+                                    started.notify_one();
+                                    Json(serde_json::json!({"data": [{"id": "synthetic-model"}]}))
+                                }
+                            }
+                        }),
+                    ),
+            )
+            .into_future(),
+        );
+        let data = std::env::temp_dir().join(format!("switchx-checks-{}", app::new_id().unwrap()));
+        std::fs::create_dir_all(&data).unwrap();
+        let store = Store::open(&data.join("switchx.sqlite")).unwrap();
+        for id in ["slow", "fast"] {
+            store
+                .put_provider_with_models_options_and_key(
+                    &ProviderRecord {
+                        id: id.into(),
+                        name: id.into(),
+                        base_url: format!("http://{address}/{id}"),
+                        model_id: "synthetic-model".into(),
+                        credential_ref: None,
+                        kind: ProviderKind::ApiKey,
+                        account_binding: None,
+                        icon_id: None,
+                    },
+                    &[],
+                    None,
+                    &Secret::new("synthetic-key".into()),
+                )
+                .unwrap();
+        }
+        drop(store);
+        let (sender, receiver) = mpsc::channel(8);
+        let background = tokio::spawn(worker(receiver, slint::Weak::default(), Ok(data.clone())));
+        sender
+            .send(Command::Check {
+                id: "slow".into(),
+                home: String::new(),
+                check_id: "slow-check".into(),
+            })
+            .await
+            .unwrap();
+        timeout(Duration::from_secs(2), slow_started.notified())
+            .await
+            .unwrap();
+        sender
+            .send(Command::Check {
+                id: "fast".into(),
+                home: String::new(),
+                check_id: "fast-check".into(),
+            })
+            .await
+            .unwrap();
+        timeout(Duration::from_secs(2), fast_started.notified())
+            .await
+            .expect("the second check must start while the first is waiting");
+        sender.send(Command::Delete("fast".into())).await.unwrap();
+        timeout(Duration::from_secs(2), async {
+            while app::load_provider(&data, "fast").is_ok() {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("other commands must proceed while a check is waiting");
+        release_slow.notify_one();
+        drop(sender);
+        timeout(Duration::from_secs(2), background)
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap();
+        server.abort();
+        std::fs::remove_dir_all(data).unwrap();
+    }
 
     #[test]
     fn account_removal_checks_saved_fixed_and_default_provider_references() {
