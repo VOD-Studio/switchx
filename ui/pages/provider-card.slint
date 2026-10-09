@@ -1,0 +1,272 @@
+import { Theme } from "../tokens.slint";
+import { QuietButton, StatusPill, AnimatedSection } from "../components.slint";
+import { ProviderRow } from "../view-models.slint";
+
+export component ProviderCard inherits Rectangle {
+    in property <ProviderRow> provider;
+    in property <int> order;
+    in property <bool> busy;
+    in property <bool> config-managed;
+    in property <bool> login-pending;
+    callback manage();
+    callback models();
+    callback check();
+    callback direct();
+
+    private property <bool> motion: Theme.animations-enabled && !Theme.system-reduced-motion;
+    private property <bool> entered: !root.motion;
+    private property <float> reveal: root.entered || !root.motion ? 1 : 0;
+    private property <float> hover: hover-area.has-hover ? 1 : 0;
+    private property <bool> checking: root.provider.check-id != "";
+    private property <bool> failed: root.provider.check-failed || root.provider.auth-error != "";
+    private property <color> accent: root.provider.is-grok ? (Theme.dark ? #c3b6de : #79638f) : root.provider.is-subscription ? Theme.brand : Theme.code-key;
+    private property <color> status-color: root.failed ? Theme.error : root.checking || root.provider.check-message != "" ? Theme.brand : Theme.muted-text;
+    private property <string> detail: root.provider.auth-error != "" ? root.provider.auth-error : root.checking && root.provider.check-elapsed-ms >= 10000 ? "检查耗时较长，仍在等待响应" : root.provider.check-detail;
+    private property <string> duration-label: (round(root.provider.check-elapsed-ms / 100) / 10) + "s";
+    animate reveal {
+        duration: Theme.drawer-motion;
+        easing: cubic-bezier(0.22, 1, 0.36, 1);
+    }
+    animate hover {
+        duration: Theme.page-motion;
+        easing: cubic-bezier(0.22, 1, 0.36, 1);
+    }
+    Timer {
+        interval: 16ms + 55ms * min(root.order, 5);
+        running: !root.entered && root.motion;
+        triggered => { root.entered = true; }
+    }
+
+    height: body.preferred-height + 50px + details.height;
+    preferred-height: root.height;
+    vertical-stretch: 0;
+    // Hover observation wraps the actions so it stays active over child buttons.
+    hover-area := TouchArea {
+        height: root.height - 14px;
+        card := Rectangle {
+            x: 1px;
+            y: 4px + (1 - root.reveal) * 12px - (root.motion ? root.hover * 2px : 0px);
+            width: root.width - 2px;
+            height: body.preferred-height + 36px + details.height;
+            opacity: root.reveal;
+            border-radius: 16px;
+            background: Theme.panel;
+            border-width: 1px;
+            border-color: root.failed ? Theme.error.with-alpha(0.5) : root.hover > 0 ? root.accent.with-alpha(0.3 + root.hover * 0.3) : Theme.border;
+            drop-shadow-color: Theme.dark ? #000000.with-alpha(0.08 + root.hover * 0.12) : #26392d.with-alpha(0.03 + root.hover * 0.05);
+            drop-shadow-blur: 8px + root.hover * 8px;
+            drop-shadow-offset-y: 2px + root.hover * 3px;
+            animate background, border-color { duration: Theme.page-motion; }
+
+            Rectangle {
+                x: 1px;
+                y: 1px;
+                width: parent.width - 2px;
+                height: parent.height - 2px;
+                border-radius: 15px;
+                background: @linear-gradient(115deg, root.accent.with-alpha(Theme.dark ? 0.065 : 0.045) 0%, root.accent.with-alpha(0) 65%);
+                opacity: 0.65 + root.hover * 0.35;
+                accessible-role: none;
+            }
+
+            body := VerticalLayout {
+                x: 20px;
+                y: 18px;
+                width: parent.width - 40px;
+                height: self.preferred-height;
+                spacing: 14px;
+                HorizontalLayout {
+                    height: 52px;
+                    spacing: 14px;
+                    Rectangle {
+                        y: (parent.height - self.height) / 2 - (root.motion ? root.hover * 1px : 0px);
+                        width: root.provider.icon-id == "xiaomimimo" ? 82px : 52px;
+                        height: 52px;
+                        horizontal-stretch: 0;
+                        border-radius: 15px;
+                        background: root.accent.with-alpha(Theme.dark ? 0.1 + root.hover * 0.04 : 0.075 + root.hover * 0.025);
+                        border-width: 1px;
+                        border-color: root.accent.with-alpha(0.12 + root.hover * 0.12);
+                        Image {
+                            x: (parent.width - self.width) / 2;
+                            y: (parent.height - self.height) / 2;
+                            width: root.provider.icon-id == "xiaomimimo" ? 60px : 30px;
+                            height: 30px;
+                            source: root.provider.icon;
+                            image-fit: contain;
+                            colorize: root.provider.monochrome ? Theme.primary-text : transparent;
+                        }
+                    }
+
+                    VerticalLayout {
+                        alignment: center;
+                        spacing: 7px;
+                        horizontal-stretch: 1;
+                        min-width: 0px;
+                        HorizontalLayout {
+                            height: 24px;
+                            spacing: 10px;
+                            Text {
+                                text: root.provider.name;
+                                color: Theme.primary-text;
+                                font-size: 17px;
+                                font-weight: 600;
+                                overflow: elide;
+                                min-width: 0px;
+                                max-width: self.preferred-width;
+                                horizontal-stretch: 1;
+                                vertical-alignment: center;
+                            }
+
+                            StatusPill {
+                                y: (parent.height - self.height) / 2;
+                                width: 62px;
+                                height: 22px;
+                                border-radius: 6px;
+                                label: root.provider.is-subscription ? "订阅连接" : "API 连接";
+                                ink: root.accent;
+                                fill: root.accent.with-alpha(Theme.dark ? 0.12 : 0.08);
+                            }
+
+                            Rectangle {
+                                horizontal-stretch: 1;
+                            }
+                        }
+
+                        Text {
+                            text: root.provider.is-subscription ? root.provider.binding-label : root.provider.endpoint;
+                            color: Theme.muted-text;
+                            font-size: 12px;
+                            overflow: elide;
+                            min-width: 0px;
+                        }
+                    }
+
+                    QuietButton {
+                        y: (parent.height - self.height) / 2;
+                        width: 118px;
+                        text: "管理连接";
+                        icon: @image-url("../../assets/ui/arrow.svg");
+                        icon-color: root.accent;
+                        background: root.accent.with-alpha(0.07 + root.hover * 0.07);
+                        border-color: root.accent.with-alpha(0.16 + root.hover * 0.2);
+                        enabled: !root.busy && !root.config-managed;
+                        clicked => { root.manage(); }
+                    }
+                }
+
+                Rectangle {
+                    height: 1px;
+                    background: Theme.border.with-alpha(0.7);
+                    // A thin travelling highlight only runs during a credential check.
+                    clip: true;
+                    if root.checking: Rectangle {
+                        width: parent.width * 0.28;
+                        height: 1px;
+                        x: root.motion ? (parent.width + self.width) * mod(animation-tick(), 1800ms) / 1800ms - self.width : 0px;
+                        background: @linear-gradient(90deg, root.accent.with-alpha(0), root.accent, root.accent.with-alpha(0));
+                    }
+                }
+
+                HorizontalLayout {
+                    height: 32px;
+                    spacing: 8px;
+                    Rectangle {
+                        width: 18px;
+                        horizontal-stretch: 0;
+                        if root.checking || root.provider.check-message != "" || root.failed: Image {
+                            y: (parent.height - self.height) / 2;
+                            width: 14px;
+                            height: 14px;
+                            source: root.checking ? @image-url("../../assets/ui/loader.svg") : root.failed ? @image-url("../../assets/ui/close.svg") : @image-url("../../assets/ui/check.svg");
+                            colorize: root.status-color;
+                            transform-rotation: root.checking && root.motion ? 360deg * mod(animation-tick(), 1s) / 1s : 0deg;
+                        }
+                        if !root.checking && root.provider.check-message == "" && !root.failed: Rectangle {
+                            x: 4px;
+                            y: (parent.height - self.height) / 2;
+                            width: 6px;
+                            height: 6px;
+                            border-radius: 3px;
+                            background: Theme.muted-text.with-alpha(0.7);
+                        }
+                    }
+
+                    Text {
+                        text: root.checking ? "正在" + root.provider.check-stage + " · " + root.duration-label : root.provider.check-message != "" ? root.provider.check-message + " · " + root.duration-label : root.provider.credential-status;
+                        color: root.status-color;
+                        font-size: 11px;
+                        vertical-alignment: center;
+                        overflow: elide;
+                        min-width: 0px;
+                        horizontal-stretch: 1;
+                        animate color { duration: Theme.fast; }
+                    }
+
+                    QuietButton {
+                        width: 78px;
+                        height: 32px;
+                        text: "模型";
+                        icon: @image-url("../../assets/ui/blocks.svg");
+                        icon-width: 14px;
+                        icon-height: 14px;
+                        icon-color: Theme.muted-text;
+                        ghost: true;
+                        enabled: !root.busy && !root.config-managed;
+                        clicked => { root.models(); }
+                    }
+
+                    QuietButton {
+                        width: root.checking ? 100px : 78px;
+                        height: 32px;
+                        text: root.checking ? "检查中" : root.provider.check-failed ? "重试" : "检查";
+                        icon: @image-url("../../assets/refresh.svg");
+                        icon-width: 14px;
+                        icon-height: 14px;
+                        icon-color: Theme.muted-text;
+                        ghost: true;
+                        enabled: !root.busy && !root.checking;
+                        clicked => { root.check(); }
+                    }
+
+                    if !root.provider.is-subscription: QuietButton {
+                        width: 78px;
+                        height: 32px;
+                        text: "直连";
+                        icon: @image-url("../../assets/ui/connections.svg");
+                        icon-width: 14px;
+                        icon-height: 14px;
+                        icon-color: Theme.muted-text;
+                        ghost: true;
+                        enabled: !root.busy && !root.config-managed && !root.login-pending;
+                        clicked => { root.direct(); }
+                    }
+                }
+            }
+
+            details := AnimatedSection {
+                x: 20px;
+                y: body.y + body.height;
+                width: parent.width - 40px;
+                expanded: root.detail != "";
+                content-height: detail-text.preferred-height + 32px;
+                Rectangle {
+                    y: 12px;
+                    width: parent.width;
+                    height: parent.height - 12px;
+                    background: root.failed ? Theme.error.with-alpha(0.07) : Theme.inset;
+                    border-radius: 8px;
+                    detail-text := Text {
+                        x: 12px;
+                        y: 10px;
+                        width: parent.width - 24px;
+                        text: root.detail;
+                        color: root.failed ? Theme.error : Theme.muted-text;
+                        font-size: 12px;
+                        wrap: word-wrap;
+                    }
+                }
+            }
+        }
+    }
+}
