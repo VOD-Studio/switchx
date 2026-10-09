@@ -30,6 +30,8 @@ macOS 窗口将标题栏融入界面，隐藏独立背景和标题文字，保�
 
 Grok OAuth 使用 Grok CLI 的公开客户端身份，认证端点从 `https://auth.x.ai/.well-known/openid-configuration` 发现并限制在该官方源；它不是 SwitchX 独立注册的 OAuth 客户端。能否推理、可用模型、订阅权限和额度需用真实账号验收。xAI API Key 通道与 Grok 订阅的计费分开。
 
+OAuth 登录与凭据刷新、连接检查、模型发现和上游推理统一使用 reqwest 的自动代理机制，支持 `HTTP_PROXY` / `HTTPS_PROXY` / `ALL_PROXY` 及其小写形式，并遵循 `NO_PROXY` / `no_proxy`；未设置代理环境变量时读取 macOS / Windows 系统代理。访问本地上游时应将 `127.0.0.1,localhost` 加入代理排除项。SwitchX 自身向本地路由发送的验证请求始终直连。
+
 账号刷新凭据单独保存在 `SWITCHX_DATA_DIR/xai_oauth_auth.json`，Unix 权限为 `0600`；access token 只在内存中缓存。上游固定为 `https://api.x.ai/v1/responses`，本地路由逐请求注入保存账号的 token，丢弃客户端 OpenAI 认证与工作区头。账号绑定在发布时固定，账号不能参与自动备用切换；删除前需要解除上游引用。
 
 新增连接先保存一个未启用的 `grok-4.5` 映射（500k 上下文，low / medium / high / xhigh）。模型设置支持使用绑定账号获取 `/models`，并手动增加或修改映射；目录列出模型不代表有推理权限。发布预览会把原配置中不在所选 Grok 模型资料允许范围内的思考档位改为该模型的默认档位；恢复时还原原值。原生 Responses 兼容层展平 namespace 函数工具、恢复返回名称、移除不支持的私有字段，并处理根部联合工具 schema；无法表示的自定义工具会明确拒绝。沿用 `shell_command` 函数工具资料，导入 freeform 工具资料后可能被拒绝。

@@ -493,7 +493,6 @@ impl RouterState {
         let uses_chatgpt = upstreams.values().any(Upstream::is_chatgpt);
         let client = Client::builder()
             .redirect(Policy::none())
-            .no_proxy()
             .retry(reqwest::retry::never())
             .connect_timeout(Duration::from_secs(10))
             .build()
