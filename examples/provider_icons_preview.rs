@@ -2,7 +2,8 @@
 //! Run: cargo run --example provider_icons_preview -- /absolute/output/directory
 
 use switchx::ui::{
-    AccountRow, AppWindow, ModelRow, ProviderIconRow, ProviderRow, RequestRow, Theme, XaiQuotaRow,
+    AccountRow, AppWindow, CodexQuotaRow, ModelRow, ProviderIconRow, ProviderRow, RequestRow,
+    Theme, XaiQuotaRow,
 };
 
 use slint::platform::software_renderer::{MinimalSoftwareWindow, RepaintBufferType};
@@ -382,6 +383,105 @@ fn main() -> Result<(), Box<dyn Error>> {
         completed: true,
         ..Default::default()
     }])));
+    if std::env::args().any(|arg| arg == "--codex-quota") {
+        app.set_xai_accounts(ModelRc::default());
+        app.set_account_status("已保存 1 个 ChatGPT 账号（合成资料）".into());
+        app.set_active_page(1);
+        app.set_connections_tab(1);
+        for (width, height) in [(1200, 820), (1000, 680)] {
+            app.window().set_size(PhysicalSize::new(width, height));
+            for dark in [false, true] {
+                set_theme(&app, &window, dark);
+                let suffix = format!("{}-{width}x{height}", if dark { "dark" } else { "light" });
+                for state in [
+                    "ready",
+                    "low",
+                    "empty",
+                    "loading",
+                    "refreshing",
+                    "failed",
+                    "stale",
+                    "monthly",
+                    "single",
+                    "credits-only",
+                    "multiple",
+                ] {
+                    let has_value = !matches!(state, "loading" | "failed");
+                    let mut quota = CodexQuotaRow {
+                        has_value,
+                        primary_window: XaiQuotaRow {
+                            has_value: has_value && state != "credits-only",
+                            remaining_percent: match state {
+                                "low" => 8.0,
+                                "empty" => 0.0,
+                                _ => 75.0,
+                            },
+                            period_label: "5 小时额度".into(),
+                            reset_label: "2 小时 18 分后重置".into(),
+                            reset_detail: "重置于 10月09日 18:00".into(),
+                            ..Default::default()
+                        },
+                        secondary_window: XaiQuotaRow {
+                            has_value: has_value && !matches!(state, "single" | "credits-only"),
+                            remaining_percent: 62.0,
+                            period_label: if state == "monthly" {
+                                "30 天额度"
+                            } else {
+                                "每周额度"
+                            }
+                            .into(),
+                            reset_label: "4 天 21 小时后重置".into(),
+                            reset_detail: "重置于 10月14日 11:00".into(),
+                            ..Default::default()
+                        },
+                        credits_label: if has_value {
+                            "Codex Credits 余额：62500"
+                        } else {
+                            ""
+                        }
+                        .into(),
+                        resets_label: if has_value && state != "credits-only" {
+                            "可用额度重置 2 次 · 最早到期 10月11日 12:00"
+                        } else {
+                            ""
+                        }
+                        .into(),
+                        resets_warning: true,
+                        updated_label: if has_value { "2 分钟前更新" } else { "" }.into(),
+                        loading: matches!(state, "loading" | "refreshing"),
+                        ..Default::default()
+                    };
+                    if matches!(state, "failed" | "stale") {
+                        quota.error = "额度查询连接失败，请稍后刷新".into();
+                    }
+                    let account = AccountRow {
+                        id: "synthetic-chatgpt-account".into(),
+                        label: "preview@example.invalid".into(),
+                        workspace: "synthetic-workspace".into(),
+                        is_default: true,
+                        is_active: true,
+                        bound_provider_count: 1,
+                        codex_quota: quota,
+                        ..Default::default()
+                    };
+                    let mut rows = vec![account.clone()];
+                    if state == "multiple" {
+                        rows.push(AccountRow {
+                            id: "second-account".into(),
+                            label: "second@example.invalid".into(),
+                            is_default: false,
+                            is_active: false,
+                            ..account
+                        });
+                    }
+                    app.set_accounts(ModelRc::new(VecModel::from(rows)));
+                    snapshot(&window, output, &format!("codex-quota-{state}-{suffix}"))?;
+                }
+            }
+        }
+        println!("Synthetic ChatGPT quota previews: {}", output.display());
+        return Ok(());
+    }
     if std::env::args().any(|arg| arg == "--xai-quota") {
         app.set_accounts(ModelRc::new(VecModel::from(Vec::<AccountRow>::new())));
         app.set_account_status("尚未保存 ChatGPT 账号（合成资料）".into());

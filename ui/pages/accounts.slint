@@ -1,4 +1,5 @@
 import { XaiAccounts } from "xai-accounts.slint";
+import { CodexAccountQuota } from "codex-account-quota.slint";
 import { QuietScrollView as ScrollView } from "../scroll-view.slint";
 import { Theme } from "../tokens.slint";
 import {
@@ -31,10 +32,10 @@ export component AccountsPage inherits ScrollView {
     VerticalLayout {
         spacing: 18px;
         SurfaceCard {
-            height: 328px + root.accounts.length * 94px + (root.accounts.length == 0 ? 40px : 0px) + (root.chatgpt-login-pending ? 172px : 0px);
+            height: accounts-content.preferred-height;
             border-width: 0px;
             background: transparent;
-            VerticalLayout {
+            accounts-content := VerticalLayout {
                 padding: 0px;
                 spacing: 10px;
                 HorizontalLayout {
@@ -50,7 +51,7 @@ export component AccountsPage inherits ScrollView {
                     QuietButton {
                         width: 88px;
                         horizontal-stretch: 0;
-                        text: "刷新列表";
+                        text: "刷新全部";
                         enabled: !root.busy && !root.chatgpt-login-pending;
                         clicked => { root.account-action(0, ""); }
                     }
@@ -101,13 +102,16 @@ export component AccountsPage inherits ScrollView {
                 }
 
                 for account in root.accounts: Rectangle {
-                    height: 84px;
+                    height: 96px + quota-view.height;
                     background: account.is-active ? Theme.brand-surface : Theme.raised;
                     border-width: 1px;
                     border-color: account.is-active ? Theme.brand : Theme.border;
                     border-radius: 10px;
                     HorizontalLayout {
-                        padding: 12px;
+                        x: 14px;
+                        y: 14px;
+                        width: parent.width - 28px;
+                        height: 42px;
                         spacing: 8px;
                         VerticalLayout {
                             horizontal-stretch: 1;
@@ -164,6 +168,24 @@ export component AccountsPage inherits ScrollView {
                             enabled: !root.busy && !root.config-managed && !root.chatgpt-login-pending;
                             clicked => { root.request-account-removal(account); }
                         }
+                    }
+
+                    Rectangle {
+                        x: 14px;
+                        y: 69px;
+                        width: parent.width - 28px;
+                        height: 1px;
+                        background: Theme.border;
+                    }
+
+                    quota-view := CodexAccountQuota {
+                        x: 14px;
+                        y: 82px;
+                        width: parent.width - 28px;
+                        quota: account.codex-quota;
+                        label: account.label;
+                        pending: root.chatgpt-login-pending || root.recovery-only;
+                        refresh => { root.account-action(6, account.id); }
                     }
                 }
 

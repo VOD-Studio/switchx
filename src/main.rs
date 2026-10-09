@@ -1,6 +1,6 @@
 use switchx::ui::{
-    AccountRow, AppWindow, CodeSpan, ModelRow, ProviderIconRow, ProviderPresetRow, ProviderRow,
-    RequestRow, SwitchXTray, SyntaxHighlighting, Theme, XaiQuotaRow,
+    AccountRow, AppWindow, CodeSpan, CodexQuotaRow, ModelRow, ProviderIconRow, ProviderPresetRow,
+    ProviderRow, RequestRow, SwitchXTray, SyntaxHighlighting, Theme, XaiQuotaRow,
 };
 
 #[cfg(target_os = "macos")]
@@ -66,6 +66,10 @@ enum Command {
         id: String,
     },
     XaiQuota(Vec<(String, String)>),
+    CodexQuota {
+        requests: Vec<(String, String)>,
+        home: String,
+    },
     SaveSubscription {
         id: String,
         name: String,
@@ -417,6 +421,7 @@ fn account_view(data_dir: &Path, home: &Path) -> Result<AccountView, String> {
                     label: account.label.into(),
                     workspace: account.workspace_id.into(),
                     is_default: account.is_default,
+                    credential_generation: account.authenticated_at_ms.to_string().into(),
                     requires_reauth: false,
                     bound_provider_count: names.len() as i32,
                     bound_provider_names: names.join("、").into(),
@@ -431,10 +436,29 @@ fn account_view(data_dir: &Path, home: &Path) -> Result<AccountView, String> {
 
 fn show_accounts(app: &AppWindow, view: Result<AccountView, String>) {
     match view {
-        Ok(view) => {
+        Ok(mut view) => {
+            let previous = app.get_accounts();
+            for row in &mut view.rows {
+                if let Some(old) = previous.iter().find(|old| {
+                    old.id == row.id && old.credential_generation == row.credential_generation
+                }) {
+                    row.codex_quota = old.codex_quota;
+                }
+            }
             app.set_accounts(ModelRc::new(VecModel::from(view.rows)));
             app.set_selected_account_id(view.selected.into());
             app.set_account_status(view.status.into());
+            if app.get_active_page() == 1 && app.get_connections_tab() == 1 {
+                let unread = app
+                    .get_accounts()
+                    .iter()
+                    .filter(|row| row.codex_quota.request_id.is_empty())
+                    .map(|row| row.id)
+                    .collect::<Vec<_>>();
+                for id in unread {
+                    app.invoke_account_action(6, id);
+                }
+            }
         }
         Err(error) => app.set_account_status(error.into()),
     }
@@ -516,13 +540,7 @@ fn show_xai_accounts(app: &AppWindow, view: Result<Vec<AccountRow>, String>) {
 
 fn update_quota_times(quota: &mut XaiQuotaRow, now: i64) {
     if let Ok(queried) = quota.queried_at.parse::<i64>() {
-        let elapsed = (now - queried).max(0);
-        quota.updated_label = match elapsed {
-            0..=59 => "刚刚更新".into(),
-            60..=3599 => format!("{} 分钟前更新", elapsed / 60).into(),
-            3600..=86399 => format!("{} 小时前更新", elapsed / 3600).into(),
-            _ => format!("{} 天前更新", elapsed / 86400).into(),
-        };
+        quota.updated_label = quota_updated_label(queried, now).into();
     }
     quota.reset_label = match quota.resets_at.parse::<i64>() {
         Ok(reset) if reset <= now => "已到重置时间，请刷新".into(),
@@ -537,6 +555,155 @@ fn update_quota_times(quota: &mut XaiQuotaRow, now: i64) {
         }
         _ => "官方未提供重置时间".into(),
     };
+}
+
+fn quota_updated_label(queried: i64, now: i64) -> String {
+    let elapsed = (now - queried).max(0);
+    match elapsed {
+        0..=59 => "刚刚更新".into(),
+        60..=3599 => format!("{} 分钟前更新", elapsed / 60),
+        3600..=86399 => format!("{} 小时前更新", elapsed / 3600),
+        _ => format!("{} 天前更新", elapsed / 86400),
+    }
+}
+
+fn quota_reset_detail(reset: Option<i64>) -> String {
+    reset
+        .and_then(|v| chrono::DateTime::from_timestamp(v, 0))
+        .map(|v| {
+            format!(
+                "重置于 {}",
+                v.with_timezone(&chrono::Local).format("%m月%d日 %H:%M")
+            )
+        })
+        .unwrap_or_default()
+}
+
+fn update_codex_quota_times(quota: &mut CodexQuotaRow, now: i64) {
+    if let Ok(queried) = quota.queried_at.parse::<i64>() {
+        quota.updated_label = quota_updated_label(queried, now).into();
+    }
+    update_quota_times(&mut quota.primary_window, now);
+    update_quota_times(&mut quota.secondary_window, now);
+    let expiries = serde_json::from_str::<Vec<Option<i64>>>(&quota.reset_expiries)
+        .unwrap_or_default()
+        .into_iter()
+        .filter(|at| at.is_none_or(|at| at > now))
+        .collect::<Vec<_>>();
+    let earliest = expiries.iter().flatten().min().copied();
+    quota.resets_warning = earliest.is_some_and(|at| at - now <= 3 * 86400);
+    quota.resets_label = if expiries.is_empty() {
+        String::new()
+    } else {
+        let expiry = earliest
+            .and_then(|at| chrono::DateTime::from_timestamp(at, 0))
+            .map(|at| {
+                format!(
+                    " · 最早到期 {}",
+                    at.with_timezone(&chrono::Local).format("%m月%d日 %H:%M")
+                )
+            })
+            .unwrap_or_default();
+        format!("可用额度重置 {} 次{expiry}", expiries.len())
+    }
+    .into();
+}
+
+fn tick_codex_quotas(app: &AppWindow, now: i64) {
+    let rows = app
+        .get_accounts()
+        .iter()
+        .map(|mut row| {
+            update_codex_quota_times(&mut row.codex_quota, now);
+            row
+        })
+        .collect::<Vec<_>>();
+    app.set_accounts(ModelRc::new(VecModel::from(rows)));
+}
+
+fn update_codex_quota(
+    app: &AppWindow,
+    id: &str,
+    request_id: &str,
+    result: Result<switchx::accounts::Quota, String>,
+) {
+    let mut rows = app.get_accounts().iter().collect::<Vec<_>>();
+    let Some(row) = rows
+        .iter_mut()
+        .find(|row| row.id == id && row.codex_quota.request_id == request_id)
+    else {
+        return;
+    };
+    let quota = &mut row.codex_quota;
+    quota.loading = false;
+    match result {
+        Ok(value) => {
+            quota.has_value = true;
+            let mut windows = value.windows.into_iter().map(|window| XaiQuotaRow {
+                has_value: true,
+                remaining_percent: window.remaining_percent as f32,
+                period_label: window.period_label.into(),
+                resets_at: window
+                    .resets_at
+                    .map(|v| v.to_string())
+                    .unwrap_or_default()
+                    .into(),
+                reset_detail: quota_reset_detail(window.resets_at).into(),
+                ..Default::default()
+            });
+            quota.primary_window = windows.next().unwrap_or_default();
+            quota.secondary_window = windows.next().unwrap_or_default();
+            quota.credits_label = value
+                .credits_balance
+                .map(|balance| format!("Codex Credits 余额：{balance}"))
+                .unwrap_or_default()
+                .into();
+            quota.reset_expiries = serde_json::to_string(&value.reset_expires_at)
+                .unwrap_or_default()
+                .into();
+            quota.queried_at = value.queried_at.to_string().into();
+            quota.error = "".into();
+        }
+        Err(error) => quota.error = error.into(),
+    }
+    update_codex_quota_times(quota, chrono::Utc::now().timestamp());
+    app.set_accounts(ModelRc::new(VecModel::from(rows)));
+}
+
+fn refresh_codex_quota(app: &AppWindow, sender: &mpsc::Sender<Command>, id: &str) {
+    if app.get_recovery_only() || app.get_chatgpt_login_pending() {
+        return;
+    }
+    let mut rows = app.get_accounts().iter().collect::<Vec<_>>();
+    let mut requests = Vec::new();
+    for row in &mut rows {
+        if (id.is_empty() || row.id == id) && !row.codex_quota.loading {
+            let Ok(request_id) = app::new_id() else {
+                continue;
+            };
+            row.codex_quota.request_id = request_id.clone().into();
+            row.codex_quota.loading = true;
+            row.codex_quota.error = "".into();
+            requests.push((row.id.to_string(), request_id));
+        }
+    }
+    app.set_accounts(ModelRc::new(VecModel::from(rows)));
+    if !requests.is_empty()
+        && let Err(error) = sender.try_send(Command::CodexQuota {
+            requests,
+            home: app.get_config_home().into(),
+        })
+        && let Command::CodexQuota { requests, .. } = error.into_inner()
+    {
+        for (id, request_id) in requests {
+            update_codex_quota(
+                app,
+                &id,
+                &request_id,
+                Err("后台繁忙，请稍后刷新额度".into()),
+            );
+        }
+    }
 }
 
 fn update_xai_quota_times(app: &AppWindow, now: i64) {
@@ -1573,13 +1740,16 @@ async fn worker(
     let mut pending_login: Option<(watch::Sender<bool>, tokio::task::JoinHandle<()>)> = None;
     let mut pending_xai_login: Option<(watch::Sender<bool>, tokio::task::JoinHandle<()>)> = None;
     let mut xai_manager: Option<switchx::xai::AccountManager> = None;
+    let mut quota_account_manager: Option<AccountManager> = None;
     let mut account_home = client::default_home().ok();
     let mut subscription_auth: Option<SubscriptionAuthDraft> = None;
     let mut provider_checks = tokio::task::JoinSet::new();
     let mut xai_quota_queries = tokio::task::JoinSet::new();
+    let mut codex_quota_queries = tokio::task::JoinSet::new();
     while let Some(command) = receiver.recv().await {
         while provider_checks.try_join_next().is_some() {}
         while xai_quota_queries.try_join_next().is_some() {}
+        while codex_quota_queries.try_join_next().is_some() {}
         let recovery_only = directory
             .as_ref()
             .ok()
@@ -1752,6 +1922,36 @@ async fn worker(
                         result.map(|()| "Grok 连接与账号绑定已保存；在工作台预览并启用路由".into()),
                     );
                 });
+            }
+            Command::CodexQuota {
+                requests,
+                home: target,
+            } => {
+                let context = directory
+                    .as_ref()
+                    .map_err(|error| error.message().to_owned())
+                    .and_then(|path| {
+                        if quota_account_manager.is_none() {
+                            quota_account_manager = Some(AccountManager::open(path)?);
+                        }
+                        Ok((
+                            quota_account_manager.as_ref().unwrap().clone(),
+                            home(&target)?,
+                        ))
+                    });
+                for (id, request_id) in requests {
+                    let context = context.clone();
+                    let window = weak.clone();
+                    codex_quota_queries.spawn(async move {
+                        let result = match context {
+                            Ok((manager, home)) => manager.quota(&id, &home).await,
+                            Err(error) => Err(error),
+                        };
+                        let _ = window.upgrade_in_event_loop(move |app| {
+                            update_codex_quota(&app, &id, &request_id, result)
+                        });
+                    });
+                }
             }
             Command::XaiQuota(requests) => {
                 let manager = directory
@@ -2834,11 +3034,25 @@ async fn worker(
                     if let Some(snapshot) = snapshot {
                         show_result(&app, snapshot);
                     }
+                    if action == 5 && result.is_ok() {
+                        let rows = app
+                            .get_accounts()
+                            .iter()
+                            .map(|row| AccountRow {
+                                codex_quota: CodexQuotaRow::default(),
+                                ..row
+                            })
+                            .collect::<Vec<_>>();
+                        app.set_accounts(ModelRc::new(VecModel::from(rows)));
+                    }
                     if let Some(accounts) = accounts {
                         show_accounts(&app, accounts);
                     }
                     if let Some(status) = status {
                         show_config_status(&app, status);
+                    }
+                    if action == 0 && result.is_ok() {
+                        app.invoke_account_action(6, "".into());
                     }
                     show_action(&app, result);
                 });
@@ -3240,6 +3454,11 @@ async fn worker(
                 });
             }
             Command::Quit => {
+                codex_quota_queries.abort_all();
+                while codex_quota_queries.join_next().await.is_some() {}
+                if let Some(manager) = &quota_account_manager {
+                    manager.wait_for_idle().await?;
+                }
                 xai_quota_queries.abort_all();
                 while xai_quota_queries.join_next().await.is_some() {}
                 while provider_checks.join_next().await.is_some() {}
@@ -3363,6 +3582,11 @@ async fn worker(
                 .into(),
             );
         });
+    }
+    codex_quota_queries.abort_all();
+    while codex_quota_queries.join_next().await.is_some() {}
+    if let Some(manager) = quota_account_manager {
+        manager.wait_for_idle().await?;
     }
     xai_quota_queries.abort_all();
     while xai_quota_queries.join_next().await.is_some() {}
@@ -4039,6 +4263,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let weak = app.as_weak();
     app.on_account_action(move |action, id| {
         if let Some(app) = weak.upgrade() {
+            if action == 6 {
+                refresh_codex_quota(&app, &callback_sender, &id);
+                return;
+            }
+            if action == 7 {
+                tick_codex_quotas(&app, chrono::Utc::now().timestamp());
+                return;
+            }
             queue(
                 &app,
                 &callback_sender,
@@ -4312,6 +4544,156 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn chatgpt_quota_refresh_preserves_values_and_rejects_old_account_generations() {
+        use slint::platform::{Platform, WindowAdapter, software_renderer::MinimalSoftwareWindow};
+        use std::rc::Rc;
+        struct PreviewPlatform(Rc<MinimalSoftwareWindow>);
+        impl Platform for PreviewPlatform {
+            fn create_window_adapter(&self) -> Result<Rc<dyn WindowAdapter>, slint::PlatformError> {
+                Ok(self.0.clone())
+            }
+        }
+        let window = MinimalSoftwareWindow::new(Default::default());
+        slint::platform::set_platform(Box::new(PreviewPlatform(window))).unwrap();
+        let app = AppWindow::new().unwrap();
+        app.set_accounts(ModelRc::new(VecModel::from(vec![
+            AccountRow {
+                id: "a".into(),
+                credential_generation: "1".into(),
+                ..Default::default()
+            },
+            AccountRow {
+                id: "b".into(),
+                credential_generation: "1".into(),
+                ..Default::default()
+            },
+        ])));
+        let (sender, mut receiver) = mpsc::channel(2);
+        refresh_codex_quota(&app, &sender, "a");
+        assert!(!app.get_busy());
+        let Command::CodexQuota {
+            requests: first, ..
+        } = receiver.try_recv().unwrap()
+        else {
+            panic!("quota command")
+        };
+        refresh_codex_quota(&app, &sender, "");
+        let Command::CodexQuota {
+            requests: second, ..
+        } = receiver.try_recv().unwrap()
+        else {
+            panic!("quota command")
+        };
+        assert_eq!(first.len(), 1);
+        assert_eq!(second.len(), 1);
+        assert_eq!(second[0].0, "b");
+        let now = chrono::Utc::now().timestamp();
+        let value = switchx::accounts::Quota {
+            windows: vec![
+                switchx::accounts::QuotaWindow {
+                    remaining_percent: 75.0,
+                    period_label: "5 小时额度".into(),
+                    resets_at: Some(now + 3600),
+                },
+                switchx::accounts::QuotaWindow {
+                    remaining_percent: 62.0,
+                    period_label: "每周额度".into(),
+                    resets_at: None,
+                },
+            ],
+            credits_balance: Some(62500.0),
+            reset_expires_at: vec![Some(now + 120), None],
+            queried_at: now,
+        };
+        update_codex_quota(&app, "a", &first[0].1, Ok(value.clone()));
+        let row = app.get_accounts().row_data(0).unwrap();
+        assert_eq!(row.codex_quota.primary_window.remaining_percent, 75.0);
+        assert_eq!(
+            row.codex_quota.secondary_window.reset_label,
+            "官方未提供重置时间"
+        );
+        assert_eq!(row.codex_quota.credits_label, "Codex Credits 余额：62500");
+        assert!(
+            row.codex_quota
+                .resets_label
+                .starts_with("可用额度重置 2 次")
+        );
+        let mut quota = row.codex_quota;
+        update_codex_quota_times(&mut quota, now + 121);
+        assert_eq!(quota.updated_label, "2 分钟前更新");
+        assert_eq!(quota.resets_label, "可用额度重置 1 次");
+        assert!(!quota.resets_warning);
+        refresh_codex_quota(&app, &sender, "a");
+        let Command::CodexQuota {
+            requests: retry, ..
+        } = receiver.try_recv().unwrap()
+        else {
+            panic!("quota command")
+        };
+        update_codex_quota(&app, "a", &first[0].1, Err("过时结果".into()));
+        assert!(app.get_accounts().row_data(0).unwrap().codex_quota.loading);
+        update_codex_quota(&app, "a", &retry[0].1, Err("模拟连接失败".into()));
+        let row = app.get_accounts().row_data(0).unwrap();
+        assert!(row.codex_quota.has_value);
+        assert_eq!(row.codex_quota.primary_window.remaining_percent, 75.0);
+        assert_eq!(row.codex_quota.error, "模拟连接失败");
+        let rows = app
+            .get_accounts()
+            .iter()
+            .map(|row| AccountRow {
+                codex_quota: CodexQuotaRow::default(),
+                ..row
+            })
+            .collect::<Vec<_>>();
+        show_accounts(
+            &app,
+            Ok(AccountView {
+                rows,
+                selected: String::new(),
+                status: String::new(),
+            }),
+        );
+        assert!(
+            app.get_accounts()
+                .row_data(0)
+                .unwrap()
+                .codex_quota
+                .has_value
+        );
+        let mut rows = app.get_accounts().iter().collect::<Vec<_>>();
+        rows[0].credential_generation = "2".into();
+        rows[0].codex_quota = CodexQuotaRow::default();
+        show_accounts(
+            &app,
+            Ok(AccountView {
+                rows,
+                selected: String::new(),
+                status: String::new(),
+            }),
+        );
+        update_codex_quota(&app, "a", &retry[0].1, Ok(value.clone()));
+        assert!(
+            !app.get_accounts()
+                .row_data(0)
+                .unwrap()
+                .codex_quota
+                .has_value
+        );
+        app.set_accounts(ModelRc::default());
+        update_codex_quota(&app, "b", &second[0].1, Ok(value));
+        assert_eq!(app.get_accounts().row_count(), 0);
+        app.set_accounts(ModelRc::new(VecModel::from(vec![AccountRow {
+            id: "a".into(),
+            ..Default::default()
+        }])));
+        drop(receiver);
+        refresh_codex_quota(&app, &sender, "a");
+        let row = app.get_accounts().row_data(0).unwrap();
+        assert!(!row.codex_quota.loading);
+        assert_eq!(row.codex_quota.error, "后台繁忙，请稍后刷新额度");
+    }
 
     #[test]
     fn grok_quota_refresh_keeps_last_success_and_ignores_outdated_account_results() {
