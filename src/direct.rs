@@ -69,7 +69,6 @@ pub async fn fetch_models(base_url: &str, token: &str) -> Result<Vec<String>, St
         format!("{base_path}/v1/models"),
     ];
     let client = Client::builder()
-        .no_proxy()
         .redirect(Policy::none())
         .connect_timeout(Duration::from_secs(5))
         .timeout(Duration::from_secs(12))
