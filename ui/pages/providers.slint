@@ -157,10 +157,10 @@ export component ProvidersPage inherits VerticalLayout {
                     }
 
                     QuietButton {
-                        width: 64px;
-                        text: "检查";
+                        width: 80px;
+                        text: provider.check-id == "" ? "检查" : "检查中…";
                         ghost: true;
-                        enabled: !root.busy;
+                        enabled: !root.busy && provider.check-id == "";
                         clicked => { root.check-provider(provider.id); }
                     }
 
