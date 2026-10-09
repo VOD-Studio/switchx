@@ -192,6 +192,8 @@ ChatGPT 订阅上游默认显示 OpenAI 绿色头像；API 预设继续按准确
 CODEX_HOME="/absolute/codex-home" codex --no-daemon
 ```
 
+`/model` 只切换当前会话的模型，不把已有的官方会话改成 SwitchX 路由。若会话仍使用 `openai`，选择 `sx-…` 公开 ID 会把别名直接发到官方接口并被拒绝。开启路由后应通过以上入口新建会话，确认连接为 `switchx_router`；恢复配置后也应新建原连接的会话。
+
 目录检查会同时核对解析结果和新服务的 `model/list`，不再只以 `debug models` 能解析 JSON 作为模型菜单通过的依据。检查不读取原有账号或调用模型；目录与菜单检查通过仍不代表真实上游的工具能力或账号权限已验证。
 
 仅含 API 模型的原生路由使用独立 `auth.command` helper 获取本地令牌，无需手工设置终端环境变量。上游 Key 保存于 SQLite，不进入 Codex 配置、请求记录或恢复 journal；API 出站请求只使用映射上游的 Key。原生 SSE 透传，取消不重放请求；服务器状态引用始终拒绝，API 模型另拒绝加密推理与压缩状态续接。应用运行中或有恢复记录时禁止修改上游、模型和绑定。成功的 `/models` 检查和目录解析不代表真实工具能力已验证。[Codex 配置约定](https://learn.chatgpt.com/docs/config-file/config-reference)

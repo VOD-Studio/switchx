@@ -824,6 +824,10 @@ fn main() -> Result<(), Box<dyn Error>> {
         println!("Synthetic connection-check previews: {}", output.display());
         return Ok(());
     }
+    if std::env::args().any(|arg| arg == "--route-launch") {
+        app.set_route_running(true);
+        app.set_config_managed(true);
+    }
     for (width, height) in [(1200, 820), (1000, 680)] {
         app.window().set_size(PhysicalSize::new(width, height));
         for dark in [false, true] {

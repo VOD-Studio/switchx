@@ -387,7 +387,7 @@ export component RoutingPage inherits Rectangle {
                 }
 
                 Text {
-                    text: root.config-managed ? (root.direct-active ? "当前使用单一上游；恢复后可发布模型菜单。" : "恢复后可编辑模型与连接。") : "默认 · " + (root.default-model == "" ? "尚未选择" : root.default-model) + "，在新会话生效。";
+                    text: root.route-running ? "请用“启动 Codex”或 codex --no-daemon 新建会话。" : root.config-managed ? (root.direct-active ? "当前使用单一上游；恢复后可发布模型菜单。" : "恢复后可编辑模型与连接。") : "默认 · " + (root.default-model == "" ? "尚未选择" : root.default-model) + "，在新会话生效。";
                     color: Theme.muted-text;
                     font-size: 11px;
                     overflow: elide;
