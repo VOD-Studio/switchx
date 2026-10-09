@@ -21,6 +21,9 @@ export component ProvidersPage inherits VerticalLayout {
     callback check-provider(string);
     callback preview-direct(string);
     callback begin-model-editor(string, string);
+    function check-duration(milliseconds: int) -> string {
+        return (round(milliseconds / 100) / 10) + "s";
+    }
     spacing: 16px;
     HorizontalLayout {
         height: 36px;
@@ -95,7 +98,7 @@ export component ProvidersPage inherits VerticalLayout {
     ListView {
         vertical-stretch: 1;
         for provider in root.filtered-providers: Rectangle {
-            height: provider.auth-error == "" ? 116px : 144px;
+            height: max(provider.auth-error == "" ? 116px : 144px, info.preferred-height + 48px);
             Rectangle {
                 height: parent.height - 12px;
                 background: Theme.panel;
@@ -115,7 +118,7 @@ export component ProvidersPage inherits VerticalLayout {
                         colorize: provider.monochrome ? Theme.primary-text : transparent;
                     }
 
-                    VerticalLayout {
+                    info := VerticalLayout {
                         alignment: center;
                         spacing: 5px;
                         Text {
@@ -133,11 +136,28 @@ export component ProvidersPage inherits VerticalLayout {
                             overflow: elide;
                         }
 
-                        Text {
-                            text: provider.credential-status;
-                            color: Theme.muted-text;
+                        HorizontalLayout {
+                            spacing: 6px;
+                            if provider.check-id != "" || provider.check-message != "": Image {
+                                width: 14px;
+                                height: 14px;
+                                source: provider.check-id != "" ? @image-url("../../assets/ui/loader.svg") : provider.check-failed ? @image-url("../../assets/ui/close.svg") : @image-url("../../assets/ui/check.svg");
+                                colorize: provider.check-failed ? Theme.error : Theme.brand;
+                                transform-rotation: provider.check-id != "" && Theme.animations-enabled && !Theme.system-reduced-motion ? 360deg * mod(animation-tick(), 1s) / 1s : 0deg;
+                            }
+                            Text {
+                                text: provider.check-id != "" ? "正在" + provider.check-stage + " · " + root.check-duration(provider.check-elapsed-ms) : provider.check-message != "" ? provider.check-message + " · " + root.check-duration(provider.check-elapsed-ms) : provider.credential-status;
+                                color: provider.check-failed ? Theme.error : provider.check-id != "" || provider.check-message != "" ? Theme.brand : Theme.muted-text;
+                                font-size: 11px;
+                                overflow: elide;
+                            }
+                        }
+
+                        if provider.check-detail != "" || (provider.check-id != "" && provider.check-elapsed-ms >= 10000): Text {
+                            text: provider.check-id != "" ? "检查耗时较长，仍在等待响应" : provider.check-detail;
+                            color: provider.check-failed ? Theme.error : Theme.muted-text;
                             font-size: 11px;
-                            overflow: elide;
+                            wrap: word-wrap;
                         }
 
                         if provider.auth-error != "": Text {
@@ -158,7 +178,7 @@ export component ProvidersPage inherits VerticalLayout {
 
                     QuietButton {
                         width: 80px;
-                        text: provider.check-id == "" ? "检查" : "检查中…";
+                        text: provider.check-id != "" ? "检查中…" : provider.check-failed ? "重试" : "检查";
                         ghost: true;
                         enabled: !root.busy && provider.check-id == "";
                         clicked => { root.check-provider(provider.id); }
