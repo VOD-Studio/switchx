@@ -644,6 +644,15 @@ fn chatgpt_error_message(code: u8) -> Option<&'static str> {
     }
 }
 
+fn model_routing_hint_suffix<'a>(hint: &'a str, public_id: &str) -> Option<&'a str> {
+    let suffix = hint.strip_prefix("model=")?.strip_prefix(public_id)?;
+    (suffix.is_empty()
+        || suffix
+            .strip_prefix(";tier=")
+            .is_some_and(|tier| !tier.is_empty() && !tier.contains(';')))
+    .then_some(suffix)
+}
+
 fn single_header<'a>(
     headers: &'a HeaderMap,
     name: &str,
@@ -1015,6 +1024,24 @@ async fn forward(
             "server-side state continuation is not available; start a new session",
         );
     }
+    let routing_hint = if official || state.session_store.is_some() {
+        match single_header(&headers, "x-codex-routing-hint") {
+            Ok(value) => value,
+            Err(code) => {
+                return request_error(
+                    &mut tracker,
+                    StatusCode::BAD_REQUEST,
+                    code,
+                    "a single consistent routing hint is required",
+                );
+            }
+        }
+    } else {
+        None
+    };
+    let model_hint_suffix = routing_hint
+        .and_then(|hint| hint.to_str().ok())
+        .and_then(|hint| model_routing_hint_suffix(hint, &public_id));
     if let Some(store) = &state.session_store {
         let session = match session_id(&headers) {
             Ok(session) => session,
@@ -1043,21 +1070,8 @@ async fn forward(
         if xai {
             context.upstream_model = Some(binding.upstream_model.clone());
         }
-        let routing_hint = match single_header(&headers, "x-codex-routing-hint") {
-            Ok(value) => value,
-            Err(code) => {
-                return request_error(
-                    &mut tracker,
-                    StatusCode::BAD_REQUEST,
-                    code,
-                    "a single consistent routing hint is required",
-                );
-            }
-        };
-        // Codex 0.158 sends this model-only hint even on a new root session.
-        let opaque_hint = routing_hint.is_some_and(|value| {
-            value.to_str().ok() != Some(format!("model={public_id}").as_str())
-        });
+        // Model/tier hints describe this request, rather than prior session state.
+        let opaque_hint = routing_hint.is_some() && model_hint_suffix.is_none();
         let allow_new = !compact
             && !object.get("input").is_some_and(opaque_input)
             && !headers.contains_key("x-codex-turn-state")
@@ -1111,7 +1125,7 @@ async fn forward(
             }
         }
     };
-    let outbound_headers = match authenticated {
+    let mut outbound_headers = match authenticated {
         Ok(headers) => headers,
         Err(code) => {
             if official {
@@ -1148,6 +1162,18 @@ async fn forward(
         );
     }
     object.insert("model".into(), binding.upstream_model.clone().into());
+    if official && let Some(suffix) = model_hint_suffix {
+        let Ok(hint) = HeaderValue::from_str(&format!("model={}{suffix}", binding.upstream_model))
+        else {
+            return request_error(
+                &mut tracker,
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "internal_error",
+                "could not encode upstream model routing hint",
+            );
+        };
+        outbound_headers.insert("x-codex-routing-hint", hint);
+    }
     let Ok(outbound_body) = serde_json::to_vec(&request) else {
         return request_error(
             &mut tracker,

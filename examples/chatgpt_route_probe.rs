@@ -85,6 +85,16 @@ async fn response(
     {
         return Err(StatusCode::UNAUTHORIZED);
     }
+    if state.official
+        && let Some(model) = headers
+            .get("x-codex-routing-hint")
+            .and_then(|value| value.to_str().ok())
+            .and_then(|hint| hint.strip_prefix("model="))
+            .and_then(|hint| hint.split(';').next())
+        && body["model"] != model
+    {
+        return Err(StatusCode::BAD_REQUEST);
+    }
     let tool_returned = body["input"].as_array().is_some_and(|items| {
         items
             .iter()
@@ -243,7 +253,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .prepare(&data, &home, 0, &selected.public_id, &binary)
         .await?;
     check(
-        preview.contains("已选工作区的官方目的地：https://chatgpt.com"),
+        preview.contains("工作区 synthetic-workspace · https://chatgpt.com"),
         "production preflight discarded native workspace routing",
     )?;
     preflight.discard_preview();

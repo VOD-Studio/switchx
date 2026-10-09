@@ -308,6 +308,7 @@ async fn subscription_forwarding_refresh_failure_workspace_pin_and_api_switch_ar
             .header(LOCAL_TOKEN_HEADER, RECORD_TOKEN)
             .bearer_auth(bearer)
             .header("chatgpt-account-id", workspace)
+            .header("x-codex-routing-hint", format!("model={model}"))
             .header(header::CONTENT_TYPE, "application/json")
             .body(json!({"model":model,"input":input}).to_string())
     };
@@ -364,6 +365,7 @@ async fn subscription_forwarding_refresh_failure_workspace_pin_and_api_switch_ar
             "Bearer synthetic-native-old-access"
         );
         assert_eq!(body["model"], "gpt-5.5");
+        assert_eq!(headers["x-codex-routing-hint"], "model=gpt-5.5");
         assert!(api_seen.try_recv().is_err());
     }
 
@@ -492,6 +494,7 @@ async fn subscription_forwarding_refresh_failure_workspace_pin_and_api_switch_ar
         .bearer_auth("synthetic-native-renewed-access")
         .header("chatgpt-account-id", "fixture-workspace")
         .header(header::CONTENT_TYPE, "application/json")
+        .header("x-codex-routing-hint", "model=sx-account;tier=priority")
         .body(json!({"model":"sx-account","input":[]}).to_string())
         .send()
         .await
@@ -506,9 +509,13 @@ async fn subscription_forwarding_refresh_failure_workspace_pin_and_api_switch_ar
         "response.compaction"
     );
     assert_eq!(records.wait_for(&id).await.status, RequestStatus::Completed);
-    let (_, body, path) = official_seen.recv().await.unwrap();
+    let (headers, body, path) = official_seen.recv().await.unwrap();
     assert_eq!(path, "/responses/compact");
     assert_eq!(body["model"], "gpt-5.5");
+    assert_eq!(
+        headers["x-codex-routing-hint"],
+        "model=gpt-5.5;tier=priority"
+    );
     let response = client
         .post(format!("{url}/compact"))
         .header(LOCAL_TOKEN_HEADER, RECORD_TOKEN)
