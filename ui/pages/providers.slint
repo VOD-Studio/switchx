@@ -106,8 +106,8 @@ export component ProvidersPage inherits VerticalLayout {
                 HorizontalLayout {
                     padding: 18px;
                     spacing: 14px;
+                    cross-axis-alignment: center;
                     Image {
-                        y: (parent.height - self.height) / 2;
                         width: provider.icon-id == "xiaomimimo" ? 64px : 32px;
                         height: 32px;
                         source: provider.icon;
@@ -149,7 +149,6 @@ export component ProvidersPage inherits VerticalLayout {
                     }
 
                     QuietButton {
-                        y: (parent.height - self.height) / 2;
                         width: 72px;
                         text: "模型";
                         ghost: true;
@@ -158,7 +157,6 @@ export component ProvidersPage inherits VerticalLayout {
                     }
 
                     QuietButton {
-                        y: (parent.height - self.height) / 2;
                         width: 64px;
                         text: "检查";
                         ghost: true;
@@ -174,7 +172,6 @@ export component ProvidersPage inherits VerticalLayout {
                         clicked => { root.preview-direct(provider.id); }
                     }
                     QuietButton {
-                        y: (parent.height - self.height) / 2;
                         width: 106px;
                         text: "管理连接  ↗";
                         enabled: !root.busy && !root.config-managed;

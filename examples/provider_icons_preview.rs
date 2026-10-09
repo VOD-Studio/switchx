@@ -98,6 +98,7 @@ fn main() -> Result<(), Box<dyn Error>> {
         })
         .collect::<Result<Vec<_>, slint::LoadImageError>>()?;
     let openai = icons.iter().find(|row| row.id == "openai").unwrap().clone();
+    let grok = icons.iter().find(|row| row.id == "grok").unwrap().clone();
     let custom = icons.iter().find(|row| row.id == "google").unwrap().clone();
     let providers = ModelRc::new(VecModel::from(vec![
         ProviderRow {
@@ -111,6 +112,18 @@ fn main() -> Result<(), Box<dyn Error>> {
             icon_id: openai.id.clone(),
             icon: openai.icon.clone(),
             monochrome: openai.monochrome,
+            ..Default::default()
+        },
+        ProviderRow {
+            id: "preview-grok".into(),
+            name: "Grok".into(),
+            is_subscription: true,
+            is_grok: true,
+            binding_label: "绑定：预览账号（合成资料）".into(),
+            credential_status: "Grok OAuth · 发布时核对账号绑定".into(),
+            icon_id: grok.id.clone(),
+            icon: grok.icon.clone(),
+            monochrome: grok.monochrome,
             ..Default::default()
         },
         ProviderRow {
