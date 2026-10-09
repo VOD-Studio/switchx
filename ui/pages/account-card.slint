@@ -1,0 +1,336 @@
+import { Theme } from "../tokens.slint";
+import {
+    QuietButton,
+    QuietComboBox,
+    QuietLineEdit,
+    StatusPill,
+    AnimatedSection,
+} from "../components.slint";
+import { AccountRow } from "../view-models.slint";
+import { QuotaWindow } from "../quota-window.slint";
+import { CodexAccountQuota } from "codex-account-quota.slint";
+
+export component AccountCard inherits Rectangle {
+    in property <AccountRow> account;
+    in property <bool> grok;
+    in property <bool> busy;
+    in property <bool> config-managed;
+    in property <bool> recovery-only;
+    in property <bool> pending;
+    in property <bool> removing;
+    in property <bool> expanded;
+    callback action(int, string);
+    callback request-removal(AccountRow);
+    callback request-login(AccountRow);
+    callback toggle-details(string);
+    property <bool> entered: Theme.page-motion == 0ms;
+    property <float> row-reveal: root.entered && !root.removing ? 1 : 0;
+    animate row-reveal {
+        duration: Theme.page-motion;
+        easing: cubic-bezier(0.22, 1, 0.36, 1);
+    }
+    Timer {
+        interval: 16ms;
+        running: !root.entered;
+        triggered => { root.entered = true; }
+    }
+
+    property <string> identity: root.account.id;
+    changed identity => { actions.cancel-popup(); }
+    property <bool> query-pending: root.grok ? root.account.quota.loading : root.account.codex-quota.loading;
+    height: (82px + quota-content.preferred-height + account-details.height) * root.row-reveal;
+    preferred-height: root.height;
+    vertical-stretch: 0;
+    opacity: root.row-reveal;
+    clip: true;
+    background: Theme.panel;
+    border-width: 1px;
+    border-color: root.account.requires-reauth ? Theme.warning.with-alpha(0.5) : Theme.border;
+    border-radius: 11px;
+    animate background, border-color { duration: Theme.page-motion; }
+    HorizontalLayout {
+        x: 16px;
+        y: 14px;
+        width: parent.width - 32px;
+        height: 42px;
+        spacing: 8px;
+        VerticalLayout {
+            spacing: 5px;
+            horizontal-stretch: 1;
+            HorizontalLayout {
+                spacing: 8px;
+                Text {
+                    text: root.account.label;
+                    color: Theme.primary-text;
+                    font-size: 14px;
+                    font-weight: 600;
+                    overflow: elide;
+                    min-width: 0px;
+                    max-width: self.preferred-width;
+                    vertical-alignment: center;
+                    horizontal-stretch: 1;
+                }
+
+                if root.account.is-default: StatusPill {
+                    y: (parent.height - self.height) / 2;
+                    width: 86px;
+                    height: 22px;
+                    label: "默认保存账号";
+                }
+                if !root.grok && root.account.is-active: StatusPill {
+                    y: (parent.height - self.height) / 2;
+                    width: 104px;
+                    height: 22px;
+                    label: "Codex 文件关联";
+                    ink: Theme.brand;
+                    fill: Theme.brand-surface;
+                }
+                Rectangle {
+                    horizontal-stretch: 1;
+                }
+            }
+
+            Text {
+                text: root.account.bound-provider-count == 0 ? "未绑定连接" : "已绑定 " + root.account.bound-provider-count + " 个连接";
+                color: Theme.muted-text;
+                font-size: 12px;
+            }
+        }
+
+        if root.account.requires-reauth: QuietButton {
+            y: (parent.height - self.height) / 2;
+            width: 92px;
+            horizontal-stretch: 0;
+            text: "重新授权";
+            enabled: !root.busy && !root.pending && !root.config-managed;
+            clicked => { root.action(1, root.account.id); }
+        }
+        QuietButton {
+            y: (parent.height - self.height) / 2;
+            width: 76px;
+            horizontal-stretch: 0;
+            text: "详情";
+            icon: @image-url("../../assets/ui/chevron-down.svg");
+            icon-color: Theme.muted-text;
+            icon-angle: root.expanded ? 180deg : 0deg;
+            ghost: true;
+            accessible-expandable: true;
+            accessible-expanded: root.expanded;
+            enabled: !root.removing;
+            clicked => { root.toggle-details(root.account.id); }
+        }
+
+        actions := QuietComboBox {
+            y: (parent.height - self.height) / 2;
+            width: 36px;
+            height: 36px;
+            horizontal-stretch: 0;
+            action-menu: true;
+            icon-only: true;
+            accessible-role: button;
+            trigger-icon: @image-url("../../assets/ui/more.svg");
+            trigger-text: root.account.label + " 的更多操作";
+            enabled: !root.busy && !root.pending && !root.removing;
+            model: [
+                "刷新额度",
+                "设为默认保存账号",
+                root.grok ? "重新授权" : "写入 Codex 登录",
+                "移除账号"
+            ];
+            item-enabled: [
+                !root.query-pending && !root.account.requires-reauth && !root.recovery-only,
+                !root.config-managed && !root.account.is-default && !root.account.requires-reauth,
+                root.grok ? !root.config-managed : !root.recovery-only,
+                !root.config-managed
+            ];
+            destructive-index: 3;
+            action-context: root.account.id;
+            selected(value) => {
+                if (value == "刷新额度") { root.action(root.grok ? 5 : 6, root.account.id); }
+                else if (value == "设为默认保存账号") { root.action(2, root.account.id); }
+                else if (value == "重新授权") { root.action(1, root.account.id); }
+                else if (value == "写入 Codex 登录") { root.request-login(root.account); }
+                else if (value == "移除账号") { root.request-removal(root.account); }
+            }
+        }
+    }
+
+    quota-content := VerticalLayout {
+        x: 16px;
+        y: 64px;
+        width: parent.width - 32px;
+        height: self.preferred-height;
+        spacing: 7px;
+        if !root.grok: CodexAccountQuota {
+            quota: root.account.codex-quota;
+            expanded: root.expanded;
+        }
+        if root.grok && root.account.quota.has-value: QuotaWindow {
+            quota: root.account.quota;
+            label-width: 74px;
+        }
+        if root.grok && root.account.requires-reauth && root.account.quota.has-value: Text {
+            text: "授权已失效，请重新登录；当前显示上次额度数据。";
+            color: Theme.warning;
+            font-size: 12px;
+            wrap: word-wrap;
+        }
+        if root.grok && !root.account.quota.has-value: Text {
+            height: 18px;
+            text: root.account.requires-reauth ? "授权已失效，请重新登录" : root.query-pending ? "正在查询官方额度…" : root.account.quota.error != "" ? "暂时无法查询额度" : "尚未查询额度";
+            color: root.account.requires-reauth || root.account.quota.error != "" ? Theme.warning : Theme.muted-text;
+            font-size: 12px;
+        }
+        if root.grok && root.account.quota.error != "": Text {
+            text: root.account.quota.error;
+            color: Theme.warning;
+            font-size: 12px;
+            wrap: word-wrap;
+        }
+        if root.grok: HorizontalLayout {
+            height: 18px;
+            spacing: 6px;
+            Rectangle {
+                horizontal-stretch: 1;
+            }
+
+            if root.query-pending: QuietButton {
+                width: 18px;
+                height: 18px;
+                text: "正在更新额度";
+                icon-only: true;
+                icon: @image-url("../../assets/refresh.svg");
+                icon-color: Theme.muted-text;
+                ghost: true;
+                loading: true;
+                enabled: false;
+            }
+            Text {
+                text: root.query-pending ? "更新中…" : (root.account.requires-reauth || root.account.quota.error != "") && root.account.quota.has-value ? "上次数据 · " + root.account.quota.updated-label : root.account.quota.updated-label;
+                color: Theme.muted-text;
+                font-size: 12px;
+                horizontal-stretch: 0;
+            }
+        }
+    }
+
+    account-details := AnimatedSection {
+        x: 16px;
+        y: 70px + quota-content.preferred-height;
+        width: parent.width - 32px;
+        expanded: root.expanded;
+        content-height: details.preferred-height;
+        details := VerticalLayout {
+            x: 0px;
+            y: 0px;
+            width: parent.width;
+            height: self.preferred-height;
+            padding-top: 8px;
+            spacing: 8px;
+            Rectangle {
+                height: 1px;
+                background: Theme.border;
+            }
+
+            if !root.grok && root.account.workspace != "": Text {
+                text: "工作区：" + root.account.workspace;
+                color: Theme.muted-text;
+                font-size: 12px;
+                wrap: word-wrap;
+            }
+            if root.grok && root.account.quota.reset-detail != "": Text {
+                text: root.account.quota.reset-detail;
+                color: Theme.muted-text;
+                font-size: 12px;
+                wrap: word-wrap;
+            }
+            Text {
+                text: root.account.bound-provider-count == 0 ? "连接绑定：暂无绑定" : "连接绑定：" + root.account.bound-provider-names;
+                color: Theme.muted-text;
+                font-size: 12px;
+                wrap: word-wrap;
+            }
+
+            if root.grok: Text {
+                text: "数据来源：Grok 官方账单";
+                color: Theme.muted-text;
+                font-size: 12px;
+            }
+            Text {
+                text: "默认选择用于跟随默认账号的连接；固定绑定独立管理。";
+                color: Theme.muted-text;
+                font-size: 12px;
+                wrap: word-wrap;
+            }
+        }
+    }
+}
+
+export component AccountLoginProgress inherits Rectangle {
+    in property <bool> pending;
+    in property <bool> busy;
+    in property <string> title;
+    in property <string> user-code;
+    in property <string> login-url;
+    callback cancel();
+    property <float> reveal: root.pending ? 1 : 0;
+    animate reveal {
+        duration: Theme.page-motion;
+        easing: ease-out;
+    }
+    height: 168px * root.reveal;
+    preferred-height: root.height;
+    vertical-stretch: 0;
+    opacity: root.reveal;
+    visible: root.reveal > 0;
+    clip: true;
+    background: Theme.brand-surface;
+    border-radius: 11px;
+    VerticalLayout {
+        x: 0px;
+        y: 0px;
+        width: parent.width;
+        height: 168px;
+        padding: 16px;
+        spacing: 10px;
+        HorizontalLayout {
+            Text {
+                text: root.title;
+                color: Theme.primary-text;
+                font-size: 14px;
+                font-weight: 500;
+                vertical-alignment: center;
+            }
+
+            QuietButton {
+                width: 88px;
+                text: "取消登录";
+                enabled: root.pending && !root.busy;
+                clicked => { root.cancel(); }
+            }
+        }
+
+        Text {
+            text: root.user-code == "" ? "在已打开的官方页面完成登录，可随时取消。" : "复制验证码，在官方页面完成登录。";
+            color: Theme.muted-text;
+            font-size: 12px;
+        }
+
+        HorizontalLayout {
+            spacing: 10px;
+            if root.user-code != "": QuietLineEdit {
+                text: root.user-code;
+                read-only: true;
+                enabled: root.pending;
+                accessible-label: "登录验证码，可选择复制";
+            }
+
+            if root.login-url != "": QuietLineEdit {
+                text: root.login-url;
+                read-only: true;
+                enabled: root.pending;
+                accessible-label: "官方登录页面地址，可选择复制";
+            }
+        }
+    }
+}

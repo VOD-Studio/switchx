@@ -383,6 +383,123 @@ fn main() -> Result<(), Box<dyn Error>> {
         completed: true,
         ..Default::default()
     }])));
+    if std::env::args().any(|arg| arg == "--accounts-design") {
+        app.set_active_page(1);
+        app.set_connections_tab(1);
+        app.set_action_message("合成账号界面检查；未访问实际账号或 Codex 配置".into());
+        let chatgpt_account = AccountRow {
+            id: "design-chatgpt".into(),
+            label: "personal@example.invalid".into(),
+            workspace: "synthetic-workspace-0001".into(),
+            is_default: true,
+            is_active: true,
+            codex_quota: CodexQuotaRow {
+                has_value: true,
+                primary_window: XaiQuotaRow {
+                    has_value: true,
+                    remaining_percent: 78.0,
+                    period_label: "每周额度".into(),
+                    reset_label: "5 天 17 小时后重置".into(),
+                    reset_detail: "重置于 10月15日 09:30".into(),
+                    ..Default::default()
+                },
+                resets_label: "可用额度重置 3 次 · 最早到期 10月23日 04:26".into(),
+                updated_label: "刚刚更新".into(),
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let grok_account = AccountRow {
+            id: "design-grok".into(),
+            label: "grok@example.invalid".into(),
+            workspace: "已保存授权".into(),
+            is_default: true,
+            bound_provider_count: 1,
+            bound_provider_names: "Grok 订阅连接".into(),
+            quota: XaiQuotaRow {
+                has_value: true,
+                remaining_percent: 97.0,
+                period_label: "每周额度".into(),
+                reset_label: "4 天 19 小时后重置".into(),
+                reset_detail: "重置于 10月14日 11:36".into(),
+                updated_label: "刚刚更新".into(),
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let writes = Rc::new(Cell::new(0));
+        let removals = Rc::new(Cell::new(0));
+        let write_count = writes.clone();
+        let removal_count = removals.clone();
+        app.on_account_action(move |action, id| {
+            if action == 3 || action == 4 {
+                assert_eq!(id, "design-chatgpt");
+                if action == 3 {
+                    write_count.set(write_count.get() + 1);
+                } else {
+                    removal_count.set(removal_count.get() + 1);
+                }
+            }
+        });
+        for (width, height) in [(1200, 820), (1000, 680)] {
+            app.window().set_size(PhysicalSize::new(width, height));
+            for dark in [false, true] {
+                set_theme(&app, &window, dark);
+                app.set_accounts(ModelRc::new(VecModel::from(vec![chatgpt_account.clone()])));
+                app.set_xai_accounts(ModelRc::new(VecModel::from(vec![grok_account.clone()])));
+                app.set_expanded_chatgpt_account_id("".into());
+                app.set_expanded_grok_account_id("".into());
+                app.set_native_login_expanded(false);
+                let suffix = format!("{}-{width}x{height}", if dark { "dark" } else { "light" });
+                snapshot(&window, output, &format!("accounts-ready-{suffix}"))?;
+                app.set_expanded_chatgpt_account_id(chatgpt_account.id.clone());
+                app.set_expanded_grok_account_id(grok_account.id.clone());
+                snapshot(&window, output, &format!("accounts-details-{suffix}"))?;
+                app.set_accounts(ModelRc::new(VecModel::from(vec![chatgpt_account.clone()])));
+                assert_eq!(app.get_expanded_chatgpt_account_id(), chatgpt_account.id);
+                app.set_expanded_chatgpt_account_id("".into());
+                app.set_expanded_grok_account_id("".into());
+                app.set_native_login_expanded(true);
+                snapshot(&window, output, &format!("accounts-native-{suffix}"))?;
+                app.set_native_login_expanded(false);
+                app.set_account_login_confirm_label(chatgpt_account.label.clone());
+                app.set_account_login_confirm_id(chatgpt_account.id.clone());
+                app.set_account_login_confirm_open(true);
+                snapshot(&window, output, &format!("accounts-confirm-{suffix}"))?;
+                window.dispatch_event(WindowEvent::KeyPressed {
+                    text: slint::platform::Key::Escape.into(),
+                });
+                window.dispatch_event(WindowEvent::KeyReleased {
+                    text: slint::platform::Key::Escape.into(),
+                });
+                assert!(!app.get_account_login_confirm_open());
+            }
+        }
+        app.window().set_size(PhysicalSize::new(1200, 820));
+        app.global::<Theme>().set_animations_enabled(false);
+        app.set_native_login_expanded(false);
+        render(&window);
+        click(&window, 1124.0, 332.0);
+        snapshot(&window, output, "accounts-menu-dark-1200x820")?;
+        click(&window, 1000.0, 452.0);
+        render(&window);
+        assert!(app.get_account_login_confirm_open());
+        assert_eq!(writes.get(), 0, "Selecting login must only open its review");
+        click(&window, 720.0, 488.0);
+        render(&window);
+        assert_eq!(writes.get(), 1);
+        assert!(!app.get_account_login_confirm_open());
+
+        app.global::<Theme>().set_animations_enabled(true);
+        app.set_account_removing_id("design-chatgpt".into());
+        render(&window);
+        assert_eq!(removals.get(), 1);
+        render(&window);
+        assert_eq!(removals.get(), 1, "Confirmed removal must dispatch once");
+        app.set_account_removing_id("".into());
+        println!("Synthetic account design previews: {}", output.display());
+        return Ok(());
+    }
     if std::env::args().any(|arg| arg == "--codex-quota") {
         app.set_xai_accounts(ModelRc::default());
         app.set_account_status("已保存 1 个 ChatGPT 账号（合成资料）".into());
@@ -555,13 +672,22 @@ fn main() -> Result<(), Box<dyn Error>> {
                     if state == "low" {
                         let pixels = render(&window);
                         // A short quota fill must remain anchored at the meter's left edge.
-                        let pixel = pixels.as_slice()[((height - 95) * width + 296) as usize];
                         let expected = if dark {
                             (225, 184, 121)
                         } else {
                             (148, 102, 33)
                         };
-                        assert_eq!((pixel.r, pixel.g, pixel.b), expected);
+                        let meter = (255..height - 58)
+                            .flat_map(|y| (300..330).map(move |x| (y * width + x) as usize))
+                            .find(|&offset| {
+                                pixels.as_slice()[offset..offset + 8]
+                                    .iter()
+                                    .all(|pixel| (pixel.r, pixel.g, pixel.b) == expected)
+                            })
+                            .expect("low quota fill must remain at the track's left edge");
+                        let track = pixels.as_slice()[meter + 30];
+                        let expected_track = if dark { (40, 44, 46) } else { (243, 243, 239) };
+                        assert_eq!((track.r, track.g, track.b), expected_track);
                     }
                 }
             }

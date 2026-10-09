@@ -5,8 +5,28 @@ use std::{cell::Cell, io::Write, rc::Rc, time::Duration};
 
 slint::slint! {
     import { QuietButton, SurfaceCard } from "../ui/components.slint";
+    import { AccountCard } from "../ui/pages/account-card.slint";
+    import { AccountRow } from "../ui/view-models.slint";
+    export { AccountRow, CodexQuotaRow, XaiQuotaRow } from "../ui/view-models.slint";
     import { Theme } from "../ui/tokens.slint";
     export { Theme } from "../ui/tokens.slint";
+
+    export component AccountCardWindow inherits Window {
+        preferred-width: 820px;
+        preferred-height: 500px;
+        background: Theme.background;
+        in-out property <AccountRow> account;
+        in-out property <bool> expanded: false;
+        in-out property <bool> removing: false;
+        out property <length> card-height: card.height;
+        card := AccountCard {
+            x: 30px; y: 30px; width: 760px;
+            account: root.account;
+            expanded: root.expanded;
+            removing: root.removing;
+            toggle-details(id) => { root.expanded = !root.expanded; }
+        }
+    }
 
     export component SurfaceWindow inherits Window {
         width: 400px;
@@ -112,6 +132,87 @@ fn click(window: &MinimalSoftwareWindow, x: f32, y: f32) {
         position,
         button: PointerEventButton::Left,
     });
+}
+
+#[test]
+fn account_card_reverses_disclosure_and_removal_without_losing_quota_details() {
+    let window = MinimalSoftwareWindow::new(RepaintBufferType::NewBuffer);
+    slint::platform::set_platform(Box::new(PreviewPlatform(window.clone()))).unwrap();
+    let app = AccountCardWindow::new().unwrap();
+    let mut account = AccountRow {
+        id: "synthetic-account".into(),
+        label: "preview@example.invalid".into(),
+        workspace: "synthetic-workspace".into(),
+        codex_quota: CodexQuotaRow {
+            has_value: true,
+            primary_window: XaiQuotaRow {
+                has_value: true,
+                remaining_percent: 78.0,
+                period_label: "每周额度".into(),
+                reset_label: "5 天后重置".into(),
+                reset_detail: "重置于 10月15日 09:30".into(),
+                ..Default::default()
+            },
+            ..Default::default()
+        },
+        ..Default::default()
+    };
+    app.set_account(account.clone());
+    app.window().set_size(PhysicalSize::new(820, 500));
+    app.show().unwrap();
+    draw(&window, "account-entry-start");
+    advance(16);
+    draw(&window, "account-entry-ready");
+    advance(300);
+    draw(&window, "account-ready");
+    let collapsed = app.get_card_height();
+    assert!(collapsed > 100.0);
+    click(&window, 692.0, 65.0);
+    assert!(app.get_expanded());
+    draw(&window, "account-details-start");
+    advance(60);
+    draw(&window, "account-details-partial");
+    let partial = app.get_card_height();
+    advance(300);
+    draw(&window, "account-details-open");
+    let expanded = app.get_card_height();
+    assert!(partial > collapsed && partial < expanded);
+    assert!(expanded > collapsed + 60.0);
+
+    app.set_expanded(false);
+    draw(&window, "account-details-closing");
+    advance(50);
+    app.set_expanded(true);
+    draw(&window, "account-details-reversing");
+    advance(300);
+    account.codex_quota.primary_window.remaining_percent = 62.0;
+    app.set_account(account);
+    draw(&window, "account-quota-updated");
+    assert!(app.get_expanded());
+    assert!((app.get_card_height() - expanded).abs() < 1.0);
+
+    app.set_removing(true);
+    draw(&window, "account-removal-start");
+    advance(60);
+    draw(&window, "account-removal-partial");
+    let removal_partial = app.get_card_height();
+    assert!(removal_partial > 0.0 && removal_partial < expanded);
+    app.set_removing(false);
+    draw(&window, "account-removal-reversed");
+    advance(300);
+    draw(&window, "account-removal-restored");
+    assert!((app.get_card_height() - expanded).abs() < 1.0);
+
+    app.global::<Theme>().set_system_reduced_motion(true);
+    app.set_expanded(false);
+    draw(&window, "account-reduced-collapsed");
+    assert!((app.get_card_height() - collapsed).abs() < 1.0);
+    app.set_expanded(true);
+    draw(&window, "account-reduced-expanded");
+    assert!((app.get_card_height() - expanded).abs() < 1.0);
+    app.set_removing(true);
+    draw(&window, "account-reduced-removed");
+    assert_eq!(app.get_card_height(), 0.0);
 }
 
 #[test]

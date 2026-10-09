@@ -38,6 +38,7 @@ export component RoutingPage inherits Rectangle {
     callback launch-codex();
     callback show-direct();
     callback restore-config(string);
+    callback switch-api-preview();
     callback navigate(int);
     vertical-stretch: 1;
     VerticalLayout {
@@ -441,6 +442,15 @@ export component RoutingPage inherits Rectangle {
                 ghost: true;
                 height: 28px;
                 clicked => { root.navigate(5); }
+            }
+
+            QuietButton {
+                width: 132px;
+                height: 28px;
+                text: "切回 API 预览";
+                ghost: true;
+                enabled: !root.busy && !root.chatgpt-login-pending;
+                clicked => { root.switch-api-preview(); }
             }
         }
     }

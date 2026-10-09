@@ -23,6 +23,9 @@ slint::slint! {
         in-out property <int> choice;
         in-out property <string> value: "DeepSeek";
         in-out property <bool> enabled: true;
+        in-out property <bool> action-menu: false;
+        in-out property <[bool]> item-enabled: [];
+        in-out property <string> action-context;
         out property <bool> expanded: chooser.accessible-expanded;
         out property <int> selections;
         out property <string> selected-value;
@@ -37,11 +40,86 @@ slint::slint! {
             current-index <=> root.choice;
             current-value <=> root.value;
             enabled: root.enabled;
+            action-menu: root.action-menu;
+            item-enabled: root.item-enabled;
+            action-context: root.action-context;
             accessible-label: "选择连接";
             selected(value) => { root.selections += 1; root.selected-value = value; }
         }
         next := FocusScope { x: 280px; y: 64px; width: 40px; height: 36px; }
     }
+}
+
+#[test]
+fn action_menu_requires_activation_and_cancels_disabled_pending_actions() {
+    let window = MinimalSoftwareWindow::new(RepaintBufferType::NewBuffer);
+    slint::platform::set_platform(Box::new(PreviewPlatform(window.clone()))).unwrap();
+    let app = DropdownWindow::new().unwrap();
+    app.window().set_size(PhysicalSize::new(360, 420));
+    app.set_action_menu(true);
+    app.set_options(ModelRc::new(VecModel::from(vec![
+        "刷新额度".into(),
+        "写入 Codex 登录".into(),
+        "移除账号".into(),
+    ])));
+    app.set_item_enabled(ModelRc::new(VecModel::from(vec![true, false, true])));
+    app.show().unwrap();
+    app.invoke_focus_choice();
+    draw(&window, "action-menu-closed");
+
+    key(&window, Key::Return);
+    advance(200);
+    key(&window, Key::DownArrow);
+    assert_eq!(
+        app.get_selections(),
+        0,
+        "Arrow keys must not execute actions"
+    );
+    key(&window, Key::Return);
+    assert!(app.get_expanded(), "A disabled action must not activate");
+    key(&window, Key::End);
+    assert_eq!(app.get_selections(), 0);
+    key(&window, Key::Return);
+    assert!(!app.get_expanded());
+    assert_eq!(app.get_selections(), 0, "Action waits for popup exit");
+    advance(200);
+    draw(&window, "action-menu-activated");
+    assert_eq!(app.get_selections(), 1);
+    assert_eq!(app.get_selected_value(), "移除账号");
+
+    app.invoke_focus_choice();
+    key(&window, Key::Return);
+    advance(200);
+    key(&window, Key::Return);
+    app.set_enabled(false);
+    advance(200);
+    draw(&window, "action-menu-cancelled");
+    assert_eq!(app.get_selections(), 1, "Disabling cancels a queued action");
+
+    app.set_enabled(true);
+    app.set_action_context("account-a".into());
+    app.invoke_focus_choice();
+    key(&window, Key::Return);
+    advance(200);
+    key(&window, Key::End);
+    key(&window, Key::Return);
+    app.set_action_context("account-b".into());
+    advance(200);
+    draw(&window, "action-menu-context-changed");
+    assert_eq!(
+        app.get_selections(),
+        1,
+        "A queued action must retain its account context"
+    );
+
+    app.global::<Theme>().set_system_reduced_motion(true);
+    app.invoke_focus_choice();
+    key(&window, Key::Return);
+    key(&window, Key::End);
+    key(&window, Key::Return);
+    draw(&window, "action-menu-reduced");
+    assert_eq!(app.get_selections(), 2);
+    assert_eq!(app.get_selected_value(), "移除账号");
 }
 
 struct PreviewPlatform(Rc<MinimalSoftwareWindow>);
