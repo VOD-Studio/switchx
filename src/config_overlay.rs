@@ -168,6 +168,15 @@ impl Overlay {
                 continue;
             }
             if found != leaf.applied
+                && leaf.path == ["model_reasoning_effort"]
+                && (current.is_none()
+                    || current
+                        .and_then(Item::as_str)
+                        .is_some_and(|effort| crate::catalog::REASONING_LEVELS.contains(&effort)))
+            {
+                continue;
+            }
+            if found != leaf.applied
                 || (leaf.before.is_none()
                     && leaf_comments_hash(parent.key(key), current) != leaf.applied_comments)
             {
@@ -465,6 +474,80 @@ fn hash_inner_comments(item: &Item, hash: &mut DefaultHasher) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn preserves_changed_reasoning_preferences_without_blocking_restore() {
+        for original in ["", "model_reasoning_effort = 'minimal'\n"] {
+            let before: DocumentMut = original.parse().unwrap();
+            let applied: DocumentMut =
+                "model_reasoning_effort = 'medium'\napproval_policy = 'never'\n"
+                    .parse()
+                    .unwrap();
+            let overlay = Overlay::between(&before, &applied).unwrap();
+            for effort in crate::catalog::REASONING_LEVELS
+                .iter()
+                .copied()
+                .map(Some)
+                .chain([None])
+            {
+                let mut current = applied.clone();
+                if let Some(effort) = effort {
+                    current["model_reasoning_effort"] = toml_edit::value(effort);
+                    if effort != "medium" {
+                        current["model_reasoning_effort"]
+                            .as_value_mut()
+                            .unwrap()
+                            .decor_mut()
+                            .set_suffix(" # keep preference");
+                    }
+                } else {
+                    current.remove("model_reasoning_effort");
+                }
+                let mut conflicts = Vec::new();
+                assert!(overlay.restore(&mut current, &mut conflicts).unwrap());
+                assert!(conflicts.is_empty(), "{effort:?}: {conflicts:?}");
+                assert!(current.get("approval_policy").is_none());
+                let expected = if effort == Some("medium") {
+                    before.get("model_reasoning_effort").and_then(Item::as_str)
+                } else {
+                    effort
+                };
+                assert_eq!(
+                    current.get("model_reasoning_effort").and_then(Item::as_str),
+                    expected
+                );
+                if expected.is_some() && effort != Some("medium") {
+                    assert!(current.to_string().contains("# keep preference"));
+                }
+                assert!(!overlay.restore(&mut current, &mut conflicts).unwrap());
+                assert!(conflicts.is_empty());
+            }
+        }
+    }
+
+    #[test]
+    fn keeps_invalid_reasoning_preferences_and_nested_edits_as_conflicts() {
+        let applied: DocumentMut =
+            "model_reasoning_effort = 'medium'\n[profile]\nmodel_reasoning_effort = 'medium'\n"
+                .parse()
+                .unwrap();
+        let overlay = Overlay::between(&DocumentMut::new(), &applied).unwrap();
+        for effort in ["'unknown'", "''", "42", "true", "{ effort = 'high' }"] {
+            let mut current: DocumentMut = format!(
+                "model_reasoning_effort = {effort}\n[profile]\nmodel_reasoning_effort = 'high'\n"
+            )
+            .parse()
+            .unwrap();
+            let original = current.to_string();
+            let mut conflicts = Vec::new();
+            assert!(!overlay.restore(&mut current, &mut conflicts).unwrap());
+            assert_eq!(
+                conflicts,
+                ["model_reasoning_effort", "profile.model_reasoning_effort"]
+            );
+            assert_eq!(current.to_string(), original);
+        }
+    }
 
     #[test]
     fn restores_leaves_and_empty_added_tables_without_reverting_external_edits() {

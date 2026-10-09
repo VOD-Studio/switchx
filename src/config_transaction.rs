@@ -890,6 +890,50 @@ mod tests {
     }
 
     #[test]
+    fn restores_published_model_selection_after_reasoning_effort_changes() {
+        for model in ["sx-default", "sx-selected"] {
+            for partial in [false, true] {
+                let home = TestHome::new();
+                fs::write(home.config(), "model = 'native-model'\n").unwrap();
+                PreparedSwitch::inspect(
+                    &home.config(),
+                    &home.state(),
+                    &publication_with_model_choices(),
+                    "127.0.0.1:18731".parse().unwrap(),
+                    "sx-default",
+                )
+                .unwrap()
+                .with_common_config("model_reasoning_effort = 'medium'\n")
+                .unwrap()
+                .apply()
+                .unwrap();
+                let mut selected: DocumentMut =
+                    fs::read_to_string(home.config()).unwrap().parse().unwrap();
+                selected["model"] = value(model);
+                selected["model_reasoning_effort"] = value("high");
+                if partial {
+                    selected["model"] = value("native-model");
+                    for name in ["model_provider", "model_catalog_json", "model_providers"] {
+                        selected.remove(name);
+                    }
+                }
+                fs::write(home.config(), selected.to_string()).unwrap();
+
+                let result = restore(&home.config(), &home.state()).unwrap();
+                assert!(result.conflicts.is_empty(), "{:?}", result.conflicts);
+                let restored: DocumentMut =
+                    fs::read_to_string(home.config()).unwrap().parse().unwrap();
+                assert_eq!(restored["model"].as_str(), Some("native-model"));
+                assert_eq!(restored["model_reasoning_effort"].as_str(), Some("high"));
+                for name in ["model_provider", "model_catalog_json", "model_providers"] {
+                    assert!(restored.get(name).is_none());
+                }
+                assert!(!home.state().join(JOURNAL_NAME).exists());
+            }
+        }
+    }
+
+    #[test]
     fn restores_selected_published_models_including_legacy_partial_recovery() {
         let publication = publication_with_model_choices();
         for legacy in [false, true] {
