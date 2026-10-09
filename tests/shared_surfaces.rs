@@ -216,6 +216,93 @@ fn account_card_reverses_disclosure_and_removal_without_losing_quota_details() {
 }
 
 #[test]
+fn account_card_quota_fill_grows_on_entry_and_pulses_only_while_refreshing() {
+    let window = MinimalSoftwareWindow::new(RepaintBufferType::NewBuffer);
+    slint::platform::set_platform(Box::new(PreviewPlatform(window.clone()))).unwrap();
+    let app = AccountCardWindow::new().unwrap();
+    let mut account = AccountRow {
+        id: "synthetic-account".into(),
+        label: "preview@example.invalid".into(),
+        initial: "P".into(),
+        codex_quota: CodexQuotaRow {
+            has_value: true,
+            primary_window: XaiQuotaRow {
+                has_value: true,
+                remaining_percent: 80.0,
+                period_label: "每周额度".into(),
+                reset_label: "5 天后重置".into(),
+                ..Default::default()
+            },
+            ..Default::default()
+        },
+        ..Default::default()
+    };
+    app.set_account(account.clone());
+    app.window().set_size(PhysicalSize::new(820, 500));
+    app.show().unwrap();
+    draw(&window, "quota-fill-start");
+    // The card enters after 16 ms and the fill starts growing roughly 120 ms later.
+    // Draw every step like a running window does; Slint only animates a property
+    // that was already rendered before its value changed.
+    for _ in 0..6 {
+        advance(if app.get_card_height() == 0.0 { 16 } else { 60 });
+        draw(&window, "quota-fill-step");
+    }
+    let growing = draw(&window, "quota-fill-growing");
+    advance(1200);
+    let settled = draw(&window, "quota-fill-settled");
+    // Card top + padding + header + gap + well padding + half the 20px row: the 80% fill
+    // spans x = 146..474 once settled.
+    let bar_row = (30 + 16 + 40 + 14 + 13 + 10) * 820;
+    assert_eq!(
+        growing.as_slice()[bar_row + 200],
+        settled.as_slice()[bar_row + 200]
+    );
+    assert_ne!(
+        growing.as_slice()[bar_row + 450],
+        settled.as_slice()[bar_row + 450],
+        "The fill must still be growing and not yet reach its final width"
+    );
+    advance(450);
+    assert_eq!(
+        draw(&window, "quota-fill-idle").as_bytes(),
+        settled.as_bytes(),
+        "An idle quota fill must stay still"
+    );
+
+    account.codex_quota.loading = true;
+    app.set_account(account.clone());
+    draw(&window, "quota-pulse-start");
+    advance(450);
+    let dimmed = draw(&window, "quota-pulse-mid");
+    assert_ne!(dimmed.as_bytes(), settled.as_bytes());
+    advance(450);
+    let returned = draw(&window, "quota-pulse-peak");
+    assert_ne!(returned.as_bytes(), dimmed.as_bytes());
+
+    account.codex_quota.loading = false;
+    app.set_account(account);
+    advance(16);
+    let finished = draw(&window, "quota-pulse-finished");
+    advance(450);
+    let still = draw(&window, "quota-pulse-still");
+    let header = 0..60 * 820 * 3;
+    assert_eq!(
+        &finished.as_bytes()[header.clone()],
+        &still.as_bytes()[header],
+        "The header must not change once the refresh ends"
+    );
+    assert_eq!(
+        finished.as_slice()[bar_row + 200],
+        still.as_slice()[bar_row + 200]
+    );
+    assert_eq!(
+        finished.as_slice()[bar_row + 200],
+        settled.as_slice()[bar_row + 200]
+    );
+}
+
+#[test]
 fn shared_surfaces_preserve_styling_motion_and_accessible_button_actions() {
     let window = MinimalSoftwareWindow::new(RepaintBufferType::NewBuffer);
     slint::platform::set_platform(Box::new(PreviewPlatform(window.clone()))).unwrap();

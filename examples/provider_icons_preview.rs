@@ -390,6 +390,7 @@ fn main() -> Result<(), Box<dyn Error>> {
         let chatgpt_account = AccountRow {
             id: "design-chatgpt".into(),
             label: "personal@example.invalid".into(),
+            initial: "P".into(),
             workspace: "synthetic-workspace-0001".into(),
             is_default: true,
             is_active: true,
@@ -412,6 +413,7 @@ fn main() -> Result<(), Box<dyn Error>> {
         let grok_account = AccountRow {
             id: "design-grok".into(),
             label: "grok@example.invalid".into(),
+            initial: "G".into(),
             workspace: "已保存授权".into(),
             is_default: true,
             bound_provider_count: 1,
@@ -479,9 +481,9 @@ fn main() -> Result<(), Box<dyn Error>> {
         app.global::<Theme>().set_animations_enabled(false);
         app.set_native_login_expanded(false);
         render(&window);
-        click(&window, 1124.0, 332.0);
+        click(&window, 1126.0, 348.0);
         snapshot(&window, output, "accounts-menu-dark-1200x820")?;
-        click(&window, 1000.0, 452.0);
+        click(&window, 1000.0, 474.0);
         render(&window);
         assert!(app.get_account_login_confirm_open());
         assert_eq!(writes.get(), 0, "Selecting login must only open its review");
@@ -685,8 +687,8 @@ fn main() -> Result<(), Box<dyn Error>> {
                                     .all(|pixel| (pixel.r, pixel.g, pixel.b) == expected)
                             })
                             .expect("low quota fill must remain at the track's left edge");
-                        let track = pixels.as_slice()[meter + 30];
-                        let expected_track = if dark { (40, 44, 46) } else { (243, 243, 239) };
+                        let track = pixels.as_slice()[meter + 80];
+                        let expected_track = if dark { (51, 58, 53) } else { (228, 231, 225) };
                         assert_eq!((track.r, track.g, track.b), expected_track);
                     }
                 }
