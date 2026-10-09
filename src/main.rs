@@ -417,6 +417,7 @@ fn account_view(data_dir: &Path, home: &Path) -> Result<AccountView, String> {
                 let names = account_provider_names(&providers, &account.id, default_id.as_deref());
                 AccountRow {
                     is_active: active.as_ref() == Some(&account.id),
+                    initial: account_initial(&account.label).into(),
                     id: account.id.into(),
                     label: account.label.into(),
                     workspace: account.workspace_id.into(),
@@ -432,6 +433,16 @@ fn account_view(data_dir: &Path, home: &Path) -> Result<AccountView, String> {
         selected,
         status,
     })
+}
+
+/// First visible character of an account label, shown in the card avatar.
+fn account_initial(label: &str) -> String {
+    label
+        .chars()
+        .find(|c| c.is_alphanumeric())
+        .or_else(|| label.chars().next())
+        .map(|c| c.to_uppercase().collect())
+        .unwrap_or_default()
 }
 
 /// Applies account rows by id. Replacing the model would recreate every account
@@ -542,6 +553,7 @@ fn xai_account_view(data_dir: &Path) -> Result<Vec<AccountRow>, String> {
             AccountRow {
                 id: account.id.clone().into(),
                 label: account.label.clone().into(),
+                initial: account_initial(&account.label).into(),
                 workspace: if account.requires_reauth {
                     "凭据失效，请重新登录"
                 } else {
@@ -4623,6 +4635,15 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn account_initial_uses_the_first_visible_character() {
+        assert_eq!(account_initial("y.defect@gmail.com"), "Y");
+        assert_eq!(account_initial("_ éclair@example.invalid"), "É");
+        assert_eq!(account_initial("账号@example.invalid"), "账");
+        assert_eq!(account_initial("--"), "-");
+        assert_eq!(account_initial(""), "");
+    }
 
     #[test]
     fn chatgpt_quota_refresh_preserves_values_and_rejects_old_account_generations() {

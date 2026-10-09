@@ -1,11 +1,31 @@
 import { Theme } from "tokens.slint";
 import { XaiQuotaRow } from "view-models.slint";
 
+// One quota row: label, remaining bar, remaining percentage and reset time.
+// The bar stretches so every column lines up across rows and cards.
 export component QuotaWindow inherits HorizontalLayout {
     in property <XaiQuotaRow> quota;
     in property <length> label-width: 60px;
-    height: 18px;
-    spacing: 10px;
+    in property <bool> loading: false;
+    property <float> remaining: max(0, min(100, root.quota.remaining-percent));
+    property <color> tone: root.quota.remaining-percent <= 0 ? Theme.error : root.quota.remaining-percent < 10 ? Theme.warning : Theme.brand;
+    // The fill grows from empty when the row first appears, then follows updates.
+    property <bool> filled: Theme.page-motion == 0ms;
+    property <float> pulse: root.loading && Theme.fast > 0ms ? 1 : 0;
+    animate pulse {
+        duration: root.loading && Theme.fast > 0ms ? 900ms : 0ms;
+        iteration-count: root.loading ? -1 : 1;
+        direction: alternate;
+        easing: ease-in-out;
+    }
+    height: 20px;
+    spacing: 12px;
+    Timer {
+        interval: 120ms;
+        running: !root.filled;
+        triggered => { root.filled = true; }
+    }
+
     Text {
         width: root.label-width;
         horizontal-stretch: 0;
@@ -13,35 +33,36 @@ export component QuotaWindow inherits HorizontalLayout {
         color: Theme.muted-text;
         font-size: 12px;
         vertical-alignment: center;
+        overflow: elide;
     }
 
     Rectangle {
-        height: 5px;
+        height: 6px;
         y: (parent.height - self.height) / 2;
-        min-width: 70px;
-        max-width: 240px;
+        min-width: 60px;
         horizontal-stretch: 1;
         border-radius: 3px;
-        background: Theme.raised;
+        background: Theme.border;
         accessible-role: progress-indicator;
         accessible-label: root.quota.period-label + "剩余 " + round(root.quota.remaining-percent) + "%";
         accessible-value: round(root.quota.remaining-percent) + "%";
         Rectangle {
             x: 0px;
             y: 0px;
-            width: parent.width * max(0, min(100, root.quota.remaining-percent)) / 100;
+            width: root.filled ? parent.width * root.remaining / 100 : 0px;
             height: parent.height;
             border-radius: 3px;
-            background: root.quota.remaining-percent <= 0 ? Theme.error : root.quota.remaining-percent < 10 ? Theme.warning : Theme.brand;
+            background: root.tone;
+            opacity: 1 - 0.5 * root.pulse;
             animate width {
-                duration: Theme.page-motion;
-                easing: ease-out;
+                duration: Theme.page-motion * 2.5;
+                easing: cubic-bezier(0.22, 1, 0.36, 1);
             }
         }
     }
 
     Text {
-        width: 82px;
+        width: 68px;
         horizontal-stretch: 0;
         text: "剩余 " + round(root.quota.remaining-percent) + "%";
         color: root.quota.remaining-percent <= 0 ? Theme.error : root.quota.remaining-percent < 10 ? Theme.warning : Theme.primary-text;
@@ -51,13 +72,14 @@ export component QuotaWindow inherits HorizontalLayout {
     }
 
     Text {
-        min-width: 184px;
-        horizontal-stretch: 1;
+        width: 112px;
+        horizontal-stretch: 0;
         text: root.quota.reset-label;
         color: Theme.muted-text;
         font-size: 12px;
         horizontal-alignment: right;
         vertical-alignment: center;
+        overflow: elide;
     }
 }
 

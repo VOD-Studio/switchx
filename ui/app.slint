@@ -784,11 +784,14 @@ export component AppWindow inherits Window {
                                 if root.active-page == 1: VerticalLayout {
                                     spacing: 20px;
                                     Rectangle {
-                                        height: 40px;
+                                        // Ends where the scroll gutter begins so the actions line up with the cards below.
+                                        height: 52px;
                                         HorizontalLayout {
-                                            height: 36px;
+                                            height: 51px;
+                                            padding-right: 14px;
                                             spacing: 8px;
                                             QuietButton {
+                                                y: 8px;
                                                 width: 98px;
                                                 text: "上游连接";
                                                 ghost: true;
@@ -798,6 +801,7 @@ export component AppWindow inherits Window {
                                             }
 
                                             QuietButton {
+                                                y: 8px;
                                                 width: 98px;
                                                 text: "订阅账号";
                                                 ghost: true;
@@ -811,7 +815,9 @@ export component AppWindow inherits Window {
                                             }
 
                                             if root.connections-tab == 1: QuietButton {
+                                                y: 9px;
                                                 width: 112px;
+                                                height: 32px;
                                                 text: "刷新额度";
                                                 icon: @image-url("../assets/refresh.svg");
                                                 icon-color: Theme.muted-text;
@@ -820,7 +826,10 @@ export component AppWindow inherits Window {
                                                 clicked => { root.account-action(6, ""); root.xai-account-action(5, ""); }
                                             }
                                             if root.connections-tab == 1: ComboBox {
+                                                y: 9px;
                                                 width: 146px;
+                                                min-height: 32px;
+                                                max-height: 32px;
                                                 action-menu: true;
                                                 accessible-role: button;
                                                 primary: true;
@@ -834,20 +843,23 @@ export component AppWindow inherits Window {
                                         }
 
                                         Rectangle {
-                                            y: 39px;
+                                            x: 0px;
+                                            y: 51px;
+                                            width: parent.width - 14px;
                                             height: 1px;
                                             background: Theme.border;
                                         }
 
                                         Rectangle {
                                             x: root.connections-tab == 0 ? 12px : 118px;
-                                            y: 38px;
+                                            y: 49px;
                                             width: 74px;
                                             height: 2px;
+                                            border-radius: 1px;
                                             background: Theme.brand;
                                             animate x {
                                                 duration: Theme.page-motion;
-                                                easing: ease-out;
+                                                easing: cubic-bezier(0.22, 1, 0.36, 1);
                                             }
                                         }
                                     }
