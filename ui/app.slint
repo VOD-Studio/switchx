@@ -34,6 +34,7 @@ import { ActivityPage } from "pages/activity.slint";
 import { ConfigPage } from "pages/config.slint";
 
 export {
+    XaiQuotaRow,
     ProviderRow,
     ProviderPresetRow,
     ProviderIconRow,
@@ -222,6 +223,7 @@ export component AppWindow inherits Window {
     }
     changed active-page => {
         root.page-entered = Theme.page-motion == 0ms;
+        if (root.active-page == 1 && root.connections-tab == 1) { root.xai-account-action(5, ""); }
         if (root.active-page != 1) {
             root.connection-picker-open = false;
             root.connection-preset-id = "";
@@ -367,7 +369,16 @@ export component AppWindow inherits Window {
     }
 
     in-out property <int> connections-tab: 0;
-    changed connections-tab => { root.page-entered = Theme.page-motion == 0ms; }
+    changed connections-tab => {
+        root.page-entered = Theme.page-motion == 0ms;
+        if (root.active-page == 1 && root.connections-tab == 1) { root.xai-account-action(5, ""); }
+    }
+    Timer {
+        interval: 30s;
+        running: root.active-page == 1 && root.connections-tab == 1 && root.xai-accounts.length > 0;
+        triggered => { root.xai-account-action(6, ""); }
+    }
+
     in-out property <bool> publish-drawer-open: false;
     in-out property <bool> direct-drawer-open: false;
     in-out property <bool> command-open: false;

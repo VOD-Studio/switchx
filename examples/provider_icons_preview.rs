@@ -2,7 +2,7 @@
 //! Run: cargo run --example provider_icons_preview -- /absolute/output/directory
 
 use switchx::ui::{
-    AccountRow, AppWindow, ModelRow, ProviderIconRow, ProviderRow, RequestRow, Theme,
+    AccountRow, AppWindow, ModelRow, ProviderIconRow, ProviderRow, RequestRow, Theme, XaiQuotaRow,
 };
 
 use slint::platform::software_renderer::{MinimalSoftwareWindow, RepaintBufferType};
@@ -214,6 +214,93 @@ fn main() -> Result<(), Box<dyn Error>> {
         completed: true,
         ..Default::default()
     }])));
+    if std::env::args().any(|arg| arg == "--xai-quota") {
+        app.set_accounts(ModelRc::new(VecModel::from(Vec::<AccountRow>::new())));
+        app.set_account_status("尚未保存 ChatGPT 账号（合成资料）".into());
+        app.set_xai_status("已保存 1 个 Grok 账号".into());
+        app.set_active_page(1);
+        app.set_connections_tab(1);
+        for (width, height) in [(1200, 820), (1000, 680)] {
+            app.window().set_size(PhysicalSize::new(width, height));
+            for dark in [false, true] {
+                set_theme(&app, &window, dark);
+                let suffix = format!("{}-{width}x{height}", if dark { "dark" } else { "light" });
+                for state in [
+                    "ready",
+                    "low",
+                    "empty",
+                    "loading",
+                    "refreshing",
+                    "failed",
+                    "stale",
+                    "reauth",
+                ] {
+                    let mut quota = XaiQuotaRow {
+                        has_value: !matches!(state, "loading" | "failed" | "reauth"),
+                        remaining_percent: if state == "low" {
+                            8.0
+                        } else if state == "empty" {
+                            0.0
+                        } else {
+                            98.0
+                        },
+                        period_label: "每周额度".into(),
+                        reset_label: "4 天 21 小时后重置".into(),
+                        reset_detail: "重置于 10月14日 11:00".into(),
+                        updated_label: if matches!(state, "loading" | "failed" | "reauth") {
+                            ""
+                        } else {
+                            "2 分钟前更新"
+                        }
+                        .into(),
+                        loading: matches!(state, "loading" | "refreshing"),
+                        ..Default::default()
+                    };
+                    if matches!(state, "failed" | "stale") {
+                        quota.error = "额度查询连接失败，请稍后刷新".into();
+                    }
+                    app.set_xai_accounts(ModelRc::new(VecModel::from(vec![AccountRow {
+                        id: "synthetic-grok-account".into(),
+                        label: "preview@example.invalid".into(),
+                        workspace: if state == "reauth" {
+                            "凭据失效，请重新登录"
+                        } else {
+                            "已保存授权"
+                        }
+                        .into(),
+                        is_default: true,
+                        requires_reauth: state == "reauth",
+                        bound_provider_count: 1,
+                        quota,
+                        ..Default::default()
+                    }])));
+                    render(&window);
+                    window.dispatch_event(WindowEvent::PointerScrolled {
+                        position: slint::LogicalPosition::new(
+                            width as f32 - 60.0,
+                            height as f32 - 100.0,
+                        ),
+                        delta_x: 0.0,
+                        delta_y: -2000.0,
+                    });
+                    snapshot(&window, output, &format!("grok-quota-{state}-{suffix}"))?;
+                    if state == "low" {
+                        let pixels = render(&window);
+                        // A short quota fill must remain anchored at the meter's left edge.
+                        let pixel = pixels.as_slice()[((height - 95) * width + 296) as usize];
+                        let expected = if dark {
+                            (225, 184, 121)
+                        } else {
+                            (148, 102, 33)
+                        };
+                        assert_eq!((pixel.r, pixel.g, pixel.b), expected);
+                    }
+                }
+            }
+        }
+        println!("Synthetic Grok quota previews: {}", output.display());
+        return Ok(());
+    }
     if std::env::args().any(|arg| arg == "--check-progress") {
         let original = app.get_providers().iter().collect::<Vec<_>>();
         for (width, height) in [(1200, 820), (1000, 680)] {
