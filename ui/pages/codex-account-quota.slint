@@ -1,81 +1,124 @@
 import { Theme } from "../tokens.slint";
-import { QuietButton } from "../components.slint";
-import { QuotaWindowDetail } from "../quota-window.slint";
+import { QuotaWindow } from "../quota-window.slint";
+import { AnimatedSection, QuietButton } from "../components.slint";
 import { CodexQuotaRow } from "../view-models.slint";
 
 export component CodexAccountQuota inherits Rectangle {
     in property <CodexQuotaRow> quota;
-    in property <string> label;
-    in property <bool> pending;
-    callback refresh();
+    in property <bool> expanded;
     property <int> window-count: (root.quota.primary-window.has-value ? 1 : 0) + (root.quota.secondary-window.has-value ? 1 : 0);
-    height: max(1, root.window-count) * 42px + 24px + (root.quota.credits-label == "" ? 0px : 20px) + (root.quota.resets-label == "" ? 0px : 20px);
-    VerticalLayout {
+    height: summary.preferred-height + details.height;
+    preferred-height: root.height;
+    vertical-stretch: 0;
+    summary := VerticalLayout {
         x: 0px;
         y: 0px;
-        width: parent.width - 46px;
-        spacing: 6px;
-        if root.quota.primary-window.has-value: QuotaWindowDetail {
+        width: root.width;
+        height: self.preferred-height;
+        spacing: 7px;
+        if root.quota.primary-window.has-value: QuotaWindow {
             quota: root.quota.primary-window;
+            label-width: 74px;
         }
-        if root.quota.secondary-window.has-value: QuotaWindowDetail {
+        if root.quota.secondary-window.has-value: QuotaWindow {
             quota: root.quota.secondary-window;
+            label-width: 74px;
         }
         if root.window-count == 0: Text {
-            height: 36px;
+            height: 18px;
             text: root.quota.has-value ? "官方未提供额度窗口" : root.quota.loading ? "正在查询官方额度…" : root.quota.error != "" ? "暂时无法查询额度" : "尚未查询额度";
             font-size: 12px;
             color: root.quota.error != "" ? Theme.warning : Theme.muted-text;
             vertical-alignment: center;
         }
-        if root.quota.credits-label != "": Text {
-            height: 14px;
-            text: root.quota.credits-label;
-            font-size: 12px;
-            color: Theme.primary-text;
-            vertical-alignment: center;
-        }
-        if root.quota.resets-label != "": Text {
-            height: 14px;
+        if root.quota.resets-warning && root.quota.resets-label != "": Text {
             text: root.quota.resets-label;
+            color: Theme.warning;
             font-size: 12px;
-            color: root.quota.resets-warning ? Theme.warning : Theme.muted-text;
-            vertical-alignment: center;
-            overflow: elide;
+            wrap: word-wrap;
+        }
+        if root.window-count == 0 && root.quota.credits-label != "": Text {
+            text: root.quota.credits-label;
+            color: Theme.primary-text;
+            font-size: 12px;
+            wrap: word-wrap;
+        }
+        if root.quota.error != "": Text {
+            text: root.quota.error;
+            color: Theme.warning;
+            font-size: 12px;
+            wrap: word-wrap;
         }
         HorizontalLayout {
-            height: 14px;
-            spacing: 8px;
-            Text {
+            height: 18px;
+            spacing: 6px;
+            Rectangle {
                 horizontal-stretch: 1;
-                text: root.quota.error != "" ? root.quota.error : "Codex 官方订阅额度";
-                color: root.quota.error != "" ? Theme.warning : Theme.muted-text;
-                font-size: 11px;
-                overflow: elide;
-                vertical-alignment: center;
             }
 
+            if root.quota.loading: QuietButton {
+                width: 18px;
+                height: 18px;
+                icon-only: true;
+                icon: @image-url("../../assets/refresh.svg");
+                icon-color: Theme.muted-text;
+                ghost: true;
+                loading: true;
+                enabled: false;
+                text: "正在更新额度";
+            }
             Text {
-                horizontal-stretch: 0;
                 text: root.quota.loading ? "更新中…" : root.quota.error != "" && root.quota.has-value ? "上次数据 · " + root.quota.updated-label : root.quota.updated-label;
                 color: Theme.muted-text;
-                font-size: 11px;
+                font-size: 12px;
                 vertical-alignment: center;
+                horizontal-stretch: 0;
             }
         }
     }
 
-    QuietButton {
-        x: parent.width - 36px;
-        y: 0px;
-        width: 36px;
-        height: 36px;
-        text: "刷新 " + root.label + " 的额度";
-        icon: @image-url("../../assets/refresh.svg");
-        icon-only: true;
-        icon-color: Theme.muted-text;
-        ghost: true;
-        enabled: !root.quota.loading && !root.pending;
-        clicked => { root.refresh(); }
+    details := AnimatedSection {
+        x: 0px;
+        width: root.width;
+        y: summary.preferred-height;
+        expanded: root.expanded;
+        content-height: detail-content.preferred-height;
+        detail-content := VerticalLayout {
+            x: 0px;
+            y: 0px;
+            width: root.width;
+            height: self.preferred-height;
+            padding-top: 10px;
+            spacing: 7px;
+            if root.quota.primary-window.has-value && root.quota.primary-window.reset-detail != "": Text {
+                text: root.quota.primary-window.period-label + " · " + root.quota.primary-window.reset-detail;
+                color: Theme.muted-text;
+                font-size: 12px;
+                wrap: word-wrap;
+            }
+            if root.quota.secondary-window.has-value && root.quota.secondary-window.reset-detail != "": Text {
+                text: root.quota.secondary-window.period-label + " · " + root.quota.secondary-window.reset-detail;
+                color: Theme.muted-text;
+                font-size: 12px;
+                wrap: word-wrap;
+            }
+            if root.window-count > 0 && root.quota.credits-label != "": Text {
+                text: root.quota.credits-label;
+                color: Theme.primary-text;
+                font-size: 12px;
+                wrap: word-wrap;
+            }
+            if !root.quota.resets-warning && root.quota.resets-label != "": Text {
+                text: root.quota.resets-label;
+                color: Theme.muted-text;
+                font-size: 12px;
+                wrap: word-wrap;
+            }
+            Text {
+                text: "数据来源：Codex 官方订阅额度";
+                color: Theme.muted-text;
+                font-size: 12px;
+            }
+        }
     }
 }

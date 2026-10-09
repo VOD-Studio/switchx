@@ -448,6 +448,7 @@ fn show_accounts(app: &AppWindow, view: Result<AccountView, String>) {
             app.set_accounts(ModelRc::new(VecModel::from(view.rows)));
             app.set_selected_account_id(view.selected.into());
             app.set_account_status(view.status.into());
+            app.set_account_error("".into());
             if app.get_active_page() == 1 && app.get_connections_tab() == 1 {
                 let unread = app
                     .get_accounts()
@@ -460,7 +461,10 @@ fn show_accounts(app: &AppWindow, view: Result<AccountView, String>) {
                 }
             }
         }
-        Err(error) => app.set_account_status(error.into()),
+        Err(error) => {
+            app.set_account_status(error.clone().into());
+            app.set_account_error(error.into());
+        }
     }
 }
 
@@ -521,6 +525,7 @@ fn show_xai_accounts(app: &AppWindow, view: Result<Vec<AccountRow>, String>) {
                 }
             }
             app.set_xai_status(format!("已保存 {} 个 Grok 账号", rows.len()).into());
+            app.set_xai_account_error("".into());
             app.set_xai_accounts(ModelRc::new(VecModel::from(rows)));
             if app.get_active_page() == 1 && app.get_connections_tab() == 1 {
                 let unread = app
@@ -534,7 +539,10 @@ fn show_xai_accounts(app: &AppWindow, view: Result<Vec<AccountRow>, String>) {
                 }
             }
         }
-        Err(error) => app.set_xai_status(error.into()),
+        Err(error) => {
+            app.set_xai_status(error.clone().into());
+            app.set_xai_account_error(error.into());
+        }
     }
 }
 
@@ -1350,9 +1358,16 @@ fn open_provider_link(url: &str) -> Result<(), String> {
 }
 
 fn queue(app: &AppWindow, sender: &mpsc::Sender<Command>, command: Command) {
+    let account_removal = matches!(
+        &command,
+        Command::Account { action: 4, .. } | Command::XaiAccount { action: 4, .. }
+    );
     app.set_busy(true);
     if let Err(error) = sender.try_send(command) {
         app.set_busy(false);
+        if account_removal {
+            app.set_account_removing_id("".into());
+        }
         let message = match error {
             TrySendError::Full(_) => "操作仍在执行，请稍后重试",
             TrySendError::Closed(_) => "后台状态通道已停止",
@@ -2061,6 +2076,7 @@ async fn worker(
                                         }
                                         Err(error) => {
                                             app.set_xai_status(error.clone().into());
+                                            app.set_xai_account_error(error.clone().into());
                                             app.set_action_message(error.into());
                                         }
                                     }
@@ -2106,6 +2122,9 @@ async fn worker(
                     }
                     discard_account_previews(&app);
                     show_action(&app, result);
+                    if action == 4 {
+                        app.set_account_removing_id("".into());
+                    }
                     if action == 0 {
                         app.invoke_xai_account_action(5, "".into());
                     }
@@ -2955,6 +2974,7 @@ async fn worker(
                                         ),
                                         Err(error) => {
                                             app.set_account_status(error.clone().into());
+                                            app.set_account_error(error.clone().into());
                                             app.set_action_message(error.into());
                                         }
                                     }
@@ -3053,6 +3073,9 @@ async fn worker(
                     }
                     if action == 0 && result.is_ok() {
                         app.invoke_account_action(6, "".into());
+                    }
+                    if action == 4 {
+                        app.set_account_removing_id("".into());
                     }
                     show_action(&app, result);
                 });
@@ -4833,7 +4856,18 @@ mod tests {
             delta_y: -2000.0,
         });
         let before = draw();
-        let pixel = before.as_slice()[585 * 1000 + 296];
+        // Locate the meter in the current layout, then require both updates to
+        // retain its position. Account headers no longer use a green fill.
+        let meter = (255..620)
+            .flat_map(|y| (300..650).map(move |x| y * 1000 + x))
+            .find(|&offset| {
+                before.as_slice()[offset..offset + 80]
+                    .iter()
+                    .all(|pixel| (pixel.r, pixel.g, pixel.b) == (167, 196, 171))
+            })
+            .expect("quota meter must be visible after scrolling")
+            + 40;
+        let pixel = before.as_slice()[meter];
         assert_eq!(
             (pixel.r, pixel.g, pixel.b),
             (167, 196, 171),
@@ -4849,7 +4883,7 @@ mod tests {
             "2 分钟前更新"
         );
         let after = draw();
-        let pixel = after.as_slice()[585 * 1000 + 296];
+        let pixel = after.as_slice()[meter];
         assert_eq!(
             (pixel.r, pixel.g, pixel.b),
             (167, 196, 171),
@@ -4857,7 +4891,7 @@ mod tests {
         );
         update_xai_quota(&app, "a", "scroll-check", Ok(quota));
         let after = draw();
-        let pixel = after.as_slice()[585 * 1000 + 296];
+        let pixel = after.as_slice()[meter];
         assert_eq!(
             (pixel.r, pixel.g, pixel.b),
             (167, 196, 171),

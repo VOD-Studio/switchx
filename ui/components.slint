@@ -60,10 +60,20 @@ export component QuietButton {
     in property <bool> primary: false;
     in property <bool> ghost: false;
     in property <bool> navigation: false;
+    in property <bool> tab: false;
     in property <bool> left-aligned: false;
+    in property <angle> icon-angle: 0deg;
+    in property <bool> loading: false;
     in property <bool> enabled <=> hit-area.enabled;
     callback clicked;
-    property <length> press-offset: hit-area.pressed && root.enabled ? 1px : 0px;
+    property <bool> keyboard-pressed: false;
+    property <length> press-offset: (hit-area.pressed || root.keyboard-pressed) && root.enabled ? 1px : 0px;
+    property <angle> spin: root.loading ? 360deg : 0deg;
+    animate spin {
+        duration: root.loading && Theme.fast > 0ms ? 900ms : 0ms;
+        iteration-count: root.loading ? -1 : 1;
+    }
+    changed enabled => { if (!root.enabled) { root.keyboard-pressed = false; } }
     animate press-offset {
         duration: Theme.fast;
         easing: ease-out;
@@ -74,12 +84,12 @@ export component QuietButton {
     horizontal-stretch: 1;
     vertical-stretch: 0;
     in property <length> border-radius: 8px;
-    in property <length> border-width: root.ghost || root.navigation ? 0px : 1px;
+    in property <length> border-width: root.ghost || root.navigation || root.tab ? 0px : 1px;
     in property <color> border-color: root.primary ? Theme.solid : root.selected ? Theme.brand : hit-area.has-hover ? Theme.muted-text : Theme.border;
-    in property <brush> background: root.primary ? (hit-area.pressed ? Theme.brand : Theme.solid)
+    in property <brush> background: root.primary ? ((hit-area.pressed || root.keyboard-pressed) ? Theme.brand : hit-area.has-hover && root.enabled ? Theme.solid.with-alpha(0.9) : Theme.solid)
         : root.navigation && root.selected ? Theme.panel
-        : root.selected ? Theme.brand-surface
-        : hit-area.has-hover || hit-area.pressed ? Theme.raised
+        : root.selected && !root.tab ? Theme.brand-surface
+        : hit-area.has-hover || hit-area.pressed || root.keyboard-pressed ? Theme.raised
         : root.ghost || root.navigation ? transparent : Theme.panel;
     forward-focus: key-focus;
     accessible-role: button;
@@ -136,6 +146,11 @@ export component QuietButton {
             source: root.icon;
             image-fit: contain;
             colorize: root.icon-color;
+            transform-rotation: root.icon-angle + root.spin;
+            animate transform-rotation {
+                duration: root.loading ? 0ms : Theme.fast;
+                easing: ease-out;
+            }
             accessible-role: none;
         }
         if !root.icon-only: Text {
@@ -144,7 +159,7 @@ export component QuietButton {
             width: parent.width - self.x - 12px;
             height: root.description != "" ? 20px : parent.height - (root.stacked-icon ? self.y : 0px);
             text: root.text;
-            color: root.primary ? Theme.on-brand : root.selected && !root.navigation ? Theme.brand : root.ghost && !hit-area.has-hover ? Theme.muted-text : Theme.primary-text;
+            color: root.primary ? Theme.on-brand : root.selected && root.tab ? Theme.primary-text : root.selected && !root.navigation ? Theme.brand : root.ghost && !hit-area.has-hover ? Theme.muted-text : Theme.primary-text;
             font-size: root.description != "" ? 14px : 12px;
             font-weight: root.selected || root.primary ? 600 : 400;
             horizontal-alignment: root.left-aligned ? left : center;
@@ -192,11 +207,19 @@ export component QuietButton {
         enabled <=> root.enabled;
         key-pressed(event) => {
             if (event.text == Key.Space || event.text == Key.Return) {
-                if (root.enabled) { root.clicked(); }
+                if (root.enabled) { root.keyboard-pressed = true; }
                 return accept;
             }
             return reject;
         }
+        key-released(event) => {
+            if (event.text == Key.Space || event.text == Key.Return) {
+                if (root.enabled && root.keyboard-pressed) { root.keyboard-pressed = false; root.clicked(); }
+                return accept;
+            }
+            return reject;
+        }
+        changed has-focus => { if (!self.has-focus) { root.keyboard-pressed = false; } }
     }
 }
 
@@ -465,6 +488,14 @@ export component QuietLineEdit inherits Rectangle {
 export component QuietComboBox inherits Rectangle {
     in property <[string]> model <=> selection-state.model;
     in property <bool> enabled: true;
+    in property <bool> action-menu: false;
+    in property <string> trigger-text: "";
+    in property <image> trigger-icon;
+    in property <bool> icon-only: false;
+    in property <bool> primary: false;
+    in property <[bool]> item-enabled: [];
+    in property <int> destructive-index: -1;
+    in property <string> action-context;
     in-out property <int> current-index <=> selection-state.current-index;
     in-out property <string> current-value <=> selection-state.current-value;
     out property <bool> has-focus: keyboard.has-focus || root.popup-mounted;
@@ -475,6 +506,11 @@ export component QuietComboBox inherits Rectangle {
     property <float> popup-reveal: root.popup-open && root.popup-entered ? 1 : 0;
     property <duration> popup-motion: root.popup-open ? Theme.fast : Theme.fast * 0.8;
     property <int> visible-items: min(6, root.model.length);
+    property <int> menu-index: 0;
+    property <int> highlight-index: root.action-menu ? root.menu-index : root.current-index;
+    property <string> pending-action: "";
+    property <string> pending-context;
+    property <int> pending-index: -1;
     animate popup-reveal {
         duration: root.popup-motion;
         easing: ease-out;
@@ -493,30 +529,54 @@ export component QuietComboBox inherits Rectangle {
     }
 
     changed popup-mounted => {
-        if (!root.popup-mounted) { root.popup-open = false; root.popup-entered = false; }
+        if (!root.popup-mounted) {
+            root.popup-open = false;
+            root.popup-entered = false;
+            if (root.pending-action != "" && root.enabled && root.pending-context == root.action-context && root.item-is-enabled(root.pending-index) && root.model[root.pending-index] == root.pending-action) { root.selected(root.pending-action); }
+            root.pending-action = "";
+        }
     }
 
+    function item-is-enabled(index: int) -> bool {
+        return index >= 0 && index < root.model.length && (root.item-enabled.length <= index || root.item-enabled[index]);
+    }
     function select(index: int) {
-        if (root.enabled && index >= 0 && index < root.model.length) {
-            root.current-index = index;
-            root.current-value = root.model[index];
-            root.selected(root.current-value);
+        if (root.enabled && root.item-is-enabled(index)) {
+            if (root.action-menu) {
+                root.pending-action = root.model[index];
+                root.pending-index = index;
+                root.pending-context = root.action-context;
+                root.close-popup();
+            } else {
+                root.current-index = index;
+                root.current-value = root.model[index];
+                root.selected(root.current-value);
+            }
         }
     }
     function open-popup() {
-        if (root.enabled && root.model.length > 0) {
+        if (root.enabled && root.model.length > 0 && root.pending-action == "") {
             if (!root.popup-mounted) {
                 root.popup-entered = Theme.fast == 0ms;
+                root.menu-index = 0;
                 popup.show();
             }
             root.popup-open = true;
         }
     }
-    function close-popup() {
+    public function close-popup() {
         root.popup-open = false;
         if (Theme.fast == 0ms) { popup.close(); }
     }
+    public function cancel-popup() { root.pending-action = ""; root.close-popup(); }
     function handle-selection-key(event: KeyEvent) -> EventResult {
+        if (root.action-menu) {
+            if (event.text == Key.UpArrow) { root.menu-index = max(0, root.menu-index - 1); return accept; }
+            if (event.text == Key.DownArrow) { root.menu-index = min(root.model.length - 1, root.menu-index + 1); return accept; }
+            if (event.text == Key.Home) { root.menu-index = 0; return accept; }
+            if (event.text == Key.End) { root.menu-index = root.model.length - 1; return accept; }
+            return reject;
+        }
         if (event.text == Key.UpArrow) {
             root.select(max(0, root.current-index - 1));
             return accept;
@@ -532,28 +592,38 @@ export component QuietComboBox inherits Rectangle {
         }
         return reject;
     }
-    changed model => { if (root.model.length == 0) { root.close-popup(); } }
-    changed enabled => { if (!root.enabled) { root.close-popup(); } }
+    changed model => { if (root.action-menu || root.model.length == 0) { root.cancel-popup(); } }
+    changed enabled => { if (!root.enabled) { root.pending-action = ""; root.close-popup(); } }
 
     min-width: 0px;
     min-height: 36px;
     preferred-width: 180px;
     vertical-stretch: 0;
     border-radius: 8px;
-    border-width: 1px;
-    border-color: root.has-focus ? Theme.brand : touch.has-hover && root.enabled ? Theme.muted-text : Theme.border;
-    background: root.popup-open || touch.pressed || (touch.has-hover && root.enabled) ? Theme.raised : Theme.panel;
+    border-width: root.action-menu && !root.primary ? 0px : 1px;
+    border-color: root.primary ? Theme.solid : root.has-focus ? Theme.brand : touch.has-hover && root.enabled ? Theme.muted-text : Theme.border;
+    background: root.primary ? (touch.pressed ? Theme.brand : touch.has-hover && root.enabled ? Theme.solid.with-alpha(0.9) : Theme.solid) : root.popup-open || touch.pressed || (touch.has-hover && root.enabled) ? Theme.raised : root.action-menu ? transparent : Theme.panel;
     opacity: root.enabled ? 1 : 0.45;
     animate background, border-color, opacity { duration: Theme.fast; }
     forward-focus: keyboard;
     accessible-role: combobox;
+    accessible-label: root.trigger-text;
     accessible-enabled: root.enabled;
     accessible-expandable: true;
     accessible-expanded: root.popup-open;
-    accessible-value <=> root.current-value;
+    accessible-value: root.action-menu ? "" : root.current-value;
+    accessible-action-default => { root.open-popup(); }
     accessible-action-expand => { root.open-popup(); }
 
     // Reuse native index/value synchronization, including external value bindings.
+    if root.action-menu: Rectangle {
+        border-radius: 8px;
+        border-width: 2px;
+        border-color: Theme.brand;
+        opacity: keyboard.has-focus ? 1 : 0;
+        animate opacity { duration: Theme.fast; }
+        accessible-role: none;
+    }
     selection-state := ComboBox {
         visible: false;
         enabled: false;
@@ -562,24 +632,34 @@ export component QuietComboBox inherits Rectangle {
         accessible-role: none;
     }
 
-    Text {
-        x: 12px;
-        width: max(0px, parent.width - 42px);
-        text: root.current-value;
-        color: Theme.primary-text;
+    if !root.icon-only: Text {
+        x: root.trigger-icon.width > 0 ? 36px : 12px;
+        width: max(0px, parent.width - self.x - 30px);
+        text: root.trigger-text == "" ? root.current-value : root.trigger-text;
+        color: root.primary ? Theme.on-brand : Theme.primary-text;
         font-size: 13px;
         vertical-alignment: center;
         overflow: elide;
         accessible-role: none;
     }
 
-    Image {
+    if root.trigger-icon.width > 0: Image {
+        x: root.icon-only ? (parent.width - self.width) / 2 : 12px;
+        y: (parent.height - self.height) / 2;
+        width: 16px;
+        height: 16px;
+        source: root.trigger-icon;
+        colorize: root.primary ? Theme.on-brand : root.has-focus ? Theme.brand : Theme.muted-text;
+        animate colorize { duration: Theme.fast; }
+        accessible-role: none;
+    }
+    if !root.icon-only: Image {
         x: parent.width - 26px;
         y: (parent.height - self.height) / 2;
         width: 14px;
         height: 14px;
         source: @image-url("../assets/ui/chevron-down.svg");
-        colorize: root.popup-open ? Theme.brand : Theme.muted-text;
+        colorize: root.primary ? Theme.on-brand : root.popup-open ? Theme.brand : Theme.muted-text;
         transform-rotation: root.popup-open ? 180deg : 0deg;
         animate transform-rotation {
             duration: Theme.fast;
@@ -602,6 +682,7 @@ export component QuietComboBox inherits Rectangle {
                 root.open-popup();
                 return accept;
             }
+            if (root.action-menu && (event.text == Key.UpArrow || event.text == Key.DownArrow)) { root.open-popup(); return accept; }
             return root.handle-selection-key(event);
         }
     }
@@ -621,6 +702,8 @@ export component QuietComboBox inherits Rectangle {
                 if (event.text == Key.Return || event.text == Key.Space || event.text == Key.Escape) {
                     if (!root.popup-open && event.text != Key.Escape) {
                         root.open-popup();
+                    } else if (root.action-menu && event.text != Key.Escape) {
+                        root.select(root.menu-index);
                     } else {
                         root.close-popup();
                     }
@@ -646,7 +729,7 @@ export component QuietComboBox inherits Rectangle {
             Rectangle {
                 width: min(max(root.width, 200px), parent.width);
                 height: min(root.visible-items * 40px + 10px, parent.height);
-                x: max(0px, min(root.absolute-position.x, parent.width - self.width));
+                x: max(0px, min(root.action-menu ? root.absolute-position.x + root.width - self.width : root.absolute-position.x, parent.width - self.width));
                 property <bool> above: root.absolute-position.y + root.height + 6px + self.height > parent.height;
                 y: (self.above ? max(0px, root.absolute-position.y - self.height - 6px) : root.absolute-position.y + root.height + 6px) + (self.above ? 5px : -5px) * (1 - root.popup-reveal);
                 opacity: root.popup-reveal;
@@ -669,8 +752,8 @@ export component QuietComboBox inherits Rectangle {
                     height: parent.height - 2px;
                     vertical-scrollbar-policy: root.model.length * 40px + 8px > self.height ? as-needed : always-off;
                     horizontal-scrollbar-policy: always-off;
-                    content-y: -max(0, root.current-index - root.visible-items + 1) * 40px;
-                    property <int> selection: root.current-index;
+                    content-y: -max(0, root.highlight-index - root.visible-items + 1) * 40px;
+                    property <int> selection: root.highlight-index;
                     changed selection => {
                         if (self.content-y + self.selection * 40px < 0px) {
                             self.content-y = -self.selection * 40px;
@@ -685,21 +768,23 @@ export component QuietComboBox inherits Rectangle {
                         for value[index] in root.model: Rectangle {
                             height: 36px;
                             border-radius: 6px;
-                            background: index == root.current-index ? Theme.brand-surface : item-touch.has-hover ? Theme.raised : transparent;
+                            background: root.item-is-enabled(index) && (index == root.highlight-index || item-touch.has-hover) ? (root.action-menu ? Theme.raised : index == root.current-index ? Theme.brand-surface : Theme.raised) : transparent;
+                            opacity: root.item-is-enabled(index) ? 1 : 0.42;
+                            animate opacity { duration: Theme.fast; }
                             animate background { duration: Theme.fast; }
                             Text {
                                 x: 10px;
                                 width: max(0px, parent.width - 38px);
                                 text: value;
-                                color: index == root.current-index ? Theme.brand : Theme.primary-text;
+                                color: index == root.destructive-index ? Theme.error : !root.action-menu && index == root.current-index ? Theme.brand : Theme.primary-text;
                                 font-size: 13px;
-                                font-weight: index == root.current-index ? 600 : 400;
+                                font-weight: !root.action-menu && index == root.current-index ? 600 : 400;
                                 vertical-alignment: center;
                                 overflow: elide;
                                 accessible-role: none;
                             }
 
-                            if index == root.current-index: Image {
+                            if !root.action-menu && index == root.current-index: Image {
                                 x: parent.width - 24px;
                                 y: (parent.height - self.height) / 2;
                                 width: 14px;
@@ -710,13 +795,13 @@ export component QuietComboBox inherits Rectangle {
                             }
                             accessible-role: list-item;
                             accessible-label: value;
-                            accessible-value: index == root.current-index ? "已选" : "";
-                            accessible-enabled: root.popup-open && root.enabled;
+                            accessible-value: !root.action-menu && index == root.current-index ? "已选" : "";
+                            accessible-enabled: root.popup-open && root.enabled && root.item-is-enabled(index);
                             accessible-action-default => {
                                 if (root.popup-open) { root.select(index); root.close-popup(); }
                             }
                             item-touch := TouchArea {
-                                enabled: root.popup-open && root.enabled;
+                                enabled: root.popup-open && root.enabled && root.item-is-enabled(index);
                                 mouse-cursor: pointer;
                                 clicked => { root.select(index); root.close-popup(); }
                             }
@@ -726,6 +811,24 @@ export component QuietComboBox inherits Rectangle {
             }
         }
     }
+}
+
+// Keep content mounted while its height and opacity animate in either direction.
+export component AnimatedSection inherits Rectangle {
+    in property <bool> expanded;
+    in property <length> content-height;
+    out property <float> reveal: root.expanded ? 1 : 0;
+    animate reveal {
+        duration: Theme.page-motion;
+        easing: cubic-bezier(0.22, 1, 0.36, 1);
+    }
+    height: root.content-height * root.reveal;
+    preferred-height: root.height;
+    vertical-stretch: 0;
+    clip: true;
+    opacity: root.reveal;
+    visible: root.reveal > 0;
+    @children
 }
 
 // The panel stays mounted through its exit transition. Owners clear credentials

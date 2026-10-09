@@ -108,6 +108,34 @@ export component AppWindow inherits Window {
     in-out property <int> xai-account-choice: 0;
     in-out property <[AccountRow]> xai-accounts: [];
     in-out property <string> xai-status: "Grok 账号列表尚未读取";
+    in-out property <string> xai-account-error: "";
+    in-out property <string> account-error: "";
+    in-out property <bool> native-login-expanded: false;
+    in-out property <string> expanded-chatgpt-account-id: "";
+    in-out property <string> expanded-grok-account-id: "";
+    in-out property <string> account-removing-id: "";
+    property <bool> account-removing-grok: false;
+    property <bool> account-removal-submitted: false;
+    changed account-removing-id => { if (root.account-removing-id == "") { root.account-removal-submitted = false; } }
+    Timer {
+        interval: max(1ms, Theme.page-motion);
+        running: root.account-removing-id != "" && !root.account-removal-submitted;
+        triggered => {
+            root.account-removal-submitted = true;
+            if (root.account-removing-grok) { root.xai-account-action(4, root.account-removing-id); }
+            else { root.account-action(4, root.account-removing-id); }
+        }
+    }
+
+    in-out property <bool> account-login-confirm-open: false;
+    in-out property <string> account-login-confirm-id: "";
+    in-out property <string> account-login-confirm-label: "";
+    property <bool> account-login-confirm-native: false;
+    function dismiss-account-login() {
+        root.account-login-confirm-open = false;
+        root.account-login-confirm-id = "";
+        root.account-login-confirm-label = "";
+    }
     in-out property <string> xai-user-code: "";
     in-out property <string> xai-login-url: "";
     in-out property <bool> xai-pending: false;
@@ -235,6 +263,8 @@ export component AppWindow inherits Window {
         root.page-entered = Theme.page-motion == 0ms;
         if (root.active-page == 1 && root.connections-tab == 1) { root.xai-account-action(5, ""); root.account-action(6, ""); }
         if (root.active-page != 1) {
+            root.dismiss-account-login();
+            root.native-login-expanded = false;
             root.connection-picker-open = false;
             root.connection-preset-id = "";
             if (root.icon-picker-open) { root.close-provider-icon-picker(); }
@@ -394,10 +424,10 @@ export component AppWindow inherits Window {
     in-out property <bool> command-open: false;
     property <bool> page-entered: true;
     property <bool> new-connection-form: (root.editor-open && root.edit-id == "") || (root.subscription-editor-open && root.subscription-id == "") || (root.xai-editor-open && root.xai-provider-id == "");
-    property <bool> modal-open: root.drawer-open || root.connection-picker-open || root.xai-editor-open || root.editor-open || root.subscription-editor-open || root.common-config-editor-open || root.icon-picker-open || root.model-editor-open || root.fallback-editor-open || root.publish-drawer-open || root.direct-drawer-open || root.delete-account-confirm || root.command-open;
-    property <string> page-title: root.active-page == 0 ? "模型，随手可用。" : root.active-page == 1 ? "连接你的模型。" : root.active-page == 3 ? "每次请求，有迹可循。" : root.active-page == 4 ? "让工作流更顺手。" : "让它适合你。";
+    property <bool> modal-open: root.account-removing-id != "" || root.account-login-confirm-open || root.drawer-open || root.connection-picker-open || root.xai-editor-open || root.editor-open || root.subscription-editor-open || root.common-config-editor-open || root.icon-picker-open || root.model-editor-open || root.fallback-editor-open || root.publish-drawer-open || root.direct-drawer-open || root.delete-account-confirm || root.command-open;
+    property <string> page-title: root.active-page == 0 ? "模型，随手可用。" : root.active-page == 1 ? "连接" : root.active-page == 3 ? "每次请求，有迹可循。" : root.active-page == 4 ? "让工作流更顺手。" : "让它适合你。";
     property <string> page-label: root.active-page == 0 ? "工作台" : root.active-page == 1 ? "连接" : root.active-page == 3 ? "活动" : root.active-page == 4 ? "工具箱" : "设置";
-    property <string> page-subtitle: root.active-page == 0 ? "把常用的模型放进 Codex，专注下一次创作。" : root.active-page == 1 ? "账号、API 与模型，在这里统一管理。" : root.active-page == 3 ? "查看模型、耗时与结果。" : root.active-page == 4 ? "MCP 与 Skills，独立于模型连接。" : "外观、工作空间和配置，各在其位。";
+    property <string> page-subtitle: root.active-page == 0 ? "把常用的模型放进 Codex，专注下一次创作。" : root.active-page == 1 ? "账号与上游，集中管理。" : root.active-page == 3 ? "查看模型、耗时与结果。" : root.active-page == 4 ? "MCP 与 Skills，独立于模型连接。" : "外观、工作空间和配置，各在其位。";
     animate background { duration: Theme.page-motion; }
     Timer {
         interval: 16ms;
@@ -655,14 +685,14 @@ export component AppWindow inherits Window {
                         padding-bottom: 16px;
                         spacing: 18px;
                         HorizontalLayout {
-                            height: 65px;
+                            height: root.active-page == 1 ? 52px : 65px;
                             spacing: 16px;
                             VerticalLayout {
                                 spacing: 7px;
                                 Text {
                                     text: root.page-title;
                                     color: Theme.primary-text;
-                                    font-size: 28px;
+                                    font-size: root.active-page == 1 ? 24px : 28px;
                                     font-weight: 600;
                                 }
 
@@ -677,7 +707,7 @@ export component AppWindow inherits Window {
                                 horizontal-stretch: 1;
                             }
 
-                            StatusPill {
+                            if root.active-page != 1: StatusPill {
                                 width: 98px;
                                 label: root.loading ? "读取中…" : "● " + root.connection-label;
                                 ink: root.route-running || root.direct-active ? Theme.success : Theme.warning;
@@ -748,31 +778,77 @@ export component AppWindow inherits Window {
                                     launch-codex() => { root.launch-codex(); }
                                     show-direct() => { root.direct-drawer-open = true; }
                                     restore-config(home) => { root.restore-config(home); }
+                                    switch-api-preview() => { root.subscription-action(4); }
                                     navigate(page) => { root.active-page = page; }
                                 }
                                 if root.active-page == 1: VerticalLayout {
                                     spacing: 20px;
-                                    HorizontalLayout {
-                                        height: 36px;
-                                        spacing: 8px;
-                                        QuietButton {
-                                            width: 112px;
-                                            text: "上游连接";
-                                            ghost: true;
-                                            selected: root.connections-tab == 0;
-                                            clicked => { root.connections-tab = 0; }
-                                        }
+                                    Rectangle {
+                                        height: 40px;
+                                        HorizontalLayout {
+                                            height: 36px;
+                                            spacing: 8px;
+                                            QuietButton {
+                                                width: 98px;
+                                                text: "上游连接";
+                                                ghost: true;
+                                                tab: true;
+                                                selected: root.connections-tab == 0;
+                                                clicked => { root.connections-tab = 0; }
+                                            }
 
-                                        QuietButton {
-                                            width: 112px;
-                                            text: "订阅账号";
-                                            ghost: true;
-                                            selected: root.connections-tab == 1;
-                                            clicked => { root.connections-tab = 1; }
+                                            QuietButton {
+                                                width: 98px;
+                                                text: "订阅账号";
+                                                ghost: true;
+                                                tab: true;
+                                                selected: root.connections-tab == 1;
+                                                clicked => { root.connections-tab = 1; }
+                                            }
+
+                                            Rectangle {
+                                                horizontal-stretch: 1;
+                                            }
+
+                                            if root.connections-tab == 1: QuietButton {
+                                                width: 112px;
+                                                text: "刷新额度";
+                                                icon: @image-url("../assets/refresh.svg");
+                                                icon-color: Theme.muted-text;
+                                                ghost: true;
+                                                enabled: !root.busy && !root.recovery-only && !root.chatgpt-login-pending && !root.xai-pending;
+                                                clicked => { root.account-action(6, ""); root.xai-account-action(5, ""); }
+                                            }
+                                            if root.connections-tab == 1: ComboBox {
+                                                width: 146px;
+                                                action-menu: true;
+                                                accessible-role: button;
+                                                primary: true;
+                                                trigger-text: "添加账号";
+                                                trigger-icon: @image-url("../assets/ui/plus.svg");
+                                                model: ["ChatGPT 账号", "Grok 账号"];
+                                                item-enabled: [true, !root.config-managed];
+                                                enabled: !root.busy && !root.chatgpt-login-pending && !root.xai-pending;
+                                                selected(value) => { if (value == "ChatGPT 账号") { root.account-action(1, ""); } else { root.xai-account-action(1, ""); } }
+                                            }
                                         }
 
                                         Rectangle {
-                                            horizontal-stretch: 1;
+                                            y: 39px;
+                                            height: 1px;
+                                            background: Theme.border;
+                                        }
+
+                                        Rectangle {
+                                            x: root.connections-tab == 0 ? 12px : 118px;
+                                            y: 38px;
+                                            width: 74px;
+                                            height: 2px;
+                                            background: Theme.brand;
+                                            animate x {
+                                                duration: Theme.page-motion;
+                                                easing: ease-out;
+                                            }
                                         }
                                     }
 
@@ -796,21 +872,37 @@ export component AppWindow inherits Window {
                                         begin-model-editor(provider-id, model-id) => { root.begin-model-editor(provider-id, model-id); }
                                     }
                                     if root.connections-tab == 1: AccountsPage {
-                                        busy: root.busy;
+                                        busy: root.busy || root.account-removing-id != "";
+                                        expanded-chatgpt-id <=> root.expanded-chatgpt-account-id;
+                                        expanded-grok-id <=> root.expanded-grok-account-id;
+                                        removing-id: root.account-removing-id;
                                         recovery-only: root.recovery-only;
                                         config-managed: root.config-managed;
                                         auth-status: root.auth-status;
                                         accounts: root.accounts;
-                                        account-status: root.account-status;
+                                        account-error: root.account-error;
                                         login-user-code: root.login-user-code;
                                         login-url: root.login-url;
                                         chatgpt-login-pending: root.chatgpt-login-pending;
                                         route-auth-error: root.route-auth-error;
                                         xai-accounts: root.xai-accounts;
-                                        xai-status: root.xai-status;
+                                        xai-error: root.xai-account-error;
                                         xai-user-code: root.xai-user-code;
                                         xai-login-url: root.xai-login-url;
                                         xai-pending: root.xai-pending;
+                                        native-expanded <=> root.native-login-expanded;
+                                        request-account-login(account) => {
+                                            root.account-login-confirm-native = false;
+                                            root.account-login-confirm-id = account.id;
+                                            root.account-login-confirm-label = account.label;
+                                            root.account-login-confirm-open = true;
+                                        }
+                                        request-native-login() => {
+                                            root.account-login-confirm-native = true;
+                                            root.account-login-confirm-label = "目标 Codex 目录的本机登录";
+                                            root.account-login-confirm-id = "";
+                                            root.account-login-confirm-open = true;
+                                        }
                                         xai-account-action(action, id) => { root.xai-account-action(action, id); }
                                         request-xai-removal(account) => {
                                             root.delete-account-grok = true;
@@ -1236,6 +1328,55 @@ export component AppWindow inherits Window {
         }
     }
 
+    // Block pointer input while a confirmed removal collapses and is dispatched.
+    if root.account-removing-id != "": TouchArea { }
+
+    Drawer {
+        open: root.account-login-confirm-open;
+        centered: true;
+        title: root.account-login-confirm-native ? "重新登录 Codex" : "写入 Codex 登录";
+        subtitle: root.account-login-confirm-label;
+        panel-width: 520px;
+        busy: root.busy;
+        dismissed => { root.dismiss-account-login(); }
+        VerticalLayout {
+            spacing: 16px;
+            Text {
+                text: "执行时会先恢复受管配置，并停止当前路由。";
+                color: Theme.warning;
+                font-size: 13px;
+                wrap: word-wrap;
+            }
+
+            Text {
+                text: "各上游的账号绑定保持不变。完成后，请在工作台重新发布，并启动新会话。";
+                color: Theme.muted-text;
+                font-size: 13px;
+                wrap: word-wrap;
+            }
+
+            HorizontalLayout {
+                spacing: 10px;
+                QuietButton {
+                    text: "取消";
+                    enabled: root.account-login-confirm-open && !root.busy;
+                    clicked => { root.dismiss-account-login(); }
+                }
+
+                QuietButton {
+                    text: root.account-login-confirm-native ? "继续登录" : "确认写入";
+                    primary: true;
+                    enabled: root.account-login-confirm-open && !root.busy && !root.chatgpt-login-pending && !root.xai-pending && (root.account-login-confirm-native || (!root.recovery-only && root.account-login-confirm-id != ""));
+                    clicked => {
+                        if (root.account-login-confirm-native) { root.subscription-action(1); }
+                        else { root.account-action(3, root.account-login-confirm-id); }
+                        root.dismiss-account-login();
+                    }
+                }
+            }
+        }
+    }
+
     Drawer {
         open: root.delete-account-confirm;
         title: "移除订阅账号";
@@ -1305,7 +1446,11 @@ export component AppWindow inherits Window {
                         text: "确认移除";
                         primary: true;
                         enabled: !root.busy && !root.config-managed && !root.chatgpt-login-pending && !root.xai-pending && root.delete-account-id != "" && root.delete-account-references == "";
-                        clicked => { if root.delete-account-grok { root.xai-account-action(4, root.delete-account-id); } else { root.account-action(4, root.delete-account-id); } }
+                        clicked => {
+                            root.account-removing-grok = root.delete-account-grok;
+                            root.account-removing-id = root.delete-account-id;
+                            root.delete-account-confirm = false;
+                        }
                     }
                 }
             }

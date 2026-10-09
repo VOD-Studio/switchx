@@ -1,237 +1,90 @@
-import { QuotaWindow } from "../quota-window.slint";
 import { Theme } from "../tokens.slint";
-import {
-    QuietButton,
-    QuietLineEdit as LineEdit,
-    SurfaceCard,
-} from "../components.slint";
 import { AccountRow } from "../view-models.slint";
-export component XaiAccounts inherits SurfaceCard {
+import { AccountCard, AccountLoginProgress } from "account-card.slint";
+
+export component XaiAccounts inherits Rectangle {
     in property <bool> busy;
     in property <bool> config-managed;
+    in property <bool> recovery-only;
     in property <bool> pending;
+    in property <bool> other-login-pending;
     in property <[AccountRow]> accounts;
-    in property <string> status;
+    in property <string> error;
     in property <string> user-code;
     in property <string> login-url;
+    in-out property <string> expanded-id;
+    in property <string> removing-id;
     callback action(int, string);
     callback request-removal(AccountRow);
-    height: 142px + root.accounts.length * 144px + (root.pending ? 184px : 0px);
-    border-width: 0px;
-    background: transparent;
-    VerticalLayout {
-        padding: 0px;
+    height: content.preferred-height;
+    preferred-height: root.height;
+    vertical-stretch: 0;
+    content := VerticalLayout {
+        height: self.preferred-height;
         spacing: 10px;
         HorizontalLayout {
-            height: 36px;
+            height: 32px;
+            spacing: 8px;
+            Image {
+                y: (parent.height - self.height) / 2;
+                width: 20px;
+                height: 20px;
+                source: @image-url("../../assets/providers/icons/xai.svg");
+                colorize: Theme.primary-text;
+            }
+
             Text {
-                text: "Grok 订阅账号";
-                font-size: 17px;
+                text: "Grok";
+                font-size: 16px;
                 font-weight: 600;
                 color: Theme.primary-text;
                 vertical-alignment: center;
+                horizontal-stretch: 0;
+            }
+
+            Text {
+                text: root.accounts.length + " 个账号";
+                color: Theme.muted-text;
+                font-size: 12px;
+                vertical-alignment: center;
                 horizontal-stretch: 1;
             }
-
-            QuietButton {
-                width: 88px;
-                horizontal-stretch: 0;
-                text: "刷新全部";
-                enabled: !root.busy && !root.pending;
-                clicked => { root.action(0, ""); }
-            }
-
-            QuietButton {
-                width: 190px;
-                horizontal-stretch: 0;
-                text: "添加 / 重新登录 Grok";
-                primary: true;
-                enabled: !root.busy && !root.pending && !root.config-managed;
-                clicked => { root.action(1, ""); }
-            }
         }
 
-        Text {
-            text: root.status;
-            color: Theme.muted-text;
+        if root.error != "": Text {
+            text: root.error;
+            color: Theme.warning;
             font-size: 12px;
             wrap: word-wrap;
         }
-
-        Text {
-            text: "在 xAI 官方页面完成授权，再将账号绑定到 Grok 上游。";
+        if root.accounts.length == 0: Text {
+            height: 48px;
+            text: "尚未添加 Grok 账号。添加后，可在上游连接中绑定。";
             color: Theme.muted-text;
             font-size: 12px;
+            vertical-alignment: center;
             wrap: word-wrap;
         }
-
-        for account in root.accounts: Rectangle {
-            height: 134px;
-            background: Theme.panel;
-            border-width: 1px;
-            border-color: Theme.border;
-            border-radius: 10px;
-            HorizontalLayout {
-                x: 14px;
-                y: 14px;
-                width: parent.width - 28px;
-                height: 42px;
-                spacing: 10px;
-                Rectangle {
-                    width: 36px;
-                    height: 36px;
-                    y: (parent.height - self.height) / 2;
-                    horizontal-stretch: 0;
-                    border-radius: 10px;
-                    background: Theme.raised;
-                    Image {
-                        width: 22px;
-                        height: 22px;
-                        x: 7px;
-                        y: 7px;
-                        source: @image-url("../../assets/providers/icons/xai.svg");
-                        colorize: Theme.primary-text;
-                    }
-                }
-
-                VerticalLayout {
-                    horizontal-stretch: 1;
-                    spacing: 5px;
-                    Text {
-                        text: account.label;
-                        color: Theme.primary-text;
-                        font-size: 14px;
-                        font-weight: 600;
-                        overflow: elide;
-                    }
-
-                    Text {
-                        text: account.workspace + " · " + account.bound-provider-count + " 个上游引用";
-                        color: Theme.muted-text;
-                        font-size: 12px;
-                        overflow: elide;
-                    }
-                }
-
-                QuietButton {
-                    width: 92px;
-                    horizontal-stretch: 0;
-                    text: account.is-default ? "默认账号" : "设为默认";
-                    selected: account.is-default;
-                    enabled: !root.busy && !root.config-managed && !root.pending && !account.is-default && !account.requires-reauth;
-                    clicked => { root.action(2, account.id); }
-                }
-
-                QuietButton {
-                    width: 80px;
-                    horizontal-stretch: 0;
-                    text: "移除";
-                    enabled: !root.busy && !root.config-managed && !root.pending;
-                    clicked => { root.request-removal(account); }
-                }
-            }
-
-            Rectangle {
-                x: 14px;
-                y: 69px;
-                width: parent.width - 28px;
-                height: 1px;
-                background: Theme.border;
-            }
-
-            quota-area := VerticalLayout {
-                x: 14px;
-                y: 82px;
-                width: parent.width - 74px;
-                height: 38px;
-                spacing: 6px;
-                if account.quota.has-value: QuotaWindow {
-                    quota: account.quota;
-                }
-                if !account.quota.has-value: Text {
-                    height: 18px;
-                    text: account.requires-reauth ? "请重新登录以查询额度" : account.quota.loading ? "正在查询官方额度…" : account.quota.error != "" ? "暂时无法查询额度" : "尚未查询额度";
-                    color: account.quota.error != "" || account.requires-reauth ? Theme.warning : Theme.muted-text;
-                    font-size: 12px;
-                    vertical-alignment: center;
-                }
-                HorizontalLayout {
-                    height: 14px;
-                    spacing: 8px;
-                    Text {
-                        horizontal-stretch: 1;
-                        text: account.quota.error != "" ? account.quota.error : account.quota.has-value ? account.quota.reset-detail : "Grok 官方账单 · 订阅额度";
-                        color: account.quota.error != "" ? Theme.warning : Theme.muted-text;
-                        font-size: 11px;
-                        overflow: elide;
-                        vertical-alignment: center;
-                    }
-
-                    Text {
-                        horizontal-stretch: 0;
-                        text: account.quota.loading ? "更新中…" : account.quota.error != "" && account.quota.has-value ? "上次数据 · " + account.quota.updated-label : account.quota.updated-label;
-                        color: Theme.muted-text;
-                        font-size: 11px;
-                        vertical-alignment: center;
-                    }
-                }
-            }
-
-            QuietButton {
-                x: parent.width - 50px;
-                y: 82px;
-                width: 36px;
-                height: 36px;
-                text: "刷新 " + account.label + " 的额度";
-                icon: @image-url("../../assets/refresh.svg");
-                icon-only: true;
-                icon-color: Theme.muted-text;
-                ghost: true;
-                enabled: !account.quota.loading && !account.requires-reauth && !root.pending;
-                clicked => { root.action(5, account.id); }
-            }
+        for account in root.accounts: AccountCard {
+            expanded: root.expanded-id == account.id;
+            removing: root.removing-id == account.id;
+            toggle-details(id) => { root.expanded-id = root.expanded-id == id ? "" : id; }
+            account: account;
+            grok: true;
+            busy: root.busy;
+            config-managed: root.config-managed;
+            recovery-only: root.recovery-only;
+            pending: root.pending || root.other-login-pending;
+            action(action, id) => { root.action(action, id); }
+            request-removal(account) => { root.request-removal(account); }
         }
-        if root.pending: Rectangle {
-            height: 174px;
-            background: Theme.brand-surface;
-            border-radius: 10px;
-            VerticalLayout {
-                padding: 12px;
-                spacing: 8px;
-                HorizontalLayout {
-                    Text {
-                        text: "在已打开的官方页面完成验证码登录。";
-                        color: Theme.primary-text;
-                        font-size: 13px;
-                        horizontal-stretch: 1;
-                        wrap: word-wrap;
-                    }
-
-                    QuietButton {
-                        text: "取消登录";
-                        enabled: !root.busy;
-                        clicked => { root.action(3, ""); }
-                    }
-                }
-
-                LineEdit {
-                    text: root.user-code;
-                    read-only: true;
-                    accessible-label: "Grok 登录验证码，可选择复制";
-                }
-
-                LineEdit {
-                    text: root.login-url;
-                    read-only: true;
-                    accessible-label: "Grok 官方登录页面地址，可选择复制";
-                }
-            }
-        }
-        Text {
-            text: "登录与保存上游不会启用路由。额度来自 Grok 官方账单，查询不会发送模型请求。";
-            color: Theme.muted-text;
-            font-size: 12px;
-            wrap: word-wrap;
+        AccountLoginProgress {
+            title: "完成 Grok 官方授权";
+            pending: root.pending;
+            busy: root.busy;
+            user-code: root.user-code;
+            login-url: root.login-url;
+            cancel => { root.action(3, ""); }
         }
     }
 }
