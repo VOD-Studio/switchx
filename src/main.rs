@@ -3536,7 +3536,7 @@ async fn worker(
                     show_action(
                         &app,
                         result.map(|()| {
-                            "模型路由已开启，目录和配置已发布；点击“启动 Codex”后在新会话选择模型".into()
+                            "模型路由已开启；点击“启动 Codex”或运行 codex --no-daemon 新建会话。已有会话的连接不会随 /model 切换。".into()
                         }),
                     );
                 });
