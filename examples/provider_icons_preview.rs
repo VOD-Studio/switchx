@@ -1,5 +1,10 @@
-//! Render synthetic provider avatar previews with the real Slint UI, without native windows.
+//! Render synthetic previews with the real Slint UI and no account or configuration access.
 //! Run: cargo run --example provider_icons_preview -- /absolute/output/directory
+//! Connection cards: add --connections-design (snapshots) or --connections-native (window).
+
+#[cfg(target_os = "macos")]
+#[path = "../src/macos.rs"]
+pub mod macos;
 
 use switchx::ui::{
     AccountRow, AppWindow, CodexQuotaRow, ModelRow, ProviderIconRow, ProviderRow, RequestRow,
@@ -114,7 +119,13 @@ fn main() -> Result<(), Box<dyn Error>> {
     }
     fs::create_dir_all(output)?;
     let window = MinimalSoftwareWindow::new(RepaintBufferType::NewBuffer);
-    slint::platform::set_platform(Box::new(PreviewPlatform(window.clone())))?;
+    let native_connections = std::env::args().any(|arg| arg == "--connections-native");
+    if native_connections {
+        #[cfg(target_os = "macos")]
+        macos::configure_window()?;
+    } else {
+        slint::platform::set_platform(Box::new(PreviewPlatform(window.clone())))?;
+    }
     let app = AppWindow::new()?;
     app.set_loading(false);
     app.global::<Theme>().set_animations_enabled(false);
@@ -309,6 +320,83 @@ fn main() -> Result<(), Box<dyn Error>> {
             ..Default::default()
         },
     ]));
+    if native_connections || std::env::args().any(|arg| arg == "--connections-design") {
+        let mut rows: Vec<_> = providers.iter().collect();
+        rows[0].name = "ChatGPT 订阅".into();
+        rows[0].binding_label = "绑定：原生 Codex 登录".into();
+        rows[0].credential_status = "订阅凭据由绑定账号提供".into();
+        rows[1].binding_label = "绑定：Personal · 合成账号".into();
+        rows[2].name = "Gemini API".into();
+        rows[2].credential_status = "API Key 已保存 · 尚未检查".into();
+        app.set_action_message("连接卡片预览 · 合成资料".into());
+        let model = Rc::new(VecModel::from(rows.clone()));
+        app.set_providers(model.clone().into());
+        app.set_filtered_providers(model.clone().into());
+        if native_connections {
+            app.set_native_titlebar_overlay(cfg!(target_os = "macos"));
+            #[cfg(target_os = "macos")]
+            app.global::<Theme>()
+                .set_system_reduced_motion(macos::prefers_reduced_motion());
+            app.global::<Theme>().set_animations_enabled(true);
+            app.invoke_set_appearance(true);
+            app.on_check_provider(move |id| {
+                if let Some(index) = model.iter().position(|row| row.id == id) {
+                    let mut row = model.row_data(index).unwrap();
+                    row.check_id = "synthetic-check".into();
+                    row.check_stage = "检查凭据".into();
+                    model.set_row_data(index, row);
+                    let model = model.clone();
+                    slint::Timer::single_shot(Duration::from_millis(1800), move || {
+                        let mut row = model.row_data(index).unwrap();
+                        row.check_id = "".into();
+                        row.check_message = "合成检查完成".into();
+                        row.check_elapsed_ms = 1800;
+                        model.set_row_data(index, row);
+                    });
+                }
+            });
+            return Ok(app.run()?);
+        }
+        app.show()?;
+        for (width, height) in [(1200, 820), (1000, 680)] {
+            app.window().set_size(PhysicalSize::new(width, height));
+            for dark in [false, true] {
+                set_theme(&app, &window, dark);
+                let suffix = format!("{}-{width}x{height}", if dark { "dark" } else { "light" });
+                model.set_vec(rows.clone());
+                snapshot(&window, output, &format!("connections-ready-{suffix}"))?;
+                window.dispatch_event(WindowEvent::PointerMoved {
+                    position: slint::LogicalPosition::new(500.0, 310.0),
+                });
+                snapshot(&window, output, &format!("connections-hover-{suffix}"))?;
+                window.dispatch_event(WindowEvent::PointerExited);
+                let mut pending = rows[0].clone();
+                pending.check_id = "synthetic-check".into();
+                pending.check_stage = "检查凭据".into();
+                pending.check_elapsed_ms = 12500;
+                model.set_row_data(0, pending);
+                let mut failed = rows[1].clone();
+                failed.check_failed = true;
+                failed.check_message = "检查失败".into();
+                failed.check_detail = "授权已失效，请在管理连接中重新绑定账号。".into();
+                model.set_row_data(1, failed);
+                snapshot(&window, output, &format!("connections-checks-{suffix}"))?;
+                let mut long = rows[2].clone();
+                long.name = "团队的 API 连接 · 一个需要截断的非常长的连接名称".into();
+                long.endpoint =
+                    "https://example.invalid/a/very/long/path/to/an/api/endpoint/v1".into();
+                long.auth_error =
+                    "无法读取凭据。请打开管理连接重新填写 API Key，然后再次检查。".into();
+                model.set_vec(vec![long]);
+                snapshot(&window, output, &format!("connections-long-{suffix}"))?;
+                app.set_config_managed(true);
+                snapshot(&window, output, &format!("connections-managed-{suffix}"))?;
+                app.set_config_managed(false);
+            }
+        }
+        println!("Synthetic connection-card previews: {}", output.display());
+        return Ok(());
+    }
     app.set_providers(providers.clone());
     app.set_filtered_providers(providers);
     app.set_model_provider_ids(ModelRc::new(VecModel::from(vec![

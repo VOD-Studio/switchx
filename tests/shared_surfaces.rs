@@ -6,10 +6,34 @@ use std::{cell::Cell, io::Write, rc::Rc, time::Duration};
 slint::slint! {
     import { QuietButton, SurfaceCard } from "../ui/components.slint";
     import { AccountCard } from "../ui/pages/account-card.slint";
+    import { ProviderCard } from "../ui/pages/provider-card.slint";
+    import { ProviderRow } from "../ui/view-models.slint";
+    export { ProviderRow } from "../ui/view-models.slint";
     import { AccountRow } from "../ui/view-models.slint";
     export { AccountRow, CodexQuotaRow, XaiQuotaRow } from "../ui/view-models.slint";
     import { Theme } from "../ui/tokens.slint";
     export { Theme } from "../ui/tokens.slint";
+
+    export component ProviderCardWindow inherits Window {
+        preferred-width: 820px;
+        preferred-height: 380px;
+        background: Theme.background;
+        in-out property <ProviderRow> provider;
+        in-out property <bool> busy;
+        in-out property <bool> managed;
+        in-out property <int> action: 0;
+        out property <length> card-height: card.height;
+        card := ProviderCard {
+            x: 30px; y: 30px; width: 760px;
+            provider: root.provider;
+            busy: root.busy;
+            config-managed: root.managed;
+            manage => { root.action = 1; }
+            models => { root.action = 2; }
+            check => { root.action = 3; }
+            direct => { root.action = 4; }
+        }
+    }
 
     export component AccountCardWindow inherits Window {
         preferred-width: 820px;
@@ -386,4 +410,95 @@ fn shared_surfaces_preserve_styling_motion_and_accessible_button_actions() {
         }
         theme.set_system_reduced_motion(false);
     }
+}
+
+#[test]
+fn provider_card_motion_keeps_actions_reachable_and_respects_reduced_motion() {
+    let window = MinimalSoftwareWindow::new(RepaintBufferType::NewBuffer);
+    slint::platform::set_platform(Box::new(PreviewPlatform(window.clone()))).unwrap();
+    let app = ProviderCardWindow::new().unwrap();
+    let mut provider = ProviderRow {
+        name: "Synthetic API".into(),
+        endpoint: "https://example.invalid/v1".into(),
+        credential_status: "API Key 已保存 · 尚未检查".into(),
+        ..Default::default()
+    };
+    app.set_provider(provider.clone());
+    app.window().set_size(PhysicalSize::new(820, 380));
+    app.show().unwrap();
+    let entry = draw(&window, "provider-entry-start");
+    advance(16);
+    draw(&window, "provider-entry-ready");
+    advance(90);
+    let entering = draw(&window, "provider-entry-partial");
+    advance(400);
+    let settled = draw(&window, "provider-ready");
+    assert_ne!(entry.as_bytes(), entering.as_bytes());
+    assert_ne!(entering.as_bytes(), settled.as_bytes());
+    let height = app.get_card_height();
+    window.dispatch_event(WindowEvent::PointerMoved {
+        position: LogicalPosition::new(420.0, 70.0),
+    });
+    draw(&window, "provider-hover-start");
+    advance(280);
+    let hovered = draw(&window, "provider-hover");
+    assert_ne!(settled.as_bytes(), hovered.as_bytes());
+    assert_eq!(
+        height,
+        app.get_card_height(),
+        "hover must not reflow the list"
+    );
+    // Actions remain reachable inside the hover observer, including managed states.
+    for (x, y, action) in [
+        (706.0, 76.0, 1),
+        (559.0, 150.0, 2),
+        (645.0, 150.0, 3),
+        (731.0, 150.0, 4),
+    ] {
+        click(&window, x, y);
+        assert_eq!(app.get_action(), action);
+    }
+    app.set_managed(true);
+    app.set_action(0);
+    draw(&window, "provider-managed");
+    click(&window, 706.0, 76.0);
+    click(&window, 559.0, 150.0);
+    click(&window, 731.0, 150.0);
+    assert_eq!(app.get_action(), 0);
+    click(&window, 645.0, 150.0);
+    assert_eq!(app.get_action(), 3);
+    app.set_busy(true);
+    app.set_action(0);
+    click(&window, 645.0, 150.0);
+    assert_eq!(app.get_action(), 0);
+    app.set_busy(false);
+    app.set_managed(false);
+    provider.check_id = "synthetic-check".into();
+    provider.check_stage = "检查凭据".into();
+    app.set_provider(provider.clone());
+    draw(&window, "provider-check-start");
+    advance(300);
+    let checking = draw(&window, "provider-check-moving");
+    advance(180);
+    assert_ne!(
+        checking.as_bytes(),
+        draw(&window, "provider-check-next").as_bytes()
+    );
+    app.global::<Theme>().set_system_reduced_motion(true);
+    draw(&window, "provider-reduced-start");
+    advance(400);
+    let reduced = draw(&window, "provider-reduced-check");
+    advance(400);
+    assert_eq!(
+        reduced.as_bytes(),
+        draw(&window, "provider-reduced-still").as_bytes()
+    );
+    provider.check_id = "".into();
+    provider.auth_error = "授权已失效，请重新绑定账号。".into();
+    app.set_provider(provider);
+    draw(&window, "provider-error");
+    assert!(
+        app.get_card_height() > height + 20.0,
+        "error details must remain visible"
+    );
 }

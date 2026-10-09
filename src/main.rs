@@ -194,7 +194,12 @@ fn matching_providers(providers: &ModelRc<ProviderRow>, query: &str) -> Vec<Prov
 
 fn filter_providers(app: &AppWindow, query: &str) {
     let rows = matching_providers(&app.get_providers(), query);
-    app.set_filtered_providers(ModelRc::new(VecModel::from(rows)));
+    sync_rows(
+        app.get_filtered_providers(),
+        rows,
+        |row| row.id.clone(),
+        |model| app.set_filtered_providers(model),
+    );
 }
 
 fn show_result(app: &AppWindow, result: Result<Snapshot, AppError>) {
@@ -445,21 +450,22 @@ fn account_initial(label: &str) -> String {
         .unwrap_or_default()
 }
 
-/// Applies account rows by id. Replacing the model would recreate every account
-/// card and replay its entry motion on each quota refresh or time update.
-fn sync_account_rows(
-    model: ModelRc<AccountRow>,
-    rows: Vec<AccountRow>,
-    replace: impl FnOnce(ModelRc<AccountRow>),
+/// Updates visible cards in place so progress and quota refreshes preserve
+/// scroll position, hover state, and completed entry animations.
+fn sync_rows<T: Clone + PartialEq + 'static>(
+    model: ModelRc<T>,
+    rows: Vec<T>,
+    row_id: impl Fn(&T) -> slint::SharedString,
+    replace: impl FnOnce(ModelRc<T>),
 ) {
-    let Some(current) = model.as_any().downcast_ref::<VecModel<AccountRow>>() else {
+    let Some(current) = model.as_any().downcast_ref::<VecModel<T>>() else {
         replace(ModelRc::new(VecModel::from(rows)));
         return;
     };
     let mut index = 0;
     while index < current.row_count() {
-        let id = current.row_data(index).unwrap_or_default().id;
-        if rows.iter().any(|row| row.id == id) {
+        let id = row_id(&current.row_data(index).unwrap());
+        if rows.iter().any(|row| row_id(row) == id) {
             index += 1;
         } else {
             current.remove(index);
@@ -467,8 +473,11 @@ fn sync_account_rows(
     }
     let count = rows.len();
     for (index, row) in rows.into_iter().enumerate() {
-        let found = (index..current.row_count())
-            .find(|&old| current.row_data(old).is_some_and(|old| old.id == row.id));
+        let found = (index..current.row_count()).find(|&old| {
+            current
+                .row_data(old)
+                .is_some_and(|old| row_id(&old) == row_id(&row))
+        });
         match found {
             Some(old) if old == index => {
                 if current.row_data(index).as_ref() != Some(&row) {
@@ -485,6 +494,14 @@ fn sync_account_rows(
     while current.row_count() > count {
         current.remove(current.row_count() - 1);
     }
+}
+
+fn sync_account_rows(
+    model: ModelRc<AccountRow>,
+    rows: Vec<AccountRow>,
+    replace: impl FnOnce(ModelRc<AccountRow>),
+) {
+    sync_rows(model, rows, |row| row.id.clone(), replace);
 }
 
 fn show_accounts(app: &AppWindow, view: Result<AccountView, String>) {
@@ -5127,8 +5144,15 @@ mod tests {
                 set_provider_check_id(&app, "synthetic-chatgpt", "");
                 set_provider_check_id(&app, "synthetic-grok", "");
                 draw();
-                // Use the real callback to start one check, then click the other row's controls.
-                click(width as f32 - 220.0, 374.0);
+                window.dispatch_event(WindowEvent::PointerScrolled {
+                    position: slint::LogicalPosition::new(500.0, 440.0),
+                    delta_x: 0.0,
+                    delta_y: 2000.0,
+                });
+                draw();
+                let visible_cards = app.get_filtered_providers();
+                // Use the footer check action, then the other card's controls.
+                click(width as f32 - 88.0, 445.0);
                 assert!(
                     !app.get_busy(),
                     "one provider check must not lock the whole app"
@@ -5138,6 +5162,11 @@ mod tests {
                 };
                 assert_eq!(id, "synthetic-chatgpt");
                 let chatgpt_check = check_id;
+                assert_eq!(
+                    app.get_filtered_providers(),
+                    visible_cards,
+                    "checking must keep cards mounted"
+                );
                 update_provider_check(&app, "synthetic-chatgpt", &chatgpt_check, |row| {
                     row.check_stage = "读取登录状态".into();
                     row.check_elapsed_ms = 12500;
@@ -5163,13 +5192,13 @@ mod tests {
                     receiver.try_recv().is_err(),
                     "duplicate checks must be ignored"
                 );
-                click(width as f32 - 220.0, 490.0);
+                click(width as f32 - 88.0, 608.0);
                 let Ok(Command::Check { id, check_id, .. }) = receiver.try_recv() else {
                     panic!("the other connection must still be checkable");
                 };
                 assert_eq!(id, "synthetic-grok");
                 let grok_check = check_id;
-                click(width as f32 - 114.0, 490.0);
+                click(width as f32 - 122.0, 537.0);
                 assert!(
                     matches!(receiver.try_recv(), Ok(Command::BeginXaiEditor(id)) if id == "synthetic-grok")
                 );
