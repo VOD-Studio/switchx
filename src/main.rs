@@ -198,6 +198,8 @@ fn show_result(app: &AppWindow, result: Result<Snapshot, AppError>) {
     app.set_busy(false);
     match result {
         Ok(snapshot) => {
+            app.set_local_data_ready(true);
+            app.set_credentials_checked(snapshot.credentials_checked);
             let checking = app.get_providers();
             let selected_count = snapshot.models.iter().filter(|model| model.enabled).count();
             let selectable_count = snapshot.models.iter().filter(|model| model.ready).count();
@@ -325,6 +327,8 @@ fn show_result(app: &AppWindow, result: Result<Snapshot, AppError>) {
             app.set_error_action("".into());
         }
         Err(error) => {
+            app.set_local_data_ready(false);
+            app.set_credentials_checked(false);
             app.set_error_code(error.code().into());
             app.set_error_message(error.message().into());
             app.set_error_action(error.action().into());
@@ -1383,6 +1387,10 @@ fn route_port(text: &str) -> Result<u16, String> {
 fn show_config_status(app: &AppWindow, status: client::ConfigStatus) {
     app.set_direct_active(status.direct_active);
     app.set_route_managed(status.route_managed);
+    app.set_config_mode(status.mode.as_str().into());
+    app.set_config_provider(status.provider.as_str().into());
+    app.set_config_model(status.model.as_str().into());
+    app.set_config_exists(status.config_exists);
     app.set_config_status(
         format!("{} · {} · {}", status.mode, status.provider, status.model).into(),
     );

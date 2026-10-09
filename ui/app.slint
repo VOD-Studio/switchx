@@ -32,6 +32,7 @@ import { CommonConfigEditor } from "editors/common-config-editor.slint";
 import { RoutingPage } from "pages/routing.slint";
 import { ActivityPage } from "pages/activity.slint";
 import { ConfigPage } from "pages/config.slint";
+import { ConnectionStatusDialog } from "connection-status.slint";
 
 export {
     XaiQuotaRow,
@@ -77,6 +78,8 @@ export component AppWindow inherits Window {
 
     in-out property <int> active-page: 0;
     in-out property <bool> drawer-open: false;
+    in-out property <bool> status-directories-expanded: false;
+    changed drawer-open => { if (root.drawer-open) { root.status-directories-expanded = false; } }
     in-out property <bool> loading: true;
     in-out property <bool> busy: false;
     in-out property <bool> recovery-only: false;
@@ -84,6 +87,8 @@ export component AppWindow inherits Window {
     in-out property <string> error-message: "";
     in-out property <string> error-action: "";
     in-out property <string> status-text: "正在读取本地资料…";
+    in-out property <bool> local-data-ready: false;
+    in-out property <bool> credentials-checked: false;
     in-out property <string> data-path: "";
     in-out property <[ProviderRow]> providers: [];
     in-out property <[ProviderRow]> filtered-providers: [];
@@ -157,6 +162,10 @@ export component AppWindow inherits Window {
     in-out property <int> discovery-scope: 0;
     in-out property <string> config-home: "";
     in-out property <string> config-status: "尚未读取 Codex 配置";
+    in-out property <string> config-mode: "尚未读取 Codex 配置";
+    in-out property <string> config-provider: "";
+    in-out property <string> config-model: "";
+    in-out property <bool> config-exists: false;
     in-out property <bool> direct-active: false;
     out property <string> connection-label: root.route-running ? "路由已启用" : root.direct-active ? "直连已启用" : root.config-managed ? "配置待恢复" : "待启用";
     in-out property <string> auth-status: "官方登录状态尚未检查";
@@ -1466,110 +1475,32 @@ export component AppWindow inherits Window {
         }
     }
 
-    Drawer {
+    ConnectionStatusDialog {
         open: root.drawer-open;
-        title: "连接状态";
-        subtitle: "当前工作空间与配置管理状态。";
-        panel-width: 440px;
         busy: root.busy;
+        loading: root.loading;
+        data-ready: root.local-data-ready;
+        credentials-checked: root.credentials-checked;
+        provider-count: root.providers.length;
+        status-text: root.status-text;
+        config-mode: root.config-mode;
+        config-provider: root.config-provider;
+        config-model: root.config-model;
+        config-exists: root.config-exists;
+        direct-active: root.direct-active;
+        route-running: root.route-running;
+        route-managed: root.route-managed;
+        config-managed: root.config-managed;
+        connection-label: root.connection-label;
+        route-status: root.route-status;
+        action-message: root.action-message;
+        config-home: root.config-home;
+        data-path: root.data-path;
+        problem: root.error-code == "" ? "" : root.error-message + " · " + root.error-action;
+        directories-expanded <=> root.status-directories-expanded;
         dismissed => { root.drawer-open = false; app-keyboard.focus(); }
-        VerticalLayout {
-            spacing: 18px;
-            StatusPill {
-                width: 148px;
-                label: "● " + root.connection-label;
-                ink: root.route-running || root.direct-active ? Theme.success : Theme.warning;
-                fill: root.route-running || root.direct-active ? Theme.brand-surface : Theme.warning-surface;
-            }
-
-            ScrollView {
-                vertical-stretch: 1;
-                VerticalLayout {
-                    spacing: 18px;
-                    Text {
-                        text: root.direct-active ? "API 直连配置已应用，在新会话中生效。" : root.route-status;
-                        color: Theme.primary-text;
-                        font-size: 13px;
-                        wrap: word-wrap;
-                    }
-
-                    Text {
-                        text: root.config-status;
-                        color: Theme.muted-text;
-                        font-size: 12px;
-                        wrap: word-wrap;
-                    }
-
-                    Text {
-                        text: root.status-text;
-                        color: Theme.muted-text;
-                        font-size: 12px;
-                        wrap: word-wrap;
-                    }
-
-                    Text {
-                        text: "最近操作";
-                        color: Theme.primary-text;
-                        font-size: 14px;
-                        font-weight: 500;
-                    }
-
-                    Text {
-                        text: root.action-message;
-                        color: Theme.muted-text;
-                        font-size: 12px;
-                        wrap: word-wrap;
-                    }
-
-                    Text {
-                        text: "工作空间";
-                        color: Theme.primary-text;
-                        font-size: 14px;
-                        font-weight: 500;
-                    }
-
-                    Text {
-                        text: root.config-home;
-                        color: Theme.muted-text;
-                        font-size: 12px;
-                        wrap: word-wrap;
-                    }
-
-                    Text {
-                        text: "本地资料";
-                        color: Theme.primary-text;
-                        font-size: 14px;
-                        font-weight: 500;
-                    }
-
-                    Text {
-                        text: root.data-path;
-                        color: Theme.muted-text;
-                        font-size: 12px;
-                        wrap: word-wrap;
-                    }
-
-                    if root.error-code != "": Text {
-                        text: root.error-message + " · " + root.error-action;
-                        color: Theme.error;
-                        font-size: 12px;
-                        wrap: word-wrap;
-                    }
-                }
-            }
-
-            if root.config-managed: QuietButton {
-                text: "恢复并停止";
-                primary: true;
-                enabled: !root.busy;
-                clicked => { root.restore-config(root.config-home); }
-            }
-            QuietButton {
-                text: "配置与恢复  ↗";
-                enabled: !root.busy;
-                clicked => { root.drawer-open = false; root.active-page = 5; }
-            }
-        }
+        restore-requested => { root.restore-config(root.config-home); }
+        configure-requested => { root.drawer-open = false; root.active-page = 5; app-keyboard.focus(); }
     }
 
     Drawer {
