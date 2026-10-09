@@ -611,7 +611,10 @@ async fn session_context_survives_restart_and_blocks_account_changes_before_forw
                 "x-codex-turn-metadata",
                 json!({"session_id":session,"thread_id":CHILD}).to_string(),
             )
-            .header("x-codex-routing-hint", format!("model={model}"))
+            .header(
+                "x-codex-routing-hint",
+                format!("model={model};tier=priority"),
+            )
             .send()
             .await
             .unwrap();
@@ -621,6 +624,10 @@ async fn session_context_survives_restart_and_blocks_account_changes_before_forw
         assert_eq!(headers["session-id"], session);
         assert_eq!(headers["thread-id"], CHILD);
         assert_eq!(
+            headers["x-codex-routing-hint"],
+            "model=gpt-5.5;tier=priority"
+        );
+        assert_eq!(
             headers["chatgpt-account-id"],
             workspace(expected_workspace).account_id
         );
@@ -628,6 +635,7 @@ async fn session_context_survives_restart_and_blocks_account_changes_before_forw
     let opaque = json!([{"type":"reasoning","encrypted_content":"synthetic-prior-state"}]);
     let response = request(address, "sx-a-two", Some(A), opaque.clone(), false)
         .header("session_id", A)
+        .header("x-codex-routing-hint", "model=sx-a-two;tier=default")
         .send()
         .await
         .unwrap();
@@ -636,6 +644,10 @@ async fn session_context_survives_restart_and_blocks_account_changes_before_forw
     let (headers, body) = official_seen.recv().await.unwrap();
     assert_eq!(headers["session_id"], A);
     assert_eq!(body["model"], "deepseek-flash");
+    assert_eq!(
+        headers["x-codex-routing-hint"],
+        "model=deepseek-flash;tier=default"
+    );
 
     for model in ["sx-b", "sx-api"] {
         let response = request(address, model, Some(A), json!("switch"), false)

@@ -264,7 +264,7 @@ TOML 文本与 1M/阈值控件双向同步，手动填写其他正整数窗口�
 
 OAuth refresh token、ID token 和账号资料单独保存到 `SWITCHX_DATA_DIR/codex_oauth_auth.json`，采用原子写入和 Unix `0600` 权限。私有账号可保存包含 access token 的完整 `auth.json` 快照，供认证编辑器读取；兼容没有该可选字段的旧记录。运行时仍使用内存 token 缓存，完整快照不进入 SQLite、预览或恢复 journal。请求续期只同步确切属于绑定账号且未被外部改动的原生登录。已发送的续期即使遇到请求取消，也会在有限超时内验证并保存轮换结果；应用退出等待这些操作结束。排队或发送前取消不会发起续期。准备阶段如需轮换与原生登录共用的凭据，会要求先显式检查并续期。
 
-含订阅模型的配置保留 `requires_openai_auth = true`，通过独立的 `x-switchx-local-token` 请求头校验本地访问。本地令牌仅写入受限配置与恢复 journal，不转发上游。保存账号的路由使用自己的 Bearer 与工作区，忽略入口登录 C 的认证；API 模型丢弃官方认证、工作区和协议头，注入自己的 Key。Cookie 和任意客户端头不会复制到上游。
+含订阅模型的配置保留 `requires_openai_auth = true`，通过独立的 `x-switchx-local-token` 请求头校验本地访问。本地令牌仅写入受限配置与恢复 journal，不转发上游。保存账号的路由使用自己的 Bearer 与工作区，忽略入口登录 C 的认证；API 模型丢弃官方认证、工作区和协议头，注入自己的 Key。Cookie 和任意客户端头不会复制到上游。订阅请求正文与 `x-codex-routing-hint` 中的模型名同步映射为实际模型，保留 `tier`；普通模型及 `tier` 提示不会被误判为旧会话状态，其他不透明提示保持原样。
 
 `/responses` 和 `/responses/compact` 共用 SQLite 会话保护。实际 Codex `session-id`、`thread-id` 及转发元数据经过一致性检查；根会话固定到连接、保存账号、工作区和区域。相同连接换模型允许，换连接、账号或转到 API 要求新建会话；恢复和重新发布不会清除绑定。未知会话不能携带加密上下文或上游状态建立新绑定。数据库只记录身份元数据，不保存正文、token、加密内容或完整转发元数据。API 路径拒绝官方 compact/加密输入，两条路径均拒绝 `previous_response_id` 和 `conversation`。
 
