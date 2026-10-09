@@ -1,0 +1,369 @@
+import { Drawer, QuietButton, StatusPill, SurfaceCard } from "components.slint";
+import { QuietScrollView as ScrollView } from "scroll-view.slint";
+import { Theme } from "tokens.slint";
+
+export component ConnectionStatusDialog inherits Drawer {
+    in property <bool> loading;
+    in property <bool> data-ready;
+    in property <bool> credentials-checked;
+    in property <int> provider-count;
+    in property <string> status-text;
+    in property <string> config-mode;
+    in property <string> config-provider;
+    in property <string> config-model;
+    in property <bool> config-exists;
+    in property <bool> direct-active;
+    in property <bool> route-running;
+    in property <bool> route-managed;
+    in property <bool> config-managed;
+    in property <string> connection-label;
+    in property <string> route-status;
+    in property <string> action-message;
+    in property <string> config-home;
+    in property <string> data-path;
+    in property <string> problem;
+    in-out property <bool> directories-expanded: false;
+    callback configure-requested();
+    callback restore-requested();
+    private property <string> copy-message;
+    changed directories-expanded => { root.copy-message = ""; }
+
+    title: "连接状态";
+    subtitle: "Codex 工作空间与配置概览";
+    centered: true;
+    panel-width: 510px;
+    private property <string> connection-title: root.config-provider == "" ? "尚未读取连接"
+        : root.direct-active ? "API 直连"
+        : root.config-provider == "switchx_router" ? "SwitchX 模型路由"
+        : root.config-provider == "openai" ? "Codex 官方连接" : "自定义连接";
+    private property <string> connection-detail: root.config-provider == "openai" && root.config-exists && !root.config-managed
+        ? "OpenAI · 登录由 Codex 管理"
+        : root.config-provider == "" ? root.config-mode : root.config-provider + " · " + root.config-mode;
+
+    function copy-path(path: string) {
+        clipboard-input.text = path;
+        clipboard-input.select-all();
+        clipboard-input.copy();
+        root.copy-message = "路径已复制";
+    }
+
+    VerticalLayout {
+        spacing: 22px;
+        Rectangle {
+            min-height: 50px;
+            vertical-stretch: 1;
+            preferred-height: body.preferred-height + 4px;
+            ScrollView {
+                // Place the shared scrollbar gutter inside the dialog's right padding.
+                x: 0px;
+                y: 0px;
+                width: parent.width + 14px;
+                height: parent.height;
+                content-width: self.visible-width;
+                horizontal-scrollbar-policy: always-off;
+                clipboard-input := TextInput {
+                    visible: false;
+                    width: 0px;
+                    height: 0px;
+                    read-only: true;
+                    accessible-role: none;
+                }
+
+                body := VerticalLayout {
+                    alignment: start;
+                    spacing: 20px;
+                    SurfaceCard {
+                        height: summary.preferred-height;
+                        background: Theme.brand-surface;
+                        border-width: 0px;
+                        border-radius: 12px;
+                        summary := VerticalLayout {
+                            padding: 16px;
+                            spacing: 12px;
+                            alignment: start;
+                            HorizontalLayout {
+                                spacing: 12px;
+                                Rectangle {
+                                    y: (parent.height - self.height) / 2;
+                                    width: 36px;
+                                    height: 36px;
+                                    border-radius: 10px;
+                                    background: Theme.panel;
+                                    Image {
+                                        x: 8px;
+                                        y: 8px;
+                                        width: 20px;
+                                        height: 20px;
+                                        source: @image-url("../assets/ui/terminal.svg");
+                                        colorize: Theme.brand;
+                                        accessible-role: none;
+                                    }
+                                }
+
+                                VerticalLayout {
+                                    spacing: 4px;
+                                    alignment: start;
+                                    horizontal-stretch: 1;
+                                    Text {
+                                        min-width: 0px;
+                                        text: root.connection-title;
+                                        font-size: 16px;
+                                        font-weight: 500;
+                                        color: Theme.primary-text;
+                                        wrap: word-wrap;
+                                    }
+
+                                    Text {
+                                        min-width: 0px;
+                                        text: root.connection-detail;
+                                        font-size: 12px;
+                                        color: Theme.muted-text;
+                                        wrap: word-wrap;
+                                    }
+                                }
+
+                                StatusPill {
+                                    y: (parent.height - self.height) / 2;
+                                    width: 108px;
+                                    height: 24px;
+                                    border-radius: 12px;
+                                    label: "● " + (root.route-running || root.direct-active || root.config-managed ? root.connection-label : "路由未启用");
+                                    ink: root.route-running || root.direct-active ? Theme.success : Theme.warning;
+                                    fill: root.route-running || root.direct-active ? Theme.panel : Theme.warning-surface;
+                                }
+                            }
+
+                            Rectangle {
+                                height: 1px;
+                                background: Theme.brand.with-alpha(0.18);
+                            }
+
+                            HorizontalLayout {
+                                spacing: 12px;
+                                Text {
+                                    text: "当前模型";
+                                    font-size: 12px;
+                                    color: Theme.muted-text;
+                                }
+
+                                Text {
+                                    min-width: 0px;
+                                    text: root.config-model == "" ? "尚未读取" : root.config-model;
+                                    font-family: "Menlo";
+                                    font-size: 12px;
+                                    color: Theme.primary-text;
+                                    horizontal-alignment: right;
+                                    wrap: word-wrap;
+                                }
+                            }
+                        }
+                    }
+
+                    HorizontalLayout {
+                        spacing: 24px;
+                        VerticalLayout {
+                            spacing: 6px;
+                            alignment: start;
+                            Text {
+                                text: "本地资料";
+                                font-size: 12px;
+                                color: Theme.muted-text;
+                            }
+
+                            Text {
+                                min-width: 0px;
+                                text: root.loading ? "正在读取…" : root.data-ready ? "已读取 · " + root.provider-count + " 个上游" : "读取失败";
+                                font-size: 13px;
+                                color: root.loading || root.data-ready ? Theme.primary-text : Theme.error;
+                                wrap: word-wrap;
+                            }
+                        }
+
+                        VerticalLayout {
+                            spacing: 6px;
+                            alignment: start;
+                            Text {
+                                text: "凭据状态";
+                                font-size: 12px;
+                                color: Theme.muted-text;
+                            }
+
+                            Text {
+                                text: root.credentials-checked ? "已检查" : "尚未检查";
+                                font-size: 13px;
+                                color: Theme.muted-text;
+                            }
+                        }
+                    }
+
+                    if !root.loading && !root.data-ready: Text {
+                        min-width: 0px;
+                        text: root.status-text;
+                        font-size: 12px;
+                        color: Theme.muted-text;
+                        wrap: word-wrap;
+                    }
+                    if root.route-running || root.route-managed: Text {
+                        min-width: 0px;
+                        text: root.route-status;
+                        font-size: 12px;
+                        color: Theme.muted-text;
+                        wrap: word-wrap;
+                    }
+                    Rectangle {
+                        height: 1px;
+                        background: Theme.border;
+                    }
+
+                    VerticalLayout {
+                        alignment: start;
+                        spacing: 10px;
+                        Text {
+                            text: "最近操作";
+                            font-size: 13px;
+                            font-weight: 500;
+                            color: Theme.primary-text;
+                        }
+
+                        HorizontalLayout {
+                            spacing: 10px;
+                            Image {
+                                width: 16px;
+                                height: 16px;
+                                source: @image-url("../assets/ui/check.svg");
+                                colorize: Theme.brand;
+                                accessible-role: none;
+                            }
+
+                            Text {
+                                min-width: 0px;
+                                text: root.action-message == "" ? "暂无最近操作" : root.action-message;
+                                font-size: 12px;
+                                color: Theme.muted-text;
+                                wrap: word-wrap;
+                            }
+                        }
+                    }
+
+                    if root.problem != "": Text {
+                        min-width: 0px;
+                        text: root.problem;
+                        font-size: 12px;
+                        color: Theme.error;
+                        wrap: word-wrap;
+                    }
+                    Rectangle {
+                        height: 1px;
+                        background: Theme.border;
+                    }
+
+                    VerticalLayout {
+                        alignment: start;
+                        spacing: 12px;
+                        Rectangle {
+                            height: 32px;
+                            QuietButton {
+                                width: parent.width;
+                                text: "工作空间与资料目录";
+                                icon: @image-url("../assets/ui/folder.svg");
+                                icon-color: Theme.muted-text;
+                                ghost: true;
+                                left-aligned: true;
+                                accessible-expandable: true;
+                                accessible-expanded: root.directories-expanded;
+                                height: parent.height;
+                                clicked => { root.directories-expanded = !root.directories-expanded; }
+                            }
+
+                            Image {
+                                x: parent.width - 24px;
+                                y: (parent.height - self.height) / 2;
+                                width: 14px;
+                                height: 14px;
+                                source: @image-url("../assets/ui/chevron-down.svg");
+                                colorize: Theme.muted-text;
+                                transform-rotation: root.directories-expanded ? 180deg : 0deg;
+                                accessible-role: none;
+                            }
+                        }
+
+                        if root.directories-expanded: VerticalLayout {
+                            alignment: start;
+                            spacing: 12px;
+                            for item[index] in [
+                                { label: "工作空间", path: root.config-home },
+                                { label: "本地资料", path: root.data-path }
+                            ]: VerticalLayout {
+                                alignment: start;
+                                spacing: 6px;
+                                if index > 0: Rectangle {
+                                    height: 1px;
+                                    background: Theme.border;
+                                }
+                                HorizontalLayout {
+                                    Text {
+                                        text: item.label;
+                                        font-size: 12px;
+                                        color: Theme.primary-text;
+                                        vertical-alignment: center;
+                                    }
+
+                                    QuietButton {
+                                        text: "复制" + item.label + "路径";
+                                        width: 28px;
+                                        height: 28px;
+                                        icon-only: true;
+                                        ghost: true;
+                                        icon: @image-url("../assets/ui/copy.svg");
+                                        icon-color: Theme.muted-text;
+                                        enabled: item.path != "";
+                                        clicked => { root.copy-path(item.path); }
+                                    }
+                                }
+
+                                Text {
+                                    min-width: 0px;
+                                    text: item.path == "" ? "尚未读取" : item.path;
+                                    font-family: "Menlo";
+                                    font-size: 11px;
+                                    color: Theme.muted-text;
+                                    wrap: word-wrap;
+                                }
+                            }
+                            if root.copy-message != "": Text {
+                                text: root.copy-message;
+                                font-size: 11px;
+                                color: Theme.brand;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        HorizontalLayout {
+            alignment: end;
+            spacing: 10px;
+            if root.config-managed: QuietButton {
+                text: "恢复并停止";
+                width: 112px;
+                enabled: !root.busy;
+                clicked => { root.restore-requested(); }
+            }
+            QuietButton {
+                text: "关闭";
+                width: 64px;
+                enabled: !root.busy;
+                clicked => { root.dismissed(); }
+            }
+
+            QuietButton {
+                text: "配置与恢复  ↗";
+                width: 140px;
+                primary: true;
+                enabled: !root.busy;
+                clicked => { root.configure-requested(); }
+            }
+        }
+    }
+}

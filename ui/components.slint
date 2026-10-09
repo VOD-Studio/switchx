@@ -738,6 +738,7 @@ export component Drawer inherits Rectangle {
     in property <string> subtitle: "";
     in property <string> error-message: "";
     in property <length> panel-width: 660px;
+    in property <bool> centered: false;
     callback dismissed();
     property <float> reveal: root.open ? 1 : 0;
     animate reveal {
@@ -765,17 +766,23 @@ export component Drawer inherits Rectangle {
             }
 
             Rectangle {
-                x: root.width - self.width * root.reveal;
-                width: min(root.panel-width, root.width);
-                height: root.height;
+                x: root.centered ? (root.width - self.width) / 2 : root.width - self.width * root.reveal;
+                y: root.centered ? (root.height - self.height) / 2 + 8px * (1 - root.reveal) : 0px;
+                width: min(root.panel-width, root.centered ? max(0px, root.width - 48px) : root.width);
+                height: root.centered ? min(max(0px, root.height - 48px), panel-layout.preferred-height) : root.height;
+                opacity: root.centered ? root.reveal : 1;
                 background: Theme.panel;
                 border-width: 1px;
                 border-color: Theme.border;
+                border-radius: root.centered ? 18px : 0px;
+                drop-shadow-blur: root.centered ? 24px : 0px;
+                drop-shadow-offset-y: root.centered ? 8px : 0px;
+                drop-shadow-color: Theme.dark ? #00000038 : #23332818;
                 // Consume panel clicks so they never reach the scrim.
                 TouchArea { }
 
-                VerticalLayout {
-                    padding: 26px;
+                panel-layout := VerticalLayout {
+                    padding: root.centered ? 24px : 26px;
                     spacing: 18px;
                     HorizontalLayout {
                         spacing: 12px;
@@ -797,6 +804,7 @@ export component Drawer inherits Rectangle {
                         }
 
                         QuietButton {
+                            y: root.centered ? (parent.height - self.height) / 2 : 0px;
                             text: "关闭";
                             width: 36px;
                             icon-only: true;
