@@ -3,10 +3,13 @@
 SLINT_LSP ?= slint-lsp
 SLINT_FILES := $(shell find ui -type f -name '*.slint' | sort)
 
-.PHONY: build lint format format-check test check check-lib check-app test-router require-slint-lsp
+.PHONY: build clean lint format format-check test check check-lib check-app test-router require-slint-lsp
 
 build:
 	cargo build --locked
+
+clean:
+	cargo clean
 
 release:
 	./scripts/bundle-macos.sh --release
