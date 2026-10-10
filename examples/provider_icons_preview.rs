@@ -3,14 +3,15 @@
 //! Connection cards: add --connections-design (snapshots) or --connections-native (window).
 //! Tab transitions: add --connections-motion (frames and interruption checks).
 //! Batch model picker: add --batch-models.
+//! Connection directory/workbench: add --connection-workbench.
 
 #[cfg(target_os = "macos")]
 #[path = "../src/macos.rs"]
 pub mod macos;
 
 use switchx::ui::{
-    AccountRow, AppWindow, BatchModelRow, BatchSummary, CodexQuotaRow, ModelRow, ProviderIconRow,
-    ProviderRow, RequestRow, Theme, XaiQuotaRow,
+    AccountRow, AppWindow, BatchModelRow, BatchSummary, CodexQuotaRow, ConnectionModelRow,
+    ModelRow, ProviderIconRow, ProviderRow, RequestRow, Theme, XaiQuotaRow,
 };
 
 use slint::platform::software_renderer::{MinimalSoftwareWindow, RepaintBufferType};
@@ -446,6 +447,195 @@ fn render_connections_motion(
     Ok(())
 }
 
+fn render_connection_workbench(
+    app: &AppWindow,
+    window: &MinimalSoftwareWindow,
+    output: &Path,
+) -> Result<(), Box<dyn Error>> {
+    let make_provider =
+        |id: &str, name: &str, icon_id: &str, subscription: bool, grok: bool, selected: bool| {
+            let icon = provider_icons::icon(icon_id).unwrap();
+            let models: Vec<_> = ["coder-pro", "coder-mini", "reasoner-max", "chat-flash"]
+                .iter()
+                .enumerate()
+                .map(|(index, model)| ModelRow {
+                    provider_id: id.into(),
+                    provider_name: name.into(),
+                    upstream_model: (*model).into(),
+                    public_id: format!("sx-{id}-{index}").into(),
+                    display_name: format!("{model}/{name}").into(),
+                    context_window: "1000000".into(),
+                    reasoning_levels: "low, medium, high, max".into(),
+                    saved: true,
+                    ready: true,
+                    included: selected,
+                    is_subscription: subscription,
+                    ..Default::default()
+                })
+                .collect();
+            ProviderRow {
+                id: id.into(),
+                name: name.into(),
+                icon: slint::Image::load_from_svg_data(icon.data).unwrap(),
+                monochrome: icon.monochrome,
+                endpoint: "https://example.invalid/v1".into(),
+                base_url: "https://example.invalid/v1".into(),
+                binding_label: "绑定：工作账号".into(),
+                is_subscription: subscription,
+                is_grok: grok,
+                model_count: 4,
+                ready_model_count: 4,
+                selected_model_count: if selected { 4 } else { 0 },
+                models: ModelRc::new(VecModel::from(models)),
+                ..Default::default()
+            }
+        };
+    let providers = vec![
+        make_provider("chatgpt", "ChatGPT · 工作", "openai", true, false, true),
+        make_provider("grok", "Grok", "grok", true, true, false),
+        make_provider("podlink", "Podlink", "anthropic", false, false, false),
+    ];
+    app.set_providers(ModelRc::new(VecModel::from(providers.clone())));
+    app.set_models(ModelRc::new(VecModel::from(
+        providers
+            .iter()
+            .flat_map(|provider| provider.models.iter())
+            .collect::<Vec<_>>(),
+    )));
+    app.set_selected_model_count(4);
+    app.set_selected_connection_count(1);
+    app.set_default_model_label("coder-pro/ChatGPT · 工作".into());
+    app.set_selectable_model_count(12);
+    app.set_default_model("sx-chatgpt-0".into());
+    app.set_config_home("/isolated/codex".into());
+    app.set_status_text("合成连接与模型 · 未读取账号或修改 Codex".into());
+    let toggles = Rc::new(Cell::new(0));
+    let calls = toggles.clone();
+    app.on_select_connection(move |id, selected| {
+        assert_eq!(id, "chatgpt");
+        assert!(!selected);
+        calls.set(calls.get() + 1);
+    });
+    let weak = app.as_weak();
+    app.on_connection_model_edited(move || {
+        if let Some(app) = weak.upgrade() {
+            app.set_connection_models_dirty(true);
+        }
+    });
+    let saves = Rc::new(Cell::new(0));
+    let save_calls = saves.clone();
+    app.on_save_connection_models(move || save_calls.set(save_calls.get() + 1));
+    for (width, height) in [(1200, 820), (1000, 680)] {
+        app.window().set_size(PhysicalSize::new(width, height));
+        for dark in [false, true] {
+            let suffix = format!("{}-{width}x{height}", if dark { "dark" } else { "light" });
+            set_theme(app, window, dark);
+            app.set_active_page(0);
+            snapshot(window, output, &format!("workbench-connections-{suffix}"))?;
+            if width == 1200 && !dark {
+                click(window, 1090.0, 398.0);
+                render(window);
+                assert_eq!(
+                    toggles.get(),
+                    1,
+                    "whole-connection selection must be reachable"
+                );
+                click(window, 1100.0, 458.0);
+                snapshot(window, output, &format!("workbench-expanded-{suffix}"))?;
+                click(window, 1100.0, 458.0);
+            }
+            if width == 1200 && dark {
+                click(window, 1100.0, 458.0);
+                snapshot(window, output, &format!("workbench-expanded-{suffix}"))?;
+                click(window, 1100.0, 458.0);
+                click(window, 860.0, 294.0);
+                snapshot(window, output, &format!("workbench-direct-{suffix}"))?;
+                click(window, 785.0, 294.0);
+            }
+            app.set_active_page(1);
+            app.set_connection_models_id("podlink".into());
+            app.set_connection_models_name("Podlink".into());
+            app.set_connection_models_open(true);
+            app.set_connection_models(ModelRc::new(VecModel::from(
+                (0..4)
+                    .map(|index| ConnectionModelRow {
+                        public_id: format!("sx-podlink-{index}").into(),
+                        display_name: [
+                            "Claude Opus · Podlink",
+                            "Claude Sonnet · Podlink",
+                            "Coder Pro · Podlink",
+                            "Reasoner Max · Podlink",
+                        ][index]
+                            .into(),
+                        upstream_model: [
+                            "claude-opus",
+                            "claude-sonnet",
+                            "coder-pro",
+                            "reasoner-max",
+                        ][index]
+                            .into(),
+                        context_window: "1000000".into(),
+                        reasoning_levels: "low, medium, high, max".into(),
+                        ..Default::default()
+                    })
+                    .collect::<Vec<_>>(),
+            )));
+            snapshot(window, output, &format!("connection-directory-{suffix}"))?;
+            assert!(app.get_connection_models_open());
+            if width == 1200 && dark {
+                click(window, 1132.0, 378.0);
+                render(window);
+                assert!(
+                    app.get_connection_models().row_data(0).unwrap().removing,
+                    "directory removal must stay in the draft"
+                );
+                assert!(app.get_connection_models_dirty());
+                snapshot(window, output, "connection-directory-remove-dark")?;
+                click(window, 1110.0, 365.0);
+                render(window);
+                assert!(
+                    !app.get_connection_models().row_data(0).unwrap().removing,
+                    "removal must be undoable before save"
+                );
+                click(window, 1095.0, 775.0);
+                render(window);
+                assert_eq!(saves.get(), 1, "directory save must remain reachable");
+            }
+            app.set_connection_models_dirty(false);
+            app.set_connection_models_open(false);
+            app.set_subscription_id("chatgpt".into());
+            app.set_subscription_name("ChatGPT · 工作".into());
+            app.set_subscription_account_ids(ModelRc::new(VecModel::from(vec!["".into()])));
+            app.set_subscription_account_options(ModelRc::new(VecModel::from(vec![
+                "跟随 Codex 登录".into(),
+            ])));
+            app.set_edit_icon(providers[0].icon.clone());
+            app.set_subscription_binding_label("跟随所选 Codex 目录的登录。".into());
+            app.set_subscription_editor_open(true);
+            snapshot(window, output, &format!("subscription-clean-{suffix}"))?;
+            app.set_subscription_editor_open(false);
+        }
+    }
+    app.window().set_size(PhysicalSize::new(1200, 820));
+    set_theme(app, window, true);
+    app.set_active_page(0);
+    app.global::<Theme>().set_animations_enabled(true);
+    render(window);
+    click(window, 1100.0, 458.0);
+    for index in 0..12 {
+        frame(30);
+        snapshot_now(window, output, &format!("workbench-motion-{index:02}"))?;
+    }
+    assert_ne!(
+        fs::read(output.join("workbench-motion-00.ppm"))?,
+        fs::read(output.join("workbench-motion-11.ppm"))?,
+        "disclosure must animate between captured frames"
+    );
+    app.global::<Theme>().set_system_reduced_motion(true);
+    snapshot(window, output, "workbench-reduced-motion")?;
+    Ok(())
+}
+
 fn main() -> Result<(), Box<dyn Error>> {
     let output = std::env::args()
         .nth(1)
@@ -466,6 +656,10 @@ fn main() -> Result<(), Box<dyn Error>> {
     let app = AppWindow::new()?;
     app.set_loading(false);
     app.global::<Theme>().set_animations_enabled(false);
+    if std::env::args().any(|arg| arg == "--connection-workbench") {
+        app.show()?;
+        return render_connection_workbench(&app, &window, output);
+    }
     let layout_only = std::env::args().any(|arg| arg == "--layout-only");
     if std::env::args().any(|arg| arg == "--connection-status") {
         app.set_local_data_ready(true);

@@ -1,0 +1,446 @@
+import { Theme } from "../tokens.slint";
+import {
+    QuietButton,
+    QuietLineEdit,
+    QuietCheckBox,
+    AnimatedSection,
+    StatusPill,
+} from "../components.slint";
+import { QuietScrollView } from "../scroll-view.slint";
+import {
+    ConnectionModelRow,
+    BatchModelRow,
+    BatchSummary,
+} from "../view-models.slint";
+import { FeedbackBanner } from "../feedback-banner.slint";
+
+export component ConnectionModels inherits Rectangle {
+    in property <bool> busy;
+    in property <bool> managed;
+    in property <bool> subscription;
+    in property <bool> dirty;
+    in-out property <[ConnectionModelRow]> rows;
+    in property <string> message;
+    in property <int> message-tone;
+    in property <bool> fetching;
+    in property <string> discovery-message;
+    in property <int> discovery-tone;
+    in property <[BatchModelRow]> candidates;
+    in property <BatchSummary> summary;
+    in-out property <string> query;
+    callback fetch();
+    callback add();
+    callback edited();
+    callback toggle(int);
+    callback select-all(bool);
+    callback filter(string);
+    callback append();
+    callback save();
+    callback cancel();
+    property <bool> picker-expanded: false;
+    changed candidates => { if (root.candidates.length > 0) { root.picker-expanded = true; } }
+    VerticalLayout {
+        spacing: 14px;
+        Rectangle {
+            height: 72px;
+            border-radius: 12px;
+            background: @linear-gradient(110deg, Theme.brand-surface, Theme.panel);
+            HorizontalLayout {
+                padding: 16px;
+                spacing: 12px;
+                cross-axis-alignment: center;
+                Image {
+                    width: 24px;
+                    height: 24px;
+                    source: @image-url("../../assets/ui/blocks.svg");
+                    colorize: Theme.brand;
+                }
+
+                VerticalLayout {
+                    spacing: 5px;
+                    Text {
+                        text: "模型在这里准备，一次加入工作台。";
+                        font-size: 16px;
+                        font-weight: 600;
+                        color: Theme.primary-text;
+                    }
+
+                    Text {
+                        text: "直连与聚合共用此目录。保存目录后，在工作台选择连接。";
+                        font-size: 11px;
+                        color: Theme.muted-text;
+                    }
+                }
+            }
+        }
+
+        HorizontalLayout {
+            height: 36px;
+            spacing: 8px;
+            Text {
+                text: "模型目录";
+                color: Theme.primary-text;
+                font-size: 16px;
+                font-weight: 600;
+                vertical-alignment: center;
+            }
+
+            StatusPill {
+                label: root.rows.length + " 项";
+                width: 48px;
+                height: 24px;
+                y: (parent.height - self.height) / 2;
+            }
+
+            Rectangle {
+                horizontal-stretch: 1;
+            }
+
+            QuietButton {
+                width: 128px;
+                text: root.fetching ? "正在获取…" : "获取模型列表";
+                icon: root.fetching ? @image-url("../../assets/ui/loader.svg") : @image-url("../../assets/refresh.svg");
+                icon-color: Theme.brand;
+                loading: root.fetching;
+                enabled: !root.busy && !root.managed;
+                clicked => { root.fetch(); }
+            }
+
+            QuietButton {
+                width: 106px;
+                text: "手动添加";
+                icon: @image-url("../../assets/ui/plus.svg");
+                icon-color: Theme.brand;
+                enabled: !root.busy && !root.managed && !root.subscription;
+                clicked => { root.add(); }
+            }
+        }
+
+        if root.discovery-message != "" || root.fetching: FeedbackBanner {
+            tone: root.discovery-tone;
+            message: root.discovery-message;
+            loading: root.fetching;
+        }
+
+        if root.candidates.length > 0: HorizontalLayout {
+            height: 32px;
+            QuietButton {
+                text: root.picker-expanded ? "收起获取结果 ▴" : "展开获取结果 ▾";
+                ghost: true;
+                clicked => { root.picker-expanded = !root.picker-expanded; }
+            }
+
+            Rectangle {
+                horizontal-stretch: 1;
+            }
+
+            QuietButton {
+                text: "加入目录 · " + root.summary.selected;
+                primary: true;
+                enabled: !root.busy && !root.managed && root.summary.selected > 0;
+                clicked => { root.append(); root.picker-expanded = false; }
+            }
+        }
+        if root.candidates.length > 0: AnimatedSection {
+            expanded: root.picker-expanded && root.candidates.length > 0;
+            content-height: 212px;
+            VerticalLayout {
+                spacing: 8px;
+                HorizontalLayout {
+                    height: 36px;
+                    QuietLineEdit {
+                        text <=> root.query;
+                        placeholder-text: "搜索获取结果";
+                        accessible-label: "搜索模型列表";
+                        edited(value) => { root.filter(value); }
+                    }
+
+                    QuietButton {
+                        width: 90px;
+                        text: "选择全部";
+                        enabled: !root.busy;
+                        clicked => { root.select-all(true); }
+                    }
+
+                    QuietButton {
+                        width: 80px;
+                        text: "清空选择";
+                        enabled: !root.busy;
+                        clicked => { root.select-all(false); }
+                    }
+                }
+
+                QuietScrollView {
+                    VerticalLayout {
+                        spacing: 0px;
+                        for candidate[index] in root.candidates: Rectangle {
+                            height: candidate.matched ? 36px : 0px;
+                            visible: candidate.matched;
+                            background: candidate.checked ? Theme.brand-surface : Theme.inset;
+                            animate background { duration: Theme.fast; }
+                            HorizontalLayout {
+                                padding-left: 10px;
+                                padding-right: 10px;
+                                spacing: 8px;
+                                QuietCheckBox {
+                                    y: (parent.height - self.height) / 2;
+                                    text: candidate.id;
+                                    checked: candidate.checked;
+                                    auto-toggle: false;
+                                    enabled: !root.busy && candidate.supported && !candidate.added;
+                                    toggled => { root.toggle(index); }
+                                }
+
+                                Text {
+                                    text: candidate.added ? "已在目录" : !candidate.supported ? "不支持" : candidate.source;
+                                    color: Theme.muted-text;
+                                    font-size: 10px;
+                                    vertical-alignment: center;
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        QuietScrollView {
+            vertical-stretch: 1;
+            min-height: 100px;
+            VerticalLayout {
+                alignment: start;
+                spacing: 10px;
+                if root.rows.length == 0: Rectangle {
+                    height: 170px;
+                    border-width: 1px;
+                    border-color: Theme.border;
+                    border-radius: 12px;
+                    background: Theme.inset;
+                    VerticalLayout {
+                        padding: 24px;
+                        spacing: 12px;
+                        alignment: center;
+                        Text {
+                            text: root.busy ? "正在读取目录…" : "为这个连接准备模型";
+                            color: Theme.primary-text;
+                            font-size: 18px;
+                            horizontal-alignment: center;
+                        }
+
+                        Text {
+                            text: root.subscription ? "获取官方模型列表，选择常用模型加入目录。" : "获取模型列表批量添加，也可以手动填写实际模型 ID。";
+                            color: Theme.muted-text;
+                            font-size: 12px;
+                            horizontal-alignment: center;
+                            wrap: word-wrap;
+                        }
+                    }
+                }
+                if root.rows.length > 0: HorizontalLayout {
+                    height: 20px;
+                    padding-left: 12px;
+                    padding-right: 12px;
+                    spacing: 8px;
+                    Text {
+                        width: 22px;
+                        text: "";
+                    }
+
+                    Text {
+                        text: "菜单显示名";
+                        color: Theme.muted-text;
+                        font-size: 11px;
+                    }
+
+                    Text {
+                        text: "实际请求模型 ID";
+                        color: Theme.muted-text;
+                        font-size: 11px;
+                    }
+
+                    Text {
+                        width: 100px;
+                        text: "上下文窗口";
+                        color: Theme.muted-text;
+                        font-size: 11px;
+                    }
+
+                    Text {
+                        width: 160px;
+                        text: "思考等级 · 逗号分隔";
+                        color: Theme.muted-text;
+                        font-size: 11px;
+                    }
+
+                    Text {
+                        width: 32px;
+                        text: "";
+                    }
+                }
+                for row[index] in root.rows: item := Rectangle {
+                    property <bool> landed: false;
+                    property <float> arrival: self.landed ? 1 : 0;
+                    property <float> removed: row.removing ? 1 : 0;
+                    animate arrival {
+                        duration: Theme.page-motion;
+                        easing: ease-out;
+                    }
+                    animate removed {
+                        duration: Theme.drawer-motion;
+                        easing: cubic-bezier(0.22, 1, 0.36, 1);
+                    }
+                    height: 82px - 46px * self.removed;
+                    border-width: 1px;
+                    border-color: row.removing ? Theme.warning.with-alpha(0.4) : Theme.border;
+                    border-radius: 10px;
+                    background: Theme.panel;
+                    clip: true;
+                    opacity: Theme.page-motion == 0ms ? 1 : self.arrival;
+                    Timer {
+                        interval: max(1ms, Theme.page-motion * min(index, 6) / 5);
+                        running: !item.landed;
+                        triggered => { item.landed = true; }
+                    }
+
+                    Rectangle {
+                        x: 0px;
+                        width: 3px;
+                        height: parent.height - 24px;
+                        y: 12px;
+                        background: row.public-id == "" ? Theme.brand : Theme.border;
+                        border-radius: 2px;
+                    }
+
+                    if !row.removing: VerticalLayout {
+                        padding: 12px;
+                        spacing: 8px;
+                        HorizontalLayout {
+                            height: 36px;
+                            spacing: 8px;
+                            Text {
+                                width: 22px;
+                                text: index + 1;
+                                font-size: 12px;
+                                color: Theme.muted-text;
+                                vertical-alignment: center;
+                            }
+
+                            QuietLineEdit {
+                                text <=> row.display-name;
+                                placeholder-text: "菜单显示名";
+                                accessible-label: "模型显示名 " + (index + 1);
+                                enabled: !root.busy && !root.managed;
+                                edited(value) => { root.edited(); }
+                            }
+
+                            QuietLineEdit {
+                                text <=> row.upstream-model;
+                                placeholder-text: "实际模型 ID";
+                                accessible-label: "实际模型 " + (index + 1);
+                                enabled: !root.busy && !root.managed && !root.subscription;
+                                edited(value) => { root.edited(); }
+                            }
+
+                            QuietLineEdit {
+                                width: 100px;
+                                text <=> row.context-window;
+                                placeholder-text: "128000";
+                                input-type: number;
+                                accessible-label: "上下文窗口 " + (index + 1);
+                                enabled: !root.busy && !root.managed;
+                                edited(value) => { root.edited(); }
+                            }
+
+                            QuietLineEdit {
+                                width: 160px;
+                                text <=> row.reasoning-levels;
+                                placeholder-text: "low, medium, high";
+                                accessible-label: "思考等级 " + (index + 1);
+                                enabled: !root.busy && !root.managed;
+                                edited(value) => { root.edited(); }
+                            }
+
+                            QuietButton {
+                                width: 32px;
+                                text: "移除模型 " + (index + 1);
+                                icon-only: true;
+                                ghost: true;
+                                icon: @image-url("../../assets/ui/close.svg");
+                                icon-color: Theme.muted-text;
+                                enabled: !root.busy && !root.managed;
+                                clicked => { row.removing = true; root.edited(); }
+                            }
+                        }
+
+                        Text {
+                            text: row.public-id == "" ? "新增模型 · 保存后可加入工作台" : "公开标识 · " + row.public-id;
+                            font-size: 10px;
+                            color: Theme.muted-text;
+                            overflow: elide;
+                        }
+                    }
+                    if row.removing: HorizontalLayout {
+                        padding-left: 12px;
+                        padding-right: 8px;
+                        Text {
+                            text: row.display-name + " · 将在保存时移除";
+                            color: Theme.warning;
+                            font-size: 11px;
+                            vertical-alignment: center;
+                            overflow: elide;
+                        }
+
+                        QuietButton {
+                            width: 60px;
+                            height: 30px;
+                            text: "撤销";
+                            ghost: true;
+                            enabled: !root.busy;
+                            clicked => { row.removing = false; root.edited(); }
+                        }
+                    }
+                }
+            }
+        }
+
+        if root.message != "": FeedbackBanner {
+            message: root.message;
+            tone: root.message-tone;
+        }
+
+        Rectangle {
+            height: 1px;
+            background: Theme.border;
+        }
+
+        HorizontalLayout {
+            height: 40px;
+            spacing: 10px;
+            Text {
+                text: root.dirty ? "● 有未保存修改" : "目录已保存在此连接";
+                color: root.dirty ? Theme.warning : Theme.muted-text;
+                font-size: 11px;
+                vertical-alignment: center;
+            }
+
+            Rectangle {
+                horizontal-stretch: 1;
+            }
+
+            QuietButton {
+                width: 100px;
+                text: "关闭";
+                enabled: !root.busy;
+                clicked => { root.cancel(); }
+            }
+
+            QuietButton {
+                width: 138px;
+                text: root.busy ? "正在保存…" : "保存模型目录";
+                primary: true;
+                enabled: root.dirty && !root.busy && !root.managed;
+                clicked => { root.save(); }
+            }
+        }
+    }
+}

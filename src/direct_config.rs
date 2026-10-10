@@ -13,7 +13,7 @@ use crate::{
         write_exclusive_atomic,
     },
     direct::{helper_is_usable, validate_provider},
-    storage::ProviderRecord,
+    storage::{ModelRecord, ProviderRecord},
 };
 
 const JOURNAL_NAME: &str = "direct-journal.json";
@@ -39,6 +39,8 @@ struct Journal {
     before_providers_table: bool,
     #[serde(default)]
     overlay: Overlay,
+    #[serde(default)]
+    generated_catalog: Option<PathBuf>,
 }
 
 pub struct PreparedDirectSwitch {
@@ -46,6 +48,8 @@ pub struct PreparedDirectSwitch {
     journal_path: PathBuf,
     original: Option<Vec<u8>>,
     journal: Journal,
+    model_directory: Option<Vec<ModelRecord>>,
+    catalog_contents: Option<Vec<u8>>,
     pub proposed: String,
     pub changes: Vec<String>,
 }
@@ -190,12 +194,15 @@ impl PreparedDirectSwitch {
             }),
             before_providers_table,
             overlay: Overlay::default(),
+            generated_catalog: None,
         };
         Ok(Self {
             config_path: config_path.into(),
             journal_path,
             original,
             journal,
+            model_directory: None,
+            catalog_contents: None,
             proposed,
             changes,
         })
@@ -215,6 +222,75 @@ impl PreparedDirectSwitch {
         self.with_document_update(|document, _| {
             crate::provider_config::apply_common_to_document(document, common)
         })
+    }
+
+    /// Direct requests use actual upstream IDs, while the menu keeps the same
+    /// names and capabilities configured in the connection directory.
+    pub fn with_model_directory(mut self, models: &[ModelRecord]) -> Result<Self, String> {
+        let provider_id = self
+            .journal
+            .provider_id
+            .strip_prefix("switchx_direct_")
+            .ok_or("无效的直连连接")?;
+        if models.iter().any(|model| model.provider_id != provider_id) {
+            return Err("模型目录属于其他连接".into());
+        }
+        self.model_directory = Some(models.to_vec());
+        if models.is_empty() {
+            return Ok(self);
+        }
+        let mut direct_models = models.to_vec();
+        for model in &mut direct_models {
+            model.public_id = model.upstream_model.clone();
+            model.enabled = true;
+            model.fallback_provider_id = None;
+        }
+        let publication = crate::catalog::publish_saved(&direct_models)?;
+        let path = self
+            .journal_path
+            .parent()
+            .unwrap()
+            .join(format!("direct-models-{}.json", crate::app::new_id()?));
+        let catalog_path = path.to_str().ok_or("模型目录路径不是 UTF-8")?;
+        let mut document: DocumentMut = self
+            .proposed
+            .parse()
+            .map_err(|_| "invalid generated config")?;
+        let default = document["model"].as_str().unwrap_or("");
+        if !models.iter().any(|model| model.upstream_model == default) {
+            set_string(&mut document, "model", &models[0].upstream_model);
+            self.journal.fields[0].applied = Some(models[0].upstream_model.clone());
+        }
+        set_string(&mut document, "model_catalog_json", catalog_path);
+        self.journal.fields[2].applied = Some(catalog_path.into());
+        if !self
+            .changes
+            .iter()
+            .any(|field| field == "model_catalog_json")
+        {
+            self.changes.push("model_catalog_json".into());
+        }
+        self.proposed = document.to_string();
+        self.catalog_contents = Some(
+            serde_json::to_vec_pretty(&publication.catalog).map_err(|_| "无法生成直连模型目录")?,
+        );
+        self.journal.generated_catalog = Some(path);
+        Ok(self)
+    }
+
+    pub fn default_model(&self) -> &str {
+        self.journal.fields[0].applied.as_deref().unwrap_or("")
+    }
+
+    pub fn validate_model_directory(&self, latest: &[ModelRecord]) -> Result<(), String> {
+        if self
+            .model_directory
+            .as_deref()
+            .is_some_and(|expected| expected != latest)
+        {
+            return Err("连接的模型目录已变化，请重新预览".into());
+        }
+        Ok(())
     }
 
     fn with_document_update(
@@ -273,6 +349,12 @@ impl PreparedDirectSwitch {
         let journal =
             serde_json::to_vec_pretty(&self.journal).map_err(|error| error.to_string())?;
         write_exclusive_atomic(&self.journal_path, &journal)?;
+        if let Some(path) = &self.journal.generated_catalog {
+            write_exclusive_atomic(
+                path,
+                self.catalog_contents.as_deref().ok_or("模型目录内容缺失")?,
+            )?;
+        }
         let permissions = match &self.original {
             Some(_) => Some(
                 self.config_path
@@ -317,6 +399,7 @@ pub fn restore(config_path: &Path, state_dir: &Path) -> Result<RestoreResult, St
     let original = match read_config(config_path)? {
         Some(config) => config,
         None if !journal.config_existed => {
+            remove_generated_catalog(state_dir, journal.generated_catalog.as_deref())?;
             fs::remove_file(&journal_path).map_err(|error| error.to_string())?;
             sync_parent(&journal_path)?;
             return Ok(RestoreResult {
@@ -329,6 +412,7 @@ pub fn restore(config_path: &Path, state_dir: &Path) -> Result<RestoreResult, St
     let current = std::str::from_utf8(&original).map_err(|_| "Codex config is not UTF-8")?;
     let mut document: DocumentMut = current.parse().map_err(|_| "invalid Codex TOML")?;
     let mut conflicts = Vec::new();
+    let generated_catalog = journal.generated_catalog.clone();
     let mut changed = false;
     for change in journal.fields {
         let found = field(&document, &change.name)?;
@@ -405,10 +489,31 @@ pub fn restore(config_path: &Path, state_dir: &Path) -> Result<RestoreResult, St
         )?;
     }
     if conflicts.is_empty() {
+        remove_generated_catalog(state_dir, generated_catalog.as_deref())?;
         fs::remove_file(&journal_path).map_err(|error| error.to_string())?;
         sync_parent(&journal_path)?;
     }
     Ok(RestoreResult { conflicts, changed })
+}
+
+fn remove_generated_catalog(state_dir: &Path, path: Option<&Path>) -> Result<(), String> {
+    let Some(path) = path else {
+        return Ok(());
+    };
+    let valid_name = path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .and_then(|name| name.strip_prefix("direct-models-"))
+        .and_then(|name| name.strip_suffix(".json"))
+        .is_some_and(|id| id.len() == 32 && id.bytes().all(|byte| byte.is_ascii_hexdigit()));
+    if path.parent() != Some(state_dir) || !valid_name {
+        return Err("直连模型目录的恢复路径无效".into());
+    }
+    match fs::remove_file(path) {
+        Ok(()) => sync_parent(path),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(error.to_string()),
+    }
 }
 
 pub fn active_target(state_dir: &Path) -> Result<Option<PathBuf>, String> {

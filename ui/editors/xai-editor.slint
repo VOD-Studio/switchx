@@ -59,7 +59,7 @@ export component XaiEditor inherits SurfaceCard {
         }
 
         Text {
-            text: "保存后可在模型设置中获取目录并添加映射，再到工作台预览并启用路由。";
+            text: "保存连接后，在模型目录中批量配置模型，再到工作台一次加入整组模型。";
             color: Theme.muted-text;
             font-size: 13px;
             wrap: word-wrap;
@@ -93,7 +93,7 @@ export component XaiEditor inherits SurfaceCard {
             }
 
             QuietButton {
-                text: "保存";
+                text: root.provider-id == "" ? "保存并配置模型" : "保存连接";
                 primary: true;
                 enabled: !root.busy && !root.config-managed && root.provider-name != "" && root.accounts.length > 0;
                 clicked => { root.save(); }

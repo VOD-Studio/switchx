@@ -3,7 +3,7 @@ use slint::platform::{Key, Platform, PointerEventButton, WindowAdapter, WindowEv
 use slint::{ComponentHandle, LogicalPosition, ModelRc, PhysicalSize, VecModel};
 use std::{cell::Cell, io::Write, rc::Rc};
 
-use switchx::ui::{AppWindow, ModelRow, Theme};
+use switchx::ui::{AppWindow, ModelRow, ProviderRow, Theme};
 
 struct PreviewPlatform(Rc<MinimalSoftwareWindow>);
 
@@ -62,6 +62,16 @@ fn set_selection(app: &AppWindow, selected: usize) {
             })
             .collect::<Vec<_>>(),
     )));
+    app.set_providers(ModelRc::new(VecModel::from(vec![ProviderRow {
+        id: "synthetic".into(),
+        name: "ChatGPT 订阅".into(),
+        is_subscription: true,
+        model_count: 11,
+        ready_model_count: 10,
+        selected_model_count: selected as i32,
+        models: app.get_models(),
+        ..Default::default()
+    }])));
     app.set_selected_model_count(selected as i32);
     app.set_selectable_model_count(10);
 }
@@ -125,7 +135,7 @@ fn model_header_tracks_selection_and_respects_disabled_states() {
 
     set_selection(&app, 3);
     draw(&window, "before-selected-filter");
-    click(&window, 936.0, 294.0);
+    click(&window, 1015.0, 294.0);
     draw(&window, "selected-filter-dark");
     click(&window, 240.0, 346.0);
     assert_eq!(last.get(), (false, true));
@@ -134,7 +144,7 @@ fn model_header_tracks_selection_and_respects_disabled_states() {
     let before = calls.get();
     click(&window, 240.0, 346.0);
     assert_eq!(calls.get(), before);
-    click(&window, 870.0, 294.0);
+    click(&window, 935.0, 294.0);
 
     for (busy, managed, loading) in [
         (true, false, false),

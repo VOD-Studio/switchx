@@ -1,0 +1,279 @@
+import { Theme } from "../tokens.slint";
+import {
+    QuietButton,
+    QuietCheckBox,
+    StatusPill,
+    AnimatedSection,
+} from "../components.slint";
+import { ProviderRow } from "../view-models.slint";
+
+export component WorkbenchConnection inherits Rectangle {
+    in property <ProviderRow> provider;
+    in property <int> order;
+    in property <bool> busy;
+    in property <bool> managed;
+    in property <bool> direct-mode;
+    in-out property <string> default-model;
+    callback select(bool);
+    callback select-model(string, bool);
+    callback models();
+    callback edit-model(string);
+    callback fallback(string);
+    callback direct();
+    property <bool> expanded: false;
+    property <bool> entered: Theme.page-motion == 0ms;
+    property <float> reveal: root.entered ? 1 : 0;
+    property <float> picked: root.provider.selected-model-count > 0 ? 1 : 0;
+    property <float> hover: header-hover.has-hover ? 1 : 0;
+    property <color> accent: root.provider.is-grok ? (Theme.dark ? #c5b6e3 : #7e66a0) : root.provider.is-subscription ? Theme.brand : Theme.code-key;
+    animate reveal {
+        duration: Theme.drawer-motion;
+        easing: cubic-bezier(0.22, 1, 0.36, 1);
+    }
+    animate picked {
+        duration: Theme.drawer-motion;
+        easing: ease-out;
+    }
+    animate hover { duration: Theme.fast; }
+    Timer {
+        interval: max(1ms, 40ms * min(root.order, 5));
+        running: !root.entered;
+        triggered => { root.entered = true; }
+    }
+
+    height: 104px + model-section.height;
+    preferred-height: root.height;
+    opacity: Theme.page-motion == 0ms ? 1 : root.reveal;
+    Rectangle {
+        y: (1 - root.reveal) * 12px - root.hover * 1px;
+        width: parent.width;
+        height: parent.height;
+        border-radius: 12px;
+        border-width: 1px;
+        border-color: root.accent.with-alpha(0.15 + root.picked * 0.2 + root.hover * 0.16);
+        background: Theme.panel;
+        animate background { duration: Theme.fast; }
+        clip: true;
+        Rectangle {
+            x: 0px;
+            width: 3px;
+            height: 54px + 18px * root.picked;
+            y: 16px;
+            border-radius: 2px;
+            background: root.accent;
+            opacity: 0.15 + root.picked * 0.85;
+        }
+
+        header-hover := TouchArea {
+            height: 104px;
+        }
+
+        VerticalLayout {
+            spacing: 0px;
+            Rectangle {
+                height: 104px;
+                VerticalLayout {
+                    padding: 16px;
+                    spacing: 12px;
+                    HorizontalLayout {
+                        height: 40px;
+                        spacing: 12px;
+                        cross-axis-alignment: center;
+                        Rectangle {
+                            width: 42px;
+                            height: 42px;
+                            border-radius: 10px;
+                            background: root.accent.with-alpha(0.08 + root.hover * 0.06);
+                            Image {
+                                width: 26px;
+                                height: 26px;
+                                x: (parent.width - self.width) / 2;
+                                y: (parent.height - self.height) / 2;
+                                source: root.provider.icon;
+                                image-fit: contain;
+                                colorize: root.provider.monochrome ? Theme.primary-text : transparent;
+                            }
+                        }
+
+                        VerticalLayout {
+                            spacing: 5px;
+                            Text {
+                                text: root.provider.name;
+                                color: Theme.primary-text;
+                                font-size: 16px;
+                                font-weight: 600;
+                                overflow: elide;
+                            }
+
+                            Text {
+                                text: root.provider.is-subscription ? root.provider.binding-label : root.provider.endpoint;
+                                color: Theme.muted-text;
+                                font-size: 11px;
+                                overflow: elide;
+                            }
+                        }
+
+                        StatusPill {
+                            width: 60px;
+                            height: 22px;
+                            label: root.provider.is-subscription ? "订阅" : "API";
+                            ink: root.accent;
+                            fill: root.accent.with-alpha(0.1);
+                        }
+
+                        QuietButton {
+                            width: 100px;
+                            text: root.direct-mode ? (root.provider.is-subscription ? "订阅走聚合" : "预览直连") : root.provider.selected-model-count >= root.provider.ready-model-count && root.provider.ready-model-count > 0 ? "移出工作台" : root.provider.selected-model-count > 0 ? "全部加入" : "加入工作台";
+                            selected: !root.direct-mode && root.provider.selected-model-count > 0;
+                            enabled: !root.busy && !root.managed && (root.direct-mode ? !root.provider.is-subscription : root.provider.ready-model-count > 0);
+                            clicked => { if root.direct-mode { root.direct(); } else { root.select(root.provider.selected-model-count < root.provider.ready-model-count); } }
+                        }
+                    }
+
+                    HorizontalLayout {
+                        height: 24px;
+                        spacing: 10px;
+                        Text {
+                            text: root.direct-mode ? "目录 " + root.provider.model-count + " 个模型" : root.provider.selected-model-count + " / " + root.provider.model-count + " 个模型已加入";
+                            color: root.provider.selected-model-count > 0 ? root.accent : Theme.muted-text;
+                            font-size: 11px;
+                            vertical-alignment: center;
+                        }
+
+                        Rectangle {
+                            width: 68px;
+                            height: 3px;
+                            y: (parent.height - self.height) / 2;
+                            border-radius: 2px;
+                            background: Theme.border;
+                            Rectangle {
+                                width: parent.width * root.provider.selected-model-count / max(1, root.provider.model-count);
+                                height: parent.height;
+                                background: root.accent;
+                                border-radius: 2px;
+                                animate width {
+                                    duration: Theme.drawer-motion;
+                                    easing: ease-out;
+                                }
+                            }
+                        }
+
+                        Rectangle {
+                            horizontal-stretch: 1;
+                        }
+
+                        if !root.direct-mode && root.provider.selected-model-count > 0 && root.provider.selected-model-count < root.provider.ready-model-count: QuietButton {
+                            width: 60px;
+                            height: 26px;
+                            text: "移出";
+                            ghost: true;
+                            enabled: !root.busy && !root.managed;
+                            clicked => { root.select(false); }
+                        }
+                        QuietButton {
+                            width: 88px;
+                            height: 26px;
+                            text: "配置模型";
+                            ghost: true;
+                            enabled: !root.busy && !root.managed;
+                            clicked => { root.models(); }
+                        }
+
+                        QuietButton {
+                            width: 100px;
+                            height: 26px;
+                            text: root.expanded ? "收起模型" : "展开模型";
+                            ghost: true;
+                            icon: @image-url("../../assets/ui/chevron-down.svg");
+                            icon-color: root.accent;
+                            icon-angle: root.expanded ? 180deg : 0deg;
+                            enabled: root.provider.model-count > 0;
+                            clicked => { root.expanded = !root.expanded; }
+                        }
+                    }
+                }
+            }
+
+            model-section := AnimatedSection {
+                expanded: root.expanded;
+                content-height: root.provider.models.length * 64px;
+                VerticalLayout {
+                    spacing: 0px;
+                    for model in root.provider.models: Rectangle {
+                        height: 64px;
+                        background: root.default-model == model.public-id ? root.accent.with-alpha(0.09) : Theme.inset;
+                        animate background { duration: Theme.page-motion; }
+                        Rectangle {
+                            height: 1px;
+                            background: Theme.border;
+                        }
+
+                        HorizontalLayout {
+                            padding-left: 18px;
+                            padding-right: 12px;
+                            spacing: 10px;
+                            cross-axis-alignment: center;
+                            QuietCheckBox {
+                                width: 26px;
+                                text: "";
+                                checked: model.included;
+                                auto-toggle: false;
+                                accessible-label: "加入 " + model.display-name;
+                                enabled: model.ready && !root.busy && !root.managed && !root.direct-mode;
+                                toggled => { root.select-model(model.public-id, !model.included); }
+                            }
+
+                            VerticalLayout {
+                                spacing: 5px;
+                                Text {
+                                    text: model.display-name;
+                                    color: Theme.primary-text;
+                                    font-size: 13px;
+                                    overflow: elide;
+                                }
+
+                                Text {
+                                    text: model.upstream-model + " · " + model.context-window + " tokens";
+                                    color: Theme.muted-text;
+                                    font-size: 10px;
+                                    overflow: elide;
+                                }
+                            }
+
+                            QuietButton {
+                                width: 70px;
+                                text: root.default-model == model.public-id ? "✓ 默认" : "设默认";
+                                ghost: true;
+                                selected: root.default-model == model.public-id;
+                                enabled: model.included && !root.busy && !root.managed && !root.direct-mode;
+                                clicked => { root.default-model = model.public-id; }
+                            }
+
+                            QuietButton {
+                                width: 32px;
+                                text: "编辑 " + model.display-name;
+                                icon-only: true;
+                                ghost: true;
+                                icon: @image-url("../../assets/ui/settings.svg");
+                                icon-color: Theme.muted-text;
+                                enabled: !root.busy && !root.managed;
+                                clicked => { root.edit-model(model.public-id); }
+                            }
+
+                            QuietButton {
+                                width: 32px;
+                                text: "备用连接 " + model.display-name;
+                                icon-only: true;
+                                ghost: true;
+                                icon: @image-url("../../assets/ui/connections.svg");
+                                icon-color: model.fallback-provider-id == "" ? Theme.muted-text : root.accent;
+                                enabled: model.ready && !model.is-subscription && !root.busy && !root.managed;
+                                clicked => { root.fallback(model.public-id); }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+}

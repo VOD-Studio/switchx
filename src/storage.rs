@@ -968,6 +968,42 @@ impl Store {
         transaction.commit()
     }
 
+    /// Replace one connection's directory atomically, without overwriting changes
+    /// made since the editor opened (including workbench selections).
+    pub fn replace_provider_models(
+        &self,
+        provider_id: &str,
+        expected: &[ModelRecord],
+        models: &[ModelRecord],
+    ) -> Result<()> {
+        let transaction = self.connection.unchecked_transaction()?;
+        let current = self.models()?;
+        let current: Vec<_> = current
+            .into_iter()
+            .filter(|model| model.provider_id == provider_id)
+            .collect();
+        if current != expected || models.iter().any(|model| model.provider_id != provider_id) {
+            return Err(rusqlite::Error::InvalidQuery);
+        }
+        transaction.execute(
+            "DELETE FROM published_models WHERE provider_id = ?1",
+            [provider_id],
+        )?;
+        for model in models {
+            // Do not let a draft claim another connection's public ID.
+            let exists: bool = transaction.query_row(
+                "SELECT EXISTS(SELECT 1 FROM published_models WHERE public_id = ?1)",
+                [&model.public_id],
+                |row| row.get(0),
+            )?;
+            if exists {
+                return Err(rusqlite::Error::InvalidQuery);
+            }
+            Self::write_model(&transaction, model)?;
+        }
+        transaction.commit()
+    }
+
     pub fn delete_model(&self, public_id: &str) -> Result<bool> {
         Ok(self.connection.execute(
             "DELETE FROM published_models WHERE public_id = ?1",

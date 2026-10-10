@@ -41,6 +41,7 @@ export component SubscriptionEditor inherits SurfaceCard {
     callback open-provider-icon-picker();
     callback navigate(int);
 
+    property <int> section: 0;
     vertical-stretch: 1;
     VerticalLayout {
         padding: 18px;
@@ -52,238 +53,310 @@ export component SubscriptionEditor inherits SurfaceCard {
             font-weight: 600;
         }
 
+        Rectangle {
+            height: 40px;
+            background: Theme.inset;
+            border-radius: 10px;
+            Rectangle {
+                x: 4px + root.section * (parent.width - 8px) / 3;
+                y: 4px;
+                width: (parent.width - 8px) / 3;
+                height: 32px;
+                background: Theme.brand-surface;
+                border-radius: 8px;
+                animate x {
+                    duration: Theme.drawer-motion;
+                    easing: cubic-bezier(0.22, 1, 0.36, 1);
+                }
+            }
+
+            HorizontalLayout {
+                padding: 4px;
+                spacing: 0px;
+                QuietButton {
+                    text: "账号绑定";
+                    ghost: true;
+                    clicked => { root.section = 0; }
+                }
+
+                QuietButton {
+                    text: "登录 JSON";
+                    ghost: true;
+                    clicked => { root.section = 1; }
+                }
+
+                QuietButton {
+                    text: "Codex 配置";
+                    ghost: true;
+                    clicked => { root.section = 2; }
+                }
+            }
+        }
+
         ScrollView {
             vertical-stretch: 1;
             VerticalLayout {
+                alignment: start;
                 spacing: 12px;
-                HorizontalLayout {
-                    height: 80px;
-                    spacing: 14px;
-                    QuietButton {
-                        width: 80px;
+                if root.section == 0: VerticalLayout {
+                    alignment: start;
+                    spacing: 16px;
+                    HorizontalLayout {
                         height: 80px;
-                        horizontal-stretch: 0;
-                        text: "选择 ChatGPT 订阅头像";
-                        icon-only: true;
-                        icon: root.edit-icon;
-                        icon-width: root.edit-icon.width > root.edit-icon.height * 2 ? 64px : 40px;
-                        icon-height: 40px;
-                        icon-color: root.edit-icon-monochrome ? Theme.primary-text : transparent;
-                        enabled: !root.busy && !root.config-managed;
-                        clicked => { root.open-provider-icon-picker(); }
+                        spacing: 14px;
+                        QuietButton {
+                            width: 80px;
+                            height: 80px;
+                            horizontal-stretch: 0;
+                            text: "选择 ChatGPT 订阅头像";
+                            icon-only: true;
+                            icon: root.edit-icon;
+                            icon-width: root.edit-icon.width > root.edit-icon.height * 2 ? 64px : 40px;
+                            icon-height: 40px;
+                            icon-color: root.edit-icon-monochrome ? Theme.primary-text : transparent;
+                            enabled: !root.busy && !root.config-managed;
+                            clicked => { root.open-provider-icon-picker(); }
+                        }
+
+                        VerticalLayout {
+                            alignment: center;
+                            spacing: 4px;
+                            Text {
+                                text: root.edit-icon-name == "" ? "OpenAI" : root.edit-icon-name;
+                                color: Theme.primary-text;
+                                font-size: 14px;
+                            }
+
+                            Text {
+                                text: "点击头像选择图标，保存订阅连接后生效。";
+                                color: Theme.muted-text;
+                                font-size: 12px;
+                            }
+                        }
+
+                        Rectangle {
+                            horizontal-stretch: 1;
+                        }
+
+                        QuietButton {
+                            width: 100px;
+                            horizontal-stretch: 0;
+                            text: "选择头像";
+                            enabled: !root.busy && !root.config-managed;
+                            clicked => { root.open-provider-icon-picker(); }
+                        }
                     }
 
-                    VerticalLayout {
-                        alignment: center;
-                        spacing: 4px;
+                    HorizontalLayout {
+                        height: 36px;
+                        spacing: 8px;
                         Text {
-                            text: root.edit-icon-name == "" ? "OpenAI" : root.edit-icon-name;
+                            width: 92px;
+                            text: "名称";
+                            color: Theme.muted-text;
+                            vertical-alignment: center;
+                        }
+
+                        LineEdit {
+                            text <=> root.subscription-name;
+                            placeholder-text: "例如 ChatGPT · 工作账号";
+                            accessible-label: "ChatGPT 订阅连接名称";
+                            enabled: !root.busy && !root.config-managed;
+                        }
+                    }
+
+                    HorizontalLayout {
+                        height: 36px;
+                        spacing: 8px;
+                        Text {
+                            width: 92px;
+                            text: "绑定账号";
+                            color: Theme.muted-text;
+                            vertical-alignment: center;
+                        }
+
+                        ComboBox {
+                            model: root.subscription-account-options;
+                            current-index <=> root.subscription-account-choice;
+                            accessible-label: "为订阅连接选择已保存账号";
+                            enabled: !root.busy && !root.config-managed;
+                        }
+
+                        QuietButton {
+                            text: "管理 ChatGPT 账号";
+                            enabled: !root.busy;
+                            clicked => { root.navigate(5); }
+                        }
+                    }
+
+                    Text {
+                        text: root.subscription-binding-label;
+                        color: Theme.muted-text;
+                        font-size: 12px;
+                        wrap: word-wrap;
+                    }
+
+                    Rectangle {
+                        height: 90px;
+                        background: Theme.brand-surface;
+                        border-radius: 12px;
+                        VerticalLayout {
+                            padding: 16px;
+                            spacing: 8px;
+                            Text {
+                                text: "连接与模型，准备好再启用。";
+                                color: Theme.primary-text;
+                                font-size: 16px;
+                                font-weight: 600;
+                            }
+
+                            Text {
+                                text: root.subscription-id == "" ? "保存连接后，继续在模型目录中配置常用模型。" : "切换到上方“模型目录”，批量添加和编辑这个连接的模型。";
+                                color: Theme.muted-text;
+                                font-size: 12px;
+                                wrap: word-wrap;
+                            }
+                        }
+                    }
+                }
+                if root.section == 1: VerticalLayout {
+                    spacing: 12px;
+                    HorizontalLayout {
+                        height: 32px;
+                        Text {
+                            text: "auth.json (JSON)";
                             color: Theme.primary-text;
                             font-size: 14px;
+                            font-weight: 600;
+                            vertical-alignment: center;
+                        }
+
+                        Rectangle {
+                            horizontal-stretch: 1;
+                        }
+
+                        QuietButton {
+                            text: "格式化";
+                            enabled: !root.busy;
+                            clicked => { root.format-subscription-auth(); }
+                        }
+                    }
+
+                    CodeEditor {
+                        height: 280px;
+                        vertical-stretch: 0;
+                        text <=> root.subscription-auth-json;
+                        language: "json";
+                        edited(text) => { root.subscription-auth-edited(); }
+                        enabled: !root.busy && !root.config-managed;
+                        accessible-label: "ChatGPT auth.json 编辑内容";
+                    }
+
+                    if root.subscription-auth-error != "": Text {
+                        text: root.subscription-auth-error;
+                        color: Theme.error;
+                        font-size: 12px;
+                        wrap: word-wrap;
+                    }
+
+                    Text {
+                        text: "可查看和修改所选账号的登录 JSON。修改后保存到私有账号文件；需要切换 Codex 登录时，在账号管理中点击“写入 Codex 登录”。";
+                        color: Theme.muted-text;
+                        font-size: 12px;
+                        wrap: word-wrap;
+                    }
+                }
+                if root.section == 2: VerticalLayout {
+                    spacing: 12px;
+                    HorizontalLayout {
+                        height: 32px;
+                        spacing: 12px;
+                        Text {
+                            text: "config.toml (TOML)";
+                            color: Theme.primary-text;
+                            font-size: 14px;
+                            font-weight: 600;
+                            vertical-alignment: center;
+                        }
+
+                        Rectangle {
+                            horizontal-stretch: 1;
+                        }
+
+                        CheckBox {
+                            text: "应用通用配置";
+                            checked <=> root.edit-use-common-config;
+                            toggled => { root.update-subscription-common(); }
+                            enabled: !root.busy && !root.config-managed;
+                        }
+
+                        QuietButton {
+                            text: "编辑通用配置";
+                            enabled: !root.busy && !root.config-managed;
+                            clicked => { root.open-common-config(); }
+                        }
+                    }
+
+                    HorizontalLayout {
+                        height: 32px;
+                        spacing: 12px;
+                        CheckBox {
+                            text: "1M 上下文窗口";
+                            checked <=> root.edit-context-1m;
+                            toggled => { root.update-subscription-context(); }
+                            accessible-label: "订阅一百万 token 上下文窗口";
+                            enabled: !root.busy && !root.config-managed;
                         }
 
                         Text {
-                            text: "点击头像选择图标，保存订阅连接后生效。";
+                            text: "压缩阈值";
                             color: Theme.muted-text;
-                            font-size: 12px;
+                            vertical-alignment: center;
+                        }
+
+                        LineEdit {
+                            width: 144px;
+                            horizontal-stretch: 0;
+                            text <=> root.edit-compact-limit;
+                            edited(text) => { root.update-subscription-context(); }
+                            input-type: number;
+                            accessible-label: "订阅自动压缩 token 阈值";
+                            enabled: root.edit-context-1m && !root.busy && !root.config-managed;
+                        }
+
+                        Text {
+                            text: "tokens";
+                            color: Theme.muted-text;
+                            vertical-alignment: center;
+                        }
+
+                        Rectangle {
+                            horizontal-stretch: 1;
                         }
                     }
 
-                    Rectangle {
-                        horizontal-stretch: 1;
-                    }
-
-                    QuietButton {
-                        width: 100px;
-                        horizontal-stretch: 0;
-                        text: "选择头像";
+                    CodeEditor {
+                        height: 240px;
+                        vertical-stretch: 0;
+                        text <=> root.edit-config-preview;
+                        edited(text) => { root.subscription-config-edited(); }
                         enabled: !root.busy && !root.config-managed;
-                        clicked => { root.open-provider-icon-picker(); }
+                        accessible-label: "ChatGPT config.toml 编辑内容";
                     }
-                }
 
-                HorizontalLayout {
-                    height: 36px;
-                    spacing: 8px;
+                    if root.edit-config-error != "": Text {
+                        text: root.edit-config-error;
+                        color: Theme.error;
+                        font-size: 12px;
+                        wrap: word-wrap;
+                    }
+
                     Text {
-                        width: 92px;
-                        text: "名称";
+                        text: "保存后在下次开启路由时应用默认模型所属连接的配置。可编辑模型和非敏感设置；官方地址与路由认证由 SwitchX 管理。";
                         color: Theme.muted-text;
-                        vertical-alignment: center;
+                        font-size: 12px;
+                        wrap: word-wrap;
                     }
-
-                    LineEdit {
-                        text <=> root.subscription-name;
-                        placeholder-text: "例如 ChatGPT · 工作账号";
-                        accessible-label: "ChatGPT 订阅连接名称";
-                        enabled: !root.busy && !root.config-managed;
-                    }
-                }
-
-                HorizontalLayout {
-                    height: 36px;
-                    spacing: 8px;
-                    Text {
-                        width: 92px;
-                        text: "绑定账号";
-                        color: Theme.muted-text;
-                        vertical-alignment: center;
-                    }
-
-                    ComboBox {
-                        model: root.subscription-account-options;
-                        current-index <=> root.subscription-account-choice;
-                        accessible-label: "为订阅连接选择已保存账号";
-                        enabled: !root.busy && !root.config-managed;
-                    }
-
-                    QuietButton {
-                        text: "管理 ChatGPT 账号";
-                        enabled: !root.busy;
-                        clicked => { root.navigate(5); }
-                    }
-                }
-
-                Text {
-                    text: root.subscription-binding-label;
-                    color: Theme.muted-text;
-                    font-size: 12px;
-                    wrap: word-wrap;
-                }
-
-                HorizontalLayout {
-                    height: 32px;
-                    Text {
-                        text: "auth.json (JSON)";
-                        color: Theme.primary-text;
-                        font-size: 14px;
-                        font-weight: 600;
-                        vertical-alignment: center;
-                    }
-
-                    Rectangle {
-                        horizontal-stretch: 1;
-                    }
-
-                    QuietButton {
-                        text: "格式化";
-                        enabled: !root.busy;
-                        clicked => { root.format-subscription-auth(); }
-                    }
-                }
-
-                CodeEditor {
-                    height: 208px;
-                    vertical-stretch: 0;
-                    text <=> root.subscription-auth-json;
-                    language: "json";
-                    edited(text) => { root.subscription-auth-edited(); }
-                    enabled: !root.busy && !root.config-managed;
-                    accessible-label: "ChatGPT auth.json 编辑内容";
-                }
-
-                if root.subscription-auth-error != "": Text {
-                    text: root.subscription-auth-error;
-                    color: Theme.error;
-                    font-size: 12px;
-                    wrap: word-wrap;
-                }
-
-                Text {
-                    text: "可查看和修改所选账号的登录 JSON。修改后保存到私有账号文件；需要切换 Codex 登录时，在账号管理中点击“写入 Codex 登录”。";
-                    color: Theme.muted-text;
-                    font-size: 12px;
-                    wrap: word-wrap;
-                }
-
-                HorizontalLayout {
-                    height: 32px;
-                    spacing: 12px;
-                    Text {
-                        text: "config.toml (TOML)";
-                        color: Theme.primary-text;
-                        font-size: 14px;
-                        font-weight: 600;
-                        vertical-alignment: center;
-                    }
-
-                    Rectangle {
-                        horizontal-stretch: 1;
-                    }
-
-                    CheckBox {
-                        text: "应用通用配置";
-                        checked <=> root.edit-use-common-config;
-                        toggled => { root.update-subscription-common(); }
-                        enabled: !root.busy && !root.config-managed;
-                    }
-
-                    QuietButton {
-                        text: "编辑通用配置";
-                        enabled: !root.busy && !root.config-managed;
-                        clicked => { root.open-common-config(); }
-                    }
-                }
-
-                HorizontalLayout {
-                    height: 32px;
-                    spacing: 12px;
-                    CheckBox {
-                        text: "1M 上下文窗口";
-                        checked <=> root.edit-context-1m;
-                        toggled => { root.update-subscription-context(); }
-                        accessible-label: "订阅一百万 token 上下文窗口";
-                        enabled: !root.busy && !root.config-managed;
-                    }
-
-                    Text {
-                        text: "压缩阈值";
-                        color: Theme.muted-text;
-                        vertical-alignment: center;
-                    }
-
-                    LineEdit {
-                        width: 144px;
-                        horizontal-stretch: 0;
-                        text <=> root.edit-compact-limit;
-                        edited(text) => { root.update-subscription-context(); }
-                        input-type: number;
-                        accessible-label: "订阅自动压缩 token 阈值";
-                        enabled: root.edit-context-1m && !root.busy && !root.config-managed;
-                    }
-
-                    Text {
-                        text: "tokens";
-                        color: Theme.muted-text;
-                        vertical-alignment: center;
-                    }
-
-                    Rectangle {
-                        horizontal-stretch: 1;
-                    }
-                }
-
-                CodeEditor {
-                    height: 240px;
-                    vertical-stretch: 0;
-                    text <=> root.edit-config-preview;
-                    edited(text) => { root.subscription-config-edited(); }
-                    enabled: !root.busy && !root.config-managed;
-                    accessible-label: "ChatGPT config.toml 编辑内容";
-                }
-
-                if root.edit-config-error != "": Text {
-                    text: root.edit-config-error;
-                    color: Theme.error;
-                    font-size: 12px;
-                    wrap: word-wrap;
-                }
-
-                Text {
-                    text: "保存后在下次开启路由时应用默认模型所属连接的配置。可编辑模型和非敏感设置；官方地址与路由认证由 SwitchX 管理。";
-                    color: Theme.muted-text;
-                    font-size: 12px;
-                    wrap: word-wrap;
                 }
             }
         }
@@ -311,7 +384,7 @@ export component SubscriptionEditor inherits SurfaceCard {
             }
 
             QuietButton {
-                text: "保存订阅连接";
+                text: root.subscription-id == "" ? "保存并配置模型" : "保存连接";
                 primary: true;
                 enabled: !root.busy && !root.config-managed && root.subscription-name != "" && root.edit-config-error == "" && root.subscription-auth-error == "";
                 clicked => { root.save-subscription(root.subscription-id, root.subscription-name, root.subscription-account-ids[root.subscription-account-choice]); }
