@@ -37,6 +37,8 @@ import { RoutingPage } from "pages/routing.slint";
 import { ActivityPage } from "pages/activity.slint";
 import { ConfigPage } from "pages/config.slint";
 import { ConnectionStatusDialog } from "connection-status.slint";
+import { WorkspaceMenu } from "workspace-menu.slint";
+import { OperationNotice } from "operation-notice.slint";
 
 export {
     XaiQuotaRow,
@@ -86,6 +88,9 @@ export component AppWindow inherits Window {
 
     in-out property <int> active-page: 0;
     in-out property <bool> drawer-open: false;
+    in-out property <bool> workspace-open: false;
+    in-out property <bool> notification-open <=> operation-notice.open;
+    in-out property <int> feedback-sequence: 0;
     in-out property <bool> status-directories-expanded: false;
     changed drawer-open => { if (root.drawer-open) { root.status-directories-expanded = false; } }
     in-out property <bool> loading: true;
@@ -303,6 +308,7 @@ export component AppWindow inherits Window {
         if (root.subscription-editor-open || root.subscription-editor-pending) { root.cancel-subscription-editor(); }
     }
     changed active-page => {
+        root.workspace-open = false;
         root.page-entered = Theme.page-motion == 0ms;
         if (root.active-page == 1 && root.connections-tab == 1) { root.xai-account-action(5, ""); root.account-action(6, ""); }
         if (root.active-page != 1) {
@@ -505,7 +511,7 @@ export component AppWindow inherits Window {
     in-out property <bool> command-open: false;
     property <bool> page-entered: true;
     property <bool> new-connection-form: (root.editor-open && root.edit-id == "") || (root.subscription-editor-open && root.subscription-id == "") || (root.xai-editor-open && root.xai-provider-id == "");
-    property <bool> modal-open: root.account-removing-id != "" || root.account-login-confirm-open || root.drawer-open || root.connection-picker-open || root.connection-models-open || root.xai-editor-open || root.editor-open || root.subscription-editor-open || root.common-config-editor-open || root.icon-picker-open || root.model-editor-open || root.fallback-editor-open || root.publish-drawer-open || root.direct-drawer-open || root.delete-account-confirm || root.command-open;
+    property <bool> modal-open: root.workspace-open || root.account-removing-id != "" || root.account-login-confirm-open || root.drawer-open || root.connection-picker-open || root.connection-models-open || root.xai-editor-open || root.editor-open || root.subscription-editor-open || root.common-config-editor-open || root.icon-picker-open || root.model-editor-open || root.fallback-editor-open || root.publish-drawer-open || root.direct-drawer-open || root.delete-account-confirm || root.command-open;
     property <string> page-title: root.active-page == 0 ? "模型，随手可用。" : root.active-page == 1 ? "连接" : root.active-page == 3 ? "每次请求，有迹可循。" : root.active-page == 4 ? "让工作流更顺手。" : "让它适合你。";
     property <string> page-label: root.active-page == 0 ? "工作台" : root.active-page == 1 ? "连接" : root.active-page == 3 ? "活动" : root.active-page == 4 ? "工具箱" : "设置";
     property <string> page-subtitle: root.active-page == 0 ? "配好连接，整组模型随手可用。" : root.active-page == 1 ? "账号与上游，集中管理。" : root.active-page == 3 ? "查看模型、耗时与结果。" : root.active-page == 4 ? "MCP 与 Skills，独立于模型连接。" : "外观、工作空间和配置，各在其位。";
@@ -721,10 +727,22 @@ export component AppWindow inherits Window {
                             padding-right: 24px;
                             spacing: 8px;
                             Text {
+                                width: 128px;
                                 text: "Codex  ›  " + root.page-label;
                                 color: Theme.muted-text;
                                 font-size: 12px;
                                 vertical-alignment: center;
+                            }
+
+                            QuietButton {
+                                y: (parent.height - self.height) / 2;
+                                width: 122px;
+                                text: "工作空间";
+                                icon: @image-url("../assets/ui/folder.svg");
+                                icon-color: Theme.brand;
+                                selected: root.workspace-open;
+                                ghost: true;
+                                clicked => { root.workspace-open = true; }
                             }
 
                             WindowMoveArea {
@@ -757,6 +775,33 @@ export component AppWindow inherits Window {
                                 text: "连接状态";
                                 ghost: true;
                                 clicked => { root.drawer-open = true; }
+                            }
+
+                            Rectangle {
+                                y: (parent.height - self.height) / 2;
+                                width: 36px;
+                                height: 36px;
+                                QuietButton {
+                                    text: operation-notice.has-message ? "查看最近的操作反馈" : "暂无操作反馈";
+                                    icon-only: true;
+                                    ghost: true;
+                                    selected: root.notification-open && operation-notice.has-message;
+                                    icon: @image-url("../assets/ui/bell.svg");
+                                    icon-color: Theme.muted-text;
+                                    enabled: operation-notice.has-message;
+                                    clicked => { operation-notice.toggle(); }
+                                }
+
+                                Rectangle {
+                                    x: 25px;
+                                    y: 6px;
+                                    width: 5px;
+                                    height: 5px;
+                                    border-radius: 3px;
+                                    background: operation-notice.has-error ? Theme.error : Theme.brand;
+                                    opacity: operation-notice.has-message ? 1 : 0;
+                                    animate opacity, background { duration: Theme.page-motion; }
+                                }
                             }
                         }
                     }
@@ -796,28 +841,6 @@ export component AppWindow inherits Window {
                             }
                         }
 
-                        if root.error-code != "": Rectangle {
-                            height: 62px;
-                            background: Theme.warning-surface;
-                            border-radius: 8px;
-                            VerticalLayout {
-                                padding: 12px;
-                                spacing: 5px;
-                                Text {
-                                    text: root.error-message;
-                                    color: Theme.error;
-                                    font-size: 13px;
-                                    wrap: word-wrap;
-                                }
-
-                                Text {
-                                    text: root.error-action;
-                                    color: Theme.muted-text;
-                                    font-size: 11px;
-                                    wrap: word-wrap;
-                                }
-                            }
-                        }
                         Rectangle {
                             vertical-stretch: 1;
                             opacity: root.page-entered ? 1 : 0;
@@ -865,8 +888,6 @@ export component AppWindow inherits Window {
                                     launch-codex() => { root.launch-codex(); }
                                     show-direct() => { root.direct-drawer-open = true; }
                                     restore-config(home) => { root.restore-config(home); }
-                                    switch-api-preview() => { root.subscription-action(4); }
-                                    navigate(page) => { root.active-page = page; }
                                 }
                                 if root.active-page == 1: VerticalLayout {
                                     spacing: 20px;
@@ -1181,30 +1202,33 @@ export component AppWindow inherits Window {
                                 }
                             }
                         }
-
-                        if root.action-message != "": HorizontalLayout {
-                            height: 24px;
-                            spacing: 8px;
-                            Text {
-                                text: root.action-message;
-                                color: Theme.muted-text;
-                                font-size: 11px;
-                                overflow: elide;
-                                vertical-alignment: center;
-                            }
-
-                            QuietButton {
-                                width: 50px;
-                                height: 24px;
-                                text: "详情";
-                                ghost: true;
-                                clicked => { root.drawer-open = true; }
-                            }
-                        }
                     }
                 }
             }
         }
+    }
+
+    WorkspaceMenu {
+        open: root.workspace-open;
+        config-home: root.config-home;
+        connection-label: root.connection-label;
+        managed: root.config-managed;
+        connected: root.route-running || root.direct-active;
+        actions-enabled: !root.busy && !root.chatgpt-login-pending && !root.xai-pending;
+        dismissed => { root.workspace-open = false; }
+        configure => { root.workspace-open = false; root.active-page = 5; }
+        switch-api => { root.workspace-open = false; root.subscription-action(4); }
+        details => { root.workspace-open = false; root.drawer-open = true; }
+    }
+
+    operation-notice := OperationNotice {
+        message: root.error-code != "" ? root.error-message : root.action-message;
+        hint: root.error-code != "" ? root.error-action : "";
+        error: root.error-code != "";
+        sequence: root.feedback-sequence;
+        blocked: root.modal-open || root.busy || root.loading;
+        details => { root.drawer-open = true; }
+        dismissed => { app-keyboard.focus(); }
     }
 
     connection-drawer := Drawer {

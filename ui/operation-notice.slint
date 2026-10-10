@@ -1,0 +1,187 @@
+import { Theme } from "tokens.slint";
+import { QuietButton } from "components.slint";
+
+// Latest operation feedback stays available from the toolbar after the toast closes.
+export component OperationNotice inherits Rectangle {
+    in property <string> message;
+    in property <string> hint;
+    in property <bool> error;
+    in property <int> sequence;
+    in property <bool> blocked;
+    in-out property <bool> open;
+    out property <bool> has-message: root.shown-message != "";
+    out property <bool> has-error: root.shown-error;
+    callback details();
+    callback dismissed();
+    private property <string> shown-message;
+    private property <string> shown-hint;
+    private property <bool> shown-error;
+    private property <int> shown-sequence;
+    private property <int> elapsed: 0;
+    private property <bool> pinned: false;
+    private property <color> ink: root.shown-error ? Theme.error : Theme.brand;
+    private property <float> reveal: root.open && !root.blocked && root.has-message ? 1 : 0;
+    private property <float> arrival: root.elapsed > 0 ? 1 : 0;
+    private property <bool> held: hover.has-hover;
+    animate reveal {
+        duration: Theme.drawer-motion;
+        easing: cubic-bezier(0.22, 1, 0.36, 1);
+    }
+    animate arrival {
+        duration: Theme.page-motion > 0ms ? 520ms : 0ms;
+        easing: ease-out-back;
+    }
+    visible: root.reveal > 0;
+
+    function sync() {
+        if (root.message == "") { return; }
+        if (root.shown-message == root.message && root.shown-hint == root.hint
+            && root.shown-error == root.error && root.shown-sequence == root.sequence) { return; }
+        root.shown-message = root.message;
+        root.shown-hint = root.hint;
+        root.shown-error = root.error;
+        root.shown-sequence = root.sequence;
+        root.elapsed = 0;
+        root.pinned = false;
+        root.open = true;
+    }
+    public function toggle() {
+        root.open = !root.open;
+        root.pinned = root.open;
+        if (root.open) { keyboard.focus(); }
+        else { root.dismissed(); }
+    }
+    init => { root.sync(); }
+    changed message => { root.sync(); }
+    changed hint => { root.sync(); }
+    changed error => { root.sync(); }
+    changed sequence => { root.sync(); }
+    changed open => { if (root.open) { root.elapsed = 0; } }
+    Timer {
+        interval: 100ms;
+        running: root.open && !root.blocked && !root.held && !root.pinned && (!root.shown-error || root.elapsed < 600);
+        triggered => {
+            root.elapsed += 100;
+            if (!root.shown-error && root.elapsed >= 6000) { root.open = false; }
+        }
+    }
+
+    keyboard := FocusScope {
+        enabled: root.open && !root.blocked;
+        capture-key-pressed(event) => {
+            if (event.text == Key.Escape) { root.open = false; root.dismissed(); return accept; }
+            // Keyboard interaction pins the card; stale focus after a modal does not.
+            root.pinned = true;
+            return reject;
+        }
+        card := Rectangle {
+            accessible-role: text;
+            accessible-label: root.shown-message + (root.shown-hint == "" ? "" : "，" + root.shown-hint);
+            x: root.width - self.width - 24px + (1 - root.reveal) * 16px;
+            y: 69px - (1 - root.reveal) * 10px;
+            width: 380px;
+            height: content.preferred-height;
+            opacity: root.reveal;
+            border-radius: 14px;
+            border-width: 1px;
+            border-color: root.ink.with-alpha(0.35);
+            background: Theme.panel;
+            drop-shadow-blur: 22px;
+            drop-shadow-offset-y: 6px;
+            drop-shadow-color: Theme.dark ? #00000055 : #18221a22;
+            animate border-color { duration: Theme.page-motion; }
+            Rectangle {
+                border-radius: 14px;
+                background: @linear-gradient(105deg, root.ink.with-alpha(0.11) 0%, root.ink.with-alpha(0) 75%);
+            }
+
+            hover := TouchArea { }
+
+            content := VerticalLayout {
+                padding: 16px;
+                spacing: 10px;
+                HorizontalLayout {
+                    height: 30px;
+                    spacing: 10px;
+                    Rectangle {
+                        width: 30px;
+                        border-radius: 10px;
+                        background: root.ink.with-alpha(0.13);
+                        Image {
+                            width: 14px + 3px * min(1.15, root.arrival);
+                            height: self.width;
+                            x: (parent.width - self.width) / 2;
+                            y: (parent.height - self.height) / 2;
+                            source: root.shown-error ? @image-url("../assets/ui/alert.svg") : @image-url("../assets/ui/check.svg");
+                            colorize: root.ink;
+                        }
+                    }
+
+                    Text {
+                        text: root.shown-error ? "操作未完成" : "操作反馈";
+                        color: root.ink;
+                        font-size: 12px;
+                        font-weight: 600;
+                        vertical-alignment: center;
+                    }
+
+                    QuietButton {
+                        width: 28px;
+                        height: 28px;
+                        text: "收起操作反馈";
+                        icon-only: true;
+                        ghost: true;
+                        icon: @image-url("../assets/ui/close.svg");
+                        icon-color: Theme.muted-text;
+                        clicked => { root.open = false; root.dismissed(); }
+                    }
+                }
+
+                Text {
+                    text: root.shown-message;
+                    color: Theme.primary-text;
+                    font-size: 13px;
+                    wrap: word-wrap;
+                    max-height: 100px;
+                    overflow: elide;
+                }
+
+                if root.shown-hint != "": Text {
+                    text: root.shown-hint;
+                    color: Theme.muted-text;
+                    font-size: 11px;
+                    wrap: word-wrap;
+                    max-height: 54px;
+                    overflow: elide;
+                }
+                HorizontalLayout {
+                    height: 28px;
+                    cross-axis-alignment: center;
+                    Text {
+                        text: root.shown-error ? "可收起，稍后继续处理" : root.pinned ? "最近一次操作" : "稍后自动收起";
+                        color: Theme.muted-text;
+                        font-size: 10px;
+                    }
+
+                    QuietButton {
+                        width: 90px;
+                        height: 28px;
+                        text: "查看详情  ↗";
+                        ghost: true;
+                        clicked => { root.open = false; root.details(); }
+                    }
+                }
+            }
+
+            Rectangle {
+                x: 16px;
+                y: parent.height - 3px;
+                width: (parent.width - 32px) * (root.shown-error || root.pinned ? 0 : max(0, 1 - root.elapsed / 6000));
+                height: 2px;
+                border-radius: 1px;
+                background: root.ink.with-alpha(0.5);
+                animate width { duration: Theme.fast; }
+            }
+        }
+    }
+}
