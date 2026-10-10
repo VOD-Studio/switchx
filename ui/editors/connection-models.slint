@@ -16,6 +16,7 @@ import { FeedbackBanner } from "../feedback-banner.slint";
 
 export component ConnectionModels inherits Rectangle {
     in property <bool> busy;
+    in property <bool> saving;
     in property <bool> managed;
     in property <bool> subscription;
     in property <bool> dirty;
@@ -436,7 +437,7 @@ export component ConnectionModels inherits Rectangle {
 
             QuietButton {
                 width: 138px;
-                text: root.busy ? "正在保存…" : "保存模型目录";
+                text: root.saving ? "正在保存…" : "保存模型目录";
                 primary: true;
                 enabled: root.dirty && !root.busy && !root.managed;
                 clicked => { root.save(); }
