@@ -1,6 +1,7 @@
 //! Render synthetic previews with the real Slint UI and no account or configuration access.
 //! Run: cargo run --example provider_icons_preview -- /absolute/output/directory
 //! Connection cards: add --connections-design (snapshots) or --connections-native (window).
+//! Tab transitions: add --connections-motion (frames and interruption checks).
 //! Batch model picker: add --batch-models.
 
 #[cfg(target_os = "macos")]
@@ -333,16 +334,115 @@ fn snapshot_now(
     output: &Path,
     name: &str,
 ) -> Result<(), Box<dyn Error>> {
+    let pixels = render_now(window);
+    let mut file = std::io::BufWriter::new(fs::File::create(output.join(format!("{name}.ppm")))?);
+    write!(file, "P6\n{} {}\n255\n", pixels.width(), pixels.height())?;
+    file.write_all(pixels.as_bytes())?;
+    file.flush()?;
+    Ok(())
+}
+
+fn render_now(window: &MinimalSoftwareWindow) -> SharedPixelBuffer<Rgb8Pixel> {
+    slint::platform::update_timers_and_animations();
     let size = WindowAdapter::size(window);
     let mut pixels = SharedPixelBuffer::<Rgb8Pixel>::new(size.width, size.height);
     window.request_redraw();
     window.draw_if_needed(|renderer| {
         renderer.render(pixels.make_mut_slice(), size.width as usize);
     });
-    let mut file = std::io::BufWriter::new(fs::File::create(output.join(format!("{name}.ppm")))?);
-    write!(file, "P6\n{} {}\n255\n", pixels.width(), pixels.height())?;
-    file.write_all(pixels.as_bytes())?;
-    file.flush()?;
+    pixels
+}
+
+fn render_connections_motion(
+    app: &AppWindow,
+    window: &MinimalSoftwareWindow,
+    output: &Path,
+) -> Result<(), Box<dyn Error>> {
+    app.set_active_page(1);
+    let checks = Rc::new(Cell::new(0));
+    let check_count = checks.clone();
+    app.on_refresh(move |_| check_count.set(check_count.get() + 1));
+    for (width, height) in [(1200, 820), (1000, 680)] {
+        app.window().set_size(PhysicalSize::new(width, height));
+        for dark in [false, true] {
+            app.global::<Theme>().set_animations_enabled(false);
+            app.set_connections_tab(0);
+            set_theme(app, window, dark);
+            let suffix = format!("{}-{width}x{height}", if dark { "dark" } else { "light" });
+            app.global::<Theme>().set_animations_enabled(true);
+            // Settle the existing provider cards before measuring a tab switch.
+            for _ in 0..24 {
+                frame(32);
+                render_now(window);
+            }
+            let initial = render_now(window);
+            for (target, name) in [(1, "accounts"), (0, "upstreams")] {
+                click(window, if target == 1 { 360.0 } else { 260.0 }, 222.0);
+                assert_eq!(app.get_connections_tab(), target);
+                let mut elapsed = 0;
+                for at in [
+                    0, 16, 32, 64, 96, 128, 160, 192, 224, 256, 288, 340, 400, 480, 600, 760, 920,
+                ] {
+                    frame(at - elapsed);
+                    elapsed = at;
+                    let pixels = render_now(window);
+                    // Tab changes keep the title/subtitle still throughout the transition.
+                    for y in 60..194 {
+                        let start = (y * width as usize + 208) * 3;
+                        let end = (y * width as usize + width as usize - 30) * 3;
+                        assert_eq!(
+                            &pixels.as_bytes()[start..end],
+                            &initial.as_bytes()[start..end]
+                        );
+                    }
+                    snapshot_now(window, output, &format!("tabs-{name}-{suffix}-{at:03}ms"))?;
+                    if target == 1 && at == 32 {
+                        // The still-visible outgoing toolbar must not dispatch actions.
+                        click(window, width as f32 - 208.0, 284.0);
+                        assert_eq!(checks.get(), 0);
+                    }
+                }
+            }
+            // Reverse twice while both pages are still mounted, then resize mid-flight.
+            app.set_connections_tab(1);
+            render_now(window);
+            frame(96);
+            snapshot_now(window, output, &format!("tabs-interrupt-before-{suffix}"))?;
+            app.set_connections_tab(0);
+            render_now(window);
+            frame(48);
+            app.set_connections_tab(1);
+            render_now(window);
+            app.window().set_size(PhysicalSize::new(width - 20, height));
+            frame(920);
+            snapshot_now(window, output, &format!("tabs-interrupt-settled-{suffix}"))?;
+            assert_eq!(app.get_connections_tab(), 1);
+            app.window().set_size(PhysicalSize::new(width, height));
+            // Both motion settings must switch immediately, without a timer tick.
+            for reduced in [false, true] {
+                app.global::<Theme>().set_animations_enabled(reduced);
+                app.global::<Theme>().set_system_reduced_motion(reduced);
+                app.set_connections_tab(0);
+                let upstreams = render_now(window);
+                app.set_connections_tab(1);
+                let accounts = render_now(window);
+                assert_ne!(upstreams.as_bytes(), accounts.as_bytes());
+                frame(1000);
+                let settled = render_now(window);
+                assert_eq!(
+                    accounts.as_bytes(),
+                    settled.as_bytes(),
+                    "Motion-off content must be complete immediately"
+                );
+                snapshot_now(window, output, &format!("tabs-static-{reduced}-{suffix}"))?;
+            }
+            app.global::<Theme>().set_system_reduced_motion(false);
+        }
+    }
+    println!(
+        "Synthetic tab transitions and interruption checks: {}",
+        output.display()
+    );
     Ok(())
 }
 
@@ -708,7 +808,7 @@ fn main() -> Result<(), Box<dyn Error>> {
         completed: true,
         ..Default::default()
     }])));
-    if std::env::args().any(|arg| arg == "--accounts-design") {
+    if std::env::args().any(|arg| arg == "--accounts-design" || arg == "--connections-motion") {
         app.set_active_page(1);
         app.set_connections_tab(1);
         app.set_action_message("合成账号界面检查；未访问实际账号或 Codex 配置".into());
@@ -754,6 +854,11 @@ fn main() -> Result<(), Box<dyn Error>> {
             },
             ..Default::default()
         };
+        if std::env::args().any(|arg| arg == "--connections-motion") {
+            app.set_accounts(ModelRc::new(VecModel::from(vec![chatgpt_account])));
+            app.set_xai_accounts(ModelRc::new(VecModel::from(vec![grok_account])));
+            return render_connections_motion(&app, &window, output);
+        }
         let writes = Rc::new(Cell::new(0));
         let removals = Rc::new(Cell::new(0));
         let write_count = writes.clone();

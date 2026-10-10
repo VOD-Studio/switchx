@@ -118,14 +118,19 @@ export component AccountCard inherits Rectangle {
     callback request-login(AccountRow);
     callback toggle-details(string);
     property <bool> entered: Theme.page-motion == 0ms;
-    property <float> row-reveal: root.entered && !root.removing ? 1 : 0;
-    animate row-reveal {
+    property <float> row-reveal: (root.entered || Theme.page-motion == 0ms) && !root.removing ? 1 : 0;
+    property <float> row-height-reveal: root.removing ? 0 : 1;
+    animate row-height-reveal {
         duration: Theme.page-motion;
+        easing: cubic-bezier(0.22, 1, 0.36, 1);
+    }
+    animate row-reveal {
+        duration: root.removing ? Theme.page-motion : Theme.drawer-motion;
         easing: cubic-bezier(0.22, 1, 0.36, 1);
     }
     Timer {
         interval: 16ms + 60ms * min(root.order, 4);
-        running: !root.entered;
+        running: !root.entered && Theme.page-motion > 0ms;
         triggered => { root.entered = true; }
     }
 
@@ -135,7 +140,8 @@ export component AccountCard inherits Rectangle {
     property <string> updated-text: root.query-pending ? "更新中…"
         : root.grok ? ((root.account.requires-reauth || root.account.quota.error != "") && root.account.quota.has-value ? "上次数据 · " + root.account.quota.updated-label : root.account.quota.updated-label)
         : (root.account.codex-quota.error != "" && root.account.codex-quota.has-value ? "上次数据 · " + root.account.codex-quota.updated-label : root.account.codex-quota.updated-label);
-    height: (body.preferred-height + 32px) * root.row-reveal;
+    // Reserve the final space during arrival so following groups never jump.
+    height: (body.preferred-height + 32px) * root.row-height-reveal;
     preferred-height: root.height;
     vertical-stretch: 0;
     opacity: root.row-reveal;
@@ -147,7 +153,7 @@ export component AccountCard inherits Rectangle {
     animate background, border-color { duration: Theme.page-motion; }
     body := VerticalLayout {
         x: 16px;
-        y: 16px;
+        y: 16px + (1 - root.row-reveal) * 10px;
         width: parent.width - 32px;
         height: self.preferred-height;
         HorizontalLayout {

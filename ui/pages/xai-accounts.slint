@@ -19,6 +19,7 @@ export component XaiAccounts inherits Rectangle {
     in property <string> login-url;
     in-out property <string> expanded-id;
     in property <string> removing-id;
+    in property <int> entry-offset: 0;
     callback action(int, string);
     callback request-removal(AccountRow);
     height: content.preferred-height;
@@ -43,7 +44,7 @@ export component XaiAccounts inherits Rectangle {
             text: "尚未添加 Grok 账号。添加后，可在上游连接中绑定。";
         }
         for account[index] in root.accounts: AccountCard {
-            order: index;
+            order: root.entry-offset + index;
             expanded: root.expanded-id == account.id;
             removing: root.removing-id == account.id;
             toggle-details(id) => { root.expanded-id = root.expanded-id == id ? "" : id; }
