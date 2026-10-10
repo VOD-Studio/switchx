@@ -8,6 +8,7 @@
 //! Shared workspace menu and operation feedback: add --workspace-feedback.
 //! Activity timeline: add --activity-design (entry, arrivals, pause, details, filter).
 //! API connection editor: add --provider-editor-design.
+//! Reasoning multi-select: add --reasoning-picker (themes, sizes, and motion).
 
 #[cfg(target_os = "macos")]
 #[path = "../src/macos.rs"]
@@ -452,6 +453,64 @@ fn render_connections_motion(
     Ok(())
 }
 
+fn render_reasoning_picker(
+    app: &AppWindow,
+    window: &MinimalSoftwareWindow,
+    output: &Path,
+) -> Result<(), Box<dyn Error>> {
+    app.set_active_page(1);
+    app.set_connection_models_name("ChatGPT 订阅".into());
+    app.set_connection_models_subscription(true);
+    app.set_connection_models_open(true);
+    let weak = app.as_weak();
+    app.on_connection_model_edited(move || {
+        if let Some(app) = weak.upgrade() {
+            app.set_connection_models_dirty(true);
+        }
+    });
+    for (width, height) in [(1200, 820), (1000, 680)] {
+        app.window().set_size(PhysicalSize::new(width, height));
+        for dark in [false, true] {
+            app.global::<Theme>().set_animations_enabled(false);
+            set_theme(app, window, dark);
+            app.set_connection_models(ModelRc::new(VecModel::from(
+                (0..6)
+                    .map(|index| ConnectionModelRow {
+                        public_id: format!("sx-synthetic-{index}").into(),
+                        display_name: format!("coder-{}/ChatGPT 订阅", index + 1).into(),
+                        upstream_model: format!("coder-{}", index + 1).into(),
+                        context_window: "272000".into(),
+                        reasoning_levels: "low, medium, high, xhigh, max".into(),
+                        default_reasoning: "high".into(),
+                        ..Default::default()
+                    })
+                    .collect::<Vec<_>>(),
+            )));
+            app.set_connection_models_dirty(false);
+            let suffix = format!("{}-{width}x{height}", if dark { "dark" } else { "light" });
+            snapshot(window, output, &format!("reasoning-directory-{suffix}"))?;
+            app.global::<Theme>().set_animations_enabled(true);
+            click(window, width as f32 - 140.0, 338.0);
+            play(
+                window,
+                output,
+                &format!("reasoning-open-{suffix}"),
+                &(0..=20).map(|frame| frame * 16).collect::<Vec<_>>(),
+            )?;
+            snapshot(window, output, &format!("reasoning-picker-{suffix}"))?;
+            click(window, 300.0, 600.0);
+            play(
+                window,
+                output,
+                &format!("reasoning-close-{suffix}"),
+                &(0..=10).map(|frame| frame * 16).collect::<Vec<_>>(),
+            )?;
+        }
+    }
+    println!("Reasoning picker previews saved to {}", output.display());
+    Ok(())
+}
+
 fn render_connection_workbench(
     app: &AppWindow,
     window: &MinimalSoftwareWindow,
@@ -614,6 +673,7 @@ fn render_connection_workbench(
                             .into(),
                         context_window: "1000000".into(),
                         reasoning_levels: "low, medium, high, max".into(),
+                        default_reasoning: "high".into(),
                         ..Default::default()
                     })
                     .collect::<Vec<_>>(),
@@ -1633,11 +1693,16 @@ fn main() -> Result<(), Box<dyn Error>> {
         slint::platform::set_platform(Box::new(PreviewPlatform(window.clone())))?;
     }
     let app = AppWindow::new()?;
+    switchx::reasoning_picker::connect(&app);
     app.set_loading(false);
     app.global::<Theme>().set_animations_enabled(false);
     if native_provider || std::env::args().any(|arg| arg == "--provider-editor-design") {
         app.show()?;
         return render_provider_editor(&app, &window, output);
+    }
+    if std::env::args().any(|arg| arg == "--reasoning-picker") {
+        app.show()?;
+        return render_reasoning_picker(&app, &window, output);
     }
     if std::env::args().any(|arg| arg == "--connection-workbench") {
         app.show()?;

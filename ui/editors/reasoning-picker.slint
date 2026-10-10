@@ -1,0 +1,397 @@
+import { Theme } from "../tokens.slint";
+import {
+    QuietButton,
+    QuietLineEdit,
+    QuietComboBox,
+    DropdownViewport,
+} from "../components.slint";
+import { QuietScrollView } from "../scroll-view.slint";
+
+export struct ReasoningChoice {
+    effort: string,
+    description: string,
+    selected: bool,
+}
+
+export global ReasoningChoices {
+    pure callback label(string) -> string;
+    pure callback choices(string, string) -> [ReasoningChoice];
+    pure callback defaults(string) -> [string];
+    pure callback includes(string, string) -> bool;
+    pure callback toggle(string, string) -> string;
+}
+
+// A multi-select stays open while editing. The default belongs to the selected set.
+export component ReasoningPicker inherits Rectangle {
+    in-out property <string> levels;
+    in-out property <string> default-level;
+    in property <bool> enabled: true;
+    in property <string> label: "思考等级";
+    callback edited();
+    out property <bool> expanded: root.open;
+    private property <string> summary: ReasoningChoices.label(root.levels);
+    private property <string> query;
+    private property <[ReasoningChoice]> choices: ReasoningChoices.choices(root.levels, root.query);
+    private property <int> highlight: 0;
+    private property <bool> open: false;
+    private property <bool> entered: false;
+    private property <bool> mounted: popup.is-open;
+    private property <float> reveal: root.open && root.entered ? 1 : 0;
+    private property <duration> motion: root.open ? Theme.page-motion : Theme.fast;
+    animate reveal {
+        duration: root.motion;
+        easing: cubic-bezier(0.22, 1, 0.36, 1);
+    }
+
+    function toggle(index: int) {
+        if root.open && root.enabled && index >= 0 && index < root.choices.length {
+            root.levels = ReasoningChoices.toggle(root.levels, root.choices[index].effort);
+            if !ReasoningChoices.includes(root.levels, root.default-level) { root.default-level = ""; }
+            root.edited();
+        }
+    }
+    public function open-popup() {
+        if root.enabled {
+            if !root.mounted {
+                root.query = "";
+                root.highlight = 0;
+                root.entered = Theme.page-motion == 0ms;
+                popup.show();
+            }
+            root.open = true;
+        }
+    }
+    public function close-popup() {
+        root.open = false;
+        if Theme.fast == 0ms { popup.close(); }
+    }
+    function handle-key(event: KeyEvent) -> EventResult {
+        if event.text == Key.Escape { root.close-popup(); return accept; }
+        if !root.open {
+            if event.text == Key.Return || event.text == Key.DownArrow { root.open-popup(); return accept; }
+            return reject;
+        }
+        if event.text == Key.DownArrow { root.highlight = min(root.choices.length - 1, root.highlight + 1); return accept; }
+        if event.text == Key.UpArrow { root.highlight = max(0, root.highlight - 1); return accept; }
+        if event.text == Key.Return { root.toggle(root.highlight); return accept; }
+        return reject;
+    }
+    changed query => { root.highlight = 0; }
+    changed enabled => { if !root.enabled { root.close-popup(); } }
+    changed mounted => {
+        if !root.mounted { root.open = false; root.entered = false; root.query = ""; }
+    }
+    Timer {
+        interval: 16ms;
+        running: root.open && !root.entered;
+        triggered => { root.entered = true; }
+    }
+
+    Timer {
+        interval: max(1ms, Theme.fast);
+        running: root.mounted && !root.open;
+        triggered => { popup.close(); }
+    }
+
+    height: 36px;
+    min-width: 0px;
+    preferred-width: 160px;
+    horizontal-stretch: 1;
+    vertical-stretch: 0;
+    border-radius: 8px;
+    border-width: 1px;
+    border-color: root.open || keyboard.has-focus ? Theme.brand : touch.has-hover ? Theme.muted-text : Theme.border;
+    background: root.open ? Theme.brand-surface : touch.has-hover ? Theme.raised : Theme.panel;
+    opacity: root.enabled ? 1 : 0.45;
+    animate background, border-color, opacity { duration: Theme.fast; }
+    forward-focus: keyboard;
+    accessible-role: combobox;
+    accessible-label: root.label;
+    accessible-value: root.levels + "，默认 " + (root.default-level == "" || root.default-level == "未设置" ? "未设置" : root.default-level);
+    accessible-enabled: root.enabled;
+    accessible-expandable: true;
+    accessible-expanded: root.open;
+    accessible-action-default => { root.open-popup(); }
+    accessible-action-expand => { root.open-popup(); }
+    Text {
+        x: 11px;
+        y: 4px;
+        width: max(0px, parent.width - 38px);
+        height: 16px;
+        text: root.summary == "" ? "选择思考等级" : root.summary;
+        color: root.summary == "" ? Theme.muted-text : Theme.primary-text;
+        font-size: 12px;
+        font-weight: root.summary == "" ? 400 : 500;
+        overflow: elide;
+    }
+
+    Text {
+        x: 11px;
+        y: 21px;
+        width: max(0px, parent.width - 38px);
+        height: 12px;
+        text: root.default-level == "" || root.default-level == "未设置" ? "默认未设置" : "默认 " + root.default-level;
+        color: root.open ? Theme.brand : Theme.muted-text;
+        font-size: 9px;
+        overflow: elide;
+        animate color { duration: Theme.fast; }
+    }
+
+    Image {
+        x: parent.width - 24px;
+        y: 11px;
+        width: 14px;
+        height: 14px;
+        source: @image-url("../../assets/ui/chevron-down.svg");
+        colorize: root.open ? Theme.brand : Theme.muted-text;
+        transform-rotation: root.open ? 180deg : 0deg;
+        animate transform-rotation {
+            duration: Theme.page-motion;
+            easing: ease-out;
+        }
+    }
+
+    touch := TouchArea {
+        enabled: root.enabled;
+        mouse-cursor: pointer;
+        clicked => { keyboard.focus(); root.open-popup(); }
+    }
+
+    keyboard := FocusScope {
+        width: 0px;
+        enabled: root.enabled;
+        key-pressed(event) => {
+            if event.text == Key.Space || event.text == Key.Return || event.text == Key.DownArrow {
+                root.open-popup();
+                return accept;
+            }
+            return reject;
+        }
+    }
+
+    popup := PopupWindow {
+        x: -root.absolute-position.x;
+        y: -root.absolute-position.y;
+        width: DropdownViewport.size.x;
+        height: DropdownViewport.size.y;
+        property <Point> viewport: DropdownViewport.size;
+        changed viewport => { self.width = self.viewport.x; self.height = self.viewport.y; }
+        close-policy: no-auto-close;
+        forward-focus: search;
+        FocusScope {
+            property <bool> active: root.open;
+            changed active => {
+                if self.active { search.focus(); }
+                else { defaults.cancel-popup(); }
+            }
+            key-pressed(event) => { return root.handle-key(event); }
+            TouchArea {
+                clicked => {
+                    if !root.open && self.mouse-x >= root.absolute-position.x && self.mouse-x <= root.absolute-position.x + root.width && self.mouse-y >= root.absolute-position.y && self.mouse-y <= root.absolute-position.y + root.height {
+                        root.open-popup();
+                    } else { root.close-popup(); }
+                }
+            }
+
+            panel := Rectangle {
+                width: min(320px, parent.width - 24px);
+                height: min(530px, parent.height - 24px);
+                x: max(12px, min(root.absolute-position.x + root.width - self.width, parent.width - self.width - 12px));
+                property <bool> above: root.absolute-position.y + root.height + 8px + self.height > parent.height - 12px;
+                y: (self.above ? max(12px, root.absolute-position.y - self.height - 8px) : root.absolute-position.y + root.height + 8px) + (self.above ? 8px : -8px) * (1 - root.reveal);
+                opacity: root.reveal;
+                background: Theme.panel;
+                border-radius: 14px;
+                border-width: 1px;
+                border-color: Theme.border;
+                drop-shadow-blur: 24px;
+                drop-shadow-offset-y: 8px;
+                drop-shadow-color: Theme.dark ? #00000070 : #18221a25;
+                animate height {
+                    duration: Theme.fast;
+                    easing: ease-out;
+                }
+                TouchArea { }
+
+                VerticalLayout {
+                    padding: 12px;
+                    spacing: 8px;
+                    HorizontalLayout {
+                        height: 24px;
+                        Text {
+                            text: "思考等级";
+                            color: Theme.primary-text;
+                            font-size: 14px;
+                            font-weight: 600;
+                            vertical-alignment: center;
+                        }
+
+                        Text {
+                            text: "多选";
+                            color: Theme.brand;
+                            font-size: 11px;
+                            vertical-alignment: center;
+                            horizontal-alignment: right;
+                        }
+
+                        QuietButton {
+                            width: 24px;
+                            height: 24px;
+                            text: "关闭思考等级";
+                            ghost: true;
+                            icon-only: true;
+                            icon: @image-url("../../assets/ui/close.svg");
+                            icon-width: 12px;
+                            icon-height: 12px;
+                            icon-color: Theme.muted-text;
+                            clicked => { root.close-popup(); }
+                        }
+                    }
+
+                    search := QuietLineEdit {
+                        height: 36px;
+                        text <=> root.query;
+                        icon: @image-url("../../assets/ui/search.svg");
+                        placeholder-text: "搜索思考等级…";
+                        accessible-label: "搜索思考等级";
+                        enabled: root.open && root.enabled;
+                        key-pressed(event) => { return root.handle-key(event); }
+                    }
+
+                    QuietScrollView {
+                        vertical-stretch: 1;
+                        enabled: root.open && root.enabled;
+                        horizontal-scrollbar-policy: always-off;
+                        vertical-scrollbar-policy: root.choices.length * 40px > self.height ? as-needed : always-off;
+                        property <int> selection: root.highlight;
+                        changed selection => {
+                            if self.content-y + self.selection * 40px < 0px {
+                                self.content-y = -self.selection * 40px;
+                            } else if self.content-y + (self.selection + 1) * 40px > self.visible-height {
+                                self.content-y = self.visible-height - (self.selection + 1) * 40px;
+                            }
+                        }
+                        property <string> filter: root.query;
+                        changed filter => { self.content-y = 0px; }
+                        if root.choices.length == 0: Text {
+                            text: "没有匹配的等级";
+                            color: Theme.muted-text;
+                            font-size: 12px;
+                            vertical-alignment: center;
+                            horizontal-alignment: center;
+                        }
+                        VerticalLayout {
+                            spacing: 0px;
+                            alignment: start;
+                            for choice[index] in root.choices: Rectangle {
+                                height: 40px;
+                                border-radius: 8px;
+                                background: choice.selected ? Theme.brand-surface : row-touch.has-hover || index == root.highlight ? Theme.raised : transparent;
+                                border-width: 1px;
+                                border-color: index == root.highlight ? Theme.brand.with-alpha(0.3) : transparent;
+                                animate background, border-color { duration: Theme.fast; }
+                                accessible-role: checkbox;
+                                accessible-label: choice.effort + "，" + choice.description;
+                                accessible-checked: choice.selected;
+                                accessible-enabled: root.open && root.enabled;
+                                accessible-action-default => { root.toggle(index); }
+                                Rectangle {
+                                    x: 10px;
+                                    y: 11px;
+                                    width: 18px;
+                                    height: 18px;
+                                    border-radius: 5px;
+                                    border-width: 1px;
+                                    border-color: choice.selected ? Theme.brand : Theme.border;
+                                    background: choice.selected ? Theme.brand : Theme.panel;
+                                    animate background, border-color { duration: Theme.fast; }
+                                    Image {
+                                        x: 2px;
+                                        y: choice.selected ? 2px : 5px;
+                                        width: 14px;
+                                        height: 14px;
+                                        source: @image-url("../../assets/ui/check.svg");
+                                        colorize: Theme.on-brand;
+                                        opacity: choice.selected ? 1 : 0;
+                                        animate y, opacity {
+                                            duration: Theme.fast;
+                                            easing: ease-out;
+                                        }
+                                    }
+                                }
+
+                                Text {
+                                    x: 40px;
+                                    width: 112px;
+                                    text: choice.effort;
+                                    color: choice.selected ? Theme.brand : Theme.primary-text;
+                                    font-size: 14px;
+                                    font-weight: choice.selected ? 600 : 400;
+                                    vertical-alignment: center;
+                                    animate color { duration: Theme.fast; }
+                                }
+
+                                Text {
+                                    x: 158px;
+                                    width: parent.width - self.x - 10px;
+                                    text: choice.effort == root.default-level ? "默认 · " + choice.description : choice.description;
+                                    color: choice.effort == root.default-level ? Theme.brand : Theme.muted-text;
+                                    font-size: 11px;
+                                    vertical-alignment: center;
+                                    horizontal-alignment: right;
+                                }
+
+                                row-touch := TouchArea {
+                                    enabled: root.open && root.enabled;
+                                    mouse-cursor: pointer;
+                                    clicked => { root.highlight = index; root.toggle(index); search.focus(); }
+                                }
+                            }
+                        }
+                    }
+
+                    Rectangle {
+                        height: 1px;
+                        background: Theme.border;
+                    }
+
+                    HorizontalLayout {
+                        height: 20px;
+                        Text {
+                            text: "默认等级";
+                            color: Theme.primary-text;
+                            font-size: 11px;
+                            vertical-alignment: center;
+                        }
+
+                        QuietButton {
+                            width: 84px;
+                            height: 22px;
+                            text: "清空选择";
+                            ghost: true;
+                            enabled: root.open && root.enabled && root.levels != "";
+                            clicked => { root.levels = ""; root.default-level = ""; root.edited(); search.focus(); }
+                        }
+                    }
+
+                    defaults := QuietComboBox {
+                        height: 36px;
+                        model: ReasoningChoices.defaults(root.levels);
+                        current-value: root.default-level == "" ? "未设置" : root.default-level;
+                        accessible-label: "默认思考等级";
+                        enabled: root.open && root.enabled;
+                        selected(value) => { root.default-level = value == "未设置" ? "" : value; root.edited(); }
+                    }
+
+                    Text {
+                        height: 16px;
+                        text: "可多选 · 默认等级仅从已选等级中选择";
+                        color: Theme.muted-text;
+                        font-size: 10px;
+                        vertical-alignment: center;
+                    }
+                }
+            }
+        }
+    }
+}

@@ -41,6 +41,7 @@ fn draft(id: &str) -> ConnectionModel {
         upstream_model: id.into(),
         context_window: "128000".into(),
         reasoning_levels: "low, high".into(),
+        default_reasoning: "high".into(),
     }
 }
 
@@ -213,6 +214,7 @@ fn subscription_directory_keeps_official_capabilities_and_rejects_unknown_models
     let mut edit = draft("official-pro");
     edit.public_id = original[0].public_id.clone();
     edit.reasoning_levels = "low, medium".into();
+    edit.default_reasoning.clear();
     app::save_connection_models(
         &fixture.0,
         "subscription",
@@ -237,4 +239,36 @@ fn subscription_directory_keeps_official_capabilities_and_rejects_unknown_models
         .is_err()
     );
     assert_eq!(store.models().unwrap(), saved);
+}
+
+#[test]
+fn reasoning_defaults_round_trip_and_invalid_defaults_do_not_partially_save() {
+    let fixture = Fixture::new();
+    let store = fixture.store();
+    store.put_provider(&provider("api")).unwrap();
+    app::save_connection_models(&fixture.0, "api", &[], &[draft("coder-pro")], &[]).unwrap();
+    let original = store.models().unwrap();
+    let metadata: serde_json::Value = serde_json::from_str(&original[0].metadata).unwrap();
+    assert_eq!(metadata["default_reasoning_level"], "high");
+    let mut changed = ConnectionModel {
+        public_id: original[0].public_id.clone(),
+        ..draft("coder-pro")
+    };
+    changed.default_reasoning = "low".into();
+    app::save_connection_models(&fixture.0, "api", &original, &[changed.clone()], &[]).unwrap();
+    let saved = store.models().unwrap();
+    let metadata: serde_json::Value = serde_json::from_str(&saved[0].metadata).unwrap();
+    assert_eq!(metadata["default_reasoning_level"], "low");
+    changed.reasoning_levels = "high".into();
+    assert!(
+        app::save_connection_models(&fixture.0, "api", &saved, &[changed.clone()], &[]).is_err()
+    );
+    assert_eq!(store.models().unwrap(), saved);
+    changed.default_reasoning.clear();
+    app::save_connection_models(&fixture.0, "api", &saved, &[changed], &[]).unwrap();
+    let cleared = store.models().unwrap();
+    let metadata: serde_json::Value = serde_json::from_str(&cleared[0].metadata).unwrap();
+    assert!(metadata["default_reasoning_level"].is_null());
+    assert_eq!(metadata["supported_reasoning_levels"][0]["effort"], "high");
+    assert_eq!(cleared[0].public_id, original[0].public_id);
 }

@@ -1,3 +1,4 @@
+import { ReasoningPicker } from "reasoning-picker.slint";
 import { Theme } from "../tokens.slint";
 import {
     QuietButton,
@@ -268,7 +269,7 @@ export component ConnectionModels inherits Rectangle {
 
                     Text {
                         width: 160px;
-                        text: "思考等级 · 逗号分隔";
+                        text: "思考等级 / 默认";
                         color: Theme.muted-text;
                         font-size: 11px;
                     }
@@ -352,13 +353,13 @@ export component ConnectionModels inherits Rectangle {
                                 edited(value) => { root.edited(); }
                             }
 
-                            QuietLineEdit {
+                            ReasoningPicker {
                                 width: 160px;
-                                text <=> row.reasoning-levels;
-                                placeholder-text: "low, medium, high";
-                                accessible-label: "思考等级 " + (index + 1);
+                                levels <=> row.reasoning-levels;
+                                default-level <=> row.default-reasoning;
+                                label: "思考等级 " + (index + 1);
                                 enabled: !root.busy && !root.managed;
-                                edited(value) => { root.edited(); }
+                                edited => { root.edited(); }
                             }
 
                             QuietButton {
