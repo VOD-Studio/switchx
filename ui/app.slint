@@ -612,18 +612,18 @@ export component AppWindow inherits Window {
                             height: 42px;
                             padding-left: 8px;
                             spacing: 8px;
+                            cross-axis-alignment: center;
                             Image {
-                                y: (parent.height - self.height) / 2;
-                                width: 23px;
-                                height: 25px;
-                                source: @image-url("../assets/ui/brand.svg");
-                                colorize: Theme.brand;
+                                width: 36px;
+                                height: 36px;
+                                source: @image-url("../assets/logo.png");
+                                image-fit: contain;
                             }
 
                             Text {
-                                text: "switchx.";
+                                text: "switchx";
                                 color: Theme.primary-text;
-                                font-size: 23px;
+                                font-size: 19px;
                                 font-weight: 600;
                                 vertical-alignment: center;
                             }
@@ -631,48 +631,6 @@ export component AppWindow inherits Window {
 
                         Rectangle {
                             height: 12px;
-                        }
-
-                        HorizontalLayout {
-                            height: 54px;
-                            padding-left: 8px;
-                            spacing: 10px;
-                            Rectangle {
-                                y: (parent.height - self.height) / 2;
-                                width: 29px;
-                                height: 29px;
-                                background: Theme.panel;
-                                border-radius: 8px;
-                                Image {
-                                    x: 6px;
-                                    y: 6px;
-                                    width: 17px;
-                                    height: 17px;
-                                    source: @image-url("../assets/ui/code.svg");
-                                    colorize: Theme.primary-text;
-                                }
-                            }
-
-                            VerticalLayout {
-                                alignment: center;
-                                spacing: 4px;
-                                Text {
-                                    text: "Codex";
-                                    color: Theme.primary-text;
-                                    font-size: 13px;
-                                    font-weight: 500;
-                                }
-
-                                Text {
-                                    text: "本机工作空间";
-                                    color: Theme.muted-text;
-                                    font-size: 11px;
-                                }
-                            }
-                        }
-
-                        Rectangle {
-                            height: 14px;
                         }
 
                         nav-workbench := QuietButton {
