@@ -5,6 +5,7 @@ import {
     SurfaceCard,
     QuietLineEdit as LineEdit,
 } from "../components.slint";
+import { FeedbackBanner } from "../feedback-banner.slint";
 
 export component ModelEditor inherits SurfaceCard {
     in property <bool> busy;
@@ -12,6 +13,7 @@ export component ModelEditor inherits SurfaceCard {
     in property <bool> fetching-models;
     in property <string> discovery-message;
     in property <int> discovery-scope;
+    in property <int> discovery-tone;
     in property <bool> config-managed;
     in-out property <bool> model-editor-open;
     in property <string> model-provider-name;
@@ -27,10 +29,11 @@ export component ModelEditor inherits SurfaceCard {
     in property <[string]> model-reasoning-options;
     in-out property <bool> model-delete-confirm;
     callback fetch-models(int);
+    callback dismiss-discovery();
     callback save-model();
     callback delete-model();
 
-    height: root.discovery-scope == 1 && (root.fetched-models.length > 0 || root.discovery-message != "") ? 532px : 462px;
+    height: 462px + (root.discovery-scope == 1 && root.fetched-models.length > 0 ? 45px : 0px) + discovery-banner.height;
     VerticalLayout {
         padding: 18px;
         spacing: 9px;
@@ -72,26 +75,46 @@ export component ModelEditor inherits SurfaceCard {
             }
         }
 
-        HorizontalLayout {
-            spacing: 10px;
-            Text {
-                width: 96px;
-                text: "实际请求模型";
-                color: Theme.muted-text;
-                vertical-alignment: center;
+        VerticalLayout {
+            HorizontalLayout {
+                spacing: 10px;
+                Text {
+                    width: 96px;
+                    text: "实际请求模型";
+                    color: Theme.muted-text;
+                    vertical-alignment: center;
+                }
+
+                LineEdit {
+                    text <=> root.model-upstream-id;
+                    placeholder-text: "上游实际模型 ID";
+                    accessible-label: "映射实际请求模型";
+                }
+
+                QuietButton {
+                    width: 132px;
+                    text: root.fetching-models && root.discovery-scope == 1 ? "获取中…" : "获取模型列表";
+                    icon: root.fetching-models && root.discovery-scope == 1 ? @image-url("../../assets/ui/loader.svg") : @image-url("../../assets/refresh.svg");
+                    icon-width: 14px;
+                    icon-height: 14px;
+                    icon-color: Theme.brand;
+                    loading: root.fetching-models && root.discovery-scope == 1;
+                    enabled: !root.busy && !root.config-managed;
+                    clicked => { root.fetch-models(1); }
+                }
             }
 
-            LineEdit {
-                text <=> root.model-upstream-id;
-                placeholder-text: "上游实际模型 ID";
-                accessible-label: "映射实际请求模型";
-            }
-
-            QuietButton {
-                width: 132px;
-                text: root.fetching-models && root.discovery-scope == 1 ? "获取中…" : "获取模型列表";
-                enabled: !root.busy && !root.config-managed;
-                clicked => { root.fetch-models(1); }
+            discovery-banner := FeedbackBanner {
+                tone: root.discovery-scope == 1 ? root.discovery-tone : 0;
+                loading: root.discovery-scope == 1 && root.fetching-models;
+                title: root.discovery-tone == 3 ? "获取模型列表失败" : "";
+                message: root.discovery-scope == 1 ? root.discovery-message : "";
+                hint: root.discovery-tone == 3 ? "确认上游地址可访问、API Key 有效后重试" : "";
+                retryable: true;
+                dismissible: true;
+                actions-enabled: !root.busy && !root.config-managed;
+                retry => { root.fetch-models(1); }
+                dismiss => { root.dismiss-discovery(); }
             }
         }
 
@@ -101,13 +124,6 @@ export component ModelEditor inherits SurfaceCard {
             accessible-label: "选择探测到的映射模型";
             enabled: !root.busy;
             selected(value) => { root.model-upstream-id = value; }
-        }
-
-        if root.discovery-scope == 1 && root.discovery-message != "": Text {
-            text: root.discovery-message;
-            color: Theme.muted-text;
-            font-size: 12px;
-            wrap: word-wrap;
         }
 
         HorizontalLayout {

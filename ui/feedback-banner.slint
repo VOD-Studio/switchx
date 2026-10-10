@@ -1,0 +1,361 @@
+import { Theme } from "tokens.slint";
+import { QuietButton } from "components.slint";
+
+// Inline feedback for model discovery and validation. Tone: 0 info, 1 success,
+// 2 warning, 3 error; `loading` overrides the tone. The last visible content is
+// cached so the banner collapses with its message instead of emptying first.
+export component FeedbackBanner inherits Rectangle {
+    in property <int> tone;
+    in property <bool> loading;
+    in property <string> title;
+    in property <string> message;
+    in property <string> target;
+    in property <string> hint;
+    in property <bool> retryable: false;
+    in property <bool> dismissible: false;
+    in property <bool> actions-enabled: true;
+    in property <length> top-gap: 8px;
+    callback retry();
+    callback dismiss();
+
+    private property <bool> motion: Theme.animations-enabled && !Theme.system-reduced-motion;
+    private property <bool> active: root.message != "" || root.loading;
+    private property <int> shown-tone;
+    private property <bool> shown-loading;
+    private property <string> shown-title;
+    private property <string> shown-message;
+    private property <string> shown-target;
+    private property <string> shown-hint;
+    private property <bool> is-error: !root.shown-loading && root.shown-tone == 3;
+    private property <bool> is-alert: !root.shown-loading && root.shown-tone >= 2;
+    private property <color> ink: root.shown-loading || root.shown-tone == 0 ? Theme.brand
+        : root.shown-tone == 1 ? Theme.success
+        : root.shown-tone == 2 ? Theme.warning
+        : Theme.error;
+
+    // One replay per new state: pop the icon, shake on errors, sweep a sheen.
+    private property <int> step: 0;
+    private property <bool> playing: false;
+    private property <bool> popped: true;
+    private property <length> shake: root.is-error && root.playing && root.motion
+        ? 6px * sin(root.step * 68deg) * (1 - root.step / 30) : 0px;
+
+    private property <float> reveal: root.active ? 1 : 0;
+    animate reveal {
+        duration: Theme.page-motion;
+        easing: cubic-bezier(0.22, 1, 0.36, 1);
+    }
+    private property <length> card-height: content.preferred-height;
+    animate card-height {
+        duration: Theme.page-motion;
+        easing: cubic-bezier(0.22, 1, 0.36, 1);
+    }
+    private property <float> stripe: root.popped ? 1 : 0;
+    animate stripe {
+        duration: root.popped && root.motion ? 420ms : 0ms;
+        delay: root.popped && root.motion ? 60ms : 0ms;
+        easing: cubic-bezier(0.22, 1, 0.36, 1);
+    }
+    private property <float> ring: root.popped && root.is-alert ? 1 : 0;
+    animate ring {
+        duration: root.popped && root.motion ? 1500ms : 0ms;
+        iteration-count: root.popped && root.motion && root.is-alert ? 3 : 1;
+        easing: ease-out;
+    }
+    private property <float> sheen: root.popped && !root.shown-loading ? 1 : 0;
+    animate sheen {
+        duration: root.popped && root.motion ? 950ms : 0ms;
+        delay: root.popped && root.motion ? 140ms : 0ms;
+        easing: cubic-bezier(0.4, 0, 0.2, 1);
+    }
+    private property <float> sweep: root.shown-loading && root.motion ? 1 : 0;
+    animate sweep {
+        duration: root.shown-loading && root.motion ? 1150ms : 0ms;
+        iteration-count: root.shown-loading && root.motion ? -1 : 1;
+        easing: ease-in-out;
+    }
+    private property <angle> spin: root.shown-loading && root.motion ? 360deg : 0deg;
+    animate spin {
+        duration: root.shown-loading && root.motion ? 800ms : 0ms;
+        iteration-count: root.shown-loading && root.motion ? -1 : 1;
+    }
+
+    function replay() {
+        root.step = 0;
+        root.popped = !root.motion;
+        root.playing = root.motion;
+    }
+    function sync() {
+        if (!root.active) { return; }
+        if (root.shown-tone == root.tone && root.shown-loading == root.loading && root.shown-message == root.message
+            && root.shown-title == root.title && root.shown-target == root.target && root.shown-hint == root.hint) {
+            return;
+        }
+        root.shown-tone = root.tone;
+        root.shown-loading = root.loading;
+        root.shown-title = root.title;
+        root.shown-message = root.message;
+        root.shown-target = root.target;
+        root.shown-hint = root.hint;
+        root.replay();
+    }
+    init => { root.sync(); }
+    changed tone => { root.sync(); }
+    changed loading => { root.sync(); }
+    changed title => { root.sync(); }
+    changed message => { root.sync(); }
+    changed target => { root.sync(); }
+    changed hint => { root.sync(); }
+
+    Timer {
+        interval: 16ms;
+        running: root.playing;
+        triggered => {
+            root.step += 1;
+            if (root.step == 1) { root.popped = true; }
+            if (root.step >= 30) { root.playing = false; }
+        }
+    }
+
+    height: (root.top-gap + root.card-height) * root.reveal;
+    preferred-height: root.height;
+    vertical-stretch: 0;
+    visible: root.reveal > 0;
+    accessible-role: text;
+    accessible-label: root.shown-title == "" ? root.shown-message : root.shown-title + "，" + root.shown-message;
+
+    // Wider than the banner so the error shake is not cut at the edges.
+    Rectangle {
+        x: -8px;
+        width: root.width + 16px;
+        height: root.height;
+        clip: true;
+        accessible-role: none;
+
+        card := Rectangle {
+            x: 8px + root.shake;
+            y: root.top-gap - (1 - root.reveal) * 8px;
+            width: root.width;
+            height: root.card-height;
+            opacity: root.reveal;
+            clip: true;
+            border-radius: 12px;
+            border-width: 1px;
+            border-color: root.ink.with-alpha(Theme.dark ? 0.34 : 0.3);
+            background: Theme.panel;
+            animate border-color { duration: Theme.page-motion; }
+
+            // Tone wash fading to the right.
+            Rectangle {
+                background: @linear-gradient(100deg, root.ink.with-alpha(Theme.dark ? 0.15 : 0.1) 0%, root.ink.with-alpha(Theme.dark ? 0.05 : 0.035) 55%, root.ink.with-alpha(0) 100%);
+                accessible-role: none;
+            }
+
+            // Light sheen that crosses once when a new result lands.
+            Rectangle {
+                width: parent.width * 0.35;
+                x: -self.width + (parent.width + self.width) * root.sheen;
+                opacity: root.sheen > 0 && root.sheen < 1 ? 1 : 0;
+                background: @linear-gradient(105deg, #ffffff00 0%, #ffffff.with-alpha(Theme.dark ? 0.07 : 0.32) 50%, #ffffff00 100%);
+                accessible-role: none;
+            }
+
+            // Accent stripe draws outward from the middle.
+            Rectangle {
+                x: 0px;
+                width: 3px;
+                height: (parent.height - 16px) * root.stripe;
+                y: (parent.height - self.height) / 2;
+                border-radius: 2px;
+                background: root.ink;
+                animate background { duration: Theme.page-motion; }
+                accessible-role: none;
+            }
+
+            // Indeterminate progress while waiting for the upstream.
+            Rectangle {
+                y: parent.height - 2px;
+                height: 2px;
+                width: parent.width * 0.32;
+                x: -self.width + (parent.width + self.width) * root.sweep;
+                visible: root.shown-loading;
+                background: @linear-gradient(90deg, root.ink.with-alpha(0) 0%, root.ink 50%, root.ink.with-alpha(0) 100%);
+                accessible-role: none;
+            }
+
+            content := HorizontalLayout {
+                y: 0px;
+                height: self.preferred-height;
+                padding-left: 16px;
+                padding-right: 10px;
+                padding-top: 11px;
+                padding-bottom: 11px;
+                spacing: 12px;
+
+                VerticalLayout {
+                    alignment: start;
+                    Rectangle {
+                        width: 28px;
+                        height: 28px;
+                        horizontal-stretch: 0;
+
+                        // Pulse rings radiate from the badge on warnings and errors.
+                        Rectangle {
+                            width: 28px + 18px * root.ring;
+                            height: self.width;
+                            x: (parent.width - self.width) / 2;
+                            y: (parent.height - self.height) / 2;
+                            border-radius: self.width / 2;
+                            border-width: 1.5px;
+                            border-color: root.ink;
+                            opacity: root.ring > 0 ? (1 - root.ring) * 0.7 : 0;
+                            accessible-role: none;
+                        }
+
+                        Rectangle {
+                            border-radius: 14px;
+                            background: root.ink.with-alpha(Theme.dark ? 0.18 : 0.13);
+                            border-width: 1px;
+                            border-color: root.ink.with-alpha(0.3);
+                            animate background, border-color { duration: Theme.page-motion; }
+                            accessible-role: none;
+                        }
+
+                        Image {
+                            width: root.shown-loading ? 16px : root.popped ? 16px : 2px;
+                            height: self.width;
+                            x: (parent.width - self.width) / 2;
+                            y: (parent.height - self.height) / 2;
+                            source: root.shown-loading ? @image-url("../assets/ui/loader.svg")
+                                : root.shown-tone == 1 ? @image-url("../assets/ui/check.svg")
+                                : root.shown-tone == 0 ? @image-url("../assets/ui/blocks.svg")
+                                : @image-url("../assets/ui/alert.svg");
+                            colorize: root.ink;
+                            image-fit: contain;
+                            transform-rotation: root.spin;
+                            animate width {
+                                duration: root.popped && root.motion ? 460ms : 0ms;
+                                easing: ease-out-back;
+                            }
+                            accessible-role: none;
+                        }
+                    }
+                }
+
+                VerticalLayout {
+                    alignment: center;
+                    spacing: 5px;
+                    horizontal-stretch: 1;
+                    min-width: 0px;
+                    opacity: root.popped ? 1 : 0;
+                    animate opacity {
+                        duration: root.popped && root.motion ? 280ms : 0ms;
+                        delay: root.popped && root.motion ? 70ms : 0ms;
+                    }
+
+                    if root.shown-title != "": Text {
+                        text: root.shown-title;
+                        color: root.ink;
+                        font-size: 13px;
+                        font-weight: 600;
+                        overflow: elide;
+                    }
+
+                    Text {
+                        min-height: 28px - (root.shown-title != "" ? 28px : 0px);
+                        text: root.shown-message;
+                        color: root.shown-title != "" ? Theme.primary-text : root.shown-loading ? Theme.muted-text : root.ink;
+                        font-size: root.shown-title != "" ? 13px : 12px;
+                        vertical-alignment: center;
+                        wrap: word-wrap;
+                    }
+
+                    if root.shown-target != "" || root.shown-hint != "": HorizontalLayout {
+                        spacing: 8px;
+                        padding-top: 2px;
+                        if root.shown-target != "": Rectangle {
+                            height: 22px;
+                            horizontal-stretch: 0;
+                            max-width: 260px;
+                            border-radius: 6px;
+                            background: Theme.inset;
+                            border-width: 1px;
+                            border-color: Theme.border;
+                            HorizontalLayout {
+                                padding-left: 7px;
+                                padding-right: 8px;
+                                spacing: 5px;
+                                Image {
+                                    y: (parent.height - self.height) / 2;
+                                    width: 12px;
+                                    height: 12px;
+                                    source: @image-url("../assets/ui/link.svg");
+                                    colorize: Theme.muted-text;
+                                    accessible-role: none;
+                                }
+
+                                Text {
+                                    text: root.shown-target;
+                                    color: Theme.primary-text;
+                                    font-family: "Menlo";
+                                    font-size: 11px;
+                                    vertical-alignment: center;
+                                    overflow: elide;
+                                    min-width: 0px;
+                                }
+                            }
+                        }
+
+                        if root.shown-hint != "": Text {
+                            text: root.shown-hint;
+                            color: Theme.muted-text;
+                            font-size: 11px;
+                            vertical-alignment: center;
+                            overflow: elide;
+                            horizontal-stretch: 1;
+                            min-width: 0px;
+                        }
+                    }
+                }
+
+                if (root.retryable && root.is-error) || (root.dismissible && root.is-alert): HorizontalLayout {
+                    alignment: start;
+                    spacing: 4px;
+                    horizontal-stretch: 0;
+                    VerticalLayout {
+                        alignment: start;
+                        HorizontalLayout {
+                            spacing: 4px;
+                            if root.retryable && root.is-error: QuietButton {
+                                width: 74px;
+                                height: 30px;
+                                horizontal-stretch: 0;
+                                text: "重试";
+                                icon: @image-url("../assets/refresh.svg");
+                                icon-width: 14px;
+                                icon-height: 14px;
+                                icon-color: root.ink;
+                                enabled: root.actions-enabled;
+                                clicked => { root.retry(); }
+                            }
+
+                            if root.dismissible && root.is-alert: QuietButton {
+                                width: 30px;
+                                height: 30px;
+                                horizontal-stretch: 0;
+                                text: "关闭提示";
+                                icon-only: true;
+                                ghost: true;
+                                icon: @image-url("../assets/ui/close.svg");
+                                icon-width: 14px;
+                                icon-height: 14px;
+                                icon-color: Theme.muted-text;
+                                clicked => { root.dismiss(); }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+}

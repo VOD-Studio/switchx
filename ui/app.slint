@@ -189,6 +189,8 @@ export component AppWindow inherits Window {
     in-out property <string> discovery-message: "";
     in-out property <int> discovery-generation: 0;
     in-out property <int> discovery-scope: 0;
+    // 0 info, 1 success, 2 warning, 3 error.
+    in-out property <int> discovery-tone: 0;
     in-out property <string> config-home: "";
     in-out property <string> config-status: "尚未读取 Codex 配置";
     in-out property <string> config-mode: "尚未读取 Codex 配置";
@@ -312,6 +314,7 @@ export component AppWindow inherits Window {
         root.fetched-models = [];
         root.fetching-models = false;
         root.discovery-message = "";
+        root.discovery-tone = 0;
     }
     changed edit-id => { root.reset-model-discovery(); }
     changed edit-url => {
@@ -1119,6 +1122,7 @@ export component AppWindow inherits Window {
                         fetching-models: root.fetching-models;
                         discovery-message: root.discovery-message;
                         discovery-scope: root.discovery-scope;
+                        discovery-tone: root.discovery-tone;
                         config-managed: root.config-managed;
                         border-width: 0px;
                         background: transparent;
@@ -1128,6 +1132,7 @@ export component AppWindow inherits Window {
                         open-provider-preset-link(api-key-page) => { root.open-provider-preset-link(api-key-page); }
                         open-provider-icon-picker() => { root.open-provider-icon-picker(); }
                         fetch-models(scope) => { root.fetch-models(scope); }
+                        dismiss-discovery => { root.reset-model-discovery(); }
                     }
                 }
             }
@@ -1202,6 +1207,7 @@ export component AppWindow inherits Window {
                     fetching-models: root.fetching-models;
                     discovery-message: root.discovery-message;
                     discovery-scope: root.discovery-scope;
+                    discovery-tone: root.discovery-tone;
                     config-managed: root.config-managed;
                     border-width: 0px;
                     background: transparent;
@@ -1219,6 +1225,7 @@ export component AppWindow inherits Window {
                     model-reasoning-options: root.model-reasoning-options;
                     model-delete-confirm <=> root.model-delete-confirm;
                     fetch-models(scope) => { root.fetch-models(scope); }
+                    dismiss-discovery => { root.reset-model-discovery(); }
                     save-model() => { root.save-model(); }
                     delete-model() => { root.delete-model(); }
                 }

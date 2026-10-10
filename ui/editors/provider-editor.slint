@@ -7,6 +7,7 @@ import {
     QuietComboBox as ComboBox,
 } from "../components.slint";
 import { CodeEditor } from "../code-editor.slint";
+import { FeedbackBanner } from "../feedback-banner.slint";
 
 export component ProviderEditor inherits SurfaceCard {
     in property <bool> busy;
@@ -31,6 +32,7 @@ export component ProviderEditor inherits SurfaceCard {
     in property <bool> fetching-models;
     in property <string> discovery-message;
     in property <int> discovery-scope;
+    in property <int> discovery-tone;
     in property <bool> config-managed;
     callback save-provider(string, string, string, string, string);
     callback open-common-config();
@@ -38,8 +40,9 @@ export component ProviderEditor inherits SurfaceCard {
     callback open-provider-preset-link(bool);
     callback open-provider-icon-picker();
     callback fetch-models(int);
+    callback dismiss-discovery();
 
-    height: 782px + (root.edit-preset-id != "" ? 58px : 0px) + (root.discovery-scope == 0 && (root.fetched-models.length > 0 || root.discovery-message != "") ? 68px : 0px) + (root.edit-config-error != "" ? 48px : 0px);
+    height: 782px + (root.edit-preset-id != "" ? 58px : 0px) + (root.discovery-scope == 0 && root.fetched-models.length > 0 ? 43px : 0px) + discovery-banner.height + config-banner.height;
     VerticalLayout {
         padding: 16px;
         spacing: 7px;
@@ -155,26 +158,47 @@ export component ProviderEditor inherits SurfaceCard {
             }
         }
 
-        HorizontalLayout {
-            spacing: 8px;
-            Text {
-                width: 92px;
-                text: "模型 ID";
-                color: Theme.muted-text;
-                vertical-alignment: center;
+        VerticalLayout {
+            HorizontalLayout {
+                spacing: 8px;
+                Text {
+                    width: 92px;
+                    text: "模型 ID";
+                    color: Theme.muted-text;
+                    vertical-alignment: center;
+                }
+
+                LineEdit {
+                    text <=> root.edit-model;
+                    placeholder-text: "上游实际模型 ID";
+                    accessible-label: "上游模型 ID";
+                }
+
+                QuietButton {
+                    width: 132px;
+                    text: root.fetching-models && root.discovery-scope == 0 ? "获取中…" : "获取模型列表";
+                    icon: root.fetching-models && root.discovery-scope == 0 ? @image-url("../../assets/ui/loader.svg") : @image-url("../../assets/refresh.svg");
+                    icon-width: 14px;
+                    icon-height: 14px;
+                    icon-color: Theme.brand;
+                    loading: root.fetching-models && root.discovery-scope == 0;
+                    enabled: !root.busy && root.edit-url != "" && (root.edit-key != "" || root.edit-id != "");
+                    clicked => { root.fetch-models(0); }
+                }
             }
 
-            LineEdit {
-                text <=> root.edit-model;
-                placeholder-text: "上游实际模型 ID";
-                accessible-label: "上游模型 ID";
-            }
-
-            QuietButton {
-                width: 132px;
-                text: root.fetching-models && root.discovery-scope == 0 ? "获取中…" : "获取模型列表";
-                enabled: !root.busy && root.edit-url != "" && (root.edit-key != "" || root.edit-id != "");
-                clicked => { root.fetch-models(0); }
+            discovery-banner := FeedbackBanner {
+                tone: root.discovery-scope == 0 ? root.discovery-tone : 0;
+                loading: root.discovery-scope == 0 && root.fetching-models;
+                title: root.discovery-tone == 3 ? "获取模型列表失败" : "";
+                message: root.discovery-scope == 0 ? root.discovery-message : "";
+                target: root.discovery-tone == 3 ? root.edit-url : "";
+                hint: root.discovery-tone == 3 ? "确认地址可访问、API Key 有效后重试" : "";
+                retryable: true;
+                dismissible: true;
+                actions-enabled: !root.busy && root.edit-url != "" && (root.edit-key != "" || root.edit-id != "");
+                retry => { root.fetch-models(0); }
+                dismiss => { root.dismiss-discovery(); }
             }
         }
 
@@ -184,13 +208,6 @@ export component ProviderEditor inherits SurfaceCard {
             accessible-label: "选择探测到的默认模型";
             enabled: !root.busy;
             selected(value) => { root.edit-model = value; }
-        }
-
-        if root.discovery-scope == 0 && root.discovery-message != "": Text {
-            text: root.discovery-message;
-            color: Theme.muted-text;
-            font-size: 12px;
-            wrap: word-wrap;
         }
 
         HorizontalLayout {
@@ -297,19 +314,20 @@ export component ProviderEditor inherits SurfaceCard {
             }
         }
 
-        CodeEditor {
-            height: 208px;
-            vertical-stretch: 0;
-            text: root.edit-config-preview;
-            read-only: true;
-            accessible-label: "Codex config.toml 配置预览";
-        }
+        VerticalLayout {
+            CodeEditor {
+                height: 208px;
+                vertical-stretch: 0;
+                text: root.edit-config-preview;
+                read-only: true;
+                accessible-label: "Codex config.toml 配置预览";
+            }
 
-        if root.edit-config-error != "": Text {
-            text: root.edit-config-error;
-            color: Theme.error;
-            font-size: 12px;
-            wrap: word-wrap;
+            config-banner := FeedbackBanner {
+                tone: 3;
+                title: "配置无法生成";
+                message: root.edit-config-error;
+            }
         }
 
         Text {
