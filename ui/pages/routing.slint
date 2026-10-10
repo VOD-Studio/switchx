@@ -6,6 +6,7 @@ import {
     QuietComboBox,
     StatusPill,
 } from "../components.slint";
+import { WorkbenchConnection } from "workbench-connection.slint";
 import { ProviderRow, ModelRow } from "../view-models.slint";
 
 // Daily workbench: the model menu stays visible while edits and publication
@@ -16,6 +17,8 @@ export component RoutingPage inherits Rectangle {
     in property <[ProviderRow]> providers;
     in property <[ModelRow]> models;
     in property <int> selected-model-count;
+    in property <int> selected-connection-count;
+    in property <string> default-model-label;
     in property <int> selectable-model-count;
     in property <bool> config-managed;
     in property <bool> route-managed;
@@ -29,6 +32,11 @@ export component RoutingPage inherits Rectangle {
     in-out property <int> model-provider-choice;
     in-out property <length> model-scroll-y;
     property <bool> selected-only: false;
+    property <bool> direct-mode: false;
+    callback select-connection(string, bool);
+    callback connection-models(string);
+    callback preview-direct(string);
+    callback add-connection();
     callback add-selected-model();
     callback begin-model-editor(string, string);
     callback select-model(string, bool);
@@ -97,7 +105,7 @@ export component RoutingPage inherits Rectangle {
                 }
 
                 Text {
-                    text: root.direct-active ? "单一上游" : root.providers.length + " 个连接";
+                    text: root.direct-active ? "单一上游" : root.selected-connection-count + " 个连接已加入";
                     color: Theme.primary-text;
                     font-size: 12px;
                     vertical-alignment: center;
@@ -120,7 +128,7 @@ export component RoutingPage inherits Rectangle {
             height: 36px;
             spacing: 8px;
             Text {
-                text: root.direct-active ? "模型菜单 · 未发布" : "我的模型";
+                text: "我的连接";
                 color: Theme.primary-text;
                 font-size: 17px;
                 font-weight: 600;
@@ -128,7 +136,7 @@ export component RoutingPage inherits Rectangle {
             }
 
             Text {
-                text: root.models.length;
+                text: root.providers.length;
                 color: Theme.muted-text;
                 font-size: 12px;
                 vertical-alignment: center;
@@ -138,268 +146,183 @@ export component RoutingPage inherits Rectangle {
                 horizontal-stretch: 1;
             }
 
+            Rectangle {
+                width: 150px;
+                height: 36px;
+                background: Theme.inset;
+                border-radius: 9px;
+                Rectangle {
+                    x: root.direct-mode ? 77px : 3px;
+                    y: 3px;
+                    width: 70px;
+                    height: 30px;
+                    border-radius: 7px;
+                    background: Theme.brand-surface;
+                    animate x {
+                        duration: Theme.drawer-motion;
+                        easing: cubic-bezier(0.22, 1, 0.36, 1);
+                    }
+                }
+
+                HorizontalLayout {
+                    spacing: 0px;
+                    QuietButton {
+                        text: "聚合";
+                        ghost: true;
+                        clicked => { root.direct-mode = false; }
+                    }
+
+                    QuietButton {
+                        text: "直连";
+                        ghost: true;
+                        clicked => { root.direct-mode = true; }
+                    }
+                }
+            }
+
             QuietButton {
                 width: 58px;
                 text: "全部";
-                selected: !root.selected-only;
                 ghost: true;
+                selected: !root.selected-only;
                 clicked => { root.selected-only = false; }
             }
 
             QuietButton {
-                width: 58px;
-                text: "已选";
-                selected: root.selected-only;
+                width: 76px;
+                text: "已加入";
                 ghost: true;
+                selected: root.selected-only;
                 clicked => { root.selected-only = true; }
             }
 
-            QuietComboBox {
-                width: 155px;
-                model: root.model-provider-options;
-                current-index <=> root.model-provider-choice;
-                accessible-label: "添加模型的连接";
-                enabled: !root.busy && !root.config-managed && root.providers.length > 0;
-            }
-
             QuietButton {
-                width: 36px;
-                text: "添加模型";
-                icon-only: true;
+                width: 116px;
+                text: "添加连接";
+                primary: true;
                 icon: @image-url("../../assets/ui/plus.svg");
-                icon-color: Theme.primary-text;
-                enabled: !root.busy && !root.config-managed && root.providers.length > 0;
-                clicked => { root.add-selected-model(); }
+                icon-color: Theme.on-brand;
+                enabled: !root.busy && !root.config-managed;
+                clicked => { root.add-connection(); }
             }
         }
 
         Rectangle {
             vertical-stretch: 1;
             min-height: 140px;
-            border-width: 1px;
-            border-color: Theme.border;
-            border-radius: 11px;
-            background: Theme.panel;
-            clip: true;
-            animate background, border-color { duration: Theme.page-motion; }
             VerticalLayout {
-                spacing: 0px;
-                Rectangle {
+                spacing: 12px;
+                HorizontalLayout {
                     height: 36px;
-                    background: Theme.background;
-                    HorizontalLayout {
-                        padding-left: 14px;
-                        padding-right: 20px;
-                        spacing: 12px;
-                        QuietCheckBox {
-                            y: (parent.height - self.height) / 2;
-                            width: 64px;
-                            text: "全选";
-                            accessible-label: self.checked ? "取消全选可发布模型" : "全选可发布模型";
-                            auto-toggle: false;
-                            checked: root.selected-model-count > 0 && (root.selected-only || root.selected-model-count == root.selectable-model-count);
-                            indeterminate: !root.selected-only && root.selected-model-count > 0 && root.selected-model-count < root.selectable-model-count;
-                            enabled: !root.busy && !root.loading && !root.config-managed && (root.selected-only ? root.selected-model-count : root.selectable-model-count) > 0;
-                            toggled => { root.select-models(!self.checked, root.selected-only); }
-                        }
-
-                        Text {
-                            text: "模型 / 公开标识";
-                            color: Theme.muted-text;
-                            font-size: 11px;
-                            vertical-alignment: center;
-                        }
-
-                        Text {
-                            width: 146px;
-                            text: "连接";
-                            color: Theme.muted-text;
-                            font-size: 11px;
-                            vertical-alignment: center;
-                        }
-
-                        Text {
-                            width: 148px;
-                            text: "默认与设置";
-                            color: Theme.muted-text;
-                            font-size: 11px;
-                            vertical-alignment: center;
-                        }
-                    }
-                }
-
-                if root.models.length == 0: VerticalLayout {
-                    padding: 32px;
-                    spacing: 14px;
-                    alignment: center;
-                    Text {
-                        text: root.loading ? "正在读取模型…" : "把第一个模型放到手边。";
-                        color: Theme.primary-text;
-                        font-size: 19px;
-                        font-weight: 500;
-                        horizontal-alignment: center;
+                    spacing: 10px;
+                    QuietCheckBox {
+                        width: 110px;
+                        y: (parent.height - self.height) / 2;
+                        text: "全部加入";
+                        accessible-label: self.checked ? "移出全部可发布模型" : "加入全部可发布模型";
+                        auto-toggle: false;
+                        checked: root.selected-model-count > 0 && (root.selected-only || root.selected-model-count == root.selectable-model-count);
+                        indeterminate: !root.selected-only && root.selected-model-count > 0 && root.selected-model-count < root.selectable-model-count;
+                        enabled: !root.direct-mode && !root.busy && !root.loading && !root.config-managed && (root.selected-only ? root.selected-model-count : root.selectable-model-count) > 0;
+                        toggled => { root.select-models(!self.checked, root.selected-only); }
                     }
 
                     Text {
-                        text: "添加连接，再选择要在 Codex 中使用的模型。";
+                        text: root.direct-mode ? "选择一个 API 连接，预览后启用直连。" : "加入连接即可使用整组模型，展开后可以单独调整。";
                         color: Theme.muted-text;
-                        font-size: 13px;
-                        horizontal-alignment: center;
-                    }
-
-                    HorizontalLayout {
-                        Rectangle { }
-
-                        QuietButton {
-                            width: 140px;
-                            text: "添加连接";
-                            primary: true;
-                            clicked => { root.navigate(1); }
-                        }
-
-                        Rectangle { }
+                        font-size: 11px;
+                        vertical-alignment: center;
+                        overflow: elide;
                     }
                 }
-                if root.selected-only && root.selected-model-count == 0 && root.models.length > 0: Text {
-                    text: "还没有选择模型。切回“全部”开始选择。";
-                    color: Theme.muted-text;
-                    horizontal-alignment: center;
-                    vertical-alignment: center;
-                }
+
                 ScrollView {
                     vertical-stretch: 1;
                     content-y <=> root.model-scroll-y;
                     VerticalLayout {
-                        spacing: 0px;
-                        for model in root.models: model-row := Rectangle {
-                            // Rows from a batch addition glow once, then settle.
-                            property <bool> settled: false;
-                            property <float> glow: model.fresh && !self.settled ? 1 : 0;
-                            animate glow {
-                                duration: model-row.settled && Theme.page-motion > 0ms ? 1800ms : 0ms;
+                        spacing: 12px;
+                        if root.providers.length == 0: Rectangle {
+                            height: 200px;
+                            background: Theme.panel;
+                            border-width: 1px;
+                            border-color: Theme.border;
+                            border-radius: 12px;
+                            VerticalLayout {
+                                padding: 24px;
+                                spacing: 12px;
+                                alignment: center;
+                                Text {
+                                    text: root.loading ? "正在读取连接…" : "从一个连接开始。";
+                                    color: Theme.primary-text;
+                                    font-size: 20px;
+                                    horizontal-alignment: center;
+                                }
+
+                                Text {
+                                    text: "在连接中准备模型，再整组加入工作台。";
+                                    color: Theme.muted-text;
+                                    font-size: 13px;
+                                    horizontal-alignment: center;
+                                }
+
+                                HorizontalLayout {
+                                    Rectangle { }
+
+                                    QuietButton {
+                                        width: 140px;
+                                        text: "添加连接";
+                                        primary: true;
+                                        enabled: !root.loading && !root.busy && !root.config-managed;
+                                        clicked => { root.add-connection(); }
+                                    }
+
+                                    Rectangle { }
+                                }
+                            }
+                        }
+                        if root.selected-only && root.selected-model-count == 0 && root.providers.length > 0: Rectangle {
+                            height: 140px;
+                            VerticalLayout {
+                                alignment: center;
+                                spacing: 12px;
+                                Text {
+                                    text: "还没有加入连接";
+                                    color: Theme.primary-text;
+                                    font-size: 18px;
+                                    horizontal-alignment: center;
+                                }
+
+                                Text {
+                                    text: "切回“全部”，选择一个准备好的连接。";
+                                    color: Theme.muted-text;
+                                    font-size: 12px;
+                                    horizontal-alignment: center;
+                                }
+                            }
+                        }
+                        for provider[index] in root.providers: Rectangle {
+                            property <float> shown: !root.selected-only || provider.selected-model-count > 0 ? 1 : 0;
+                            animate shown {
+                                duration: Theme.page-motion;
                                 easing: ease-out;
                             }
-                            height: !root.selected-only || model.included ? 74px : 0px;
-                            visible: !root.selected-only || model.included;
-                            background: root.default-model == model.public-id ? Theme.brand-surface.with-alpha(0.45) : Theme.panel;
-                            animate background { duration: Theme.fast; }
-                            Timer {
-                                interval: 700ms;
-                                running: model.fresh && !model-row.settled;
-                                // Play once, even if the page is rebuilt before the next refresh.
-                                triggered => {
-                                    model-row.settled = true;
-                                    model.fresh = false;
-                                }
-                            }
-
-                            Rectangle {
-                                background: Theme.brand-surface;
-                                opacity: model-row.glow;
-                                accessible-role: none;
-                            }
-
-                            Rectangle {
-                                x: 0px;
-                                width: 3px;
-                                height: (parent.height - 26px) * model-row.glow;
-                                y: (parent.height - self.height) / 2;
-                                border-radius: 2px;
-                                background: Theme.brand;
-                                accessible-role: none;
-                            }
-
-                            Rectangle {
-                                y: parent.height - 1px;
-                                height: 1px;
-                                background: Theme.border;
-                            }
-
-                            HorizontalLayout {
-                                padding-left: 14px;
-                                padding-right: 12px;
-                                spacing: 10px;
-                                QuietCheckBox {
-                                    y: (parent.height - self.height) / 2;
-                                    width: 28px;
-                                    text: "";
-                                    accessible-label: "发布 " + model.display-name;
-                                    checked: model.included;
-                                    enabled: model.ready && !root.busy && !root.config-managed;
-                                    toggled => { root.select-model(model.public-id, self.checked); }
-                                }
-
-                                VerticalLayout {
-                                    alignment: center;
-                                    spacing: 5px;
-                                    Text {
-                                        text: model.display-name;
-                                        color: Theme.primary-text;
-                                        font-size: 14px;
-                                        font-weight: 500;
-                                        overflow: elide;
-                                    }
-
-                                    Text {
-                                        text: model.public-id;
-                                        color: Theme.muted-text;
-                                        font-size: 11px;
-                                        overflow: elide;
-                                    }
-                                }
-
-                                VerticalLayout {
-                                    width: 146px;
-                                    alignment: center;
-                                    spacing: 4px;
-                                    Text {
-                                        text: model.provider-name;
-                                        color: Theme.primary-text;
-                                        font-size: 12px;
-                                        overflow: elide;
-                                    }
-
-                                    Text {
-                                        text: model.ready ? (model.is-subscription ? "订阅账号" : "Responses API") : "待完善模型资料";
-                                        color: model.ready ? Theme.muted-text : Theme.warning;
-                                        font-size: 11px;
-                                        overflow: elide;
-                                    }
-                                }
-
-                                QuietButton {
-                                    y: (parent.height - self.height) / 2;
-                                    width: 66px;
-                                    text: root.default-model == model.public-id ? "✓ 默认" : "设默认";
-                                    selected: root.default-model == model.public-id;
-                                    ghost: true;
-                                    enabled: model.included && !root.busy && !root.config-managed;
-                                    clicked => { root.default-model = model.public-id; }
-                                }
-
-                                QuietButton {
-                                    y: (parent.height - self.height) / 2;
-                                    width: 36px;
-                                    text: "编辑 " + model.display-name;
-                                    icon-only: true;
-                                    ghost: true;
-                                    icon: @image-url("../../assets/ui/settings.svg");
-                                    icon-color: Theme.muted-text;
-                                    enabled: !root.busy && !root.config-managed;
-                                    clicked => { root.begin-model-editor(model.provider-id, model.saved ? model.public-id : ""); }
-                                }
-
-                                QuietButton {
-                                    y: (parent.height - self.height) / 2;
-                                    width: 36px;
-                                    text: "备用上游 · " + model.display-name;
-                                    icon-only: true;
-                                    ghost: true;
-                                    icon: @image-url("../../assets/ui/connections.svg");
-                                    icon-color: model.fallback-provider-id == "" ? Theme.muted-text : Theme.brand;
-                                    enabled: model.ready && !root.busy && !root.config-managed && !model.is-subscription;
-                                    clicked => { root.edit-fallback(model.public-id); }
-                                }
+                            height: card.height * self.shown;
+                            visible: self.shown > 0;
+                            opacity: self.shown;
+                            clip: true;
+                            card := WorkbenchConnection {
+                                provider: provider;
+                                order: index;
+                                busy: root.busy;
+                                managed: root.config-managed;
+                                direct-mode: root.direct-mode;
+                                default-model <=> root.default-model;
+                                select(selected) => { root.select-connection(provider.id, selected); }
+                                select-model(id, selected) => { root.select-model(id, selected); }
+                                models => { root.connection-models(provider.id); }
+                                edit-model(id) => { root.begin-model-editor(provider.id, id); }
+                                fallback(id) => { root.edit-fallback(id); }
+                                direct => { root.preview-direct(provider.id); }
                             }
                         }
                     }
@@ -413,14 +336,14 @@ export component RoutingPage inherits Rectangle {
             VerticalLayout {
                 spacing: 5px;
                 Text {
-                    text: root.config-managed ? (root.route-running ? "路由已启用" : root.direct-active ? "直连已启用" : "配置正在管理中") : "已选 " + root.selected-model-count + " 个模型";
+                    text: root.config-managed ? (root.route-running ? "路由已启用" : root.direct-active ? "直连已启用" : "配置正在管理中") : root.direct-mode ? "直连使用一个 API 连接" : "已选 " + root.selected-model-count + " 个模型";
                     color: Theme.primary-text;
                     font-size: 13px;
                     font-weight: 500;
                 }
 
                 Text {
-                    text: root.route-running ? "请用“启动 Codex”或 codex --no-daemon 新建会话。" : root.config-managed ? (root.direct-active ? "当前使用单一上游；恢复后可发布模型菜单。" : "恢复后可编辑模型与连接。") : "默认 · " + (root.default-model == "" ? "尚未选择" : root.default-model) + "，在新会话生效。";
+                    text: root.route-running ? "请用“启动 Codex”或 codex --no-daemon 新建会话。" : root.config-managed ? (root.direct-active ? "当前使用单一上游；恢复后可发布模型菜单。" : "恢复后可编辑模型与连接。") : root.direct-mode ? "点击连接卡片的“预览直连”，查看变更后启用。" : "默认 · " + (root.default-model == "" ? "尚未选择" : root.default-model-label) + "，在新会话生效。";
                     color: Theme.muted-text;
                     font-size: 11px;
                     overflow: elide;
@@ -436,11 +359,11 @@ export component RoutingPage inherits Rectangle {
             }
             QuietButton {
                 width: 154px;
-                text: root.busy ? "正在处理…" : root.route-running ? "启动 Codex" : root.direct-active ? "查看直连配置" : "预览并启用";
+                text: root.busy ? "正在处理…" : root.route-running ? "启动 Codex" : root.direct-active ? "查看直连配置" : root.direct-mode ? "选择连接预览直连" : "预览并启用";
                 icon: @image-url("../../assets/ui/arrow.svg");
                 icon-color: Theme.on-brand;
                 primary: true;
-                enabled: !root.busy && (root.route-running || root.direct-active || (!root.config-managed && !root.chatgpt-login-pending && root.selected-model-count > 0));
+                enabled: !root.busy && (root.route-running || root.direct-active || (!root.direct-mode && !root.config-managed && !root.chatgpt-login-pending && root.selected-model-count > 0));
                 clicked => { if (root.route-running) { root.launch-codex(); } else if (root.direct-active) { root.show-direct(); } else { root.inspect-route(); } }
             }
         }

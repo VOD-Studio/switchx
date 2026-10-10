@@ -1,4 +1,5 @@
 import { XaiEditor } from "editors/xai-editor.slint";
+import { ConnectionModels } from "editors/connection-models.slint";
 import { Palette } from "std-widgets.slint";
 import { QuietScrollView as ScrollView } from "scroll-view.slint";
 import { Theme } from "tokens.slint";
@@ -21,6 +22,7 @@ import {
     BatchModelRow,
     BatchSummary,
     RequestRow,
+    ConnectionModelRow,
 } from "view-models.slint";
 import { AccountsPage } from "pages/accounts.slint";
 import { ProviderEditor } from "editors/provider-editor.slint";
@@ -47,6 +49,7 @@ export {
     BatchModelRow,
     BatchSummary,
     RequestRow,
+    ConnectionModelRow,
 } from "view-models.slint";
 export { SyntaxHighlighting, CodeSpan } from "code-editor.slint";
 
@@ -99,6 +102,24 @@ export component AppWindow inherits Window {
     in-out property <[ProviderRow]> filtered-providers: [];
     in-out property <string> provider-query: "";
     in-out property <bool> connection-picker-open: false;
+    in-out property <bool> connection-models-open: false;
+    in-out property <string> connection-models-id;
+    in-out property <string> connection-models-name;
+    in-out property <bool> connection-models-subscription;
+    in-out property <[ConnectionModelRow]> connection-models;
+    in-out property <bool> connection-models-dirty: false;
+    in-out property <string> connection-models-message;
+    in-out property <int> connection-models-tone: 0;
+    changed connection-models-open => {
+        if root.connection-models-open { connection-drawer.focus(); }
+        else { root.reset-model-discovery(); }
+    }
+    callback begin-connection-models(string);
+    callback edit-connection(string);
+    callback add-connection-model();
+    callback append-discovered-models();
+    callback save-connection-models();
+    callback connection-model-edited();
     changed connection-picker-open => {
         if (root.connection-picker-open || root.editor-open || root.subscription-editor-open || root.xai-editor-open) { connection-drawer.focus(); }
     }
@@ -224,6 +245,9 @@ export component AppWindow inherits Window {
     in-out property <[RequestRow]> requests: [];
     in-out property <string> request-error: "";
     in-out property <int> selected-model-count: 0;
+    in-out property <int> selected-connection-count: 0;
+    in-out property <string> default-model-label;
+    callback update-default-model-label();
     in-out property <int> selectable-model-count: 0;
     in-out property <bool> config-managed: false;
     in-out property <bool> route-managed: false;
@@ -292,6 +316,7 @@ export component AppWindow inherits Window {
             root.editor-open = false;
             root.edit-key = "";
         }
+        if (root.active-page != 1) { root.connection-models-open = false; }
         if (root.active-page != 0) { root.model-editor-open = false; root.fallback-editor-open = false; }
     }
     changed subscription-editor-open => {
@@ -304,6 +329,7 @@ export component AppWindow inherits Window {
         if (root.subscription-editor-open && !root.config-editor-updating) { root.load-subscription-auth(); }
     }
     function close-connection-editor() {
+        root.connection-models-open = false;
         root.connection-picker-open = false;
         root.connection-preset-id = "";
         if (root.subscription-editor-open || root.subscription-editor-pending) { root.cancel-subscription-editor(); }
@@ -324,9 +350,10 @@ export component AppWindow inherits Window {
     }
     changed route-port => { root.route-preview-ready = false; }
     changed default-model => {
+        root.update-default-model-label();
         if root.default-model != root.route-preview-model { root.route-preview-ready = false; }
     }
-    function reset-model-discovery() {
+    public function reset-model-discovery() {
         root.discovery-generation += 1;
         root.fetched-models = [];
         root.fetching-models = false;
@@ -436,6 +463,7 @@ export component AppWindow inherits Window {
     callback lock-batch-rows();
     callback select-model(string, bool);
     callback select-models(bool, bool);
+    callback select-connection(string, bool);
     callback edit-fallback(string);
     callback save-fallback();
     callback inspect-route();
@@ -477,10 +505,10 @@ export component AppWindow inherits Window {
     in-out property <bool> command-open: false;
     property <bool> page-entered: true;
     property <bool> new-connection-form: (root.editor-open && root.edit-id == "") || (root.subscription-editor-open && root.subscription-id == "") || (root.xai-editor-open && root.xai-provider-id == "");
-    property <bool> modal-open: root.account-removing-id != "" || root.account-login-confirm-open || root.drawer-open || root.connection-picker-open || root.xai-editor-open || root.editor-open || root.subscription-editor-open || root.common-config-editor-open || root.icon-picker-open || root.model-editor-open || root.fallback-editor-open || root.publish-drawer-open || root.direct-drawer-open || root.delete-account-confirm || root.command-open;
+    property <bool> modal-open: root.account-removing-id != "" || root.account-login-confirm-open || root.drawer-open || root.connection-picker-open || root.connection-models-open || root.xai-editor-open || root.editor-open || root.subscription-editor-open || root.common-config-editor-open || root.icon-picker-open || root.model-editor-open || root.fallback-editor-open || root.publish-drawer-open || root.direct-drawer-open || root.delete-account-confirm || root.command-open;
     property <string> page-title: root.active-page == 0 ? "模型，随手可用。" : root.active-page == 1 ? "连接" : root.active-page == 3 ? "每次请求，有迹可循。" : root.active-page == 4 ? "让工作流更顺手。" : "让它适合你。";
     property <string> page-label: root.active-page == 0 ? "工作台" : root.active-page == 1 ? "连接" : root.active-page == 3 ? "活动" : root.active-page == 4 ? "工具箱" : "设置";
-    property <string> page-subtitle: root.active-page == 0 ? "把常用的模型放进 Codex，专注下一次创作。" : root.active-page == 1 ? "账号与上游，集中管理。" : root.active-page == 3 ? "查看模型、耗时与结果。" : root.active-page == 4 ? "MCP 与 Skills，独立于模型连接。" : "外观、工作空间和配置，各在其位。";
+    property <string> page-subtitle: root.active-page == 0 ? "配好连接，整组模型随手可用。" : root.active-page == 1 ? "账号与上游，集中管理。" : root.active-page == 3 ? "查看模型、耗时与结果。" : root.active-page == 4 ? "MCP 与 Skills，独立于模型连接。" : "外观、工作空间和配置，各在其位。";
     animate background { duration: Theme.page-motion; }
     Timer {
         interval: 16ms;
@@ -810,6 +838,8 @@ export component AppWindow inherits Window {
                                     providers: root.providers;
                                     models: root.models;
                                     selected-model-count: root.selected-model-count;
+                                    selected-connection-count: root.selected-connection-count;
+                                    default-model-label: root.default-model-label;
                                     selectable-model-count: root.selectable-model-count;
                                     config-managed: root.config-managed;
                                     route-managed: root.route-managed;
@@ -823,6 +853,10 @@ export component AppWindow inherits Window {
                                     model-provider-choice <=> root.model-provider-choice;
                                     model-scroll-y <=> root.model-scroll-y;
                                     add-selected-model() => { root.add-selected-model(); }
+                                    add-connection => { root.open-connection-picker(); }
+                                    select-connection(id, selected) => { root.select-connection(id, selected); }
+                                    connection-models(id) => { root.begin-connection-models(id); }
+                                    preview-direct(id) => { root.selected-provider-id = id; root.direct-drawer-open = true; root.inspect-direct(id, root.config-home); }
                                     begin-model-editor(provider-id, model-id) => { root.begin-model-editor(provider-id, model-id); }
                                     select-model(id, selected) => { root.select-model(id, selected); }
                                     select-models(selected, selected-only) => { root.select-models(selected, selected-only); }
@@ -978,7 +1012,7 @@ export component AppWindow inherits Window {
                                                     begin-subscription-editor(id) => { root.begin-subscription-editor(id); }
                                                     check-provider(id) => { root.check-provider(id); }
                                                     preview-direct(id) => { root.selected-provider-id = id; root.direct-drawer-open = true; root.inspect-direct(id, root.config-home); }
-                                                    begin-model-editor(provider-id, model-id) => { root.begin-model-editor(provider-id, model-id); }
+                                                    begin-model-editor(provider-id, model-id) => { root.begin-connection-models(provider-id); }
                                                 }
                                             }
                                             // Fading controls must not receive pointer input on the old page.
@@ -1174,10 +1208,10 @@ export component AppWindow inherits Window {
     }
 
     connection-drawer := Drawer {
-        open: (root.connection-picker-open || root.editor-open || root.subscription-editor-open || root.xai-editor-open) && !root.icon-picker-open && !root.common-config-editor-open;
-        title: root.connection-picker-open || root.new-connection-form ? "添加连接" : root.editor-open ? "API 连接" : root.subscription-editor-open ? "ChatGPT 订阅" : "Grok 订阅连接";
-        subtitle: root.connection-picker-open ? "选择订阅账号或 API 服务，继续配置连接。" : "保存连接后，在工作台预览并启用。";
-        panel-width: 760px;
+        open: (root.connection-picker-open || root.editor-open || root.subscription-editor-open || root.xai-editor-open || root.connection-models-open) && !root.icon-picker-open && !root.common-config-editor-open;
+        title: root.connection-models-open ? root.connection-models-name : root.connection-picker-open || root.new-connection-form ? "添加连接" : root.editor-open ? "API 连接" : root.subscription-editor-open ? "ChatGPT 订阅" : "Grok 订阅连接";
+        subtitle: root.connection-picker-open ? "选择订阅账号或 API 服务，继续配置连接。" : "连接设置与模型目录分别保存，完成后在工作台启用。";
+        panel-width: 820px;
         busy: root.busy;
         error-message: root.error-code == "" ? "" : root.error-message + " · " + root.error-action;
         dismissed => { root.close-connection-editor(); }
@@ -1211,6 +1245,66 @@ export component AppWindow inherits Window {
                     vertical-alignment: center;
                     overflow: elide;
                 }
+            }
+            if !root.connection-picker-open && !root.new-connection-form: editor-tabs := Rectangle {
+                height: 44px;
+                border-radius: 10px;
+                background: Theme.inset;
+                property <string> connection-id: root.connection-models-open ? root.connection-models-id : root.editor-open ? root.edit-id : root.subscription-editor-open ? root.subscription-id : root.xai-provider-id;
+                Rectangle {
+                    x: root.connection-models-open ? parent.width / 2 + 3px : 4px;
+                    y: 4px;
+                    width: parent.width / 2 - 7px;
+                    height: 36px;
+                    border-radius: 8px;
+                    background: Theme.brand-surface;
+                    animate x {
+                        duration: Theme.drawer-motion;
+                        easing: cubic-bezier(0.22, 1, 0.36, 1);
+                    }
+                }
+
+                HorizontalLayout {
+                    padding: 4px;
+                    spacing: 6px;
+                    QuietButton {
+                        text: "连接设置";
+                        ghost: true;
+                        enabled: !root.busy;
+                        clicked => { if root.connection-models-open { root.edit-connection(editor-tabs.connection-id); } }
+                    }
+
+                    QuietButton {
+                        text: "模型目录";
+                        ghost: true;
+                        enabled: !root.busy && !root.config-managed;
+                        clicked => { if !root.connection-models-open { root.begin-connection-models(editor-tabs.connection-id); } }
+                    }
+                }
+            }
+            if root.connection-models-open: ConnectionModels {
+                busy: root.busy;
+                managed: root.config-managed;
+                subscription: root.connection-models-subscription;
+                dirty: root.connection-models-dirty;
+                rows <=> root.connection-models;
+                message: root.connection-models-message;
+                message-tone: root.connection-models-tone;
+                fetching: root.fetching-models && root.discovery-scope == 2;
+                discovery-message: root.discovery-scope == 2 ? root.discovery-message : "";
+                discovery-tone: root.discovery-tone;
+                candidates: root.batch-models;
+                summary: root.batch-summary;
+                query <=> root.batch-query;
+                fetch => { root.fetch-models(2); }
+                add => { root.add-connection-model(); }
+                edited => { root.connection-model-edited(); }
+                toggle(index) => { root.batch-toggle(index); }
+                select-all(checked) => { root.batch-select-all(checked); }
+                filter(query) => { root.batch-filter(query); }
+                append => { root.append-discovered-models(); }
+                save => { root.save-connection-models(); }
+                cancel => { root.connection-models-open = false; }
             }
             if root.editor-open: ScrollView {
                 VerticalLayout {

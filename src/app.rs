@@ -8,7 +8,7 @@ use crate::{
     credentials::Secret,
     direct::validate_provider,
     provider_config::{self, CodexOptions},
-    storage::{ModelRecord, ProviderRecord, RequestStatus, Store},
+    storage::{ModelRecord, ProviderKind, ProviderRecord, RequestStatus, Store},
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -776,7 +776,11 @@ fn save_provider_inner(
         icon_id,
     };
     let models = store.models().map_err(|_| "无法读取模型资料")?;
-    let mut defaults = new_preset_models(&record, &models)?;
+    let mut defaults = if old.is_none() {
+        new_preset_models(&record, &models)?
+    } else {
+        Vec::new()
+    };
     let picked = picked_models(&record, &models, &defaults, picked)?;
     defaults.extend(picked);
     let options = options
@@ -1224,6 +1228,115 @@ pub(crate) fn save_mappings_from(
         .add_models(&records)
         .map_err(|_| "无法保存模型映射；原资料未修改")?;
     Ok(records.into_iter().map(|model| model.public_id).collect())
+}
+
+/// Editable directory fields; credentials and publication selection are never
+/// accepted from the editor. Existing public IDs and selection survive edits.
+#[derive(Debug, Clone)]
+pub struct ConnectionModel {
+    pub public_id: String,
+    pub display_name: String,
+    pub upstream_model: String,
+    pub context_window: String,
+    pub reasoning_levels: String,
+}
+
+pub fn save_connection_models(
+    data_dir: &Path,
+    provider_id: &str,
+    expected: &[ModelRecord],
+    drafts: &[ConnectionModel],
+    templates: &[serde_json::Value],
+) -> Result<(), String> {
+    ensure_editable(data_dir)?;
+    let store = open_store(data_dir).map_err(|error| error.message())?;
+    let provider = store
+        .provider(provider_id)
+        .map_err(|_| "无法读取连接")?
+        .ok_or("连接不存在")?;
+    let all = store.models().map_err(|_| "无法读取模型目录")?;
+    let mut records: Vec<ModelRecord> = Vec::new();
+    for draft in drafts {
+        let model_id = draft.upstream_model.trim();
+        let name = draft.display_name.trim();
+        validate_provider(&provider.name, &provider.base_url, model_id)?;
+        if name.is_empty() || name.chars().count() > 160 || name.chars().any(char::is_control) {
+            return Err("模型显示名须为 1–160 个字符，且不能包含控制字符".into());
+        }
+        let old = if draft.public_id.is_empty() {
+            None
+        } else {
+            Some(
+                expected
+                    .iter()
+                    .find(|model| {
+                        model.public_id == draft.public_id && model.provider_id == provider_id
+                    })
+                    .ok_or("模型目录已变化，请关闭后重新打开")?,
+            )
+        };
+        if records.iter().any(|model| {
+            model.upstream_model == model_id
+                || (!draft.public_id.is_empty() && model.public_id == draft.public_id)
+        }) {
+            return Err(format!("{model_id} 重复，请为每个实际模型保留一个条目"));
+        }
+        let source = if let Some(old) = old.filter(|model| model.upstream_model == model_id) {
+            Some(serde_json::from_str(&old.metadata).map_err(|_| "已保存的模型资料损坏")?)
+        } else {
+            model_template(&provider, model_id, templates)?
+        };
+        if provider.kind == ProviderKind::Chatgpt && source.is_none() {
+            return Err(format!("官方目录没有 {model_id}，请获取模型列表后选择"));
+        }
+        let allowed = catalog::reasoning_levels(&draft.reasoning_levels)?;
+        let default = source
+            .as_ref()
+            .and_then(|metadata| metadata["default_reasoning_level"].as_str())
+            .filter(|level| allowed.contains(level))
+            .unwrap_or("")
+            .to_owned();
+        let metadata = catalog::mapping_metadata(
+            model_id,
+            name,
+            &catalog::MappingSettings {
+                context_window: &draft.context_window,
+                reasoning_levels: Some(&draft.reasoning_levels),
+                default_reasoning: Some(&default),
+            },
+            source,
+        )
+        .map_err(|error| format!("{model_id}：{error}"))?;
+        let mut record = ModelRecord {
+            provider_id: provider_id.into(),
+            public_id: match old {
+                Some(model) => model.public_id.clone(),
+                None => format!("sx-{}", new_id()?),
+            },
+            display_name: name.into(),
+            upstream_model: model_id.into(),
+            metadata: metadata.to_string(),
+            enabled: true,
+            fallback_provider_id: None,
+        };
+        catalog::publish_saved(std::slice::from_ref(&record))?;
+        record.enabled = old.is_some_and(|model| model.enabled);
+        record.fallback_provider_id = old
+            .filter(|model| model.upstream_model == model_id)
+            .and_then(|model| model.fallback_provider_id.clone());
+        records.push(record);
+    }
+    let updated: Vec<_> = all
+        .into_iter()
+        .filter(|model| model.provider_id != provider_id)
+        .chain(records.clone())
+        .collect();
+    for model in &updated {
+        catalog::validate_fallback(model, &updated)?;
+    }
+    store
+        .replace_provider_models(provider_id, expected, &records)
+        .map_err(|_| "模型目录在编辑期间已变化，或保存失败；原目录未修改，请重新打开后重试".into())
 }
 
 pub fn select_model(data_dir: &Path, public_id: &str, enabled: bool) -> Result<(), String> {

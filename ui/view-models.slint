@@ -1,3 +1,24 @@
+export struct ModelRow {
+    provider-id: string,
+    provider-name: string,
+    upstream-model: string,
+    public-id: string,
+    display-name: string,
+    detail: string,
+    context-window: string,
+    reasoning-levels: string,
+    default-reasoning: string,
+    saved: bool,
+    ready: bool,
+    included: bool,
+    fallback-provider-id: string,
+    fallback-label: string,
+    binding-label: string,
+    is-subscription: bool,
+    // Set only in the snapshot right after a batch addition, to play its arrival.
+    fresh: bool,
+}
+
 export struct ProviderRow {
     id: string,
     name: string,
@@ -19,6 +40,19 @@ export struct ProviderRow {
     icon-id: string,
     icon: image,
     monochrome: bool,
+    model-count: int,
+    ready-model-count: int,
+    selected-model-count: int,
+    models: [ModelRow],
+}
+
+export struct ConnectionModelRow {
+    public-id: string,
+    display-name: string,
+    upstream-model: string,
+    context-window: string,
+    reasoning-levels: string,
+    removing: bool,
 }
 
 export struct ProviderPresetRow {
@@ -79,26 +113,6 @@ export struct AccountRow {
     codex-quota: CodexQuotaRow,
 }
 
-export struct ModelRow {
-    provider-id: string,
-    provider-name: string,
-    upstream-model: string,
-    public-id: string,
-    display-name: string,
-    detail: string,
-    context-window: string,
-    reasoning-levels: string,
-    default-reasoning: string,
-    saved: bool,
-    ready: bool,
-    included: bool,
-    fallback-provider-id: string,
-    fallback-label: string,
-    binding-label: string,
-    is-subscription: bool,
-    // Set only in the snapshot right after a batch addition, to play its arrival.
-    fresh: bool,
-}
 
 // A discovered upstream model in the batch picker. Empty `context` and `levels`
 // inherit the template values (when `source` is set), then the shared values.

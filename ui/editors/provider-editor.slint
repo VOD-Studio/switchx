@@ -369,7 +369,7 @@ export component ProviderEditor inherits SurfaceCard {
         HorizontalLayout {
             spacing: 8px;
             QuietButton {
-                text: "保存";
+                text: root.edit-id == "" ? "保存并配置模型" : "保存连接";
                 primary: true;
                 enabled: !root.busy && root.edit-config-error == "";
                 clicked => {

@@ -204,9 +204,9 @@ export component ProviderCard inherits Rectangle {
                     }
 
                     QuietButton {
-                        width: 78px;
+                        width: 96px;
                         height: 32px;
-                        text: "模型";
+                        text: "模型 · " + root.provider.model-count;
                         icon: @image-url("../../assets/ui/blocks.svg");
                         icon-width: 14px;
                         icon-height: 14px;
