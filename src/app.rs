@@ -640,7 +640,7 @@ pub fn save_provider(
     model_id: &str,
     key: String,
 ) -> Result<(), String> {
-    save_provider_inner(data_dir, id, name, base_url, model_id, key, None, None)
+    save_provider_inner(data_dir, id, name, base_url, model_id, key, None, None, &[]).map(drop)
 }
 
 pub fn save_provider_with_codex_options(
@@ -669,6 +669,34 @@ pub fn save_provider_with_codex_options_and_icon(
     options: &CodexOptions,
     icon_id: Option<&str>,
 ) -> Result<(), String> {
+    save_provider_with_mappings(
+        data_dir,
+        id,
+        name,
+        base_url,
+        model_id,
+        key,
+        options,
+        icon_id,
+        &[],
+    )
+    .map(drop)
+}
+
+/// Also adds mappings for models picked from discovery in the same transaction.
+/// Returns the public IDs of every mapping this save created, presets included.
+#[allow(clippy::too_many_arguments)]
+pub fn save_provider_with_mappings(
+    data_dir: &Path,
+    id: Option<&str>,
+    name: &str,
+    base_url: &str,
+    model_id: &str,
+    key: String,
+    options: &CodexOptions,
+    icon_id: Option<&str>,
+    picked: &[String],
+) -> Result<Vec<String>, String> {
     options.validate()?;
     save_provider_inner(
         data_dir,
@@ -679,6 +707,7 @@ pub fn save_provider_with_codex_options_and_icon(
         key,
         Some(options),
         icon_id,
+        picked,
     )
 }
 
@@ -705,7 +734,8 @@ fn save_provider_inner(
     key: String,
     options: Option<&CodexOptions>,
     icon_id: Option<&str>,
-) -> Result<(), String> {
+    picked: &[String],
+) -> Result<Vec<String>, String> {
     ensure_editable(data_dir)?;
     let url = validate_provider(name, base_url, model_id)?;
     let store = open_store(data_dir).map_err(|error| error.message())?;
@@ -746,7 +776,9 @@ fn save_provider_inner(
         icon_id,
     };
     let models = store.models().map_err(|_| "无法读取模型资料")?;
-    let defaults = new_preset_models(&record, &models)?;
+    let mut defaults = new_preset_models(&record, &models)?;
+    let picked = picked_models(&record, &models, &defaults, picked)?;
+    defaults.extend(picked);
     let options = options
         .map(serde_json::to_string)
         .transpose()
@@ -767,7 +799,54 @@ fn save_provider_inner(
             "无法保存上游资料与 API Key；原资料未修改"
         }
     })?;
-    Ok(())
+    Ok(defaults.into_iter().map(|model| model.public_id).collect())
+}
+
+// Mappings for models picked in the upstream form, beside any preset models.
+// As with presets, only a new upstream's default model joins the selection.
+fn picked_models(
+    provider: &ProviderRecord,
+    existing: &[ModelRecord],
+    presets: &[ModelRecord],
+    picked: &[String],
+) -> Result<Vec<ModelRecord>, String> {
+    let selected = existing
+        .iter()
+        .any(|model| model.provider_id == provider.id)
+        || presets.iter().any(|model| model.enabled);
+    let mut added: Vec<ModelRecord> = Vec::new();
+    for model_id in picked {
+        if existing
+            .iter()
+            .chain(presets)
+            .chain(&added)
+            .any(|model| model.provider_id == provider.id && &model.upstream_model == model_id)
+        {
+            continue;
+        }
+        let display_name = format!("{model_id}/{}", provider.name);
+        let metadata = catalog::mapping_metadata(
+            model_id,
+            &display_name,
+            &catalog::MappingSettings {
+                context_window: "",
+                reasoning_levels: None,
+                default_reasoning: None,
+            },
+            None,
+        )
+        .map_err(|error| format!("{model_id}：{error}"))?;
+        added.push(ModelRecord {
+            provider_id: provider.id.clone(),
+            public_id: format!("sx-{}", new_id()?),
+            display_name,
+            upstream_model: model_id.clone(),
+            metadata: metadata.to_string(),
+            enabled: !selected && model_id == &provider.model_id,
+            fallback_provider_id: None,
+        });
+    }
+    Ok(added)
 }
 
 pub fn delete_provider(data_dir: &Path, id: &str) -> Result<(), String> {
@@ -983,13 +1062,39 @@ pub fn batch_candidates(
         .map_err(|_| "无法读取上游资料")?
         .ok_or("上游不存在")?;
     let models = store.models().map_err(|_| "无法读取模型资料")?;
+    candidates_for(&provider, &models, model_ids, templates)
+}
+
+/// Candidates for an API upstream that is still being created; preset models
+/// carry their source, and none is added yet.
+pub fn draft_candidates(base_url: &str, model_ids: &[String]) -> Vec<BatchCandidate> {
+    let provider = ProviderRecord {
+        kind: crate::storage::ProviderKind::ApiKey,
+        account_binding: None,
+        id: String::new(),
+        name: String::new(),
+        base_url: base_url.into(),
+        model_id: String::new(),
+        credential_ref: None,
+        icon_id: None,
+    };
+    // Preset templates are static and valid, so this cannot fail.
+    candidates_for(&provider, &[], model_ids, &[]).unwrap_or_default()
+}
+
+fn candidates_for(
+    provider: &ProviderRecord,
+    models: &[ModelRecord],
+    model_ids: &[String],
+    templates: &[serde_json::Value],
+) -> Result<Vec<BatchCandidate>, String> {
     let chatgpt = provider.kind == crate::storage::ProviderKind::Chatgpt;
     let mut seen = std::collections::HashSet::new();
     model_ids
         .iter()
         .filter(|id| seen.insert(id.as_str()))
         .map(|id| {
-            let template = model_template(&provider, id, templates)?;
+            let template = model_template(provider, id, templates)?;
             Ok(BatchCandidate {
                 model_id: id.clone(),
                 added: models
@@ -1987,6 +2092,84 @@ mod tests {
         }];
         assert!(save_mappings(&path, &shared(&blocked)).is_err());
         assert_eq!(store.models().unwrap().len(), 4);
+        drop(store);
+        fs::remove_dir_all(path).unwrap();
+    }
+
+    #[test]
+    fn picked_models_are_saved_with_a_new_upstream_in_one_transaction() {
+        let path = env::temp_dir().join(format!("switchx-picked-models-{}", new_id().unwrap()));
+        let options = CodexOptions::default();
+        let save = |id: Option<&str>, model_id: &str, picked: &[&str]| {
+            save_provider_with_mappings(
+                &path,
+                id,
+                "DeepSeek",
+                "https://api.deepseek.com",
+                model_id,
+                if id.is_some() {
+                    String::new()
+                } else {
+                    "synthetic-key".into()
+                },
+                &options,
+                None,
+                &picked.iter().map(|id| id.to_string()).collect::<Vec<_>>(),
+            )
+        };
+        assert!(save(None, "custom-chat", &["custom-chat", "bad id"]).is_err());
+        assert!(open_store(&path).unwrap().providers().unwrap().is_empty());
+
+        let created = save(
+            None,
+            "custom-chat",
+            &[
+                "deepseek-flash",
+                "custom-chat",
+                "custom-coder",
+                "custom-chat",
+            ],
+        )
+        .unwrap();
+        let store = open_store(&path).unwrap();
+        let models = store.models().unwrap();
+        assert_eq!(created.len(), 4, "two presets and two picked models");
+        assert_eq!(models.len(), 4);
+        let model = |upstream: &str| {
+            models
+                .iter()
+                .find(|model| model.upstream_model == upstream)
+                .unwrap()
+        };
+        let preset: serde_json::Value =
+            serde_json::from_str(&model("deepseek-flash").metadata).unwrap();
+        assert_eq!(
+            preset["context_window"], 1_048_576,
+            "presets keep their parameters"
+        );
+        assert!(
+            model("custom-chat").enabled,
+            "the picked default joins the selection"
+        );
+        assert!(!model("custom-coder").enabled && !model("deepseek-flash").enabled);
+        assert_eq!(model("custom-coder").display_name, "custom-coder/DeepSeek");
+        let picked: serde_json::Value =
+            serde_json::from_str(&model("custom-coder").metadata).unwrap();
+        assert_eq!(picked["context_window"], 128_000);
+
+        // Saving again keeps every mapping and adds only new picks, unselected.
+        let id = store.providers().unwrap()[0].id.clone();
+        let created = save(Some(&id), "custom-chat", &["custom-coder", "custom-vision"]).unwrap();
+        assert_eq!(created.len(), 1);
+        let models = store.models().unwrap();
+        assert_eq!(models.len(), 5);
+        assert!(
+            !models
+                .iter()
+                .find(|model| model.upstream_model == "custom-vision")
+                .unwrap()
+                .enabled
+        );
         drop(store);
         fs::remove_dir_all(path).unwrap();
     }

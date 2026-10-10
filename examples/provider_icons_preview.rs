@@ -249,6 +249,43 @@ fn render_batch_models(
                 model.fresh = false;
                 models.set_row_data(index, model);
             }
+
+            // A new upstream can tick discovered models; ★ marks its default.
+            app.set_active_page(1);
+            app.set_edit_id("".into());
+            app.set_edit_name("合成 API 连接".into());
+            app.set_edit_url("https://example.invalid/v1".into());
+            app.set_edit_model("synthetic-coder-pro".into());
+            app.set_edit_config_preview("model = \"synthetic-coder-pro\"\n".into());
+            app.set_editor_open(true);
+            render(window);
+            app.set_discovery_scope(0);
+            app.set_discovery_tone(1);
+            app.set_discovery_message("已获取 8 个模型".into());
+            let mut rows = batch_rows("");
+            for row in &mut rows {
+                row.checked = row.id == "synthetic-coder-pro" || row.id == "synthetic-chat-mini";
+                row.added = false;
+            }
+            rows[0].checked = true;
+            show(rows);
+            snapshot(window, output, &format!("provider-picker-{suffix}"))?;
+            app.set_batch_query("chat".into());
+            show(
+                batch_rows("chat")
+                    .into_iter()
+                    .map(|row| BatchModelRow {
+                        checked: row.id == "synthetic-coder-pro" || row.id == "synthetic-chat-mini",
+                        added: false,
+                        ..row
+                    })
+                    .collect(),
+            );
+            snapshot(window, output, &format!("provider-picker-search-{suffix}"))?;
+            app.set_batch_query("".into());
+            app.set_editor_open(false);
+            app.set_active_page(0);
+            render(window);
         }
     }
 

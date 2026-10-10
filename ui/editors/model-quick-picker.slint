@@ -1,0 +1,383 @@
+import { Theme } from "../tokens.slint";
+import { QuietCheckBox, QuietLineEdit } from "../components.slint";
+import { QuietScrollView } from "../scroll-view.slint";
+import { BatchModelRow, BatchSummary } from "../view-models.slint";
+
+component QuickTag inherits Rectangle {
+    in property <string> text;
+    in property <color> ink: Theme.brand;
+    in property <color> fill: Theme.brand-surface;
+    height: 18px;
+    width: label.preferred-width + 14px;
+    horizontal-stretch: 0;
+    border-radius: 9px;
+    background: root.fill;
+    label := Text {
+        text: root.text;
+        color: root.ink;
+        font-size: 10px;
+        font-weight: 500;
+        horizontal-alignment: center;
+        vertical-alignment: center;
+    }
+}
+
+component QuickRow inherits Rectangle {
+    in property <BatchModelRow> item;
+    in property <int> index;
+    // Shared entrance clock, 0 → 1 once per new list.
+    in property <float> clock;
+    in property <bool> is-default;
+    in property <bool> enabled;
+    callback toggle();
+    callback make-default();
+
+    private property <bool> motion: Theme.animations-enabled && !Theme.system-reduced-motion;
+    private property <bool> selectable: root.item.supported && !root.item.added;
+    // Preset models are always saved and the default stays checked.
+    private property <bool> locked: root.item.checked && (root.item.source != "" || root.is-default);
+    private property <bool> active: root.selectable && root.item.checked;
+    private property <length> line-height: 42px;
+
+    private property <float> arrive: root.motion ? clamp((root.clock * 900 - min(root.index, 10) * 24) / 360, 0, 1) : 1;
+    private property <float> landed: 1 - (1 - root.arrive) * (1 - root.arrive) * (1 - root.arrive);
+    private property <float> shown: root.item.matched ? 1 : 0;
+    animate shown {
+        duration: Theme.page-motion;
+        easing: cubic-bezier(0.22, 1, 0.36, 1);
+    }
+    private property <float> picked: root.active ? 1 : 0;
+    animate picked {
+        duration: Theme.page-motion;
+        easing: cubic-bezier(0.34, 1.3, 0.64, 1);
+    }
+    // The star swells past full size and turns one point as it becomes default.
+    private property <float> crowned: root.is-default ? 1 : 0;
+    animate crowned {
+        duration: Theme.page-motion > 0ms ? 460ms : 0ms;
+        easing: ease-out-back;
+    }
+
+    height: root.line-height * root.shown;
+    visible: root.shown > 0.01;
+    clip: true;
+    accessible-role: list-item;
+    accessible-label: root.item.id;
+    accessible-value: root.is-default ? "默认模型" : root.item.checked ? "将添加" : "";
+
+    Rectangle {
+        y: (1 - root.landed) * 10px;
+        height: root.line-height;
+        opacity: root.landed;
+
+        Rectangle {
+            background: Theme.raised;
+            opacity: row-touch.has-hover && root.selectable && root.enabled && !root.locked ? 0.65 : 0;
+            animate opacity { duration: Theme.fast; }
+            accessible-role: none;
+        }
+
+        Rectangle {
+            opacity: min(1, root.picked) * (root.is-default ? 1 : 0.7);
+            background: @linear-gradient(90deg, Theme.brand-surface 0%, Theme.brand-surface.with-alpha(Theme.dark ? 0.25 : 0.35) 100%);
+            animate opacity { duration: Theme.fast; }
+            accessible-role: none;
+        }
+
+        Rectangle {
+            x: 0px;
+            width: 3px;
+            height: max(0px, (root.line-height - 18px) * root.picked);
+            y: (root.line-height - self.height) / 2;
+            border-radius: 2px;
+            background: Theme.brand;
+            accessible-role: none;
+        }
+
+        Rectangle {
+            y: parent.height - 1px;
+            height: 1px;
+            background: Theme.border;
+            accessible-role: none;
+        }
+
+        row-touch := TouchArea {
+            enabled: root.selectable && root.enabled && !root.locked;
+            mouse-cursor: pointer;
+            clicked => { root.toggle(); }
+        }
+
+        HorizontalLayout {
+            padding-left: 12px;
+            padding-right: 8px;
+            spacing: 8px;
+            QuietCheckBox {
+                y: (parent.height - self.height) / 2;
+                width: 26px;
+                text: "";
+                accessible-label: "添加 " + root.item.id;
+                auto-toggle: false;
+                checked: root.item.checked;
+                enabled: root.selectable && root.enabled && !root.locked;
+                toggled => { root.toggle(); }
+            }
+
+            Text {
+                text: root.item.id;
+                color: root.item.supported ? Theme.primary-text : Theme.muted-text;
+                font-size: 12px;
+                font-weight: root.is-default ? 600 : 400;
+                vertical-alignment: center;
+                overflow: elide;
+                horizontal-stretch: 1;
+                min-width: 0px;
+            }
+
+            if root.item.source != "": VerticalLayout {
+                alignment: center;
+                QuickTag {
+                    text: "预置";
+                }
+            }
+            if !root.item.supported: VerticalLayout {
+                alignment: center;
+                QuickTag {
+                    text: "ID 不受支持";
+                    ink: Theme.warning;
+                    fill: Theme.warning-surface;
+                }
+            }
+            if root.item.supported: Rectangle {
+                y: (parent.height - self.height) / 2;
+                width: 28px + 34px * clamp(root.crowned, 0, 1);
+                height: 26px;
+                horizontal-stretch: 0;
+                border-radius: 13px;
+                background: root.is-default ? Theme.brand-surface : star-touch.has-hover && root.enabled ? Theme.raised : transparent;
+                clip: true;
+                animate background { duration: Theme.fast; }
+                accessible-role: button;
+                accessible-label: root.is-default ? root.item.id + " 是默认模型" : "设 " + root.item.id + " 为默认模型";
+                accessible-action-default => { if (root.enabled && !root.is-default) { root.make-default(); } }
+                Image {
+                    x: 7px;
+                    y: (parent.height - self.height) / 2;
+                    width: 14px;
+                    height: 14px;
+                    source: root.is-default ? @image-url("../../assets/ui/star-fill.svg") : @image-url("../../assets/ui/star.svg");
+                    colorize: root.is-default ? Theme.brand : star-touch.has-hover ? Theme.primary-text : Theme.muted-text;
+                    transform-scale: 1 + 0.25 * sin(clamp(root.crowned, 0, 1) * 180deg);
+                    transform-rotation: root.crowned * 72deg;
+                    animate colorize { duration: Theme.fast; }
+                    accessible-role: none;
+                }
+
+                Text {
+                    x: 26px;
+                    text: "默认";
+                    color: Theme.brand;
+                    font-size: 11px;
+                    font-weight: 600;
+                    vertical-alignment: center;
+                    opacity: clamp(root.crowned, 0, 1);
+                    accessible-role: none;
+                }
+
+                star-touch := TouchArea {
+                    enabled: root.enabled && !root.is-default;
+                    mouse-cursor: pointer;
+                    clicked => { root.make-default(); }
+                }
+            }
+        }
+    }
+}
+
+// Tick discovered models to save as mappings together with a new upstream.
+// The card unfolds when a list arrives and folds away when it is cleared.
+export component ModelQuickPicker inherits Rectangle {
+    in property <[BatchModelRow]> rows;
+    in property <BatchSummary> summary;
+    in property <string> default-id;
+    in property <bool> enabled: true;
+    in-out property <string> query;
+    callback toggle(int);
+    callback select-all(bool);
+    callback filter(string);
+    callback make-default(string);
+
+    private property <bool> motion: Theme.animations-enabled && !Theme.system-reduced-motion;
+    private property <bool> active: root.rows.length > 0;
+    private property <float> reveal: root.active ? 1 : 0;
+    animate reveal {
+        duration: Theme.page-motion;
+        easing: cubic-bezier(0.22, 1, 0.36, 1);
+    }
+    // Up to five rows show at once; the list eases as the search narrows it.
+    private property <length> list-height: max(1, min(root.summary.matched, 5)) * 42px;
+    animate list-height {
+        duration: Theme.page-motion;
+        easing: cubic-bezier(0.22, 1, 0.36, 1);
+    }
+    private property <length> card-height: 45px + root.list-height;
+    private property <length> content-height: 8px + root.card-height + 6px + hint.preferred-height;
+
+    private property <bool> revealed: false;
+    private property <float> clock: root.revealed ? 1 : 0;
+    animate clock { duration: root.revealed && root.motion ? 900ms : 0ms; }
+    changed rows => { root.revealed = false; }
+    Timer {
+        interval: 16ms;
+        running: !root.revealed && root.active;
+        triggered => { root.revealed = true; }
+    }
+
+    private property <int> selected: root.summary.selected;
+    private property <bool> popping: false;
+    private property <float> pop: root.popping ? 1.18 : 1;
+    animate pop {
+        duration: root.popping ? 90ms : 460ms;
+        easing: root.popping ? ease-out : ease-out-back;
+    }
+    changed selected => {
+        if (root.motion) {
+            root.popping = true;
+        }
+    }
+    Timer {
+        interval: 90ms;
+        running: root.popping;
+        triggered => { root.popping = false; }
+    }
+
+    height: root.content-height * root.reveal;
+    preferred-height: root.height;
+    vertical-stretch: 0;
+    visible: root.reveal > 0;
+    clip: true;
+
+    Rectangle {
+        y: 8px - (1 - root.reveal) * 10px;
+        height: root.card-height;
+        opacity: root.reveal;
+        border-radius: 12px;
+        border-width: 1px;
+        border-color: Theme.border;
+        background: Theme.panel;
+        clip: true;
+        animate background, border-color { duration: Theme.page-motion; }
+
+        VerticalLayout {
+            Rectangle {
+                height: 44px;
+                background: Theme.background;
+                animate background { duration: Theme.page-motion; }
+                HorizontalLayout {
+                    padding-left: 12px;
+                    padding-right: 8px;
+                    spacing: 8px;
+                    QuietCheckBox {
+                        y: (parent.height - self.height) / 2;
+                        width: 26px;
+                        text: "";
+                        auto-toggle: false;
+                        checked: root.summary.visible-selectable > 0 && root.summary.visible-selected == root.summary.visible-selectable;
+                        indeterminate: root.summary.visible-selected > 0 && root.summary.visible-selected < root.summary.visible-selectable;
+                        enabled: root.enabled && root.summary.visible-selectable > 0;
+                        accessible-label: self.checked ? "取消全选要添加的模型" : "全选要添加的模型";
+                        toggled => { root.select-all(!self.checked); }
+                    }
+
+                    Text {
+                        text: "同时添加为模型映射";
+                        color: Theme.primary-text;
+                        font-size: 12px;
+                        font-weight: 600;
+                        vertical-alignment: center;
+                        overflow: elide;
+                        horizontal-stretch: 1;
+                        min-width: 0px;
+                    }
+
+                    QuietLineEdit {
+                        y: (parent.height - self.height) / 2;
+                        width: 150px;
+                        height: 30px;
+                        horizontal-stretch: 0;
+                        icon: @image-url("../../assets/ui/search.svg");
+                        font-size: 12px;
+                        text <=> root.query;
+                        placeholder-text: "搜索 " + root.summary.total + " 个";
+                        accessible-label: "搜索要添加的模型";
+                        enabled: root.enabled;
+                        edited(text) => { root.filter(text); }
+                    }
+
+                    VerticalLayout {
+                        alignment: center;
+                        Rectangle {
+                            height: 24px;
+                            width: count.preferred-width + 20px;
+                            border-radius: 12px;
+                            background: root.selected > 0 ? Theme.brand : Theme.raised;
+                            transform-scale: root.pop;
+                            animate background { duration: Theme.fast; }
+                            count := Text {
+                                text: "添加 " + root.selected;
+                                color: root.selected > 0 ? Theme.on-brand : Theme.muted-text;
+                                font-size: 11px;
+                                font-weight: 600;
+                                horizontal-alignment: center;
+                                vertical-alignment: center;
+                                animate color { duration: Theme.fast; }
+                            }
+                        }
+                    }
+                }
+            }
+
+            Rectangle {
+                height: 1px;
+                background: Theme.border;
+            }
+
+            Rectangle {
+                height: root.list-height;
+                QuietScrollView {
+                    VerticalLayout {
+                        alignment: start;
+                        for row[index] in root.rows: QuickRow {
+                            item: row;
+                            index: index;
+                            clock: root.clock;
+                            is-default: row.id == root.default-id;
+                            enabled: root.enabled;
+                            toggle => { root.toggle(index); }
+                            make-default => { root.make-default(row.id); }
+                        }
+                    }
+                }
+
+                if root.active && root.summary.matched == 0: Text {
+                    text: "没有匹配“" + root.query + "”的模型";
+                    color: Theme.muted-text;
+                    font-size: 12px;
+                    horizontal-alignment: center;
+                    vertical-alignment: center;
+                    overflow: elide;
+                }
+            }
+        }
+    }
+
+    hint := Text {
+        y: 8px + root.card-height + 6px;
+        width: parent.width;
+        height: self.preferred-height;
+        text: "★ 默认模型加入已选，其余映射保存后在工作台选择；预置模型总会添加。";
+        color: Theme.muted-text;
+        font-size: 11px;
+        wrap: word-wrap;
+        opacity: root.reveal;
+    }
+}

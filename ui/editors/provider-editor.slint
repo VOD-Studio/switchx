@@ -8,6 +8,8 @@ import {
 } from "../components.slint";
 import { CodeEditor } from "../code-editor.slint";
 import { FeedbackBanner } from "../feedback-banner.slint";
+import { ModelQuickPicker } from "model-quick-picker.slint";
+import { BatchModelRow, BatchSummary } from "../view-models.slint";
 
 export component ProviderEditor inherits SurfaceCard {
     in property <bool> busy;
@@ -34,6 +36,13 @@ export component ProviderEditor inherits SurfaceCard {
     in property <int> discovery-scope;
     in property <int> discovery-tone;
     in property <bool> config-managed;
+    // Discovered models a new upstream can add as mappings when it is saved.
+    in property <[BatchModelRow]> batch-rows;
+    in property <BatchSummary> batch-summary;
+    in-out property <string> batch-query;
+    callback batch-toggle(int);
+    callback batch-select-all(bool);
+    callback batch-filter(string);
     callback save-provider(string, string, string, string, string);
     callback open-common-config();
     callback delete-provider(string);
@@ -42,7 +51,7 @@ export component ProviderEditor inherits SurfaceCard {
     callback fetch-models(int);
     callback dismiss-discovery();
 
-    height: 782px + (root.edit-preset-id != "" ? 58px : 0px) + (root.discovery-scope == 0 && root.fetched-models.length > 0 ? 43px : 0px) + discovery-banner.height + config-banner.height;
+    height: 782px + (root.edit-preset-id != "" ? 58px : 0px) + (root.discovery-scope == 0 && root.fetched-models.length > 0 && root.edit-id != "" ? 43px : 0px) + discovery-banner.height + quick-picker.height + config-banner.height;
     VerticalLayout {
         padding: 16px;
         spacing: 7px;
@@ -200,9 +209,22 @@ export component ProviderEditor inherits SurfaceCard {
                 retry => { root.fetch-models(0); }
                 dismiss => { root.dismiss-discovery(); }
             }
+
+            quick-picker := ModelQuickPicker {
+                rows: root.batch-rows;
+                summary: root.batch-summary;
+                default-id: root.edit-model;
+                enabled: !root.busy;
+                query <=> root.batch-query;
+                toggle(index) => { root.batch-toggle(index); }
+                select-all(checked) => { root.batch-select-all(checked); }
+                filter(query) => { root.batch-filter(query); }
+                make-default(id) => { root.edit-model = id; }
+            }
         }
 
-        if root.discovery-scope == 0 && root.fetched-models.length > 0: ComboBox {
+        // A new upstream picks its default in the list above instead.
+        if root.discovery-scope == 0 && root.fetched-models.length > 0 && root.edit-id != "": ComboBox {
             model: root.fetched-models;
             current-value: root.edit-model;
             accessible-label: "选择探测到的默认模型";
