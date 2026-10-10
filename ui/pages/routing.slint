@@ -17,7 +17,6 @@ export component RoutingPage inherits Rectangle {
     in property <[ProviderRow]> providers;
     in property <[ModelRow]> models;
     in property <int> selected-model-count;
-    in property <int> selected-connection-count;
     in property <string> default-model-label;
     in property <int> selectable-model-count;
     in property <bool> config-managed;
@@ -49,79 +48,6 @@ export component RoutingPage inherits Rectangle {
     vertical-stretch: 1;
     VerticalLayout {
         spacing: 18px;
-        Rectangle {
-            height: 50px;
-            border-radius: 9px;
-            background: Theme.brand-surface;
-            animate background { duration: Theme.page-motion; }
-            HorizontalLayout {
-                padding-left: 16px;
-                padding-right: 16px;
-                spacing: 12px;
-                Image {
-                    y: (parent.height - self.height) / 2;
-                    width: 17px;
-                    height: 17px;
-                    source: @image-url("../../assets/ui/code.svg");
-                    colorize: Theme.brand;
-                }
-
-                Text {
-                    text: "Codex";
-                    color: Theme.primary-text;
-                    font-size: 12px;
-                    vertical-alignment: center;
-                }
-
-                Rectangle {
-                    y: (parent.height - self.height) / 2;
-                    width: 28px;
-                    height: 1px;
-                    background: Theme.brand.with-alpha(0.3);
-                }
-
-                Image {
-                    y: (parent.height - self.height) / 2;
-                    width: 19px;
-                    height: 19px;
-                    source: @image-url("../../assets/ui/brand.svg");
-                    colorize: Theme.brand;
-                }
-
-                Text {
-                    text: root.direct-active ? "上游直连" : "SwitchX";
-                    color: Theme.primary-text;
-                    font-size: 12px;
-                    vertical-alignment: center;
-                }
-
-                Rectangle {
-                    y: (parent.height - self.height) / 2;
-                    width: 28px;
-                    height: 1px;
-                    background: Theme.brand.with-alpha(0.3);
-                }
-
-                Text {
-                    text: root.direct-active ? "单一上游" : root.selected-connection-count + " 个连接已加入";
-                    color: Theme.primary-text;
-                    font-size: 12px;
-                    vertical-alignment: center;
-                }
-
-                Rectangle {
-                    horizontal-stretch: 1;
-                }
-
-                Text {
-                    text: root.loading ? "正在读取…" : root.route-running ? "●  本地路由已启用" : root.route-managed ? "●  配置待恢复" : root.direct-active ? "●  直连已启用" : "●  等待启用";
-                    color: Theme.brand;
-                    font-size: 12px;
-                    vertical-alignment: center;
-                }
-            }
-        }
-
         HorizontalLayout {
             height: 36px;
             spacing: 8px;
