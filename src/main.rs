@@ -140,7 +140,10 @@ enum Command {
         levels: String,
         default_reasoning: String,
     },
-    BeginConnectionModels(String),
+    BeginConnectionModels {
+        provider: String,
+        discovered: Vec<app::ConnectionModel>,
+    },
     SaveConnectionModels {
         provider: String,
         models: Vec<app::ConnectionModel>,
@@ -2174,6 +2177,47 @@ fn connection_model_row(model: &ModelRecord) -> ConnectionModelRow {
     }
 }
 
+fn connection_directory_rows(
+    saved: &[ModelRecord],
+    discovered: Vec<app::ConnectionModel>,
+) -> Vec<ConnectionModelRow> {
+    let mut rows: Vec<_> = saved.iter().map(connection_model_row).collect();
+    let mut known: HashSet<_> = saved
+        .iter()
+        .map(|model| model.upstream_model.clone())
+        .collect();
+    for model in discovered {
+        if known.insert(model.upstream_model.clone()) {
+            rows.push(ConnectionModelRow {
+                display_name: model.display_name.into(),
+                upstream_model: model.upstream_model.into(),
+                context_window: model.context_window.into(),
+                reasoning_levels: model.reasoning_levels.into(),
+                ..Default::default()
+            });
+        }
+    }
+    rows
+}
+
+fn show_connection_directory(
+    app: &AppWindow,
+    provider: ProviderRecord,
+    models: &[ModelRecord],
+    discovered: Vec<app::ConnectionModel>,
+) {
+    app.set_connection_models_name(provider.name.into());
+    app.set_connection_models_subscription(provider.kind == ProviderKind::Chatgpt);
+    let rows = connection_directory_rows(models, discovered);
+    let dirty = rows.len() > models.len();
+    app.set_connection_models(ModelRc::new(VecModel::from(rows)));
+    app.set_connection_models_dirty(dirty);
+    if dirty {
+        app.set_connection_models_tone(1);
+        app.set_connection_models_message("获取的模型已加入目录草稿，请保存模型目录。".into());
+    }
+}
+
 fn connect_connection_models(app: &AppWindow, sender: &mpsc::Sender<Command>) {
     let weak = app.as_weak();
     app.on_update_default_model_label(move || {
@@ -2203,6 +2247,24 @@ fn connect_connection_models(app: &AppWindow, sender: &mpsc::Sender<Command>) {
         else {
             return;
         };
+        // Capture the settings form's valid discovery before closing it clears
+        // the shared picker. The directory still requires its explicit save.
+        let discovered =
+            if app.get_editor_open() && app.get_edit_id() == id && app.get_discovery_scope() == 0 {
+                app.get_batch_models()
+                    .iter()
+                    .filter(|row| row.supported)
+                    .map(|row| app::ConnectionModel {
+                        public_id: String::new(),
+                        display_name: format!("{}/{}", row.id, provider.name),
+                        upstream_model: row.id.into(),
+                        context_window: row.template_context.into(),
+                        reasoning_levels: row.template_levels.into(),
+                    })
+                    .collect()
+            } else {
+                Vec::new()
+            };
         app.set_active_page(1);
         close_subscription_editor(&app);
         app.set_editor_open(false);
@@ -2222,7 +2284,10 @@ fn connect_connection_models(app: &AppWindow, sender: &mpsc::Sender<Command>) {
         queue(
             &app,
             &callback_sender,
-            Command::BeginConnectionModels(id.into()),
+            Command::BeginConnectionModels {
+                provider: id.into(),
+                discovered,
+            },
         );
     });
     let weak = app.as_weak();
@@ -2359,6 +2424,60 @@ fn connect_connection_models(app: &AppWindow, sender: &mpsc::Sender<Command>) {
                 .collect();
             queue(&app, &callback_sender, Command::SelectModels(ids, enabled));
         }
+    });
+}
+
+fn connect_model_discovery(app: &AppWindow, sender: &mpsc::Sender<Command>) {
+    let callback_sender = sender.clone();
+    let weak = app.as_weak();
+    app.on_fetch_models(move |scope| {
+        let Some(app) = weak.upgrade() else {
+            return;
+        };
+        if app.get_busy() || app.get_config_managed() {
+            return;
+        }
+        let (provider, url, key) = if scope == 0 {
+            (
+                app.get_edit_id().to_string(),
+                app.get_edit_url().to_string(),
+                Secret::new(app.get_edit_key().into()),
+            )
+        } else {
+            let Some(provider) = app.get_providers().iter().find(|provider| {
+                provider.id
+                    == if scope == 2 {
+                        app.get_connection_models_id()
+                    } else {
+                        app.get_model_provider_id()
+                    }
+            }) else {
+                show_action(&app, Err("请先保存上游连接".into()));
+                return;
+            };
+            (
+                provider.id.to_string(),
+                provider.base_url.to_string(),
+                Secret::new(String::new()),
+            )
+        };
+        app.invoke_reset_model_discovery();
+        app.set_discovery_scope(scope);
+        app.set_discovery_tone(0);
+        app.set_discovery_message("正在获取模型列表…".into());
+        queue(
+            &app,
+            &callback_sender,
+            Command::FetchModels {
+                scope,
+                generation: app.get_discovery_generation(),
+                provider,
+                url,
+                key,
+                home: app.get_config_home().into(),
+            },
+        );
+        app.set_fetching_models(app.get_busy());
     });
 }
 
@@ -3350,11 +3469,11 @@ async fn worker(
                 }
                 .await
                 .and_then(|(models, is_subscription, templates)| {
-                    let candidates = if (scope == 1 || scope == 2) && !provider.is_empty() {
+                    let candidates = if scope == 0 {
+                        app::draft_candidates(&url, &models)
+                    } else if !provider.is_empty() {
                         let data_dir = directory.as_ref().map_err(|error| error.message())?;
                         app::batch_candidates(data_dir, &provider, &models, &templates)?
-                    } else if scope == 0 && provider.is_empty() {
-                        app::draft_candidates(&url, &models)
                     } else {
                         Vec::new()
                     };
@@ -3390,7 +3509,16 @@ async fn worker(
                                     )
                                     .into()
                                 } else {
-                                    format!("已获取 {} 个模型{suffix}", models.len()).into()
+                                    let directory_hint = if scope == 0 && !provider.is_empty() {
+                                        "；切换到模型目录可查看并保存"
+                                    } else {
+                                        ""
+                                    };
+                                    format!(
+                                        "已获取 {} 个模型{suffix}{directory_hint}",
+                                        models.len()
+                                    )
+                                    .into()
                                 }
                             });
                             show_batch_candidates(&app, candidates);
@@ -4082,7 +4210,10 @@ async fn worker(
                     );
                 });
             }
-            Command::BeginConnectionModels(id) => {
+            Command::BeginConnectionModels {
+                provider: id,
+                discovered,
+            } => {
                 subscription_auth = None;
                 let result = (|| {
                     let data_dir = directory.as_ref().map_err(|error| error.message())?;
@@ -4108,14 +4239,7 @@ async fn worker(
                     }
                     match result {
                         Ok((provider, models)) => {
-                            app.set_connection_models_name(provider.name.into());
-                            app.set_connection_models_subscription(
-                                provider.kind == ProviderKind::Chatgpt,
-                            );
-                            app.set_connection_models(ModelRc::new(VecModel::from(
-                                models.iter().map(connection_model_row).collect::<Vec<_>>(),
-                            )));
-                            app.set_connection_models_dirty(false);
+                            show_connection_directory(&app, provider, &models, discovered);
                         }
                         Err(error) => {
                             app.set_connection_models_tone(3);
@@ -5116,53 +5240,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     });
     connect_provider_checks(&app, &sender);
     connect_connection_models(&app, &sender);
-    let callback_sender = sender.clone();
-    let weak = app.as_weak();
-    app.on_fetch_models(move |scope| {
-        let Some(app) = weak.upgrade() else {
-            return;
-        };
-        let (provider, url, key) = if scope == 0 {
-            (
-                app.get_edit_id().to_string(),
-                app.get_edit_url().to_string(),
-                Secret::new(app.get_edit_key().into()),
-            )
-        } else {
-            let Some(provider) = app.get_providers().iter().find(|provider| {
-                provider.id
-                    == if scope == 2 {
-                        app.get_connection_models_id()
-                    } else {
-                        app.get_model_provider_id()
-                    }
-            }) else {
-                show_action(&app, Err("请先保存上游连接".into()));
-                return;
-            };
-            (
-                provider.id.to_string(),
-                provider.base_url.to_string(),
-                Secret::new(String::new()),
-            )
-        };
-        app.set_discovery_scope(scope);
-        app.set_discovery_tone(0);
-        app.set_discovery_message("正在获取模型列表…".into());
-        queue(
-            &app,
-            &callback_sender,
-            Command::FetchModels {
-                scope,
-                generation: app.get_discovery_generation(),
-                provider,
-                url,
-                key,
-                home: app.get_config_home().into(),
-            },
-        );
-        app.set_fetching_models(app.get_busy());
-    });
+    connect_model_discovery(&app, &sender);
     let callback_sender = sender.clone();
     let weak = app.as_weak();
     app.on_inspect_direct(move |id, home| {
@@ -7377,6 +7455,225 @@ mod tests {
         );
     }
     #[test]
+    fn settings_model_discovery_populates_directory_drafts_and_preserves_saved_models() {
+        use slint::platform::{Platform, WindowAdapter, software_renderer::MinimalSoftwareWindow};
+        use std::rc::Rc;
+
+        struct PreviewPlatform(Rc<MinimalSoftwareWindow>);
+        impl Platform for PreviewPlatform {
+            fn create_window_adapter(&self) -> Result<Rc<dyn WindowAdapter>, slint::PlatformError> {
+                Ok(self.0.clone())
+            }
+        }
+        let window = MinimalSoftwareWindow::new(Default::default());
+        slint::platform::set_platform(Box::new(PreviewPlatform(window.clone()))).unwrap();
+        let app = AppWindow::new().unwrap();
+        app.global::<Theme>().set_animations_enabled(false);
+        app.set_loading(false);
+        app.set_active_page(1);
+        slint::platform::update_timers_and_animations();
+        let (sender, mut receiver) = mpsc::channel(8);
+        connect_connection_models(&app, &sender);
+        connect_model_discovery(&app, &sender);
+        let provider = ProviderRecord {
+            id: "api".into(),
+            name: "Podlink".into(),
+            base_url: "https://example.invalid/v1".into(),
+            model_id: "existing-model".into(),
+            credential_ref: None,
+            kind: ProviderKind::ApiKey,
+            account_binding: None,
+            icon_id: None,
+        };
+        app.set_providers(ModelRc::new(VecModel::from(vec![
+            ProviderRow {
+                id: provider.id.clone().into(),
+                name: provider.name.clone().into(),
+                ..Default::default()
+            },
+            ProviderRow {
+                id: "other".into(),
+                name: "Other connection".into(),
+                ..Default::default()
+            },
+        ])));
+        let mut metadata = catalog::mapping_metadata(
+            "existing-model",
+            "My custom name",
+            &catalog::MappingSettings {
+                context_window: "1050000",
+                reasoning_levels: Some("low, medium, high"),
+                default_reasoning: Some("high"),
+            },
+            None,
+        )
+        .unwrap();
+        metadata["custom_field"] = serde_json::json!("preserved");
+        let saved = vec![ModelRecord {
+            public_id: "sx-existing".into(),
+            provider_id: provider.id.clone(),
+            display_name: "My custom name".into(),
+            upstream_model: "existing-model".into(),
+            metadata: metadata.to_string(),
+            enabled: true,
+            fallback_provider_id: None,
+        }];
+        let data = std::env::temp_dir().join(format!(
+            "switchx-discovery-directory-{}",
+            app::new_id().unwrap()
+        ));
+        std::fs::create_dir_all(&data).unwrap();
+        let store = Store::open(&data.join("switchx.sqlite")).unwrap();
+        store.put_provider(&provider).unwrap();
+        store.add_models(&saved).unwrap();
+        let discovered = ["existing-model", "new-model", "new-model"].map(String::from);
+        let show_discovery = || {
+            app.set_discovery_scope(0);
+            show_batch_candidates(&app, app::draft_candidates(&provider.base_url, &discovered));
+        };
+        for (width, height) in [(1200, 820), (1000, 680)] {
+            app.window()
+                .set_size(slint::PhysicalSize::new(width, height));
+            for dark in [false, true] {
+                app.invoke_set_appearance(dark);
+                app.set_connection_models_open(false);
+                show_provider_editor(
+                    &app,
+                    Some(provider.clone()),
+                    CodexOptions::default(),
+                    String::new(),
+                );
+                slint::platform::update_timers_and_animations();
+                app.set_edit_key("synthetic-private-key".into());
+                slint::platform::update_timers_and_animations();
+                show_discovery();
+                app.invoke_begin_connection_models(provider.id.clone().into());
+                let Command::BeginConnectionModels {
+                    provider: id,
+                    discovered,
+                } = receiver.try_recv().unwrap()
+                else {
+                    panic!("expected settings discovery to travel with directory opening");
+                };
+                assert_eq!(id, provider.id);
+                assert_eq!(discovered.len(), 2);
+                show_connection_directory(&app, provider.clone(), &saved, discovered);
+                app.set_busy(false);
+                slint::platform::update_timers_and_animations();
+                assert!(app.get_connection_models_open());
+                assert!(app.get_edit_key().is_empty());
+                assert_eq!(app.get_batch_models().row_count(), 0);
+                assert_eq!(app.get_connection_models().row_count(), 2);
+                assert!(app.get_connection_models_dirty());
+                assert_eq!(
+                    app.get_connection_models().row_data(0).unwrap(),
+                    connection_model_row(&saved[0])
+                );
+                let new = app.get_connection_models().row_data(1).unwrap();
+                assert_eq!(new.upstream_model, "new-model");
+                assert_eq!(new.display_name, "new-model/Podlink");
+                assert!(new.context_window.is_empty() && new.reasoning_levels.is_empty());
+                assert_eq!(
+                    store.models().unwrap(),
+                    saved,
+                    "fetching must leave the stored directory unchanged"
+                );
+                if let Some(output) = std::env::var_os("SWITCHX_CONNECTION_SNAPSHOTS") {
+                    use std::io::Write;
+                    let output = PathBuf::from(output);
+                    std::fs::create_dir_all(&output).unwrap();
+                    let mut pixels =
+                        slint::SharedPixelBuffer::<slint::Rgb8Pixel>::new(width, height);
+                    window.request_redraw();
+                    window.draw_if_needed(|renderer| {
+                        renderer.render(pixels.make_mut_slice(), width as usize);
+                    });
+                    let theme = if dark { "dark" } else { "light" };
+                    let mut file = std::fs::File::create(
+                        output.join(format!("discovery-directory-{theme}-{width}x{height}.ppm")),
+                    )
+                    .unwrap();
+                    write!(file, "P6\n{width} {height}\n255\n").unwrap();
+                    file.write_all(pixels.as_bytes()).unwrap();
+                }
+            }
+        }
+        app.invoke_save_connection_models();
+        let Command::SaveConnectionModels {
+            provider: id,
+            models,
+        } = receiver.try_recv().unwrap()
+        else {
+            panic!("expected an explicit directory save");
+        };
+        app::save_connection_models(&data, &id, &saved, &models, &[]).unwrap();
+        let updated = store.models().unwrap();
+        assert_eq!(updated.len(), 2);
+        assert_eq!(
+            updated
+                .iter()
+                .find(|model| model.public_id == "sx-existing")
+                .unwrap(),
+            &saved[0]
+        );
+        assert!(
+            !updated
+                .iter()
+                .find(|model| model.upstream_model == "new-model")
+                .unwrap()
+                .enabled
+        );
+        assert_eq!(
+            connection_directory_rows(&updated, models).len(),
+            2,
+            "repeated discovery must not duplicate mappings"
+        );
+        app.set_busy(false);
+        app.set_connection_models_open(false);
+        show_provider_editor(
+            &app,
+            Some(provider.clone()),
+            CodexOptions::default(),
+            String::new(),
+        );
+        slint::platform::update_timers_and_animations();
+        show_discovery();
+        app.invoke_begin_connection_models("other".into());
+        assert!(
+            matches!(receiver.try_recv().unwrap(), Command::BeginConnectionModels { provider, discovered } if provider == "other" && discovered.is_empty())
+        );
+        app.set_busy(false);
+        app.set_connection_models_open(false);
+        show_provider_editor(
+            &app,
+            Some(provider.clone()),
+            CodexOptions::default(),
+            String::new(),
+        );
+        slint::platform::update_timers_and_animations();
+        show_discovery();
+        app.invoke_fetch_models(0);
+        assert!(matches!(
+            receiver.try_recv().unwrap(),
+            Command::FetchModels { scope: 0, .. }
+        ));
+        assert_eq!(
+            app.get_batch_models().row_count(),
+            0,
+            "a retry must discard the previous result before a possible failure"
+        );
+        app.set_busy(false);
+        app.set_fetching_models(false);
+        app.set_discovery_tone(3);
+        app.invoke_begin_connection_models("api".into());
+        assert!(
+            matches!(receiver.try_recv().unwrap(), Command::BeginConnectionModels { discovered, .. } if discovered.is_empty())
+        );
+        drop(store);
+        std::fs::remove_dir_all(data).unwrap();
+    }
+
+    #[test]
     fn connection_directory_opens_from_workbench_clears_credentials_and_queues_one_group_selection()
     {
         use slint::platform::{Platform, WindowAdapter, software_renderer::MinimalSoftwareWindow};
@@ -7414,7 +7711,7 @@ mod tests {
         assert!(app.get_subscription_auth_json().is_empty());
         assert!(app.get_edit_key().is_empty());
         assert!(
-            matches!(receiver.try_recv().unwrap(), Command::BeginConnectionModels(id) if id == "api")
+            matches!(receiver.try_recv().unwrap(), Command::BeginConnectionModels { provider, discovered } if provider == "api" && discovered.is_empty())
         );
         assert!(!app.get_connection_models_saving());
         assert!(receiver.try_recv().is_err());
