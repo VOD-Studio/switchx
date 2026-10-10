@@ -68,17 +68,13 @@ export component FeedbackBanner inherits Rectangle {
         delay: root.popped && root.motion ? 140ms : 0ms;
         easing: cubic-bezier(0.4, 0, 0.2, 1);
     }
-    private property <float> sweep: root.shown-loading && root.motion ? 1 : 0;
-    animate sweep {
-        duration: root.shown-loading && root.motion ? 1150ms : 0ms;
-        iteration-count: root.shown-loading && root.motion ? -1 : 1;
-        easing: ease-in-out;
-    }
-    private property <angle> spin: root.shown-loading && root.motion ? 360deg : 0deg;
-    animate spin {
-        duration: root.shown-loading && root.motion ? 800ms : 0ms;
-        iteration-count: root.shown-loading && root.motion ? -1 : 1;
-    }
+    // A banner may be created already loading, before any property change can
+    // start an animation. Drive waiting indicators directly from the frame clock.
+    private property <bool> loading-motion: root.active && root.shown-loading && root.motion;
+    private property <float> sweep: root.loading-motion
+        ? (1 - cos(180deg * mod(animation-tick(), 1150ms) / 1150ms)) / 2 : 0;
+    private property <angle> spin: root.loading-motion
+        ? 360deg * mod(animation-tick(), 800ms) / 800ms : 0deg;
 
     function replay() {
         root.step = 0;

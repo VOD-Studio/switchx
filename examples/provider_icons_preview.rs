@@ -603,6 +603,34 @@ fn render_connection_workbench(
             )));
             snapshot(window, output, &format!("connection-directory-{suffix}"))?;
             assert!(app.get_connection_models_open());
+            app.set_busy(true);
+            app.set_discovery_scope(2);
+            app.set_fetching_models(true);
+            app.set_discovery_message("正在获取模型列表…".into());
+            app.global::<Theme>().set_animations_enabled(true);
+            play(
+                window,
+                output,
+                &format!("connection-directory-loading-{suffix}"),
+                &[640, 1280, 1424],
+            )?;
+            assert_ne!(
+                fs::read(output.join(format!("connection-directory-loading-{suffix}-1280ms.ppm")))?,
+                fs::read(output.join(format!("connection-directory-loading-{suffix}-1424ms.ppm")))?,
+                "model discovery feedback must keep moving at {suffix}"
+            );
+            app.global::<Theme>().set_animations_enabled(false);
+            app.set_fetching_models(false);
+            app.set_discovery_message("".into());
+            app.set_connection_models_saving(true);
+            snapshot(
+                window,
+                output,
+                &format!("connection-directory-saving-{suffix}"),
+            )?;
+            app.set_connection_models_saving(false);
+            app.set_busy(false);
+            render(window);
             if width == 1200 && dark {
                 click(window, 1132.0, 378.0);
                 render(window);

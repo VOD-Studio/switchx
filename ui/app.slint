@@ -117,6 +117,7 @@ export component AppWindow inherits Window {
     in-out property <bool> connection-models-subscription;
     in-out property <[ConnectionModelRow]> connection-models;
     in-out property <bool> connection-models-dirty: false;
+    in-out property <bool> connection-models-saving: false;
     in-out property <string> connection-models-message;
     in-out property <int> connection-models-tone: 0;
     changed connection-models-open => {
@@ -1371,6 +1372,7 @@ export component AppWindow inherits Window {
             }
             if root.connection-models-open: ConnectionModels {
                 busy: root.busy;
+                saving: root.busy && root.connection-models-saving;
                 managed: root.config-managed;
                 subscription: root.connection-models-subscription;
                 dirty: root.connection-models-dirty;

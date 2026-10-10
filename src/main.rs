@@ -1644,8 +1644,10 @@ fn queue(app: &AppWindow, sender: &mpsc::Sender<Command>, command: Command) {
         &command,
         Command::Account { action: 4, .. } | Command::XaiAccount { action: 4, .. }
     );
+    app.set_connection_models_saving(matches!(&command, Command::SaveConnectionModels { .. }));
     app.set_busy(true);
     if let Err(error) = sender.try_send(command) {
+        app.set_connection_models_saving(false);
         app.set_busy(false);
         if account_removal {
             app.set_account_removing_id("".into());
@@ -4150,6 +4152,7 @@ async fn worker(
                     .and_then(|_| directory.as_ref().ok())
                     .map(|path| load_snapshot(path, false));
                 let _ = weak.upgrade_in_event_loop(move |app| {
+                    app.set_connection_models_saving(false);
                     app.set_busy(false);
                     match result {
                         Ok(()) => {
@@ -7404,8 +7407,26 @@ mod tests {
         assert!(
             matches!(receiver.try_recv().unwrap(), Command::BeginConnectionModels(id) if id == "api")
         );
+        assert!(!app.get_connection_models_saving());
         assert!(receiver.try_recv().is_err());
 
+        queue(
+            &app,
+            &sender,
+            Command::FetchModels {
+                scope: 2,
+                generation: 0,
+                provider: "api".into(),
+                url: "https://example.invalid/v1".into(),
+                key: Secret::new(String::new()),
+                home: "/isolated/codex".into(),
+            },
+        );
+        assert!(!app.get_connection_models_saving());
+        assert!(matches!(
+            receiver.try_recv().unwrap(),
+            Command::FetchModels { .. }
+        ));
         app.set_busy(false);
         app.set_models(ModelRc::new(VecModel::from(vec![
             ModelRow {
@@ -7452,12 +7473,18 @@ mod tests {
             },
         ])));
         app.invoke_save_connection_models();
+        assert!(app.get_connection_models_saving());
         let Command::SaveConnectionModels { provider, models } = receiver.try_recv().unwrap()
         else {
             panic!("expected one atomic directory save");
         };
         assert_eq!(provider, "api");
         assert_eq!(models.len(), 1);
+        drop(receiver);
+        app.set_busy(false);
+        app.invoke_save_connection_models();
+        assert!(!app.get_busy());
+        assert!(!app.get_connection_models_saving());
         assert_eq!(models[0].upstream_model, "coder-pro");
     }
 }
