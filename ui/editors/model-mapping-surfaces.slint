@@ -1,0 +1,1298 @@
+import { Theme } from "../tokens.slint";
+import { QuietLineEdit } from "../components.slint";
+import { ReasoningChoices, ReasoningChoice } from "reasoning-picker.slint";
+
+export global MappingFormat {
+    // 272000 reads as "272K" and 1048576 as "1.05M"; small values stay exact.
+    public pure function tokens(value: float) -> string {
+        if value >= 999500 {
+            return (round(value / 10000) / 100) + "M";
+        }
+        if value >= 1000 {
+            return round(value / 1000) + "K";
+        }
+        return round(value) + "";
+    }
+    // Logarithmic position of a window between 8K and 2M tokens.
+    public pure function level(value: float) -> float {
+        return clamp(ln(max(value, 8000) / 8000) / ln(250), 0, 1);
+    }
+}
+
+component RouteNode inherits Rectangle {
+    in property <image> icon;
+    in property <string> label;
+    in property <string> value;
+    in property <string> placeholder;
+    in property <bool> mono;
+    in property <float> glow;
+    border-radius: 12px;
+    border-width: 1px;
+    border-color: Theme.brand.with-alpha(0.16 + 0.64 * root.glow);
+    background: Theme.panel.with-alpha(Theme.dark ? 0.8 : 0.92);
+    drop-shadow-blur: 18px * root.glow;
+    drop-shadow-offset-y: 4px * root.glow;
+    drop-shadow-color: Theme.brand.with-alpha(0.3 * root.glow);
+    animate background { duration: Theme.page-motion; }
+    accessible-role: text;
+    accessible-label: root.label + "，" + (root.value == "" ? root.placeholder : root.value);
+    HorizontalLayout {
+        padding-left: 10px;
+        padding-right: 10px;
+        spacing: 9px;
+        cross-axis-alignment: center;
+        Rectangle {
+            width: 30px;
+            height: 30px;
+            horizontal-stretch: 0;
+            border-radius: 9px;
+            background: Theme.brand-surface.mix(Theme.brand, 1 - 0.45 * root.glow);
+            Image {
+                x: 8px;
+                y: 8px;
+                width: 14px;
+                height: 14px;
+                source: root.icon;
+                colorize: Theme.brand.mix(Theme.on-brand, 1 - root.glow);
+                accessible-role: none;
+            }
+        }
+
+        VerticalLayout {
+            spacing: 2px;
+            alignment: center;
+            horizontal-stretch: 1;
+            min-width: 0px;
+            Text {
+                text: root.label;
+                color: Theme.muted-text;
+                font-size: 10px;
+                overflow: elide;
+                accessible-role: none;
+            }
+
+            Text {
+                text: root.value == "" ? root.placeholder : root.value;
+                color: root.value == "" ? Theme.muted-text : Theme.primary-text;
+                font-family: root.mono ? "Menlo" : "";
+                font-size: root.mono ? 11px : 12px;
+                font-weight: 600;
+                overflow: elide;
+                accessible-role: none;
+            }
+        }
+    }
+}
+
+component RailStop inherits Rectangle {
+    in property <length> center;
+    in property <float> glow;
+    x: root.center - self.width / 2;
+    y: 66px - self.height / 2;
+    width: 6px + 4px * root.glow;
+    height: self.width;
+    border-radius: self.width / 2;
+    background: Theme.brand.mix(Theme.panel, 0.4 + 0.6 * root.glow);
+    border-width: 1px;
+    border-color: Theme.brand.with-alpha(0.5);
+    accessible-role: none;
+}
+
+// The route preview: Codex menu → SwitchX public ID → upstream model. A comet
+// travels the rail and lights each stop while the editor is visible.
+export component MappingHero inherits Rectangle {
+    in property <string> display-name;
+    in property <string> public-id;
+    in property <string> upstream-id;
+    in property <string> provider-name;
+    in property <string> meta;
+    in property <bool> adding;
+    in property <bool> locked;
+    in property <bool> running;
+    in property <int> replay;
+
+    private property <bool> motion: Theme.animations-enabled && !Theme.system-reduced-motion;
+    private property <bool> live: root.running && root.motion;
+    private property <bool> landed: true;
+    private property <float> arrival: root.landed ? 1 : 0;
+    animate arrival {
+        duration: root.landed && root.motion ? 720ms : 0ms;
+        delay: root.landed && root.motion ? 30ms : 0ms;
+        easing: cubic-bezier(0.16, 1, 0.3, 1);
+    }
+    private property <float> sheen: root.landed ? 1 : 0;
+    animate sheen {
+        duration: root.landed && root.motion ? 1200ms : 0ms;
+        delay: root.landed && root.motion ? 280ms : 0ms;
+        easing: ease-in-out;
+    }
+    changed replay => { root.landed = false; }
+    Timer {
+        interval: 16ms;
+        running: !root.landed;
+        triggered => { root.landed = true; }
+    }
+
+    // Loops run only while visible; without motion everything rests.
+    private property <float> flow: root.live ? 1 : 0;
+    animate flow {
+        duration: root.live ? 3400ms : 0ms;
+        iteration-count: root.live ? -1 : 1;
+        easing: cubic-bezier(0.45, 0.05, 0.3, 1);
+    }
+    private property <angle> orbit: root.live ? 320deg : -40deg;
+    animate orbit {
+        duration: root.live ? 6400ms : 0ms;
+        iteration-count: root.live ? -1 : 1;
+        easing: linear;
+    }
+    private property <float> drift: root.live ? 1 : 0;
+    animate drift {
+        duration: root.live ? 7000ms : 0ms;
+        iteration-count: root.live ? -1 : 1;
+        direction: alternate;
+        easing: ease-in-out;
+    }
+    private property <float> ping: root.live ? 1 : 0;
+    animate ping {
+        duration: root.live ? 1800ms : 0ms;
+        iteration-count: root.live ? -1 : 1;
+        easing: ease-out;
+    }
+
+    preferred-height: body.preferred-height;
+    min-height: body.preferred-height;
+    vertical-stretch: 0;
+    accessible-role: groupbox;
+    accessible-label: "模型路由预览";
+
+    card := Rectangle {
+        y: 20px * (1 - root.arrival);
+        width: root.width;
+        height: root.height;
+        opacity: root.arrival;
+        border-radius: 18px;
+        border-width: 1px;
+        border-color: Theme.brand.with-alpha(Theme.dark ? 0.24 : 0.2);
+        background: Theme.brand-surface.mix(Theme.panel, Theme.dark ? 0.62 : 0.5);
+        animate background, border-color { duration: Theme.page-motion; }
+
+        // Glows fade out before their corners and drift inside the card, so it
+        // needs no rounded clip in any renderer.
+        Rectangle {
+            x: parent.width - self.width - 1px - 110px * root.drift;
+            y: 1px;
+            width: parent.height - 2px;
+            height: self.width;
+            // Light themes glow with paper white, dark themes with the brand.
+            background: Theme.dark
+                ? @radial-gradient(circle, Theme.brand.with-alpha(0.24) 0%, Theme.brand.with-alpha(0) 70%)
+                : @radial-gradient(circle, #ffffffe6 0%, #ffffff00 70%);
+            accessible-role: none;
+        }
+
+        Rectangle {
+            x: 1px + 140px * root.drift;
+            y: parent.height - self.height - 1px;
+            width: (parent.height - 2px) * 0.8;
+            height: self.width;
+            background: Theme.dark
+                ? @radial-gradient(circle, Theme.panel.with-alpha(0.4) 0%, Theme.panel.with-alpha(0) 70%)
+                : @radial-gradient(circle, Theme.brand.with-alpha(0.1) 0%, Theme.brand.with-alpha(0) 70%);
+            accessible-role: none;
+        }
+
+        Rectangle {
+            x: -180px + root.sheen * (parent.width + 180px);
+            y: 1px;
+            width: 180px;
+            height: parent.height - 2px;
+            background: @linear-gradient(100deg, Theme.panel.with-alpha(0) 0%, Theme.panel.with-alpha(Theme.dark ? 0.1 : 0.55) 50%, Theme.panel.with-alpha(0) 100%);
+            visible: root.motion && root.sheen > 0 && root.sheen < 1;
+            accessible-role: none;
+        }
+
+        body := VerticalLayout {
+            padding: 20px;
+            padding-bottom: 16px;
+            spacing: 16px;
+            HorizontalLayout {
+                height: 64px;
+                spacing: 16px;
+                Rectangle {
+                    width: 64px;
+                    height: 64px;
+                    horizontal-stretch: 0;
+                    Rectangle {
+                        border-radius: 32px;
+                        border-width: 1px;
+                        border-color: Theme.brand.with-alpha(0.26);
+                        accessible-role: none;
+                    }
+
+                    Rectangle {
+                        x: 7px;
+                        y: 7px;
+                        width: 50px;
+                        height: 50px;
+                        border-radius: 15px;
+                        background: Theme.brand;
+                        drop-shadow-blur: 16px;
+                        drop-shadow-offset-y: 5px;
+                        drop-shadow-color: Theme.brand.with-alpha(Theme.dark ? 0.25 : 0.35);
+                        Rectangle {
+                            x: 3px;
+                            y: 3px;
+                            width: parent.width - 6px;
+                            height: parent.height - 6px;
+                            border-radius: 12px;
+                            border-width: 1px;
+                            border-color: Theme.on-brand.with-alpha(0.18);
+                            accessible-role: none;
+                        }
+
+                        Image {
+                            x: 13px;
+                            y: 13px + 1.5px * sin(root.orbit * 2);
+                            width: 24px;
+                            height: 24px;
+                            source: @image-url("../../assets/ui/blocks.svg");
+                            colorize: Theme.on-brand;
+                            accessible-role: none;
+                        }
+                    }
+
+                    Rectangle {
+                        x: 32px + 32px * cos(root.orbit) - 5px;
+                        y: 32px + 32px * sin(root.orbit) - 5px;
+                        width: 10px;
+                        height: 10px;
+                        border-radius: 5px;
+                        background: Theme.brand;
+                        border-width: 2px;
+                        border-color: Theme.panel;
+                        accessible-role: none;
+                    }
+                }
+
+                VerticalLayout {
+                    spacing: 3px;
+                    alignment: center;
+                    horizontal-stretch: 1;
+                    min-width: 0px;
+                    Text {
+                        text: root.adding ? "新模型映射" : "模型映射";
+                        color: Theme.brand;
+                        font-size: 11px;
+                        font-weight: 600;
+                        letter-spacing: 0.6px;
+                    }
+
+                    Text {
+                        text: root.display-name == "" ? "未命名模型" : root.display-name;
+                        color: root.display-name == "" ? Theme.muted-text : Theme.primary-text;
+                        font-size: 21px;
+                        font-weight: 700;
+                        overflow: elide;
+                    }
+
+                    Text {
+                        text: root.meta;
+                        color: Theme.muted-text;
+                        font-size: 11px;
+                        overflow: elide;
+                    }
+                }
+
+                VerticalLayout {
+                    alignment: start;
+                    horizontal-stretch: 0;
+                    Rectangle {
+                        width: chip-label.preferred-width + 34px;
+                        height: 26px;
+                        border-radius: 13px;
+                        background: Theme.panel.with-alpha(Theme.dark ? 0.55 : 0.75);
+                        border-width: 1px;
+                        border-color: (root.locked ? Theme.warning : Theme.brand).with-alpha(0.3);
+                        Rectangle {
+                            x: 14px - self.width / 2;
+                            y: 13px - self.height / 2;
+                            width: 6px + 12px * root.ping;
+                            height: self.width;
+                            border-radius: self.width / 2;
+                            border-width: 1px;
+                            border-color: root.locked ? Theme.warning : Theme.brand;
+                            opacity: root.live ? 1 - root.ping : 0;
+                            accessible-role: none;
+                        }
+
+                        Rectangle {
+                            x: 11px;
+                            y: 10px;
+                            width: 6px;
+                            height: 6px;
+                            border-radius: 3px;
+                            background: root.locked ? Theme.warning : Theme.brand;
+                            accessible-role: none;
+                        }
+
+                        chip-label := Text {
+                            x: 23px;
+                            text: root.locked ? "配置受管" : root.adding ? "未保存" : "已保存";
+                            color: root.locked ? Theme.warning : Theme.primary-text;
+                            font-size: 11px;
+                            font-weight: 500;
+                            vertical-alignment: center;
+                        }
+                    }
+                }
+            }
+
+            lane := Rectangle {
+                height: 70px;
+                property <length> gap: 34px;
+                property <length> node: (self.width - 2 * self.gap) / 3;
+                property <length> head: root.flow * self.width;
+                property <float> comet: root.live ? min(1, root.flow * 10, (1 - root.flow) * 10) : 0;
+                property <float> glow-0: root.live ? max(0, 1 - abs(self.head - self.node / 2) / (self.node * 0.55)) : 0;
+                property <float> glow-1: root.live ? max(0, 1 - abs(self.head - self.node * 1.5 - self.gap) / (self.node * 0.55)) : 0;
+                property <float> glow-2: root.live ? max(0, 1 - abs(self.head - self.node * 2.5 - self.gap * 2) / (self.node * 0.55)) : 0;
+                property <float> pass-0: root.live ? max(0, 1 - abs(self.head - self.node - self.gap / 2) / 48px) : 0;
+                property <float> pass-1: root.live ? max(0, 1 - abs(self.head - self.node * 2 - self.gap * 1.5) / 48px) : 0;
+
+                RouteNode {
+                    x: 0px;
+                    y: 4px - 3px * lane.glow-0;
+                    width: lane.node;
+                    height: 52px;
+                    icon: @image-url("../../assets/ui/terminal.svg");
+                    label: "Codex 菜单";
+                    value: root.display-name;
+                    placeholder: "显示名待填写";
+                    glow: lane.glow-0;
+                }
+
+                Image {
+                    x: lane.node + (lane.gap - self.width) / 2 + 3px * lane.pass-0;
+                    y: 4px + (52px - self.height) / 2;
+                    width: 16px;
+                    height: 16px;
+                    source: @image-url("../../assets/ui/arrow-right.svg");
+                    colorize: Theme.brand.mix(Theme.muted-text, lane.pass-0);
+                    opacity: 0.55 + 0.45 * lane.pass-0;
+                    accessible-role: none;
+                }
+
+                RouteNode {
+                    x: lane.node + lane.gap;
+                    y: 4px - 3px * lane.glow-1;
+                    width: lane.node;
+                    height: 52px;
+                    icon: @image-url("../../assets/ui/brand.svg");
+                    label: "SwitchX 公开 ID";
+                    value: root.public-id;
+                    placeholder: "公开 ID 待填写";
+                    mono: true;
+                    glow: lane.glow-1;
+                }
+
+                Image {
+                    x: lane.node * 2 + lane.gap + (lane.gap - self.width) / 2 + 3px * lane.pass-1;
+                    y: 4px + (52px - self.height) / 2;
+                    width: 16px;
+                    height: 16px;
+                    source: @image-url("../../assets/ui/arrow-right.svg");
+                    colorize: Theme.brand.mix(Theme.muted-text, lane.pass-1);
+                    opacity: 0.55 + 0.45 * lane.pass-1;
+                    accessible-role: none;
+                }
+
+                RouteNode {
+                    x: (lane.node + lane.gap) * 2;
+                    y: 4px - 3px * lane.glow-2;
+                    width: lane.node;
+                    height: 52px;
+                    icon: @image-url("../../assets/ui/link.svg");
+                    label: root.provider-name == "" ? "上游模型" : root.provider-name;
+                    value: root.upstream-id;
+                    placeholder: "实际模型待填写";
+                    glow: lane.glow-2;
+                }
+
+                Rectangle {
+                    y: 65px;
+                    height: 2px;
+                    border-radius: 1px;
+                    background: Theme.brand.with-alpha(0.14);
+                    accessible-role: none;
+                }
+
+                RailStop {
+                    center: lane.node / 2;
+                    glow: lane.glow-0;
+                }
+
+                RailStop {
+                    center: lane.node * 1.5 + lane.gap;
+                    glow: lane.glow-1;
+                }
+
+                RailStop {
+                    center: lane.node * 2.5 + lane.gap * 2;
+                    glow: lane.glow-2;
+                }
+
+                Rectangle {
+                    x: lane.head - self.width;
+                    y: 65px;
+                    width: min(120px, lane.head);
+                    height: 2px;
+                    background: @linear-gradient(90deg, Theme.brand.with-alpha(0) 0%, Theme.brand 100%);
+                    opacity: lane.comet;
+                    accessible-role: none;
+                }
+
+                Rectangle {
+                    x: lane.head - 4px;
+                    y: 62px;
+                    width: 8px;
+                    height: 8px;
+                    border-radius: 4px;
+                    background: Theme.brand;
+                    drop-shadow-blur: 10px;
+                    drop-shadow-color: Theme.brand;
+                    opacity: lane.comet;
+                    accessible-role: none;
+                }
+            }
+        }
+    }
+}
+
+// A card that rises into place after `delay` whenever `replay` changes, and
+// lifts with an accent rail while one of its fields has focus.
+export component MappingSection inherits Rectangle {
+    in property <string> title;
+    in property <string> caption;
+    in property <image> icon;
+    in property <string> badge;
+    in property <bool> active;
+    in property <int> replay;
+    in property <duration> delay: 0ms;
+    in property <bool> collapsible: false;
+    in-out property <bool> expanded: true;
+    callback toggled(bool);
+
+    private property <bool> motion: Theme.animations-enabled && !Theme.system-reduced-motion;
+    private property <bool> landed: true;
+    private property <float> arrival: root.landed ? 1 : 0;
+    animate arrival {
+        duration: root.landed && root.motion ? 640ms : 0ms;
+        delay: root.landed && root.motion ? root.delay : 0ms;
+        easing: cubic-bezier(0.16, 1, 0.3, 1);
+    }
+    changed replay => { root.landed = false; }
+    Timer {
+        interval: 16ms;
+        running: !root.landed;
+        triggered => { root.landed = true; }
+    }
+
+    private property <float> lift: root.active ? 1 : 0;
+    animate lift {
+        duration: Theme.page-motion;
+        easing: cubic-bezier(0.22, 1, 0.36, 1);
+    }
+    private property <float> hover: header-touch.has-hover && root.collapsible ? 1 : 0;
+    animate hover { duration: Theme.fast; }
+    private property <float> open: !root.collapsible || root.expanded ? 1 : 0;
+    animate open {
+        duration: Theme.page-motion;
+        easing: cubic-bezier(0.22, 1, 0.36, 1);
+    }
+    function toggle() {
+        if root.collapsible {
+            root.expanded = !root.expanded;
+            root.toggled(root.expanded);
+        }
+    }
+
+    preferred-height: body.preferred-height;
+    min-height: body.preferred-height;
+    vertical-stretch: 0;
+    forward-focus: header-keys;
+
+    card := Rectangle {
+        y: 18px * (1 - root.arrival);
+        width: root.width;
+        height: root.height;
+        opacity: root.arrival;
+        border-radius: 14px;
+        border-width: 1px;
+        border-color: Theme.brand.mix(Theme.border, 0.55 * root.lift + 0.3 * root.hover);
+        background: Theme.dark ? Theme.raised.with-alpha(0.32) : Theme.inset.with-alpha(0.6);
+        drop-shadow-blur: 22px * root.lift;
+        drop-shadow-offset-y: 6px * root.lift;
+        drop-shadow-color: Theme.brand.with-alpha((Theme.dark ? 0.16 : 0.12) * root.lift);
+        animate background { duration: Theme.page-motion; }
+
+        Rectangle {
+            border-radius: parent.border-radius;
+            background: Theme.brand-surface.with-alpha(Theme.dark ? 0.35 : 0.45);
+            opacity: root.lift;
+            accessible-role: none;
+        }
+
+        Rectangle {
+            x: 0px;
+            y: 18px + (parent.height - 36px) * (1 - root.lift) / 2;
+            width: 3px;
+            height: (parent.height - 36px) * root.lift;
+            border-radius: 1.5px;
+            background: Theme.brand;
+            opacity: root.lift;
+            accessible-role: none;
+        }
+
+        body := VerticalLayout {
+            padding: 16px;
+            padding-top: 14px;
+            spacing: 14px * root.open;
+            header := HorizontalLayout {
+                height: 32px;
+                spacing: 11px;
+                cross-axis-alignment: center;
+                Rectangle {
+                    width: 30px;
+                    height: 30px;
+                    horizontal-stretch: 0;
+                    border-radius: 9px;
+                    background: Theme.brand-surface.mix(Theme.brand, 1 - 0.85 * root.lift);
+                    Image {
+                        x: 8px;
+                        y: 8px;
+                        width: 14px;
+                        height: 14px;
+                        source: root.icon;
+                        colorize: Theme.brand.mix(Theme.on-brand, 1 - root.lift);
+                        accessible-role: none;
+                    }
+                }
+
+                VerticalLayout {
+                    spacing: 1px;
+                    alignment: center;
+                    horizontal-stretch: 1;
+                    min-width: 0px;
+                    Text {
+                        text: root.title;
+                        color: Theme.primary-text;
+                        font-size: 13px;
+                        font-weight: 600;
+                        overflow: elide;
+                    }
+
+                    if root.caption != "": Text {
+                        text: root.caption;
+                        color: Theme.muted-text;
+                        font-size: 11px;
+                        overflow: elide;
+                    }
+                }
+
+                if root.badge != "": Rectangle {
+                    width: badge-label.preferred-width + 18px;
+                    height: 22px;
+                    horizontal-stretch: 0;
+                    border-radius: 11px;
+                    background: Theme.brand-surface;
+                    border-width: 1px;
+                    border-color: Theme.brand.with-alpha(0.25);
+                    badge-label := Text {
+                        text: root.badge;
+                        color: Theme.brand;
+                        font-size: 10px;
+                        font-weight: 600;
+                        horizontal-alignment: center;
+                        vertical-alignment: center;
+                    }
+                }
+
+                if root.collapsible: Image {
+                    width: 14px;
+                    height: 14px;
+                    source: @image-url("../../assets/ui/chevron-down.svg");
+                    colorize: root.expanded || root.hover > 0.5 ? Theme.brand : Theme.muted-text;
+                    transform-rotation: root.expanded ? 180deg : 0deg;
+                    animate transform-rotation {
+                        duration: Theme.page-motion;
+                        easing: cubic-bezier(0.34, 1.4, 0.64, 1);
+                    }
+                    animate colorize { duration: Theme.fast; }
+                    accessible-role: none;
+                }
+            }
+
+            @children
+        }
+
+        header-touch := TouchArea {
+            y: 0px;
+            height: 14px + 32px + 8px;
+            enabled: root.collapsible;
+            mouse-cursor: root.collapsible ? pointer : default;
+            clicked => { header-keys.focus(); root.toggle(); }
+        }
+
+        header-keys := FocusScope {
+            width: 0px;
+            enabled: root.collapsible;
+            key-pressed(event) => {
+                if event.text == Key.Space || event.text == Key.Return { root.toggle(); return accept; }
+                return reject;
+            }
+        }
+
+        Rectangle {
+            x: 2px;
+            y: 2px;
+            width: parent.width - 4px;
+            height: 50px;
+            border-radius: 12px;
+            border-width: 2px;
+            border-color: Theme.brand;
+            opacity: header-keys.has-focus ? 0.6 : 0;
+            animate opacity { duration: Theme.fast; }
+            accessible-role: none;
+        }
+
+        if root.collapsible: Rectangle {
+            y: 0px;
+            height: 54px;
+            accessible-role: button;
+            accessible-label: root.title;
+            accessible-expandable: true;
+            accessible-expanded: root.expanded;
+            accessible-action-default => { root.toggle(); }
+        }
+    }
+
+    accessible-role: groupbox;
+    accessible-label: root.title;
+}
+
+// A label column whose ink follows focus and flags a missing value.
+export component MappingFieldRow inherits HorizontalLayout {
+    in property <string> label;
+    in property <bool> focused;
+    in property <bool> missing;
+    spacing: 12px;
+    Rectangle {
+        width: 88px;
+        horizontal-stretch: 0;
+        label-text := Text {
+            x: 0px;
+            y: 0px;
+            width: parent.width - 10px;
+            height: 36px;
+            text: root.label;
+            color: root.missing ? Theme.error : root.focused ? Theme.brand : Theme.muted-text;
+            font-size: 12px;
+            font-weight: root.focused ? 600 : 400;
+            vertical-alignment: center;
+            overflow: elide;
+            animate color { duration: Theme.fast; }
+        }
+
+        Rectangle {
+            x: min(label-text.preferred-width + 5px, parent.width - 6px);
+            y: 12px;
+            width: 5px;
+            height: 5px;
+            border-radius: 2.5px;
+            background: Theme.error;
+            opacity: root.missing ? 1 : 0;
+            animate opacity { duration: Theme.fast; }
+            accessible-role: none;
+        }
+    }
+
+    @children
+}
+
+// Copies through the owner's field so clipboard handling stays native; the
+// icon morphs into a check and a label confirms the copy.
+export component CopyButton inherits Rectangle {
+    in property <bool> enabled: true;
+    in property <string> label: "复制";
+    callback copy();
+    private property <bool> copied: false;
+    private property <bool> motion: Theme.animations-enabled && !Theme.system-reduced-motion;
+    private property <float> pop: root.copied ? 1 : 0;
+    animate pop {
+        duration: root.motion ? 420ms : 0ms;
+        easing: cubic-bezier(0.34, 1.56, 0.64, 1);
+    }
+    Timer {
+        interval: 1600ms;
+        running: root.copied;
+        triggered => { root.copied = false; }
+    }
+
+    function activate() {
+        if root.enabled { root.copy(); root.copied = true; }
+    }
+
+    width: 36px;
+    height: 36px;
+    horizontal-stretch: 0;
+    border-radius: 8px;
+    border-width: 1px;
+    border-color: root.copied ? Theme.brand.with-alpha(0.5) : touch.has-hover ? Theme.muted-text : Theme.border;
+    background: root.copied ? Theme.brand-surface : touch.has-hover ? Theme.raised : Theme.panel;
+    opacity: root.enabled ? 1 : 0.45;
+    animate background, border-color, opacity { duration: Theme.fast; }
+    forward-focus: keys;
+    accessible-role: button;
+    accessible-label: root.copied ? "已复制" : root.label;
+    accessible-enabled: root.enabled;
+    accessible-action-default => { root.activate(); }
+
+    Image {
+        x: (parent.width - self.width) / 2;
+        y: (parent.height - self.height) / 2;
+        width: max(0px, 15px * (1 - min(1, root.pop)));
+        height: self.width;
+        source: @image-url("../../assets/ui/copy.svg");
+        colorize: Theme.muted-text;
+        accessible-role: none;
+    }
+
+    Image {
+        x: (parent.width - self.width) / 2;
+        y: (parent.height - self.height) / 2;
+        width: max(0px, 16px * root.pop);
+        height: self.width;
+        source: @image-url("../../assets/ui/check.svg");
+        colorize: Theme.brand;
+        accessible-role: none;
+    }
+
+    Rectangle {
+        x: -self.width - 6px - 8px * (1 - root.pop);
+        y: (parent.height - self.height) / 2;
+        width: toast.preferred-width + 18px;
+        height: 24px;
+        border-radius: 12px;
+        background: Theme.solid;
+        opacity: max(0, min(1, root.pop));
+        accessible-role: none;
+        toast := Text {
+            text: "已复制";
+            color: Theme.on-brand;
+            font-size: 11px;
+            font-weight: 600;
+            horizontal-alignment: center;
+            vertical-alignment: center;
+        }
+    }
+
+    touch := TouchArea {
+        enabled: root.enabled;
+        mouse-cursor: pointer;
+        clicked => { keys.focus(); root.activate(); }
+    }
+
+    keys := FocusScope {
+        width: 0px;
+        enabled: root.enabled;
+        key-pressed(event) => {
+            if event.text == Key.Space || event.text == Key.Return { root.activate(); return accept; }
+            return reject;
+        }
+    }
+
+    Rectangle {
+        border-radius: 8px;
+        border-width: 2px;
+        border-color: Theme.brand;
+        opacity: keys.has-focus ? 1 : 0;
+        animate opacity { duration: Theme.fast; }
+        accessible-role: none;
+    }
+}
+
+// First click arms the button: it widens, turns red and shakes once. A second
+// click confirms; it disarms by itself after a few seconds.
+export component ConfirmDeleteButton inherits Rectangle {
+    in property <string> text: "删除";
+    in property <string> confirm-text: "确认删除？";
+    in property <bool> enabled: true;
+    in-out property <bool> confirming;
+    callback confirmed();
+    private property <bool> motion: Theme.animations-enabled && !Theme.system-reduced-motion;
+    private property <float> arm: root.confirming ? 1 : 0;
+    animate arm {
+        duration: Theme.page-motion;
+        easing: cubic-bezier(0.22, 1, 0.36, 1);
+    }
+    private property <int> step: 0;
+    private property <bool> shaking: false;
+    private property <length> shake: root.shaking ? 5px * sin(root.step * 72deg) * (1 - root.step / 24) : 0px;
+    changed confirming => {
+        if root.confirming && root.motion { root.step = 0; root.shaking = true; }
+    }
+    Timer {
+        interval: 16ms;
+        running: root.shaking;
+        triggered => {
+            root.step += 1;
+            if root.step >= 24 { root.shaking = false; root.step = 0; }
+        }
+    }
+
+    Timer {
+        interval: 5s;
+        running: root.confirming;
+        triggered => { root.confirming = false; }
+    }
+
+    function activate() {
+        if root.enabled {
+            if root.confirming { root.confirmed(); }
+            else { root.confirming = true; }
+        }
+    }
+
+    width: 100px + 40px * root.arm;
+    height: 36px;
+    horizontal-stretch: 0;
+    forward-focus: keys;
+    accessible-role: button;
+    accessible-label: root.confirming ? root.confirm-text : root.text;
+    accessible-enabled: root.enabled;
+    accessible-action-default => { root.activate(); }
+
+    Rectangle {
+        x: root.shake;
+        width: root.width;
+        height: root.height;
+        border-radius: 8px;
+        border-width: 1px;
+        border-color: Theme.error.with-alpha(0.55 * root.arm + (touch.has-hover ? 0.3 : 0));
+        background: Theme.error.with-alpha(0.13 * root.arm + (touch.has-hover && !root.confirming ? 0.06 : 0));
+        opacity: root.enabled ? 1 : 0.42;
+        animate border-color, background { duration: Theme.fast; }
+        clip: true;
+
+        Image {
+            x: 12px;
+            y: (parent.height - self.height) / 2;
+            width: 14px * root.arm;
+            height: 14px;
+            source: @image-url("../../assets/ui/alert.svg");
+            colorize: Theme.error;
+            opacity: root.arm;
+            accessible-role: none;
+        }
+
+        Text {
+            x: 0px;
+            y: -8px * root.arm;
+            width: parent.width;
+            height: parent.height;
+            text: root.text;
+            color: touch.has-hover ? Theme.error : Theme.muted-text;
+            font-size: 12px;
+            horizontal-alignment: center;
+            vertical-alignment: center;
+            opacity: 1 - root.arm;
+            animate color { duration: Theme.fast; }
+            accessible-role: none;
+        }
+
+        Text {
+            x: 12px + 18px * root.arm;
+            y: 8px * (1 - root.arm);
+            width: parent.width - self.x - 10px;
+            height: parent.height;
+            text: root.confirm-text;
+            color: Theme.error;
+            font-size: 12px;
+            font-weight: 600;
+            vertical-alignment: center;
+            overflow: elide;
+            opacity: root.arm;
+            accessible-role: none;
+        }
+
+        Rectangle {
+            border-radius: 8px;
+            border-width: 2px;
+            border-color: Theme.error;
+            opacity: keys.has-focus ? 0.8 : 0;
+            animate opacity { duration: Theme.fast; }
+            accessible-role: none;
+        }
+    }
+
+    touch := TouchArea {
+        enabled: root.enabled;
+        mouse-cursor: pointer;
+        clicked => { keys.focus(); root.activate(); }
+    }
+
+    keys := FocusScope {
+        width: 0px;
+        enabled: root.enabled;
+        key-pressed(event) => {
+            if event.text == Key.Space || event.text == Key.Return { root.activate(); return accept; }
+            if event.text == Key.Escape && root.confirming { root.confirming = false; return accept; }
+            return reject;
+        }
+    }
+}
+
+// A numeric field with presets on a sliding thumb, a logarithmic meter and a
+// readout that counts toward each new value.
+export component ContextDial inherits VerticalLayout {
+    in-out property <string> text;
+    in property <bool> enabled: true;
+    callback edited();
+    out property <bool> has-focus: input.has-focus;
+
+    private property <bool> motion: Theme.animations-enabled && !Theme.system-reduced-motion;
+    private property <bool> empty: root.text == "";
+    private property <bool> valid: root.empty || (root.text.is-float() && root.text.to-float() >= 1);
+    private property <float> value: root.empty ? 128000 : root.valid ? root.text.to-float() : 0;
+    private property <[{ label: string, value: int }]> presets: [
+        { label: "128K", value: 128000 },
+        { label: "200K", value: 200000 },
+        { label: "272K", value: 272000 },
+        { label: "400K", value: 400000 },
+        { label: "1M", value: 1000000 },
+    ];
+    private property <int> preset: !root.valid ? -1
+        : root.value == 128000 ? 0
+        : root.value == 200000 ? 1
+        : root.value == 272000 ? 2
+        : root.value == 400000 ? 3
+        : root.value == 1000000 ? 4 : -1;
+    private property <float> shown: root.value;
+    animate shown {
+        duration: root.motion ? 680ms : 0ms;
+        easing: cubic-bezier(0.22, 1, 0.36, 1);
+    }
+    private property <float> fill: root.valid ? MappingFormat.level(root.value) : 0;
+    animate fill {
+        duration: root.motion ? 760ms : 0ms;
+        easing: cubic-bezier(0.34, 1.36, 0.64, 1);
+    }
+    function choose(value: int) {
+        if root.enabled {
+            root.text = value;
+            root.edited();
+        }
+    }
+
+    spacing: 12px;
+    HorizontalLayout {
+        spacing: 10px;
+        cross-axis-alignment: center;
+        input := QuietLineEdit {
+            width: 200px;
+            horizontal-stretch: 0;
+            text <=> root.text;
+            enabled: root.enabled;
+            input-type: number;
+            placeholder-text: "留空使用 128000";
+            accessible-label: "模型上下文窗口";
+            edited => { root.edited(); }
+        }
+
+        Text {
+            text: "tokens";
+            color: Theme.muted-text;
+            font-size: 12px;
+            vertical-alignment: center;
+        }
+
+        Rectangle {
+            horizontal-stretch: 1;
+        }
+
+        VerticalLayout {
+            spacing: 0px;
+            alignment: center;
+            Text {
+                text: root.valid ? MappingFormat.tokens(root.shown) : "—";
+                color: !root.valid ? Theme.error : root.empty ? Theme.muted-text : Theme.brand;
+                font-size: 26px;
+                font-weight: 700;
+                horizontal-alignment: right;
+                animate color { duration: Theme.fast; }
+            }
+
+            Text {
+                text: !root.valid ? "需要正整数" : root.empty ? "默认窗口" : "上下文 tokens";
+                color: root.valid ? Theme.muted-text : Theme.error;
+                font-size: 10px;
+                horizontal-alignment: right;
+            }
+        }
+    }
+
+    track := Rectangle {
+        height: 34px;
+        border-radius: 10px;
+        border-width: 1px;
+        border-color: Theme.border;
+        background: Theme.panel.with-alpha(Theme.dark ? 0.4 : 0.9);
+        property <length> segment: (self.width - 6px) / 5;
+        Rectangle {
+            x: 3px + track.segment * max(0, root.preset);
+            y: 3px;
+            width: track.segment;
+            height: parent.height - 6px;
+            border-radius: 8px;
+            background: Theme.brand-surface;
+            border-width: 1px;
+            border-color: Theme.brand.with-alpha(root.empty ? 0.2 : 0.45);
+            opacity: root.preset < 0 ? 0 : root.empty ? 0.6 : 1;
+            drop-shadow-blur: 6px;
+            drop-shadow-offset-y: 1px;
+            drop-shadow-color: Theme.dark ? #00000040 : #18221a14;
+            animate x {
+                duration: Theme.page-motion;
+                easing: cubic-bezier(0.34, 1.4, 0.64, 1);
+            }
+            animate opacity, border-color { duration: Theme.fast; }
+            accessible-role: none;
+        }
+
+        for item[index] in root.presets: Rectangle {
+            x: 3px + track.segment * index;
+            y: 3px;
+            width: track.segment;
+            height: parent.height - 6px;
+            accessible-role: button;
+            accessible-label: "上下文 " + item.label;
+            accessible-enabled: root.enabled;
+            accessible-action-default => { root.choose(item.value); }
+            Text {
+                text: item.label;
+                color: index == root.preset && !root.empty ? Theme.brand : preset-touch.has-hover ? Theme.primary-text : Theme.muted-text;
+                font-size: 12px;
+                font-weight: index == root.preset && !root.empty ? 700 : 500;
+                horizontal-alignment: center;
+                vertical-alignment: center;
+                animate color { duration: Theme.fast; }
+                accessible-role: none;
+            }
+
+            preset-touch := TouchArea {
+                enabled: root.enabled;
+                mouse-cursor: pointer;
+                clicked => { root.choose(item.value); }
+            }
+        }
+    }
+
+    meter := Rectangle {
+        height: 16px;
+        Rectangle {
+            y: 5px;
+            height: 6px;
+            border-radius: 3px;
+            background: Theme.border.with-alpha(0.7);
+            accessible-role: none;
+        }
+
+        Rectangle {
+            x: 0px;
+            y: 5px;
+            width: max(6px, (meter.width - 12px) * root.fill + 6px);
+            height: 6px;
+            border-radius: 3px;
+            background: Theme.brand;
+            accessible-role: none;
+        }
+
+        for item[index] in root.presets: Rectangle {
+            x: 6px + (meter.width - 12px) * MappingFormat.level(item.value) - 1px;
+            y: 6px;
+            width: 2px;
+            height: 4px;
+            border-radius: 1px;
+            background: MappingFormat.level(item.value) <= root.fill ? Theme.panel.with-alpha(0.8) : Theme.muted-text.with-alpha(0.4);
+            accessible-role: none;
+        }
+
+        Rectangle {
+            x: (meter.width - 12px) * root.fill;
+            y: 2px;
+            width: 12px;
+            height: 12px;
+            border-radius: 6px;
+            background: Theme.panel;
+            border-width: 2px;
+            border-color: root.valid ? Theme.brand : Theme.error;
+            drop-shadow-blur: 6px;
+            drop-shadow-color: Theme.brand.with-alpha(0.4);
+            opacity: root.valid ? 1 : 0.4;
+            accessible-role: none;
+        }
+    }
+}
+
+// Eight bars, one per effort, rising in height. Bars rise in on arrival and
+// fill from below when selected; the star marks the default level.
+export component ReasoningLadder inherits Rectangle {
+    in-out property <string> levels;
+    in-out property <string> default-level;
+    in property <bool> enabled: true;
+    in property <int> replay;
+    callback edited();
+
+    // Read once for names and descriptions; selection is checked per bar so
+    // the bars persist and animate.
+    private property <[ReasoningChoice]> catalog: ReasoningChoices.choices("", "");
+    private property <bool> motion: Theme.animations-enabled && !Theme.system-reduced-motion;
+    private property <bool> landed: true;
+    private property <float> clock: root.landed ? 1 : 0;
+    animate clock {
+        duration: root.landed && root.motion ? 960ms : 0ms;
+        delay: root.landed && root.motion ? 300ms : 0ms;
+        easing: linear;
+    }
+    changed replay => { root.landed = false; }
+    Timer {
+        interval: 16ms;
+        running: !root.landed;
+        triggered => { root.landed = true; }
+    }
+
+    function toggle(effort: string) {
+        if root.enabled {
+            root.levels = ReasoningChoices.toggle(root.levels, effort);
+            if !ReasoningChoices.includes(root.levels, root.default-level) { root.default-level = ""; }
+            root.edited();
+        }
+    }
+
+    private property <length> gap: 6px;
+    private property <length> column: (root.width - root.gap * 7) / 8;
+    height: 112px;
+    opacity: root.enabled ? 1 : 0.5;
+    animate opacity { duration: Theme.fast; }
+
+    for choice[index] in root.catalog: Rectangle {
+        x: (root.column + root.gap) * index;
+        width: root.column;
+        height: root.height;
+        property <bool> selected: ReasoningChoices.includes(root.levels, choice.effort);
+        property <bool> preferred: choice.effort == root.default-level;
+        property <float> grow: clamp((root.clock - index * 0.06) / 0.5, 0, 1);
+        property <float> eased: 1 - pow(1 - self.grow, 3);
+        property <float> on: self.selected ? 1 : 0;
+        animate on {
+            duration: root.motion ? 520ms : 0ms;
+            easing: cubic-bezier(0.34, 1.5, 0.64, 1);
+        }
+        property <float> hover: bar-touch.has-hover && root.enabled ? 1 : 0;
+        animate hover {
+            duration: Theme.fast;
+            easing: ease-out;
+        }
+        property <float> star: self.preferred ? 1 : 0;
+        animate star {
+            duration: root.motion ? 460ms : 0ms;
+            easing: cubic-bezier(0.34, 1.7, 0.64, 1);
+        }
+        property <length> full: 22px + index * 5.5px;
+        accessible-role: checkbox;
+        accessible-label: choice.effort + "，" + choice.description + (self.preferred ? "，默认" : "");
+        accessible-checked: self.selected;
+        accessible-enabled: root.enabled;
+        accessible-action-default => { root.toggle(choice.effort); }
+
+        bar := Rectangle {
+            property <float> fill: parent.on;
+            x: 3px - 1px * parent.hover;
+            width: parent.width - 6px + 2px * parent.hover;
+            height: max(0px, parent.full * parent.eased + 4px * parent.hover);
+            y: 78px - self.height;
+            border-radius: 7px;
+            background: Theme.border.with-alpha(Theme.dark ? 0.55 : 0.7);
+            border-width: 1px;
+            border-color: Theme.brand.mix(Theme.border, max(parent.on, parent.hover * 0.7));
+            clip: true;
+            Rectangle {
+                y: parent.height * (1 - parent.fill);
+                height: parent.height * max(0, parent.fill);
+                border-radius: 6px;
+                background: Theme.brand.with-alpha(0.88);
+                accessible-role: none;
+            }
+
+            Rectangle {
+                x: 3px;
+                y: 3px;
+                width: parent.width - 6px;
+                height: 2px;
+                border-radius: 1px;
+                background: Theme.on-brand.with-alpha(0.22);
+                opacity: parent.fill;
+                accessible-role: none;
+            }
+
+            accessible-role: none;
+        }
+
+        Image {
+            x: (parent.width - self.width) / 2;
+            y: bar.y - 4px - self.height + 3px * (1 - parent.star);
+            width: 13px * max(0, parent.star);
+            height: self.width;
+            source: @image-url("../../assets/ui/star-fill.svg");
+            colorize: Theme.brand;
+            opacity: min(1, max(0, parent.star)) * parent.eased;
+            accessible-role: none;
+        }
+
+        Text {
+            y: 84px;
+            width: parent.width;
+            height: 14px;
+            text: choice.effort;
+            color: parent.selected ? Theme.primary-text : parent.hover > 0.5 ? Theme.primary-text : Theme.muted-text;
+            font-size: 11px;
+            font-weight: parent.selected ? 600 : 400;
+            horizontal-alignment: center;
+            overflow: elide;
+            animate color { duration: Theme.fast; }
+            accessible-role: none;
+        }
+
+        Text {
+            y: 99px;
+            width: parent.width;
+            height: 12px;
+            text: parent.preferred ? "默认" : choice.description;
+            color: parent.preferred ? Theme.brand : Theme.muted-text;
+            font-size: 9px;
+            font-weight: parent.preferred ? 600 : 400;
+            horizontal-alignment: center;
+            overflow: elide;
+            opacity: parent.preferred || parent.selected || parent.hover > 0.5 ? 1 : 0.7;
+            animate opacity { duration: Theme.fast; }
+            accessible-role: none;
+        }
+
+        bar-touch := TouchArea {
+            enabled: root.enabled;
+            mouse-cursor: pointer;
+            clicked => { root.toggle(choice.effort); }
+        }
+    }
+}
