@@ -22,6 +22,8 @@ import {
     BatchModelRow,
     BatchSummary,
     RequestRow,
+    RequestStats,
+    RequestBar,
     ConnectionModelRow,
 } from "view-models.slint";
 import { AccountsPage } from "pages/accounts.slint";
@@ -51,6 +53,8 @@ export {
     BatchModelRow,
     BatchSummary,
     RequestRow,
+    RequestStats,
+    RequestBar,
     ConnectionModelRow,
 } from "view-models.slint";
 export { SyntaxHighlighting, CodeSpan } from "code-editor.slint";
@@ -247,8 +251,20 @@ export component AppWindow inherits Window {
     in-out property <bool> direct-preview-ready: false;
     in-out property <string> action-message: "";
     in-out property <[ModelRow]> models: [];
+    // `requests` is the filtered, keyed view model; `request-log` holds the newest
+    // records in chronological order for filtering and arrival stamps.
     in-out property <[RequestRow]> requests: [];
+    in-out property <[RequestRow]> request-log: [];
+    in-out property <RequestStats> request-stats: { success-rate: -1, p50-ms: -1, p95-ms: -1, first-event-ms: -1 };
+    in-out property <[RequestBar]> request-bars: [];
+    in-out property <int> request-sync: 0;
+    in-out property <int> request-filter: 0;
+    in-out property <bool> request-following: true;
+    in-out property <int> request-unseen: 0;
+    in-out property <bool> request-loading: false;
+    in-out property <bool> request-write-failed: false;
     in-out property <string> request-error: "";
+    in-out property <bool> window-visible: true;
     in-out property <int> selected-model-count: 0;
     in-out property <int> selected-connection-count: 0;
     in-out property <string> default-model-label;
@@ -417,6 +433,7 @@ export component AppWindow inherits Window {
     changed model-upstream-id => { root.update-model-display-name(); }
     callback refresh(bool);
     callback refresh-requests();
+    callback filter-requests(int);
     callback filter-providers(string);
     callback save-provider(string, string, string, string, string);
     callback begin-provider-editor(string);
@@ -680,7 +697,7 @@ export component AppWindow inherits Window {
                             selected: root.active-page == 3;
                             left-aligned: true;
                             height: 40px;
-                            clicked => { root.active-page = 3; if (!root.busy) { root.refresh-requests(); } }
+                            clicked => { root.active-page = 3; }
                         }
 
                         Rectangle {
@@ -847,14 +864,14 @@ export component AppWindow inherits Window {
                         padding-bottom: 16px;
                         spacing: 18px;
                         HorizontalLayout {
-                            height: root.active-page == 1 ? 52px : 65px;
+                            height: root.active-page == 1 || root.active-page == 3 ? 52px : 65px;
                             spacing: 16px;
                             VerticalLayout {
                                 spacing: 7px;
                                 Text {
                                     text: root.page-title;
                                     color: Theme.primary-text;
-                                    font-size: root.active-page == 1 ? 24px : 28px;
+                                    font-size: root.active-page == 1 || root.active-page == 3 ? 24px : 28px;
                                     font-weight: 600;
                                 }
 
@@ -1150,10 +1167,20 @@ export component AppWindow inherits Window {
                                     }
                                 }
                                 if root.active-page == 3: ActivityPage {
-                                    busy: root.busy;
                                     requests: root.requests;
+                                    stats: root.request-stats;
+                                    bars: root.request-bars;
+                                    sync: root.request-sync;
+                                    loading: root.request-loading;
                                     request-error: root.request-error;
+                                    write-failed: root.request-write-failed;
+                                    route-running: root.route-running;
+                                    live: root.window-visible;
+                                    filter <=> root.request-filter;
+                                    following <=> root.request-following;
+                                    unseen <=> root.request-unseen;
                                     refresh-requests() => { root.refresh-requests(); }
+                                    filter-requests(index) => { root.filter-requests(index); }
                                 }
                                 if root.active-page == 4: VerticalLayout {
                                     spacing: 22px;
@@ -1989,7 +2016,7 @@ export component AppWindow inherits Window {
                 left-aligned: true;
                 ghost: true;
                 height: 45px;
-                clicked => { root.command-open = false; root.active-page = item.page; if (item.page == 3 && !root.busy) { root.refresh-requests(); } app-keyboard.focus(); }
+                clicked => { root.command-open = false; root.active-page = item.page; app-keyboard.focus(); }
             }
             Rectangle {
                 height: 1px;

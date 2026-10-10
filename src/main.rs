@@ -1,13 +1,16 @@
 use switchx::ui::{
     AccountRow, AppWindow, BatchModelRow, BatchSummary, CodeSpan, CodexQuotaRow,
-    ConnectionModelRow, ModelRow, ProviderIconRow, ProviderPresetRow, ProviderRow, RequestRow,
-    SwitchXTray, SyntaxHighlighting, Theme, XaiQuotaRow,
+    ConnectionModelRow, ModelRow, ProviderIconRow, ProviderPresetRow, ProviderRow, RequestBar,
+    RequestRow, RequestStats, SwitchXTray, SyntaxHighlighting, Theme, XaiQuotaRow,
 };
 
 #[cfg(target_os = "macos")]
 mod macos;
 
-use std::path::{Path, PathBuf};
+use std::{
+    collections::{HashMap, HashSet},
+    path::{Path, PathBuf},
+};
 
 use slint::{ComponentHandle, Model, ModelRc, VecModel};
 use switchx::{
@@ -20,7 +23,7 @@ use switchx::{
     provider_config::{self, CodexOptions},
     provider_icons,
     routed::RouteSession,
-    storage::{AccountBinding, ModelRecord, ProviderKind, ProviderRecord, Store},
+    storage::{AccountBinding, ModelRecord, ProviderKind, ProviderRecord, RequestStatus, Store},
 };
 use tokio::sync::{
     mpsc::{self, error::TrySendError},
@@ -216,6 +219,154 @@ fn filter_providers(app: &AppWindow, query: &str) {
         |row| row.id.clone(),
         |model| app.set_filtered_providers(model),
     );
+}
+
+const PULSE_BARS: usize = 48;
+// Rows aged out of the newest-100 window that a paused reader may still be looking at.
+const RETAINED_REQUEST_HISTORY: usize = 300;
+
+fn request_row(record: app::RequestView, stamp: i32) -> RequestRow {
+    let millis = |value: i64| value.clamp(0, i32::MAX as i64) as i32;
+    RequestRow {
+        clock: record.time.get(11..).unwrap_or(&record.time).into(),
+        duration: app::format_duration(record.duration_ms).into(),
+        duration_ms: millis(record.duration_ms),
+        // Log scale up to one minute keeps sub-second and multi-second calls comparable.
+        level: ((record.duration_ms.max(0) as f64 + 1.0).log10() / 60_001_f64.log10())
+            .clamp(0.0, 1.0) as f32,
+        headers_ms: record.headers_ms.map_or(-1, millis),
+        first_event_ms: record.first_event_ms.map_or(-1, millis),
+        http: record
+            .http_status
+            .map(|status| status.to_string())
+            .unwrap_or_default()
+            .into(),
+        status: record.status.label().into(),
+        kind: match record.status {
+            RequestStatus::Completed => 0,
+            RequestStatus::Failed => 1,
+            RequestStatus::Interrupted => 2,
+            RequestStatus::Cancelled => 3,
+        },
+        id: record.id.into(),
+        time: record.time.into(),
+        model: record.model.into(),
+        provider: record.provider.into(),
+        upstream: record.upstream.into(),
+        generation: record.generation.into(),
+        error: record.error.into(),
+        fallback: record.fallback.into(),
+        stamp,
+    }
+}
+
+fn request_matches(kind: i32, filter: i32) -> bool {
+    match filter {
+        1 => kind == 0,
+        2 => kind == 1 || kind == 2,
+        3 => kind == 3,
+        _ => true,
+    }
+}
+
+/// Orders the visible rows and counts arrivals. While the reader is paused,
+/// leading rows that left the newest window stay above, so trimming never
+/// shifts the entries under the pointer.
+fn merge_request_rows(
+    current: &[RequestRow],
+    rows: Vec<RequestRow>,
+    keep_history: bool,
+) -> (Vec<RequestRow>, usize) {
+    let incoming = rows.iter().map(|row| &row.id).collect::<HashSet<_>>();
+    let visible = current.iter().map(|row| &row.id).collect::<HashSet<_>>();
+    let arrivals = rows.iter().filter(|row| !visible.contains(&row.id)).count();
+    let aged = if keep_history {
+        current
+            .iter()
+            .take_while(|row| !incoming.contains(&row.id))
+            .count()
+    } else {
+        0
+    };
+    let mut merged = current[aged.saturating_sub(RETAINED_REQUEST_HISTORY)..aged].to_vec();
+    merged.extend(rows);
+    (merged, arrivals)
+}
+
+fn show_request_rows(app: &AppWindow, keep_history: bool) {
+    let filter = app.get_request_filter();
+    let rows = app
+        .get_request_log()
+        .iter()
+        .filter(|row| request_matches(row.kind, filter))
+        .collect::<Vec<_>>();
+    let model = app.get_requests();
+    let current = model.iter().collect::<Vec<_>>();
+    let (rows, arrivals) = merge_request_rows(&current, rows, keep_history);
+    sync_rows(
+        model,
+        rows,
+        |row| row.id.clone(),
+        |model| app.set_requests(model),
+    );
+    if keep_history && arrivals > 0 {
+        app.set_request_unseen(app.get_request_unseen().saturating_add(arrivals as i32));
+    }
+}
+
+fn show_requests(app: &AppWindow, records: Vec<app::RequestView>) {
+    let stats = app::request_stats(&records);
+    let sync = app.get_request_sync().saturating_add(1);
+    // The first refresh is history; later unknown ids are live arrivals.
+    let arrival = if sync == 1 { 0 } else { sync };
+    let stamps = app
+        .get_request_log()
+        .iter()
+        .map(|row| (row.id, row.stamp))
+        .collect::<HashMap<_, _>>();
+    let log = records
+        .into_iter()
+        .rev()
+        .map(|record| {
+            let stamp = stamps.get(record.id.as_str()).copied().unwrap_or(arrival);
+            request_row(record, stamp)
+        })
+        .collect::<Vec<_>>();
+    let bars = log[log.len().saturating_sub(PULSE_BARS)..]
+        .iter()
+        .map(|row| RequestBar {
+            id: row.id.clone(),
+            level: row.level,
+            kind: row.kind,
+            label: format!("{} · {} · {}", row.model, row.duration, row.clock).into(),
+            stamp: row.stamp,
+        })
+        .collect();
+    let judged = stats.completed + stats.failed;
+    let millis = |value: Option<i64>| value.map_or(-1.0, |ms| ms as f32);
+    app.set_request_stats(RequestStats {
+        total: stats.total as i32,
+        completed: stats.completed as i32,
+        failed: stats.failed as i32,
+        cancelled: stats.cancelled as i32,
+        success_rate: if judged == 0 {
+            -1.0
+        } else {
+            stats.completed as f32 * 100.0 / judged as f32
+        },
+        p50_ms: millis(stats.p50_ms),
+        p95_ms: millis(stats.p95_ms),
+        first_event_ms: millis(stats.first_event_p50_ms),
+    });
+    sync_rows(
+        app.get_request_bars(),
+        bars,
+        |bar| bar.id.clone(),
+        |model| app.set_request_bars(model),
+    );
+    app.set_request_sync(sync);
+    app.set_request_log(ModelRc::new(VecModel::from(log)));
+    show_request_rows(app, !app.get_request_following());
 }
 
 fn show_result(app: &AppWindow, result: Result<Snapshot, AppError>) {
@@ -2340,6 +2491,7 @@ async fn worker(
                 }
                 app.set_recovery_only(true);
                 app.set_loading(false);
+                app.set_request_loading(false);
                 app.set_config_managed(true);
                 app.set_active_page(5);
                 show_action(
@@ -2378,28 +2530,10 @@ async fn worker(
                     .map_err(|error| *error)
                     .and_then(|path| app::load_requests(path));
                 let _ = weak.upgrade_in_event_loop(move |app| {
-                    app.set_busy(false);
+                    app.set_request_loading(false);
                     match result {
                         Ok(records) => {
-                            app.set_requests(ModelRc::new(VecModel::from(
-                                records
-                                    .into_iter()
-                                    .map(|record| RequestRow {
-                                        time: record.time.into(),
-                                        route: record.route.into(),
-                                        timing: record.timing.into(),
-                                        duration: record.duration.into(),
-                                        detail: record.detail.into(),
-                                        status: record.status.label().into(),
-                                        completed: record.status
-                                            == switchx::storage::RequestStatus::Completed,
-                                        cancelled: record.status
-                                            == switchx::storage::RequestStatus::Cancelled,
-                                        error: record.error.into(),
-                                        fallback: record.fallback.into(),
-                                    })
-                                    .collect::<Vec<_>>(),
-                            )));
+                            show_requests(&app, records);
                             app.set_request_error("".into());
                         }
                         Err(error) => app.set_request_error(
@@ -4305,6 +4439,7 @@ async fn worker(
                         let _ = slint::quit_event_loop();
                     }
                     Err(error) => {
+                        app.set_window_visible(true);
                         let _ = app.show();
                         app.set_active_page(5);
                         show_action(&app, Err(format!("退出前恢复未完成：{error}")));
@@ -4367,9 +4502,7 @@ async fn worker(
             }
             app.set_route_running(running);
             app.set_route_auth_error(chatgpt_error.unwrap_or("").into());
-            if recording_failed {
-                app.set_request_error("部分请求记录写入失败；请检查数据库权限和磁盘空间".into());
-            }
+            app.set_request_write_failed(recording_failed);
             app.set_route_managed(route_managed);
             app.set_config_managed(managed);
             app.set_route_status(
@@ -4573,6 +4706,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let window = app.as_weak();
     tray.on_show_app(move || {
         if let Some(app) = window.upgrade() {
+            app.set_window_visible(true);
             let _ = app.show();
         }
     });
@@ -4596,6 +4730,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let restore_sender = sender.clone();
     tray.on_restore_config(move || {
         if let Some(app) = window.upgrade() {
+            app.set_window_visible(true);
             let _ = app.show();
             queue(
                 &app,
@@ -4632,8 +4767,22 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let weak = app.as_weak();
     let request_sender = sender.clone();
     app.on_refresh_requests(move || {
+        // Polls leave `busy` alone and hold at most one slot in the shared queue;
+        // a full queue skips this tick rather than reporting an error.
+        if let Some(app) = weak.upgrade()
+            && !app.get_request_loading()
+        {
+            app.set_request_loading(true);
+            if request_sender.try_send(Command::RefreshRequests).is_err() {
+                app.set_request_loading(false);
+            }
+        }
+    });
+    let weak = app.as_weak();
+    app.on_filter_requests(move |filter| {
         if let Some(app) = weak.upgrade() {
-            queue(&app, &request_sender, Command::RefreshRequests);
+            app.set_request_filter(filter);
+            show_request_rows(&app, false);
         }
     });
     let weak = app.as_weak();
@@ -5381,6 +5530,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let weak = app.as_weak();
     app.window().on_close_requested(move || {
         if let Some(app) = weak.upgrade() {
+            app.set_window_visible(false);
             app.set_icon_picker_open(false);
             if app.get_subscription_editor_open() || app.get_subscription_editor_pending() {
                 app.invoke_cancel_subscription_editor();
@@ -5402,6 +5552,127 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn paused_request_rows_keep_aged_history_and_count_arrivals() {
+        let row = |id: &str| RequestRow {
+            id: id.into(),
+            ..Default::default()
+        };
+        let ids = |rows: &[RequestRow]| {
+            rows.iter()
+                .map(|row| row.id.to_string())
+                .collect::<Vec<_>>()
+        };
+        let current = ["a", "b", "c", "d"].map(row);
+        // "a" and "b" left the newest window; "c" finished late and "e" is new.
+        let incoming = ["x", "c", "d", "e"].map(row).to_vec();
+        let (kept, arrivals) = merge_request_rows(&current, incoming.clone(), true);
+        assert_eq!(ids(&kept), ["a", "b", "x", "c", "d", "e"]);
+        assert_eq!(arrivals, 2);
+        let (live, _) = merge_request_rows(&current, incoming, false);
+        assert_eq!(ids(&live), ["x", "c", "d", "e"]);
+
+        let long = (0..RETAINED_REQUEST_HISTORY + 5)
+            .map(|index| row(&format!("old-{index}")))
+            .collect::<Vec<_>>();
+        let (capped, arrivals) = merge_request_rows(&long, vec![row("new")], true);
+        assert_eq!(capped.len(), RETAINED_REQUEST_HISTORY + 1);
+        assert_eq!(capped[0].id, "old-5");
+        assert_eq!(arrivals, 1);
+        assert!(request_matches(2, 2) && request_matches(1, 2) && !request_matches(0, 2));
+    }
+
+    #[test]
+    fn request_refresh_stamps_arrivals_updates_in_place_and_filters() {
+        use slint::platform::{Platform, WindowAdapter, software_renderer::MinimalSoftwareWindow};
+        use std::rc::Rc;
+        struct PreviewPlatform(Rc<MinimalSoftwareWindow>);
+        impl Platform for PreviewPlatform {
+            fn create_window_adapter(&self) -> Result<Rc<dyn WindowAdapter>, slint::PlatformError> {
+                Ok(self.0.clone())
+            }
+        }
+        let window = MinimalSoftwareWindow::new(Default::default());
+        slint::platform::set_platform(Box::new(PreviewPlatform(window))).unwrap();
+        let app = AppWindow::new().unwrap();
+        let view = |id: &str, status| app::RequestView {
+            id: id.into(),
+            time: "2026-10-10 09:47:47".into(),
+            model: "sx-model".into(),
+            provider: "Synthetic".into(),
+            upstream: "upstream".into(),
+            duration_ms: 1_600,
+            headers_ms: Some(120),
+            first_event_ms: None,
+            http_status: Some(200),
+            generation: "generation".into(),
+            status,
+            error: String::new(),
+            fallback: String::new(),
+        };
+        let done = RequestStatus::Completed;
+        let ids = |app: &AppWindow| {
+            app.get_requests()
+                .iter()
+                .map(|row| (row.id.to_string(), row.stamp))
+                .collect::<Vec<_>>()
+        };
+        // Store order is newest first; the timeline is chronological.
+        show_requests(&app, vec![view("b", done), view("a", done)]);
+        assert_eq!(ids(&app), [("a".into(), 0), ("b".into(), 0)]);
+        let first = app.get_requests().row_data(0).unwrap();
+        assert_eq!(
+            (
+                first.clock.as_str(),
+                first.duration.as_str(),
+                first.http.as_str()
+            ),
+            ("09:47:47", "1.6 s", "200")
+        );
+        assert_eq!((first.headers_ms, first.first_event_ms), (120, -1));
+        let model = app.get_requests();
+
+        show_requests(
+            &app,
+            vec![view("c", done), view("b", done), view("a", done)],
+        );
+        assert_eq!(
+            ids(&app),
+            [("a".into(), 0), ("b".into(), 0), ("c".into(), 2)]
+        );
+        assert_eq!(model.row_count(), 3, "rows update in the same model");
+
+        // Paused: aged-out rows stay above and arrivals are counted.
+        app.set_request_following(false);
+        show_requests(
+            &app,
+            vec![view("d", RequestStatus::Failed), view("c", done)],
+        );
+        assert_eq!(
+            ids(&app).into_iter().map(|row| row.0).collect::<Vec<_>>(),
+            ["a", "b", "c", "d"]
+        );
+        assert_eq!(app.get_request_unseen(), 1);
+        assert_eq!(app.get_request_bars().row_count(), 2);
+        let stats = app.get_request_stats();
+        assert_eq!((stats.total, stats.completed, stats.failed), (2, 1, 1));
+        assert_eq!(stats.success_rate, 50.0);
+
+        app.set_request_following(true);
+        show_requests(
+            &app,
+            vec![view("d", RequestStatus::Failed), view("c", done)],
+        );
+        assert_eq!(
+            ids(&app),
+            [("c".into(), 2), ("d".into(), 3)],
+            "following trims to the newest window and keeps arrival stamps"
+        );
+        app.set_request_filter(2);
+        show_request_rows(&app, false);
+        assert_eq!(ids(&app), [("d".into(), 3)]);
+    }
 
     #[test]
     fn account_initial_uses_the_first_visible_character() {

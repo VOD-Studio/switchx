@@ -321,19 +321,85 @@ pub struct ModelView {
 }
 
 pub struct RequestView {
+    pub id: String,
     pub time: String,
-    pub route: String,
-    pub timing: String,
-    pub duration: String,
-    pub detail: String,
+    pub model: String,
+    pub provider: String,
+    pub upstream: String,
+    pub duration_ms: i64,
+    pub headers_ms: Option<i64>,
+    pub first_event_ms: Option<i64>,
+    pub http_status: Option<u16>,
+    pub generation: String,
     pub status: RequestStatus,
     pub error: String,
     pub fallback: String,
 }
 
+/// Aggregates for the activity header. Latency percentiles cover completed
+/// requests only, so instant local rejections do not flatter the numbers.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct RequestStats {
+    pub total: usize,
+    pub completed: usize,
+    pub failed: usize,
+    pub cancelled: usize,
+    pub p50_ms: Option<i64>,
+    pub p95_ms: Option<i64>,
+    pub first_event_p50_ms: Option<i64>,
+}
+
+pub fn request_stats(requests: &[RequestView]) -> RequestStats {
+    let count = |status| {
+        requests
+            .iter()
+            .filter(|request| request.status == status)
+            .count()
+    };
+    let completed = requests
+        .iter()
+        .filter(|request| request.status == RequestStatus::Completed);
+    let mut durations = completed
+        .clone()
+        .map(|request| request.duration_ms)
+        .collect::<Vec<_>>();
+    let mut first_events = completed
+        .filter_map(|request| request.first_event_ms)
+        .collect::<Vec<_>>();
+    // Nearest-rank percentile over the sorted sample.
+    let percentile = |values: &mut Vec<i64>, rank: usize| {
+        values.sort_unstable();
+        (!values.is_empty()).then(|| values[(values.len() * rank).div_ceil(100).max(1) - 1])
+    };
+    RequestStats {
+        total: requests.len(),
+        completed: count(RequestStatus::Completed),
+        failed: count(RequestStatus::Failed) + count(RequestStatus::Interrupted),
+        cancelled: count(RequestStatus::Cancelled),
+        p50_ms: percentile(&mut durations, 50),
+        p95_ms: percentile(&mut durations, 95),
+        first_event_p50_ms: percentile(&mut first_events, 50),
+    }
+}
+
+pub fn format_duration(ms: i64) -> String {
+    if ms >= 1_000 {
+        format!("{:.1} s", ms as f64 / 1_000.0)
+    } else {
+        format!("{ms} ms")
+    }
+}
+
 pub fn load_requests(data_dir: &Path) -> Result<Vec<RequestView>, AppError> {
     let store = open_store(data_dir)?;
     let providers = store.providers().map_err(|_| AppError::Database)?;
+    let provider_name = |id: &String| {
+        providers
+            .iter()
+            .find(|provider| &provider.id == id)
+            .map(|provider| provider.name.clone())
+            .unwrap_or_else(|| id.clone())
+    };
     store
         .requests(100)
         .map_err(|_| AppError::Database)?
@@ -342,45 +408,18 @@ pub fn load_requests(data_dir: &Path) -> Result<Vec<RequestView>, AppError> {
             let provider = record
                 .provider_id
                 .as_ref()
-                .map(|id| {
-                    providers
-                        .iter()
-                        .find(|provider| &provider.id == id)
-                        .map(|provider| provider.name.as_str())
-                        .unwrap_or(id)
-                })
-                .unwrap_or("未选择上游");
-            let millis = |value: Option<i64>| {
-                value
-                    .map(|ms| format!("{ms} ms"))
-                    .unwrap_or_else(|| "—".into())
-            };
+                .map(provider_name)
+                .unwrap_or_else(|| "未选择上游".into());
             Ok(RequestView {
                 time: store
                     .request_time(record.started_at_ms)
                     .map_err(|_| AppError::Database)?,
-                route: format!(
-                    "{} → {} / {}",
-                    record.public_model.as_deref().unwrap_or("未指定模型"),
-                    provider,
-                    record.upstream_model.as_deref().unwrap_or("—")
-                ),
-                timing: format!(
-                    "总耗时 {} ms · 响应头 {} · 首事件 {} · 上游 HTTP {}",
-                    record.duration_ms,
-                    millis(record.headers_ms),
-                    millis(record.first_event_ms),
-                    record
-                        .http_status
-                        .map(|status| status.to_string())
-                        .unwrap_or_else(|| "—".into())
-                ),
-                duration: if record.duration_ms >= 1_000 {
-                    format!("{:.1} s", record.duration_ms as f64 / 1_000.0)
-                } else {
-                    format!("{} ms", record.duration_ms)
-                },
-                detail: format!("请求 {} · 路由版本 {}", record.id, record.generation),
+                model: record.public_model.unwrap_or_else(|| "未指定模型".into()),
+                upstream: record.upstream_model.unwrap_or_else(|| "—".into()),
+                duration_ms: record.duration_ms,
+                headers_ms: record.headers_ms,
+                first_event_ms: record.first_event_ms,
+                http_status: record.http_status,
                 status: record.status,
                 error: record
                     .error_code
@@ -390,14 +429,15 @@ pub fn load_requests(data_dir: &Path) -> Result<Vec<RequestView>, AppError> {
                     .fallback_from
                     .as_ref()
                     .map(|id| {
-                        let primary = providers
-                            .iter()
-                            .find(|provider| &provider.id == id)
-                            .map(|provider| provider.name.as_str())
-                            .unwrap_or(id);
-                        format!("{primary} 建立连接失败（请求未发送）→ 尝试备用 {provider}")
+                        format!(
+                            "{} 建立连接失败（请求未发送）→ 尝试备用 {provider}",
+                            provider_name(id)
+                        )
                     })
                     .unwrap_or_default(),
+                provider,
+                id: record.id,
+                generation: record.generation,
             })
         })
         .collect()
@@ -2893,5 +2933,41 @@ mod tests {
         assert!(save_fallback(&path, "sx-mock", None).is_err());
         drop(store);
         fs::remove_dir_all(path).unwrap();
+    }
+
+    #[test]
+    fn request_stats_use_completed_latency_and_nearest_rank_percentiles() {
+        let request = |status, duration_ms, first_event_ms| RequestView {
+            id: String::new(),
+            time: String::new(),
+            model: String::new(),
+            provider: String::new(),
+            upstream: String::new(),
+            duration_ms,
+            headers_ms: None,
+            first_event_ms,
+            http_status: None,
+            generation: String::new(),
+            status,
+            error: String::new(),
+            fallback: String::new(),
+        };
+        assert_eq!(request_stats(&[]), RequestStats::default());
+        let mut requests = (1..=20)
+            .map(|second| request(RequestStatus::Completed, second * 1_000, Some(second * 10)))
+            .collect::<Vec<_>>();
+        requests.push(request(RequestStatus::Failed, 0, None));
+        requests.push(request(RequestStatus::Interrupted, 90_000, Some(5)));
+        requests.push(request(RequestStatus::Cancelled, 1, None));
+        let stats = request_stats(&requests);
+        assert_eq!(
+            (stats.total, stats.completed, stats.failed, stats.cancelled),
+            (23, 20, 2, 1)
+        );
+        assert_eq!(stats.p50_ms, Some(10_000));
+        assert_eq!(stats.p95_ms, Some(19_000));
+        assert_eq!(stats.first_event_p50_ms, Some(100));
+        assert_eq!(format_duration(999), "999 ms");
+        assert_eq!(format_duration(1_550), "1.6 s");
     }
 }
