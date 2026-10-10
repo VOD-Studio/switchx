@@ -332,6 +332,7 @@ export component AppWindow inherits Window {
         root.fetching-models = false;
         root.discovery-message = "";
         root.discovery-tone = 0;
+        root.batch-query = "";
         root.batch-models = [];
         root.batch-summary = {
             total: 0,
@@ -355,7 +356,10 @@ export component AppWindow inherits Window {
         if (root.editor-open) { root.update-provider-config-preview(); }
     }
     changed edit-name => { if (root.editor-open) { root.update-provider-config-preview(); } }
-    changed edit-model => { if (root.editor-open) { root.update-provider-config-preview(); } }
+    changed edit-model => {
+        if (root.editor-open) { root.update-provider-config-preview(); }
+        root.lock-batch-rows();
+    }
     changed edit-remote-compaction => { if (root.editor-open) { root.update-provider-config-preview(); } }
     changed edit-use-common-config => { if (root.editor-open) { root.update-provider-config-preview(); } }
     changed edit-context-1m => { if (root.editor-open) { root.update-provider-config-preview(); } }
@@ -429,6 +433,7 @@ export component AppWindow inherits Window {
     callback batch-filter(string);
     callback batch-edit(int, string, string);
     callback save-batch-models();
+    callback lock-batch-rows();
     callback select-model(string, bool);
     callback select-models(bool, bool);
     callback edit-fallback(string);
@@ -1164,8 +1169,14 @@ export component AppWindow inherits Window {
                         discovery-scope: root.discovery-scope;
                         discovery-tone: root.discovery-tone;
                         config-managed: root.config-managed;
+                        batch-rows: root.batch-models;
+                        batch-summary: root.batch-summary;
+                        batch-query <=> root.batch-query;
                         border-width: 0px;
                         background: transparent;
+                        batch-toggle(index) => { root.batch-toggle(index); }
+                        batch-select-all(checked) => { root.batch-select-all(checked); }
+                        batch-filter(query) => { root.batch-filter(query); }
                         save-provider(id, name, url, model, key) => { root.save-provider(id, name, url, model, key); }
                         open-common-config() => { root.open-common-config(); }
                         delete-provider(id) => { root.delete-provider(id); }

@@ -39,6 +39,8 @@ enum Command {
         key: String,
         options: CodexOptions,
         icon_id: String,
+        // Discovered models picked in the form for a new upstream.
+        picked: Vec<String>,
     },
     BeginProviderEditor {
         id: String,
@@ -1838,9 +1840,29 @@ fn update_batch_rows(app: &AppWindow, mut change: impl FnMut(usize, &mut BatchMo
     update_batch_summary(app);
 }
 
+// In the upstream form, preset models are always saved and the default model
+// stays picked, so neither can be unticked.
+fn batch_row_locked(app: &AppWindow, row: &BatchModelRow) -> bool {
+    app.get_discovery_scope() == 0
+        && (!row.source.is_empty() || row.id == app.get_edit_model().as_str())
+}
+
+fn lock_batch_rows(app: &AppWindow) {
+    update_batch_rows(app, |_, row| {
+        let lock = row.supported && !row.added && !row.checked && batch_row_locked(app, row);
+        if lock {
+            row.checked = true;
+        }
+        lock
+    });
+}
+
 fn toggle_batch_row(app: &AppWindow, index: usize) {
     update_batch_rows(app, |row_index, row| {
-        let toggle = row_index == index && row.supported && !row.added;
+        let toggle = row_index == index
+            && row.supported
+            && !row.added
+            && !(row.checked && batch_row_locked(app, row));
         if toggle {
             row.checked = !row.checked;
         }
@@ -1851,7 +1873,11 @@ fn toggle_batch_row(app: &AppWindow, index: usize) {
 // Only rows matching the search change, like the workbench list.
 fn select_batch_rows(app: &AppWindow, checked: bool) {
     update_batch_rows(app, |_, row| {
-        let change = row.matched && row.supported && !row.added && row.checked != checked;
+        let change = row.matched
+            && row.supported
+            && !row.added
+            && row.checked != checked
+            && (checked || !batch_row_locked(app, row));
         if change {
             row.checked = checked;
         }
@@ -1904,6 +1930,18 @@ fn batch_save_command(app: &AppWindow) -> Option<Command> {
             app.get_batch_default().into()
         },
     })
+}
+
+// Picks only count for a new upstream whose list came from this form.
+fn picked_provider_models(app: &AppWindow) -> Vec<String> {
+    if !app.get_edit_id().is_empty() || app.get_discovery_scope() != 0 {
+        return Vec::new();
+    }
+    app.get_batch_models()
+        .iter()
+        .filter(|row| row.checked && row.supported && !row.added)
+        .map(|row| row.id.to_string())
+        .collect()
 }
 
 fn mark_fresh_models(app: &AppWindow, public_ids: &[String]) {
@@ -2695,12 +2733,13 @@ async fn worker(
                 key,
                 options,
                 icon_id,
+                picked,
             } => {
                 let result = directory
                     .as_ref()
                     .map_err(|error| error.message().to_owned())
                     .and_then(|path| {
-                        app::save_provider_with_codex_options_and_icon(
+                        app::save_provider_with_mappings(
                             path,
                             (!id.is_empty()).then_some(id.as_str()),
                             &name,
@@ -2709,6 +2748,7 @@ async fn worker(
                             key,
                             &options,
                             Some(&icon_id),
+                            &picked,
                         )
                     });
                 if result.is_ok() {
@@ -2721,10 +2761,20 @@ async fn worker(
                     .and_then(|_| directory.as_ref().ok())
                     .map(|path| load_snapshot(path, false));
                 let _ = weak.upgrade_in_event_loop(move |app| {
-                    show_action(&app, result.map(|()| "上游与 API Key 已保存到本机".into()));
+                    let created = result.clone().unwrap_or_default();
+                    show_action(
+                        &app,
+                        result.map(|created| match created.len() {
+                            0 => "上游与 API Key 已保存到本机".into(),
+                            count => {
+                                format!("上游与 API Key 已保存到本机，并添加 {count} 个模型映射")
+                            }
+                        }),
+                    );
                     if let Some(snapshot) = snapshot {
                         set_provider_check_id(&app, &id, "");
                         show_result(&app, snapshot);
+                        mark_fresh_models(&app, &created);
                         app.set_editor_open(false);
                         app.set_subscription_editor_open(false);
                         app.set_direct_preview_ready(false);
@@ -2883,6 +2933,8 @@ async fn worker(
                     let candidates = if scope == 1 && !provider.is_empty() {
                         let data_dir = directory.as_ref().map_err(|error| error.message())?;
                         app::batch_candidates(data_dir, &provider, &models, &templates)?
+                    } else if scope == 0 && provider.is_empty() {
+                        app::draft_candidates(&url, &models)
                     } else {
                         Vec::new()
                     };
@@ -2921,6 +2973,7 @@ async fn worker(
                                 }
                             });
                             show_batch_candidates(&app, candidates);
+                            lock_batch_rows(&app);
                             app.set_fetched_models(ModelRc::new(VecModel::from(
                                 models
                                     .into_iter()
@@ -4494,6 +4547,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     key: key.into(),
                     options,
                     icon_id: app.get_edit_icon_id().into(),
+                    picked: picked_provider_models(&app),
                 },
             );
         }
@@ -4697,6 +4751,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     app.on_batch_edit(move |index, context, levels| {
         if let Some(app) = weak.upgrade() {
             edit_batch_row(&app, index as usize, &context, &levels);
+        }
+    });
+    let weak = app.as_weak();
+    app.on_lock_batch_rows(move || {
+        if let Some(app) = weak.upgrade() {
+            lock_batch_rows(&app);
         }
     });
     let weak = app.as_weak();
@@ -5063,6 +5123,51 @@ mod tests {
         mark_fresh_models(&app, &["sx-new".into()]);
         let models = app.get_models();
         assert!(!models.row_data(0).unwrap().fresh && models.row_data(1).unwrap().fresh);
+    }
+
+    #[test]
+    fn upstream_form_locks_preset_and_default_picks_for_new_upstreams_only() {
+        use slint::platform::{Platform, WindowAdapter, software_renderer::MinimalSoftwareWindow};
+        use std::rc::Rc;
+        struct PreviewPlatform(Rc<MinimalSoftwareWindow>);
+        impl Platform for PreviewPlatform {
+            fn create_window_adapter(&self) -> Result<Rc<dyn WindowAdapter>, slint::PlatformError> {
+                Ok(self.0.clone())
+            }
+        }
+        let window = MinimalSoftwareWindow::new(Default::default());
+        slint::platform::set_platform(Box::new(PreviewPlatform(window))).unwrap();
+        let app = AppWindow::new().unwrap();
+        app.set_discovery_scope(0);
+        app.set_edit_model("custom-default".into());
+        let candidates = app::draft_candidates(
+            "https://api.deepseek.com",
+            &["deepseek-flash", "custom-default", "custom-other"].map(String::from),
+        );
+        assert_eq!(candidates[0].source, "预设参数");
+        show_batch_candidates(&app, candidates);
+        lock_batch_rows(&app);
+        let checked = || {
+            app.get_batch_models()
+                .iter()
+                .map(|row| row.checked)
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(checked(), [true, true, false]);
+        select_batch_rows(&app, false);
+        toggle_batch_row(&app, 1);
+        assert_eq!(checked(), [true, true, false], "locked rows stay picked");
+
+        app.set_edit_model("custom-other".into());
+        lock_batch_rows(&app);
+        toggle_batch_row(&app, 1);
+        assert_eq!(checked(), [true, false, true], "the old default unlocks");
+        assert_eq!(
+            picked_provider_models(&app),
+            ["deepseek-flash", "custom-other"]
+        );
+        app.set_edit_id("saved-upstream".into());
+        assert!(picked_provider_models(&app).is_empty());
     }
 
     #[test]

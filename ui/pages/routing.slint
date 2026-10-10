@@ -286,7 +286,11 @@ export component RoutingPage inherits Rectangle {
                             Timer {
                                 interval: 700ms;
                                 running: model.fresh && !model-row.settled;
-                                triggered => { model-row.settled = true; }
+                                // Play once, even if the page is rebuilt before the next refresh.
+                                triggered => {
+                                    model-row.settled = true;
+                                    model.fresh = false;
+                                }
                             }
 
                             Rectangle {
