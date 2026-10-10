@@ -8,6 +8,7 @@
 //! Shared workspace menu and operation feedback: add --workspace-feedback.
 //! Activity timeline: add --activity-design (entry, arrivals, pause, details, filter).
 //! API connection editor: add --provider-editor-design.
+//! ChatGPT subscription editor: add --subscription-editor-design.
 //! Reasoning multi-select: add --reasoning-picker (themes, sizes, and motion).
 
 #[cfg(target_os = "macos")]
@@ -1458,11 +1459,7 @@ fn render_activity_design(
     Ok(())
 }
 
-fn render_provider_editor(
-    app: &AppWindow,
-    window: &MinimalSoftwareWindow,
-    output: &Path,
-) -> Result<(), Box<dyn Error>> {
+fn connect_code_highlighting(app: &AppWindow) {
     app.global::<SyntaxHighlighting>().on_line_count(|source| {
         source
             .as_str()
@@ -1485,6 +1482,340 @@ fn render_provider_editor(
                 .collect::<Vec<_>>();
             ModelRc::new(VecModel::from(spans))
         });
+}
+
+fn render_subscription_editor(
+    app: &AppWindow,
+    window: &MinimalSoftwareWindow,
+    output: &Path,
+) -> Result<(), Box<dyn Error>> {
+    connect_code_highlighting(app);
+    app.set_active_page(1);
+    app.set_subscription_id("preview-subscription".into());
+    app.set_subscription_name("ChatGPT · 工作账号".into());
+    app.set_subscription_account_ids(ModelRc::new(VecModel::from(vec![
+        "".into(),
+        "synthetic-account".into(),
+    ])));
+    app.set_subscription_account_options(ModelRc::new(VecModel::from(vec![
+        "跟随 Codex 登录".into(),
+        "工作账号 · Plus".into(),
+    ])));
+    app.set_subscription_binding_label(
+        "跟随所选 Codex 目录的登录；也可选择保存账号或粘贴完整 auth.json。".into(),
+    );
+    app.set_edit_icon_name("OpenAI".into());
+    app.set_edit_icon(provider_icons::load_image(
+        provider_icons::icon("openai").unwrap(),
+    )?);
+    app.set_edit_use_common_config(true);
+    app.set_edit_context_1m(true);
+    app.set_edit_compact_limit("900000".into());
+    app.set_edit_config_preview(
+        concat!(
+            "model = \"synthetic-codex\"\n",
+            "model_reasoning_effort = \"high\"\n",
+            "model_context_window = 1000000\n",
+            "model_auto_compact_token_limit = 900000\n\n",
+            "web_search = \"live\"\n",
+            "service_tier = \"default\"\n\n",
+            "[features]\n",
+            "shell_tool = true\n",
+            "apply_patch_freeform = true\n"
+        )
+        .into(),
+    );
+    const SYNTHETIC_AUTH: &str = "{\n  \"auth_mode\": \"chatgpt\",\n  \"tokens\": {\n    \"access_token\": \"synthetic-preview-only\"\n  }\n}";
+    let weak = app.as_weak();
+    app.on_load_subscription_auth(move || {
+        weak.upgrade()
+            .unwrap()
+            .set_subscription_auth_json(SYNTHETIC_AUTH.into());
+    });
+    let weak = app.as_weak();
+    app.on_cancel_subscription_editor(move || {
+        let app = weak.upgrade().unwrap();
+        app.set_subscription_editor_open(false);
+        app.set_subscription_auth_json("".into());
+    });
+    let saves = Rc::new(Cell::new(0));
+    let saved = saves.clone();
+    app.on_save_subscription(move |id, name, account| {
+        assert_eq!(id, "preview-subscription");
+        assert_eq!(name, "ChatGPT · 工作账号");
+        assert_eq!(account, "synthetic-account");
+        saved.set(saved.get() + 1);
+    });
+    let formats = Rc::new(Cell::new(0));
+    let formatted = formats.clone();
+    app.on_format_subscription_auth(move || formatted.set(formatted.get() + 1));
+    let commons = Rc::new(Cell::new(0));
+    let common = commons.clone();
+    app.on_update_subscription_common(move || common.set(common.get() + 1));
+    let contexts = Rc::new(Cell::new(0));
+    let context = contexts.clone();
+    app.on_update_subscription_context(move || context.set(context.get() + 1));
+    let icons = Rc::new(Cell::new(0));
+    let icon = icons.clone();
+    app.on_open_provider_icon_picker(move || icon.set(icon.get() + 1));
+    let deletes = Rc::new(Cell::new(0));
+    let deleted = deletes.clone();
+    app.on_delete_provider(move |id| {
+        assert_eq!(id, "preview-subscription");
+        deleted.set(deleted.get() + 1);
+    });
+    let models = Rc::new(Cell::new(0));
+    let model = models.clone();
+    app.on_begin_connection_models(move |id| {
+        assert_eq!(id, "preview-subscription");
+        model.set(model.get() + 1);
+    });
+    for (width, height) in [(1200, 820), (1000, 680), (1600, 1000)] {
+        app.window().set_size(PhysicalSize::new(width, height));
+        let left = (width as f32 - 1120.0).max(60.0) + 26.0;
+        let right = left + 312.0;
+        for dark in [false, true] {
+            let suffix = format!("{}-{width}x{height}", if dark { "dark" } else { "light" });
+            set_theme(app, window, dark);
+            app.set_delete_confirm(false);
+            app.set_edit_use_common_config(true);
+            app.set_edit_context_1m(true);
+            app.set_subscription_account_choice(0);
+            app.set_subscription_binding_label(
+                "跟随所选 Codex 目录的登录；也可选择保存账号或粘贴完整 auth.json。".into(),
+            );
+            app.set_subscription_editor_open(true);
+            snapshot(window, output, &format!("subscription-editor-{suffix}"))?;
+
+            // A credential draft cannot change the public configuration view.
+            let public = render_now(window);
+            app.set_subscription_auth_json("synthetic-hidden-credential".into());
+            assert!(
+                public.as_bytes() == render_now(window).as_bytes(),
+                "credentials stay out of the configuration view"
+            );
+            app.set_subscription_auth_json(SYNTHETIC_AUTH.into());
+
+            let count = icons.get();
+            click(window, left + 40.0, 180.0);
+            assert_eq!(icons.get(), count + 1, "the avatar opens the icon picker");
+            window.dispatch_event(WindowEvent::PointerMoved {
+                position: slint::LogicalPosition::new(10.0, 10.0),
+            });
+            click(window, width as f32 - 126.0, 164.0);
+            snapshot(window, output, &format!("subscription-options-{suffix}"))?;
+            let count = commons.get();
+            click(window, right + 70.0, 273.0);
+            assert!(!app.get_edit_use_common_config());
+            assert_eq!(
+                commons.get(),
+                count + 1,
+                "the switch updates the configuration"
+            );
+            click(window, right + 70.0, 273.0);
+            let count = contexts.get();
+            let context_x = right + (width as f32 - 26.0 - right) / 2.0 + 70.0;
+            click(window, context_x, 273.0);
+            assert!(!app.get_edit_context_1m());
+            assert_eq!(contexts.get(), count + 1);
+            snapshot(
+                window,
+                output,
+                &format!("subscription-context-off-{suffix}"),
+            )?;
+            click(window, context_x, 273.0);
+            click(window, width as f32 - 126.0, 164.0);
+            render(window);
+
+            click(window, right + 195.0, 215.0);
+            snapshot(window, output, &format!("subscription-auth-{suffix}"))?;
+            let count = formats.get();
+            click(window, width as f32 - 110.0, 164.0);
+            assert_eq!(formats.get(), count + 1, "JSON formatting stays reachable");
+            app.set_subscription_auth_error("合成 JSON 错误：请检查格式。".into());
+            snapshot(window, output, &format!("subscription-auth-error-{suffix}"))?;
+            let count = saves.get();
+            click(window, width as f32 - 90.0, height as f32 - 46.0);
+            assert_eq!(saves.get(), count, "invalid JSON cannot be saved");
+            app.set_subscription_auth_error("".into());
+            click(window, right + 65.0, 215.0);
+            render(window);
+
+            click(window, width as f32 - 44.0, 164.0);
+            snapshot(window, output, &format!("subscription-expanded-{suffix}"))?;
+            click(window, width as f32 - 44.0, 164.0);
+            render(window);
+            app.set_subscription_account_choice(1);
+            app.set_subscription_binding_label(
+                "绑定到已保存的工作账号；发布路由时核对账号。".into(),
+            );
+            snapshot(window, output, &format!("subscription-bound-{suffix}"))?;
+            let count = saves.get();
+            click(window, width as f32 - 90.0, height as f32 - 46.0);
+            assert_eq!(
+                saves.get(),
+                count + 1,
+                "save uses the selected account at every size"
+            );
+            app.set_config_managed(true);
+            click(window, width as f32 - 90.0, height as f32 - 46.0);
+            assert_eq!(
+                saves.get(),
+                count + 1,
+                "managed configuration prevents saving"
+            );
+            app.set_config_managed(false);
+            app.set_edit_config_error("合成配置错误：压缩阈值需要修正。".into());
+            click(window, width as f32 - 126.0, 164.0);
+            snapshot(
+                window,
+                output,
+                &format!("subscription-config-error-{suffix}"),
+            )?;
+            click(window, width as f32 - 90.0, height as f32 - 46.0);
+            assert_eq!(saves.get(), count + 1, "invalid TOML cannot be saved");
+            app.set_edit_config_error("".into());
+            app.set_subscription_name("".into());
+            click(window, width as f32 - 90.0, height as f32 - 46.0);
+            assert_eq!(saves.get(), count + 1, "a connection needs a name");
+            app.set_subscription_name("ChatGPT · 工作账号".into());
+            let count = deletes.get();
+            click(window, left + 56.0, height as f32 - 46.0);
+            assert!(app.get_delete_confirm());
+            assert_eq!(deletes.get(), count, "delete requires confirmation");
+            click(window, left + 56.0, height as f32 - 46.0);
+            assert_eq!(deletes.get(), count + 1);
+            if height >= 820 {
+                let count = models.get();
+                click(window, left + 115.0, 646.0);
+                assert_eq!(
+                    models.get(),
+                    count + 1,
+                    "the model directory shortcut works"
+                );
+            }
+            app.set_subscription_auth_json("synthetic-unsaved-credential".into());
+            click(window, width as f32 - 202.0, height as f32 - 46.0);
+            assert!(
+                !app.get_subscription_editor_open(),
+                "cancel stays reachable"
+            );
+            assert!(app.get_subscription_auth_json().is_empty());
+            render(window);
+        }
+    }
+
+    app.window().set_size(PhysicalSize::new(1200, 820));
+    set_theme(app, window, true);
+    app.global::<Theme>().set_animations_enabled(true);
+    app.set_subscription_editor_open(true);
+    play(
+        window,
+        output,
+        "subscription-enter",
+        &[0, 64, 144, 256, 416, 640, 960],
+    )?;
+    window.dispatch_event(WindowEvent::PointerMoved {
+        position: slint::LogicalPosition::new(150.0, 180.0),
+    });
+    play(window, output, "subscription-avatar", &[0, 80, 160, 320])?;
+    click(window, 590.0, 215.0);
+    play(window, output, "subscription-tabs", &[0, 64, 144, 256, 416])?;
+    click(window, 460.0, 215.0);
+    play(
+        window,
+        output,
+        "subscription-tabs-return",
+        &[0, 64, 144, 416],
+    )?;
+    click(window, 1074.0, 164.0);
+    play(
+        window,
+        output,
+        "subscription-options",
+        &[0, 64, 144, 256, 416],
+    )?;
+    click(window, 1074.0, 164.0);
+    play(
+        window,
+        output,
+        "subscription-options-close",
+        &[0, 64, 144, 416],
+    )?;
+    click(window, 1156.0, 164.0);
+    let first = render_now(window);
+    play(
+        window,
+        output,
+        "subscription-expand",
+        &[0, 64, 144, 256, 416, 640],
+    )?;
+    let last = render_now(window);
+    assert!(
+        first.as_bytes() != last.as_bytes(),
+        "the editor width animates"
+    );
+    // Reverse twice during the transition and compare with a clean settle.
+    click(window, 1156.0, 164.0);
+    render_now(window);
+    frame(96);
+    click(window, 1156.0, 164.0);
+    render_now(window);
+    frame(640);
+    assert!(
+        last.as_bytes() == render_now(window).as_bytes(),
+        "an interrupted transition settles to the same layout"
+    );
+    for reduced in [false, true] {
+        app.global::<Theme>().set_animations_enabled(reduced);
+        app.global::<Theme>().set_system_reduced_motion(reduced);
+        click(window, 1156.0, 164.0);
+        let immediate = render_now(window);
+        frame(640);
+        assert!(
+            immediate.as_bytes() == render_now(window).as_bytes(),
+            "disabled motion settles immediately"
+        );
+        app.set_subscription_editor_open(false);
+        render_now(window);
+        app.set_subscription_editor_open(true);
+        let immediate = render_now(window);
+        frame(960);
+        assert!(
+            immediate.as_bytes() == render_now(window).as_bytes(),
+            "disabled entry motion settles immediately"
+        );
+    }
+    app.global::<Theme>().set_system_reduced_motion(false);
+    app.global::<Theme>().set_animations_enabled(false);
+    app.set_subscription_editor_open(false);
+    app.set_subscription_id("".into());
+    app.set_subscription_name("ChatGPT · 新连接".into());
+    for (width, height) in [(1200, 820), (1000, 680)] {
+        app.window().set_size(PhysicalSize::new(width, height));
+        for dark in [false, true] {
+            set_theme(app, window, dark);
+            app.set_subscription_editor_open(true);
+            snapshot(
+                window,
+                output,
+                &format!(
+                    "subscription-new-{}-{width}x{height}",
+                    if dark { "dark" } else { "light" }
+                ),
+            )?;
+            app.set_subscription_editor_open(false);
+        }
+    }
+    Ok(())
+}
+
+fn render_provider_editor(
+    app: &AppWindow,
+    window: &MinimalSoftwareWindow,
+    output: &Path,
+) -> Result<(), Box<dyn Error>> {
+    connect_code_highlighting(app);
     app.set_active_page(1);
     app.set_edit_id("preview-api".into());
     app.set_edit_name("Podlink".into());
@@ -1696,6 +2027,10 @@ fn main() -> Result<(), Box<dyn Error>> {
     switchx::reasoning_picker::connect(&app);
     app.set_loading(false);
     app.global::<Theme>().set_animations_enabled(false);
+    if std::env::args().any(|arg| arg == "--subscription-editor-design") {
+        app.show()?;
+        return render_subscription_editor(&app, &window, output);
+    }
     if native_provider || std::env::args().any(|arg| arg == "--provider-editor-design") {
         app.show()?;
         return render_provider_editor(&app, &window, output);
