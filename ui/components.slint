@@ -87,7 +87,8 @@ export component QuietButton {
     in property <length> border-width: root.ghost || root.navigation || root.tab ? 0px : 1px;
     in property <color> border-color: root.primary ? Theme.solid : root.selected ? Theme.brand : hit-area.has-hover ? Theme.muted-text : Theme.border;
     in property <brush> background: root.primary ? ((hit-area.pressed || root.keyboard-pressed) ? Theme.brand : hit-area.has-hover && root.enabled ? Theme.solid.with-alpha(0.9) : Theme.solid)
-        : root.navigation && root.selected ? Theme.panel
+        // The sidebar slides one shared highlight and marker behind its navigation items.
+        : root.navigation && root.selected ? transparent
         : root.selected && !root.tab ? Theme.brand-surface
         : hit-area.has-hover || hit-area.pressed || root.keyboard-pressed ? Theme.raised
         : root.ghost || root.navigation ? transparent : Theme.panel;
@@ -125,17 +126,6 @@ export component QuietButton {
                     }
                 }
             }
-        }
-
-        Rectangle {
-            x: 0px;
-            width: 3px;
-            height: 14px;
-            y: (parent.height - self.height) / 2;
-            border-radius: 2px;
-            background: Theme.brand;
-            opacity: root.navigation && root.selected ? 1 : 0;
-            animate opacity { duration: Theme.fast; }
         }
 
         if root.icon.width > 0: Image {

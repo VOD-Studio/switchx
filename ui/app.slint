@@ -549,6 +549,8 @@ export component AppWindow inherits Window {
             HorizontalLayout {
                 spacing: 0px;
                 Rectangle {
+                    // Measured from the first item so titlebar padding changes never animate.
+                    property <length> nav-offset: (root.active-page == 0 ? nav-workbench.y : root.active-page == 1 ? nav-connections.y : root.active-page == 3 ? nav-activity.y : root.active-page == 4 ? nav-toolbox.y : nav-settings.y) - nav-workbench.y;
                     width: 180px;
                     background: Theme.sidebar;
                     animate background { duration: Theme.page-motion; }
@@ -561,6 +563,20 @@ export component AppWindow inherits Window {
                     WindowMoveArea {
                         height: 44px;
                         enabled: root.native-titlebar-overlay && !root.full-screen;
+                    }
+
+                    Rectangle {
+                        property <length> offset: parent.nav-offset;
+                        x: nav-workbench.x;
+                        y: nav-workbench.y + self.offset;
+                        width: nav-workbench.width;
+                        height: nav-workbench.height;
+                        border-radius: 8px;
+                        background: Theme.panel;
+                        animate offset {
+                            duration: Theme.drawer-motion;
+                            easing: cubic-bezier(0.22, 1, 0.36, 1);
+                        }
                     }
 
                     VerticalLayout {
@@ -634,7 +650,7 @@ export component AppWindow inherits Window {
                             height: 14px;
                         }
 
-                        QuietButton {
+                        nav-workbench := QuietButton {
                             text: "工作台";
                             icon: @image-url("../assets/ui/workbench.svg");
                             icon-color: Theme.muted-text;
@@ -645,7 +661,7 @@ export component AppWindow inherits Window {
                             clicked => { root.active-page = 0; }
                         }
 
-                        QuietButton {
+                        nav-connections := QuietButton {
                             text: "连接";
                             icon: @image-url("../assets/ui/connections.svg");
                             icon-color: Theme.muted-text;
@@ -656,7 +672,7 @@ export component AppWindow inherits Window {
                             clicked => { root.active-page = 1; }
                         }
 
-                        QuietButton {
+                        nav-activity := QuietButton {
                             text: "活动";
                             icon: @image-url("../assets/ui/activity.svg");
                             icon-color: Theme.muted-text;
@@ -671,7 +687,7 @@ export component AppWindow inherits Window {
                             height: 20px;
                         }
 
-                        QuietButton {
+                        nav-toolbox := QuietButton {
                             text: "工具箱";
                             icon: @image-url("../assets/ui/blocks.svg");
                             icon-color: Theme.muted-text;
@@ -682,7 +698,7 @@ export component AppWindow inherits Window {
                             clicked => { root.active-page = 4; }
                         }
 
-                        QuietButton {
+                        nav-settings := QuietButton {
                             text: "设置";
                             icon: @image-url("../assets/ui/settings.svg");
                             icon-color: Theme.muted-text;
@@ -708,6 +724,26 @@ export component AppWindow inherits Window {
                             text: "LOCAL FIRST";
                             color: Theme.muted-text;
                             font-size: 10px;
+                        }
+                    }
+
+                    Rectangle {
+                        // The leading edge arrives first; the trailing edge follows the highlight.
+                        property <length> lead: parent.nav-offset;
+                        property <length> trail: parent.nav-offset;
+                        x: nav-workbench.x;
+                        y: nav-workbench.y + (nav-workbench.height - 14px) / 2 + min(self.lead, self.trail);
+                        width: 3px;
+                        height: 14px + abs(self.lead - self.trail);
+                        border-radius: 2px;
+                        background: Theme.brand;
+                        animate lead {
+                            duration: Theme.page-motion;
+                            easing: cubic-bezier(0.22, 1, 0.36, 1);
+                        }
+                        animate trail {
+                            duration: Theme.drawer-motion;
+                            easing: cubic-bezier(0.22, 1, 0.36, 1);
                         }
                     }
                 }

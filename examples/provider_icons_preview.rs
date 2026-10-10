@@ -2,6 +2,7 @@
 //! Run: cargo run --example provider_icons_preview -- /absolute/output/directory
 //! Connection cards: add --connections-design (snapshots) or --connections-native (window).
 //! Tab transitions: add --connections-motion (frames and interruption checks).
+//! Sidebar navigation: add --sidebar-motion (frames and settle checks).
 //! Batch model picker: add --batch-models.
 //! Connection directory/workbench: add --connection-workbench.
 //! Shared workspace menu and operation feedback: add --workspace-feedback.
@@ -863,6 +864,136 @@ fn render_workspace_feedback(
     Ok(())
 }
 
+// Sidebar item centers below the in-window menu bar, without a native titlebar overlay.
+const SIDEBAR_ITEMS: [(i32, f32); 5] = [(0, 231.0), (1, 277.0), (3, 323.0), (4, 395.0), (5, 441.0)];
+
+fn sidebar_pixels(pixels: &SharedPixelBuffer<Rgb8Pixel>) -> Vec<u8> {
+    let row = pixels.width() as usize * 3;
+    pixels
+        .as_bytes()
+        .chunks(row)
+        .flat_map(|line| line[..180 * 3].iter().copied())
+        .collect()
+}
+
+// Longest vertical brand run in the marker column just inside the focus ring.
+fn marker_extent(pixels: &SharedPixelBuffer<Rgb8Pixel>, brand: slint::Color) -> usize {
+    let width = pixels.width() as usize;
+    let (mut longest, mut run) = (0, 0);
+    for y in 0..pixels.height() as usize {
+        let pixel = pixels.as_slice()[y * width + 16];
+        let close = pixel.r.abs_diff(brand.red()) <= 8
+            && pixel.g.abs_diff(brand.green()) <= 8
+            && pixel.b.abs_diff(brand.blue()) <= 8;
+        run = if close { run + 1 } else { 0 };
+        longest = longest.max(run);
+    }
+    longest
+}
+
+fn render_sidebar_motion(
+    app: &AppWindow,
+    window: &MinimalSoftwareWindow,
+    output: &Path,
+) -> Result<(), Box<dyn Error>> {
+    let center = |page: i32| {
+        SIDEBAR_ITEMS
+            .iter()
+            .find(|(item, _)| *item == page)
+            .map(|(_, y)| *y)
+            .unwrap()
+    };
+    let path = [1, 5, 0, 4, 3, 0];
+    app.window().set_size(PhysicalSize::new(1200, 820));
+    for dark in [false, true] {
+        let suffix = if dark { "dark" } else { "light" };
+        app.global::<Theme>().set_animations_enabled(false);
+        app.set_active_page(0);
+        set_theme(app, window, dark);
+        let brand = app.global::<Theme>().get_brand();
+        let mut settled = std::collections::HashMap::new();
+        for page in path {
+            click(window, 90.0, center(page));
+            assert_eq!(app.get_active_page(), page);
+            settled.insert(page, render(window));
+        }
+        let rest = marker_extent(&settled[&0], brand);
+
+        app.global::<Theme>().set_animations_enabled(true);
+        for _ in 0..24 {
+            frame(32);
+            render_now(window);
+        }
+        let mut from = 0;
+        for page in path {
+            click(window, 90.0, center(page));
+            assert_eq!(app.get_active_page(), page);
+            let (mut elapsed, mut stretch) = (0, 0);
+            for at in [
+                0, 16, 32, 48, 64, 96, 128, 160, 200, 240, 300, 340, 420, 600,
+            ] {
+                frame(at - elapsed);
+                elapsed = at;
+                let pixels = render_now(window);
+                let sidebar = sidebar_pixels(&pixels);
+                if at == 64 {
+                    assert_ne!(sidebar, sidebar_pixels(&settled[&from]));
+                    assert_ne!(
+                        sidebar,
+                        sidebar_pixels(&settled[&page]),
+                        "the selection must still be travelling"
+                    );
+                }
+                stretch = stretch.max(marker_extent(&pixels, brand));
+                snapshot_now(
+                    window,
+                    output,
+                    &format!("sidebar-{from}-to-{page}-{suffix}-{at:03}ms"),
+                )?;
+            }
+            assert!(
+                stretch >= rest + 4,
+                "the marker must stretch toward page {page}: {stretch} vs {rest}"
+            );
+            assert_eq!(
+                sidebar_pixels(&render_now(window)),
+                sidebar_pixels(&settled[&page]),
+                "the selection must settle exactly on page {page}"
+            );
+            from = page;
+        }
+
+        // Retargeting mid-flight still settles on the latest page.
+        click(window, 90.0, center(5));
+        frame(64);
+        render_now(window);
+        click(window, 90.0, center(1));
+        frame(600);
+        assert_eq!(
+            sidebar_pixels(&render_now(window)),
+            sidebar_pixels(&settled[&1])
+        );
+
+        // Reduced motion lands on the first frame, without a timer tick.
+        app.global::<Theme>().set_system_reduced_motion(true);
+        for page in [5, 3] {
+            click(window, 90.0, center(page));
+            assert_eq!(
+                sidebar_pixels(&render_now(window)),
+                sidebar_pixels(&settled[&page]),
+                "reduced motion must move the selection immediately"
+            );
+        }
+        app.global::<Theme>().set_system_reduced_motion(false);
+    }
+    app.global::<Theme>().set_animations_enabled(false);
+    println!(
+        "Synthetic sidebar transitions and settle checks: {}",
+        output.display()
+    );
+    Ok(())
+}
+
 fn main() -> Result<(), Box<dyn Error>> {
     let output = std::env::args()
         .nth(1)
@@ -1232,6 +1363,10 @@ fn main() -> Result<(), Box<dyn Error>> {
     if std::env::args().any(|arg| arg == "--workspace-feedback") {
         app.show()?;
         return render_workspace_feedback(&app, &window, output);
+    }
+    if std::env::args().any(|arg| arg == "--sidebar-motion") {
+        app.show()?;
+        return render_sidebar_motion(&app, &window, output);
     }
     if std::env::args().any(|arg| arg == "--accounts-design" || arg == "--connections-motion") {
         app.set_active_page(1);
