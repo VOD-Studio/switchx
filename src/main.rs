@@ -1996,6 +1996,7 @@ fn show_batch_candidates(app: &AppWindow, candidates: Vec<app::BatchCandidate>) 
                 template_context: model.context_window.into(),
                 template_levels_label: catalog::reasoning_label(&model.reasoning_levels).into(),
                 template_levels: model.reasoning_levels.into(),
+                template_default: model.default_reasoning.into(),
                 context: "".into(),
                 levels: "".into(),
                 levels_label: "".into(),
@@ -2173,6 +2174,10 @@ fn connection_model_row(model: &ModelRecord) -> ConnectionModelRow {
             })
             .unwrap_or_default()
             .into(),
+        default_reasoning: metadata["default_reasoning_level"]
+            .as_str()
+            .unwrap_or_default()
+            .into(),
         removing: false,
     }
 }
@@ -2193,6 +2198,7 @@ fn connection_directory_rows(
                 upstream_model: model.upstream_model.into(),
                 context_window: model.context_window.into(),
                 reasoning_levels: model.reasoning_levels.into(),
+                default_reasoning: model.default_reasoning.into(),
                 ..Default::default()
             });
         }
@@ -2260,6 +2266,7 @@ fn connect_connection_models(app: &AppWindow, sender: &mpsc::Sender<Command>) {
                         upstream_model: row.id.into(),
                         context_window: row.template_context.into(),
                         reasoning_levels: row.template_levels.into(),
+                        default_reasoning: row.template_default.into(),
                     })
                     .collect()
             } else {
@@ -2352,6 +2359,19 @@ fn connect_connection_models(app: &AppWindow, sender: &mpsc::Sender<Command>) {
             {
                 continue;
             }
+            let levels = if candidate.levels.is_empty() {
+                candidate.template_levels
+            } else {
+                candidate.levels
+            };
+            let default = if catalog::reasoning_levels(&levels)
+                .unwrap_or_default()
+                .contains(&candidate.template_default.as_str())
+            {
+                candidate.template_default
+            } else {
+                "".into()
+            };
             rows.push(ConnectionModelRow {
                 display_name: format!("{}/{}", candidate.id, app.get_connection_models_name())
                     .into(),
@@ -2361,11 +2381,8 @@ fn connect_connection_models(app: &AppWindow, sender: &mpsc::Sender<Command>) {
                 } else {
                     candidate.context
                 },
-                reasoning_levels: if candidate.levels.is_empty() {
-                    candidate.template_levels
-                } else {
-                    candidate.levels
-                },
+                default_reasoning: default,
+                reasoning_levels: levels,
                 ..Default::default()
             });
             app.set_connection_models_dirty(true);
@@ -2399,6 +2416,7 @@ fn connect_connection_models(app: &AppWindow, sender: &mpsc::Sender<Command>) {
                 upstream_model: row.upstream_model.into(),
                 context_window: row.context_window.into(),
                 reasoning_levels: row.reasoning_levels.into(),
+                default_reasoning: row.default_reasoning.into(),
             })
             .collect();
         queue(
@@ -4802,6 +4820,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         .enable_all()
         .build()?;
     let app = AppWindow::new()?;
+    switchx::reasoning_picker::connect(&app);
     #[cfg(target_os = "macos")]
     {
         app.set_native_titlebar_overlay(true);
@@ -5792,6 +5811,7 @@ mod tests {
             source: "",
             context_window: String::new(),
             reasoning_levels: String::new(),
+            default_reasoning: String::new(),
         };
         app.set_batch_query(" Coder ".into());
         show_batch_candidates(
@@ -7770,6 +7790,8 @@ mod tests {
             ConnectionModelRow {
                 upstream_model: "coder-pro".into(),
                 display_name: "Coder".into(),
+                reasoning_levels: "low, high".into(),
+                default_reasoning: "high".into(),
                 ..Default::default()
             },
             ConnectionModelRow {
@@ -7792,5 +7814,6 @@ mod tests {
         assert!(!app.get_busy());
         assert!(!app.get_connection_models_saving());
         assert_eq!(models[0].upstream_model, "coder-pro");
+        assert_eq!(models[0].default_reasoning, "high");
     }
 }
