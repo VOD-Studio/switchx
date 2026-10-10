@@ -530,6 +530,22 @@ fn render_connection_workbench(
     let saves = Rc::new(Cell::new(0));
     let save_calls = saves.clone();
     app.on_save_connection_models(move || save_calls.set(save_calls.get() + 1));
+    let weak = app.as_weak();
+    app.on_edit_connection(move |id| {
+        let app = weak.upgrade().unwrap();
+        assert_eq!(id, "chatgpt");
+        app.set_busy(true);
+        app.set_connection_models_open(false);
+        app.set_subscription_editor_open(true);
+    });
+    let weak = app.as_weak();
+    app.on_begin_connection_models(move |id| {
+        let app = weak.upgrade().unwrap();
+        assert_eq!(id, "chatgpt");
+        app.set_busy(true);
+        app.set_subscription_editor_open(false);
+        app.set_connection_models_open(true);
+    });
     for (width, height) in [(1200, 820), (1000, 680)] {
         app.window().set_size(PhysicalSize::new(width, height));
         for dark in [false, true] {
@@ -663,6 +679,51 @@ fn render_connection_workbench(
             app.set_subscription_binding_label("跟随所选 Codex 目录的登录。".into());
             app.set_subscription_editor_open(true);
             snapshot(window, output, &format!("subscription-clean-{suffix}"))?;
+            app.set_connection_models_id("chatgpt".into());
+            app.set_connection_models_name("ChatGPT · 工作".into());
+            app.set_connection_models_subscription(true);
+            let left = width as f32 - 820.0 + 26.0;
+            for directory in [true, false, true, false] {
+                click(window, left + if directory { 240.0 } else { 80.0 }, 106.0);
+                // Match the asynchronous editor load: focus moves while controls
+                // are disabled, then the new editor becomes ready.
+                render(window);
+                click(window, left + if directory { 80.0 } else { 240.0 }, 106.0);
+                assert_eq!(app.get_connection_models_open(), directory);
+                app.set_busy(false);
+                render(window);
+                assert_eq!(app.get_connection_models_open(), directory);
+                assert_eq!(app.get_subscription_editor_open(), !directory);
+                snapshot(
+                    window,
+                    output,
+                    &format!(
+                        "connection-tabs-{}-{suffix}",
+                        if directory { "models" } else { "settings" }
+                    ),
+                )?;
+            }
+            for (directory, key) in [
+                (true, slint::platform::Key::RightArrow),
+                (false, slint::platform::Key::LeftArrow),
+            ] {
+                // Focus the current segment, then select its neighbor by keyboard.
+                click(window, left + if directory { 80.0 } else { 240.0 }, 106.0);
+                window.dispatch_event(WindowEvent::KeyPressed { text: key.into() });
+                window.dispatch_event(WindowEvent::KeyReleased { text: key.into() });
+                render(window);
+                app.set_busy(false);
+                render(window);
+                assert_eq!(app.get_connection_models_open(), directory);
+                assert_eq!(app.get_subscription_editor_open(), !directory);
+            }
+            app.set_config_managed(true);
+            click(window, left + 240.0, 106.0);
+            render(window);
+            assert!(app.get_subscription_editor_open());
+            assert!(!app.get_connection_models_open());
+            snapshot(window, output, &format!("connection-tabs-managed-{suffix}"))?;
+            app.set_config_managed(false);
             app.set_subscription_editor_open(false);
         }
     }
