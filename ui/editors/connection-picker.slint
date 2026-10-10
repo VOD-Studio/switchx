@@ -3,15 +3,36 @@ import { QuietButton } from "../components.slint";
 import { Theme } from "../tokens.slint";
 import { ProviderPresetRow } from "../view-models.slint";
 
-component ConnectionChoice inherits QuietButton {
+component ConnectionChoice inherits Rectangle {
+    in property <string> text;
+    in property <string> description;
+    in property <image> icon;
+    in property <color> icon-color;
+    in property <length> icon-width: 32px;
+    in property <bool> enabled: true;
+    in property <float> arrival: 1;
+    callback clicked();
     height: 76px;
-    left-aligned: true;
-    icon-width: 32px;
-    icon-height: 32px;
-    border-radius: 10px;
+    QuietButton {
+        width: parent.width;
+        height: parent.height;
+        y: 12px * (1 - root.arrival);
+        opacity: root.arrival;
+        text: root.text;
+        description: root.description;
+        icon: root.icon;
+        icon-color: root.icon-color;
+        enabled: root.enabled;
+        left-aligned: true;
+        icon-width: root.icon-width;
+        icon-height: 32px;
+        border-radius: 10px;
+        clicked => { root.clicked(); }
+    }
 }
 
 export component ConnectionPicker inherits ScrollView {
+    in property <float> arrival: 1;
     in property <bool> busy;
     in property <bool> config-managed;
     in property <bool> chatgpt-login-pending;
@@ -34,6 +55,7 @@ export component ConnectionPicker inherits ScrollView {
             height: 76px;
             spacing: 12px;
             ConnectionChoice {
+                arrival: clamp(root.arrival / 0.82, 0, 1);
                 text: "ChatGPT 订阅";
                 description: root.chatgpt-login-pending ? "等待账号登录完成" : "使用 ChatGPT 账号连接 Codex";
                 icon: @image-url("../../assets/providers/icons/openai.svg");
@@ -43,6 +65,7 @@ export component ConnectionPicker inherits ScrollView {
             }
 
             ConnectionChoice {
+                arrival: clamp((root.arrival - 0.04) / 0.82, 0, 1);
                 text: "Grok 订阅";
                 description: "使用 xAI 账号连接 Grok";
                 icon: @image-url("../../assets/providers/icons/xai.svg");
@@ -60,6 +83,7 @@ export component ConnectionPicker inherits ScrollView {
         }
 
         ConnectionChoice {
+            arrival: clamp((root.arrival - 0.1) / 0.85, 0, 1);
             text: "自定义配置";
             description: "手动填写 API 地址、模型和 API Key";
             icon: @image-url("../../assets/ui/settings.svg");
@@ -75,6 +99,7 @@ export component ConnectionPicker inherits ScrollView {
                 property <int> preset-index: row * 2 + column;
                 property <ProviderPresetRow> preset: root.provider-presets[self.preset-index];
                 visible: self.preset-index < root.provider-presets.length;
+                arrival: clamp((root.arrival - min(0.3, 0.14 + row * 0.045 + column * 0.02)) / 0.7, 0, 1);
                 text: self.preset.name;
                 description: "官方 API · 预填地址和模型";
                 icon: self.preset.icon;
