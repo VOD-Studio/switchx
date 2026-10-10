@@ -1603,15 +1603,18 @@ export component AppWindow inherits Window {
         open: root.common-config-editor-open && !root.icon-picker-open;
         title: "通用配置";
         subtitle: "";
-        panel-width: 760px;
+        panel-width: 920px;
         busy: root.busy;
         error-message: root.error-code == "" ? "" : root.error-message + " · " + root.error-action;
         dismissed => { root.cancel-common-config(); }
         CommonConfigEditor {
+            open: root.common-config-editor-open && !root.icon-picker-open;
+            compact: root.height < 760px;
             busy: root.busy;
             border-width: 0px;
             background: transparent;
             common-config-draft <=> root.common-config-draft;
+            common-config-saved: root.common-config-saved;
             common-config-error: root.common-config-error;
             common-config-message: root.common-config-message;
             common-config-current-source: root.common-config-current-source;
