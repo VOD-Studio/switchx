@@ -1,6 +1,7 @@
 use switchx::ui::{
-    AccountRow, AppWindow, CodeSpan, CodexQuotaRow, ModelRow, ProviderIconRow, ProviderPresetRow,
-    ProviderRow, RequestRow, SwitchXTray, SyntaxHighlighting, Theme, XaiQuotaRow,
+    AccountRow, AppWindow, BatchModelRow, BatchSummary, CodeSpan, CodexQuotaRow, ModelRow,
+    ProviderIconRow, ProviderPresetRow, ProviderRow, RequestRow, SwitchXTray, SyntaxHighlighting,
+    Theme, XaiQuotaRow,
 };
 
 #[cfg(target_os = "macos")]
@@ -122,6 +123,14 @@ enum Command {
         name: String,
         upstream_model: String,
         path: String,
+        context: String,
+        levels: String,
+        default_reasoning: String,
+    },
+    SaveModels {
+        provider: String,
+        // Upstream model, row context window, row reasoning levels.
+        models: Vec<(String, String, String)>,
         context: String,
         levels: String,
         default_reasoning: String,
@@ -259,6 +268,7 @@ fn show_result(app: &AppWindow, result: Result<Snapshot, AppError>) {
                         included: model.enabled,
                         fallback_provider_id: model.fallback_provider_id.into(),
                         fallback_label: model.fallback_label.into(),
+                        fresh: false,
                     })
                     .collect::<Vec<_>>(),
             )));
@@ -1734,6 +1744,15 @@ fn open_model_editor(app: &AppWindow, provider_id: &str, original_id: &str) -> R
     );
     app.set_model_source_path("".into());
     app.set_model_delete_confirm(false);
+    app.set_model_batch_mode(original_id.is_empty());
+    app.set_batch_saving(false);
+    if original_id.is_empty() {
+        app.set_batch_query("".into());
+        app.set_batch_context("".into());
+        app.set_batch_levels("".into());
+        app.set_batch_default("未设置".into());
+        update_batch_reasoning_options(app);
+    }
     app.set_model_editor_open(true);
     app.set_fallback_editor_open(false);
     app.set_editor_open(false);
@@ -1752,6 +1771,151 @@ fn update_reasoning_options(app: &AppWindow) {
         app.set_model_default_reasoning("未设置".into());
     }
     app.set_model_reasoning_options(ModelRc::new(VecModel::from(options)));
+}
+
+fn update_batch_reasoning_options(app: &AppWindow) {
+    let text = app.get_batch_levels();
+    let levels = catalog::reasoning_levels(&text).unwrap_or_default();
+    let mut options = vec![slint::SharedString::from("未设置")];
+    options.extend(levels.into_iter().map(slint::SharedString::from));
+    if !options.contains(&app.get_batch_default()) {
+        app.set_batch_default("未设置".into());
+    }
+    app.set_batch_levels_label(catalog::reasoning_label(&text).into());
+    app.set_batch_reasoning_options(ModelRc::new(VecModel::from(options)));
+}
+
+fn show_batch_candidates(app: &AppWindow, candidates: Vec<app::BatchCandidate>) {
+    let query = app.get_batch_query().trim().to_lowercase();
+    app.set_batch_models(ModelRc::new(VecModel::from(
+        candidates
+            .into_iter()
+            .map(|model| BatchModelRow {
+                matched: model.model_id.to_lowercase().contains(&query),
+                id: model.model_id.into(),
+                added: model.added,
+                supported: model.supported,
+                checked: false,
+                source: model.source.into(),
+                template_context: model.context_window.into(),
+                template_levels_label: catalog::reasoning_label(&model.reasoning_levels).into(),
+                template_levels: model.reasoning_levels.into(),
+                context: "".into(),
+                levels: "".into(),
+                levels_label: "".into(),
+            })
+            .collect::<Vec<_>>(),
+    )));
+    update_batch_summary(app);
+}
+
+fn update_batch_summary(app: &AppWindow) {
+    let mut summary = BatchSummary::default();
+    for row in app.get_batch_models().iter() {
+        let selected = row.checked && row.supported && !row.added;
+        summary.total += 1;
+        summary.added += i32::from(row.added);
+        summary.selected += i32::from(selected);
+        if row.matched {
+            summary.matched += 1;
+            summary.visible_selectable += i32::from(row.supported && !row.added);
+            summary.visible_selected += i32::from(selected);
+        }
+    }
+    app.set_batch_summary(summary);
+}
+
+/// Changes rows in place so each row animates instead of the list rebuilding.
+fn update_batch_rows(app: &AppWindow, mut change: impl FnMut(usize, &mut BatchModelRow) -> bool) {
+    let rows = app.get_batch_models();
+    for index in 0..rows.row_count() {
+        if let Some(mut row) = rows.row_data(index)
+            && change(index, &mut row)
+        {
+            rows.set_row_data(index, row);
+        }
+    }
+    update_batch_summary(app);
+}
+
+fn toggle_batch_row(app: &AppWindow, index: usize) {
+    update_batch_rows(app, |row_index, row| {
+        let toggle = row_index == index && row.supported && !row.added;
+        if toggle {
+            row.checked = !row.checked;
+        }
+        toggle
+    });
+}
+
+// Only rows matching the search change, like the workbench list.
+fn select_batch_rows(app: &AppWindow, checked: bool) {
+    update_batch_rows(app, |_, row| {
+        let change = row.matched && row.supported && !row.added && row.checked != checked;
+        if change {
+            row.checked = checked;
+        }
+        change
+    });
+}
+
+fn filter_batch_rows(app: &AppWindow, query: &str) {
+    let query = query.trim().to_lowercase();
+    update_batch_rows(app, |_, row| {
+        let matched = row.id.to_lowercase().contains(&query);
+        let change = row.matched != matched;
+        row.matched = matched;
+        change
+    });
+}
+
+fn edit_batch_row(app: &AppWindow, index: usize, context: &str, levels: &str) {
+    let rows = app.get_batch_models();
+    if let Some(mut row) = rows.row_data(index) {
+        row.context = context.trim().into();
+        row.levels = levels.trim().into();
+        row.levels_label = catalog::reasoning_label(levels).into();
+        rows.set_row_data(index, row);
+    }
+}
+
+// Selection survives searching, so hidden picks are still added.
+fn batch_save_command(app: &AppWindow) -> Option<Command> {
+    let models = app
+        .get_batch_models()
+        .iter()
+        .filter(|row| row.checked && row.supported && !row.added)
+        .map(|row| {
+            (
+                row.id.to_string(),
+                row.context.trim().to_owned(),
+                row.levels.trim().to_owned(),
+            )
+        })
+        .collect::<Vec<_>>();
+    (!models.is_empty()).then(|| Command::SaveModels {
+        provider: app.get_model_provider_id().into(),
+        models,
+        context: app.get_batch_context().trim().into(),
+        levels: app.get_batch_levels().into(),
+        default_reasoning: if app.get_batch_default() == "未设置" {
+            String::new()
+        } else {
+            app.get_batch_default().into()
+        },
+    })
+}
+
+fn mark_fresh_models(app: &AppWindow, public_ids: &[String]) {
+    let models = app.get_models();
+    for index in 0..models.row_count() {
+        if let Some(mut model) = models.row_data(index)
+            && public_ids.iter().any(|id| model.public_id == id.as_str())
+        {
+            model.fresh = true;
+            models.set_row_data(index, model);
+        }
+    }
 }
 
 async fn check_provider(
@@ -2681,19 +2845,21 @@ async fn worker(
                             let token = manager.credential(&account.id).await?;
                             return direct::fetch_models(switchx::xai::BASE_URL, token.expose())
                                 .await
-                                .map(|models| (models, false));
+                                .map(|models| (models, false, Vec::new()));
                         }
                     }
                     let is_subscription = !provider.is_empty()
                         && app::load_provider(data_dir, &provider)?.kind == ProviderKind::Chatgpt;
                     if is_subscription {
+                        // The official templates also seed the batch picker's parameters.
+                        let templates = chatgpt::catalog().await?;
                         return Ok((
-                            chatgpt::catalog()
-                                .await?
+                            templates
                                 .iter()
                                 .filter_map(|model| model["slug"].as_str().map(str::to_owned))
                                 .collect::<Vec<_>>(),
                             true,
+                            templates,
                         ));
                     }
                     let token = if key.expose().is_empty() {
@@ -2710,9 +2876,18 @@ async fn worker(
                     };
                     direct::fetch_models(&url, token.expose())
                         .await
-                        .map(|models| (models, false))
+                        .map(|models| (models, false, Vec::new()))
                 }
-                .await;
+                .await
+                .and_then(|(models, is_subscription, templates)| {
+                    let candidates = if scope == 1 && !provider.is_empty() {
+                        let data_dir = directory.as_ref().map_err(|error| error.message())?;
+                        app::batch_candidates(data_dir, &provider, &models, &templates)?
+                    } else {
+                        Vec::new()
+                    };
+                    Ok((models, is_subscription, candidates))
+                });
                 let _ = weak.upgrade_in_event_loop(move |app| {
                     app.set_busy(false);
                     if generation != app.get_discovery_generation()
@@ -2724,21 +2899,28 @@ async fn worker(
                     }
                     app.set_fetching_models(false);
                     match result {
-                        Ok((models, is_subscription)) => {
+                        Ok((models, is_subscription, candidates)) => {
+                            let added = candidates.iter().filter(|model| model.added).count();
                             app.set_discovery_tone(if models.is_empty() { 2 } else { 1 });
                             app.set_discovery_message(if models.is_empty() {
                                 "上游返回空列表，可手动填写模型 ID".into()
                             } else {
+                                let suffix = if added > 0 {
+                                    format!("，其中 {added} 个已添加")
+                                } else {
+                                    String::new()
+                                };
                                 if is_subscription {
                                     format!(
-                                        "已读取 CLI 内置的 {} 个官方模型；账号权限以实际请求为准",
+                                        "已读取 CLI 内置的 {} 个官方模型{suffix}；账号权限以实际请求为准",
                                         models.len()
                                     )
                                     .into()
                                 } else {
-                                    format!("已获取 {} 个模型，可从列表选择", models.len()).into()
+                                    format!("已获取 {} 个模型{suffix}", models.len()).into()
                                 }
                             });
+                            show_batch_candidates(&app, candidates);
                             app.set_fetched_models(ModelRc::new(VecModel::from(
                                 models
                                     .into_iter()
@@ -3405,6 +3587,70 @@ async fn worker(
                         &app,
                         result.map(|()| {
                             "模型映射已保存；预览发布后可开启路由并刷新 Codex 模型菜单".into()
+                        }),
+                    );
+                });
+            }
+            Command::SaveModels {
+                provider,
+                models,
+                context,
+                levels,
+                default_reasoning,
+            } => {
+                let result = async {
+                    let directory = directory
+                        .as_ref()
+                        .map_err(|error| error.message().to_owned())?;
+                    let models = models
+                        .iter()
+                        .map(
+                            |(upstream_model, context_window, reasoning_levels)| app::BatchModel {
+                                upstream_model,
+                                context_window,
+                                reasoning_levels,
+                            },
+                        )
+                        .collect::<Vec<_>>();
+                    let input = app::BatchInput {
+                        provider_id: &provider,
+                        models: &models,
+                        context_window: &context,
+                        reasoning_levels: &levels,
+                        default_reasoning: &default_reasoning,
+                    };
+                    if app::load_provider(directory, &provider)?.kind == ProviderKind::Chatgpt {
+                        chatgpt::save_mappings(directory, &input).await
+                    } else {
+                        app::save_mappings(directory, &input)
+                    }
+                }
+                .await;
+                if result.is_ok() {
+                    route_session.discard_preview();
+                }
+                let snapshot = result
+                    .as_ref()
+                    .ok()
+                    .and_then(|_| directory.as_ref().ok())
+                    .map(|path| load_snapshot(path, false));
+                let _ = weak.upgrade_in_event_loop(move |app| {
+                    app.set_batch_saving(false);
+                    if let Some(snapshot) = snapshot {
+                        show_result(&app, snapshot);
+                        app.set_model_editor_open(false);
+                        app.set_route_preview_ready(false);
+                    }
+                    if let Ok(public_ids) = &result {
+                        mark_fresh_models(&app, public_ids);
+                    }
+                    show_action(
+                        &app,
+                        result.map(|public_ids| {
+                            format!(
+                                "已添加 {} 个模型映射；预览发布后可开启路由并刷新 Codex 模型菜单",
+                                public_ids.len()
+                            )
                         }),
                     );
                 });
@@ -4430,6 +4676,46 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
     });
     let weak = app.as_weak();
+    app.on_batch_toggle(move |index| {
+        if let Some(app) = weak.upgrade() {
+            toggle_batch_row(&app, index as usize);
+        }
+    });
+    let weak = app.as_weak();
+    app.on_batch_select_all(move |checked| {
+        if let Some(app) = weak.upgrade() {
+            select_batch_rows(&app, checked);
+        }
+    });
+    let weak = app.as_weak();
+    app.on_batch_filter(move |query| {
+        if let Some(app) = weak.upgrade() {
+            filter_batch_rows(&app, &query);
+        }
+    });
+    let weak = app.as_weak();
+    app.on_batch_edit(move |index, context, levels| {
+        if let Some(app) = weak.upgrade() {
+            edit_batch_row(&app, index as usize, &context, &levels);
+        }
+    });
+    let weak = app.as_weak();
+    app.on_update_batch_reasoning_options(move || {
+        if let Some(app) = weak.upgrade() {
+            update_batch_reasoning_options(&app);
+        }
+    });
+    let callback_sender = sender.clone();
+    let weak = app.as_weak();
+    app.on_save_batch_models(move || {
+        if let Some(app) = weak.upgrade()
+            && let Some(command) = batch_save_command(&app)
+        {
+            queue(&app, &callback_sender, command);
+            app.set_batch_saving(app.get_busy());
+        }
+    });
+    let weak = app.as_weak();
     app.on_begin_model_editor(move |provider, original_id| {
         if let Some(app) = weak.upgrade()
             && let Err(error) = open_model_editor(&app, &provider, &original_id)
@@ -4665,6 +4951,118 @@ mod tests {
         assert_eq!(account_initial("账号@example.invalid"), "账");
         assert_eq!(account_initial("--"), "-");
         assert_eq!(account_initial(""), "");
+    }
+
+    #[test]
+    fn batch_picker_rows_select_filter_edit_and_build_one_save_command() {
+        use slint::platform::{Platform, WindowAdapter, software_renderer::MinimalSoftwareWindow};
+        use std::rc::Rc;
+        struct PreviewPlatform(Rc<MinimalSoftwareWindow>);
+        impl Platform for PreviewPlatform {
+            fn create_window_adapter(&self) -> Result<Rc<dyn WindowAdapter>, slint::PlatformError> {
+                Ok(self.0.clone())
+            }
+        }
+        let window = MinimalSoftwareWindow::new(Default::default());
+        slint::platform::set_platform(Box::new(PreviewPlatform(window))).unwrap();
+        let app = AppWindow::new().unwrap();
+        let candidate = |id: &str, added: bool, supported: bool| app::BatchCandidate {
+            model_id: id.into(),
+            added,
+            supported,
+            source: "",
+            context_window: String::new(),
+            reasoning_levels: String::new(),
+        };
+        app.set_batch_query(" Coder ".into());
+        show_batch_candidates(
+            &app,
+            vec![
+                candidate("coder-pro", false, true),
+                candidate("coder-mini", true, true),
+                candidate("chat-max", false, true),
+                candidate("coder bad", false, false),
+            ],
+        );
+        let summary = app.get_batch_summary();
+        assert_eq!((summary.total, summary.matched, summary.added), (4, 3, 1));
+        assert_eq!(
+            summary.visible_selectable, 1,
+            "added and unsupported rows stay out"
+        );
+        assert!(batch_save_command(&app).is_none());
+
+        select_batch_rows(&app, true);
+        let rows = app.get_batch_models();
+        assert!(rows.row_data(0).unwrap().checked);
+        assert!(!rows.row_data(1).unwrap().checked && !rows.row_data(3).unwrap().checked);
+        assert!(
+            !rows.row_data(2).unwrap().checked,
+            "hidden rows keep their state"
+        );
+        filter_batch_rows(&app, "");
+        toggle_batch_row(&app, 2);
+        toggle_batch_row(&app, 1);
+        assert_eq!(app.get_batch_summary().selected, 2);
+        assert_eq!(app.get_batch_summary().visible_selected, 2);
+
+        edit_batch_row(&app, 2, " 64000 ", "max low medium high");
+        let edited = app.get_batch_models().row_data(2).unwrap();
+        assert_eq!(edited.context, "64000");
+        assert_eq!(edited.levels_label, "low → high, max");
+        filter_batch_rows(&app, "chat");
+        app.set_model_provider_id("provider".into());
+        app.set_batch_context(" 200000 ".into());
+        app.set_batch_levels("low, high".into());
+        update_batch_reasoning_options(&app);
+        assert_eq!(app.get_batch_levels_label(), "low, high");
+        app.set_batch_default("high".into());
+        let Some(Command::SaveModels {
+            provider,
+            models,
+            context,
+            levels,
+            default_reasoning,
+        }) = batch_save_command(&app)
+        else {
+            panic!("batch save command")
+        };
+        assert_eq!(provider, "provider");
+        assert_eq!(
+            models,
+            vec![
+                ("coder-pro".into(), String::new(), String::new()),
+                (
+                    "chat-max".into(),
+                    "64000".into(),
+                    "max low medium high".into()
+                ),
+            ]
+        );
+        assert_eq!((context.as_str(), levels.as_str()), ("200000", "low, high"));
+        assert_eq!(default_reasoning, "high");
+
+        app.set_batch_levels("medium".into());
+        update_batch_reasoning_options(&app);
+        assert_eq!(
+            app.get_batch_default(),
+            "未设置",
+            "a default outside the levels resets"
+        );
+
+        app.set_models(ModelRc::new(VecModel::from(vec![
+            ModelRow {
+                public_id: "sx-old".into(),
+                ..Default::default()
+            },
+            ModelRow {
+                public_id: "sx-new".into(),
+                ..Default::default()
+            },
+        ])));
+        mark_fresh_models(&app, &["sx-new".into()]);
+        let models = app.get_models();
+        assert!(!models.row_data(0).unwrap().fresh && models.row_data(1).unwrap().fresh);
     }
 
     #[test]

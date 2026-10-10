@@ -819,6 +819,16 @@ pub async fn save_mapping(data_dir: &Path, input: app::ModelInput<'_>) -> Result
     app::save_mapping_from(data_dir, input, Some(source))
 }
 
+pub async fn save_mappings(
+    data_dir: &Path,
+    input: &app::BatchInput<'_>,
+) -> Result<Vec<String>, String> {
+    if app::load_provider(data_dir, input.provider_id)?.kind != ProviderKind::Chatgpt {
+        return Err("官方模型资料只能用于订阅连接".into());
+    }
+    app::save_mappings_from(data_dir, input, &catalog().await?)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

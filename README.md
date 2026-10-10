@@ -177,9 +177,11 @@ ChatGPT 订阅上游默认显示 OpenAI 绿色头像；API 预设继续按准确
 
 手动填写参数即可生成原生 Responses 目录，无需 JSON 文件。未填上下文时使用 128000，思考等级留空则不声明推理档位；支持 `none, minimal, low, medium, high, xhigh, max, ultra`，默认等级须在支持列表中。手动目录采用文字输入和普通函数工具配置，不推断供应商的图片、并行工具、搜索或特殊工具能力。需要完整能力与指令模板时，可导入用户指定的绝对路径 Codex 目录 JSON，精确匹配实际模型 ID，保留其他字段；导入失败保留旧资料。不同上游的同名模型各自保存资料。SQLite 自动迁移到 v8，保留旧映射、已保存凭据、发布选择和备用策略；删除上游会同时删除其 API Key 与全部映射。
 
+“添加模型”默认打开批量选择：抽屉开始滑入后自动获取一次所选连接的模型列表（API 用已保存的 Key，ChatGPT 读取 CLI 内置目录，Grok 用绑定账号），可搜索、全选当前筛选结果并勾选多个模型。同一连接已有映射的实际模型显示“已添加”，不能重复勾选；不符合模型 ID 规则的条目标为不受支持。每个勾选的模型可展开调整上下文窗口和思考等级，留空时依次继承连接地址精确匹配的预置参数或 ChatGPT 官方模板，再继承“统一参数”，最后使用 128000 且不声明思考档位；不按模型名推断能力。统一默认等级不在某个模型的思考等级中时，该模型不设默认；改写了官方或预置模板等级的模型优先保留模板原默认值。批量添加在一个 SQLite 事务中写入，任一条目无效或已存在时都不写入；公开 ID 自动生成 `sx-<32hex>`，显示名为“实际模型/连接名”，新映射与单个添加一样加入已选，工作台中短暂高亮新增行。需要自定义公开 ID 或导入目录 JSON 时切换到“单个映射”；编辑已有映射仍使用单个表单。`cargo run --example provider_icons_preview -- /absolute/output --batch-models` 用合成数据渲染批量选择各状态与动效帧。
+
 使用步骤：
 
-1. 保存 Responses 上游及 API Key，在“工作台”选择连接后点击“+”手动填写参数，或导入包含实际模型 ID 的 `models.json`。映射编辑器也提供“获取模型列表”。可参考供应商提供的目录，例如 [DeepSeek 的 Codex 接入文档](https://api-docs.deepseek.com/quick_start/agent_integrations/codex)。`/models` 的 ID 列表不包含完整能力资料。
+1. 保存 Responses 上游及 API Key，在“工作台”选择连接后点击“+”批量勾选模型，或切换到“单个映射”手动填写参数、导入包含实际模型 ID 的 `models.json`。可参考供应商提供的目录，例如 [DeepSeek 的 Codex 接入文档](https://api-docs.deepseek.com/quick_start/agent_integrations/codex)。`/models` 的 ID 列表不包含完整能力资料。
 2. 选择要发布的模型和默认模型，在“设置 → Codex 工作空间”指定目标配置目录。
 3. 点击“预览并启用”。SwitchX 预留所选 loopback 端口，并让本机 Codex CLI 在独立临时目录检查完整目录，以及新启动的 app-server `model/list` 返回的可选模型。可用 `SWITCHX_CODEX_CLI` 指定 CLI 程序。
 4. 在预览抽屉中点击“确认启用”。再次核对 CLI、模型与上游资料；API 上游按连接读取凭据和 `/models`，订阅连接核对目标 Codex 的登录、工作区与 CLI 内置模型。验证本地路由后发布目录和配置。

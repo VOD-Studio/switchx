@@ -18,6 +18,8 @@ import {
     ProviderIconRow,
     AccountRow,
     ModelRow,
+    BatchModelRow,
+    BatchSummary,
     RequestRow,
 } from "view-models.slint";
 import { AccountsPage } from "pages/accounts.slint";
@@ -42,6 +44,8 @@ export {
     ProviderIconRow,
     AccountRow,
     ModelRow,
+    BatchModelRow,
+    BatchSummary,
     RequestRow,
 } from "view-models.slint";
 export { SyntaxHighlighting, CodeSpan } from "code-editor.slint";
@@ -244,6 +248,19 @@ export component AppWindow inherits Window {
     in-out property <string> model-default-reasoning: "未设置";
     in-out property <[string]> model-reasoning-options: ["未设置"];
     in-out property <bool> model-delete-confirm: false;
+    // Adding opens the batch picker; editing an existing mapping stays single.
+    in-out property <bool> model-batch-mode: true;
+    in-out property <[BatchModelRow]> batch-models: [];
+    in-out property <BatchSummary> batch-summary;
+    in-out property <bool> batch-saving: false;
+    in-out property <string> batch-query: "";
+    in-out property <string> batch-context: "";
+    in-out property <string> batch-levels: "";
+    in-out property <string> batch-default: "未设置";
+    in-out property <string> batch-levels-label: "";
+    in-out property <[string]> batch-reasoning-options: ["未设置"];
+    // Fetch once the drawer has started sliding in, after open-time resets settle.
+    property <bool> batch-autofetch: false;
     in-out property <[string]> model-provider-ids: [];
     in-out property <[string]> model-provider-options: [];
     in-out property <int> model-provider-choice: 0;
@@ -315,6 +332,18 @@ export component AppWindow inherits Window {
         root.fetching-models = false;
         root.discovery-message = "";
         root.discovery-tone = 0;
+        root.batch-models = [];
+        root.batch-summary = {
+            total: 0,
+            matched: 0,
+            added: 0,
+            selected: 0,
+            visible-selectable: 0,
+            visible-selected: 0,
+        };
+    }
+    function arm-batch-autofetch() {
+        root.batch-autofetch = root.model-editor-open && root.model-batch-mode && root.model-original-id == "" && !root.config-managed;
     }
     changed edit-id => { root.reset-model-discovery(); }
     changed edit-url => {
@@ -341,7 +370,12 @@ export component AppWindow inherits Window {
     changed model-original-id => { root.reset-model-discovery(); }
     changed model-editor-open => {
         root.reset-model-discovery();
+        root.arm-batch-autofetch();
     }
+    changed model-batch-mode => {
+        if (root.batch-models.length == 0 && !root.fetching-models) { root.arm-batch-autofetch(); }
+    }
+    changed batch-levels => { root.update-batch-reasoning-options(); }
     changed model-reasoning-levels => { root.update-reasoning-options(); }
     changed model-upstream-id => { root.update-model-display-name(); }
     callback refresh(bool);
@@ -389,6 +423,12 @@ export component AppWindow inherits Window {
     callback add-selected-model();
     callback update-model-display-name();
     callback update-reasoning-options();
+    callback update-batch-reasoning-options();
+    callback batch-toggle(int);
+    callback batch-select-all(bool);
+    callback batch-filter(string);
+    callback batch-edit(int, string, string);
+    callback save-batch-models();
     callback select-model(string, bool);
     callback select-models(bool, bool);
     callback edit-fallback(string);
@@ -1191,6 +1231,17 @@ export component AppWindow inherits Window {
         }
     }
 
+    Timer {
+        interval: 220ms;
+        running: root.batch-autofetch;
+        triggered => {
+            root.batch-autofetch = false;
+            if (root.model-editor-open && root.model-batch-mode && root.model-original-id == "" && !root.busy && !root.fetching-models && root.batch-models.length == 0) {
+                root.fetch-models(1);
+            }
+        }
+    }
+
     Drawer {
         open: root.model-editor-open;
         title: "模型设置";
@@ -1224,10 +1275,26 @@ export component AppWindow inherits Window {
                     model-default-reasoning <=> root.model-default-reasoning;
                     model-reasoning-options: root.model-reasoning-options;
                     model-delete-confirm <=> root.model-delete-confirm;
+                    batch-mode <=> root.model-batch-mode;
+                    batch-rows: root.batch-models;
+                    batch-summary: root.batch-summary;
+                    batch-saving: root.batch-saving;
+                    batch-query <=> root.batch-query;
+                    batch-context <=> root.batch-context;
+                    batch-levels <=> root.batch-levels;
+                    batch-default <=> root.batch-default;
+                    batch-levels-label: root.batch-levels-label;
+                    batch-reasoning-options: root.batch-reasoning-options;
+                    batch-list-height: clamp(root.height - 548px, 232px, 460px);
                     fetch-models(scope) => { root.fetch-models(scope); }
                     dismiss-discovery => { root.reset-model-discovery(); }
                     save-model() => { root.save-model(); }
                     delete-model() => { root.delete-model(); }
+                    batch-toggle(index) => { root.batch-toggle(index); }
+                    batch-select-all(checked) => { root.batch-select-all(checked); }
+                    batch-filter(query) => { root.batch-filter(query); }
+                    batch-edit(index, context, levels) => { root.batch-edit(index, context, levels); }
+                    save-batch => { root.save-batch-models(); }
                 }
             }
         }

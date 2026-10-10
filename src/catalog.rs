@@ -34,6 +34,32 @@ pub fn reasoning_levels(text: &str) -> Result<Vec<&str>, String> {
         .collect())
 }
 
+/// Short label for a level list: canonical runs of three or more collapse,
+/// so "low, medium, high, max" reads "low → high, max". Invalid text is kept.
+pub fn reasoning_label(text: &str) -> String {
+    let Ok(levels) = reasoning_levels(text) else {
+        return text.trim().to_owned();
+    };
+    let rank = |level: &str| REASONING_LEVELS.iter().position(|known| *known == level);
+    let mut parts = Vec::new();
+    let mut start = 0;
+    while start < levels.len() {
+        let mut end = start;
+        while end + 1 < levels.len()
+            && rank(levels[end + 1]) == rank(levels[end]).map(|rank| rank + 1)
+        {
+            end += 1;
+        }
+        if end - start >= 2 {
+            parts.push(format!("{} → {}", levels[start], levels[end]));
+        } else {
+            parts.extend(levels[start..=end].iter().map(|level| level.to_string()));
+        }
+        start = end + 1;
+    }
+    parts.join(", ")
+}
+
 pub fn mapping_metadata(
     model_id: &str,
     display_name: &str,
@@ -389,6 +415,21 @@ pub fn publish(templates: &Value, selections: &[Selection<'_>]) -> Result<Public
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn reasoning_labels_collapse_canonical_runs() {
+        for (text, label) in [
+            ("", ""),
+            ("high", "high"),
+            ("low, high, max", "low, high, max"),
+            ("max low medium high", "low → high, max"),
+            ("low, medium, high, xhigh, max", "low → max"),
+            ("none, low, medium, high", "none, low → high"),
+            ("low, turbo", "low, turbo"),
+        ] {
+            assert_eq!(reasoning_label(text), label, "{text}");
+        }
+    }
 
     fn templates() -> Value {
         serde_json::from_str(include_str!("../tests/fixtures/synthetic-models.json")).unwrap()
