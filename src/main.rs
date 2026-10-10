@@ -2725,6 +2725,7 @@ async fn worker(
                     app.set_fetching_models(false);
                     match result {
                         Ok((models, is_subscription)) => {
+                            app.set_discovery_tone(if models.is_empty() { 2 } else { 1 });
                             app.set_discovery_message(if models.is_empty() {
                                 "上游返回空列表，可手动填写模型 ID".into()
                             } else {
@@ -2745,7 +2746,10 @@ async fn worker(
                                     .collect::<Vec<_>>(),
                             )));
                         }
-                        Err(error) => app.set_discovery_message(error.into()),
+                        Err(error) => {
+                            app.set_discovery_tone(3);
+                            app.set_discovery_message(error.into());
+                        }
                     }
                 });
             }
@@ -4284,6 +4288,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             )
         };
         app.set_discovery_scope(scope);
+        app.set_discovery_tone(0);
         app.set_discovery_message("正在获取模型列表…".into());
         queue(
             &app,
