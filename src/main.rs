@@ -1723,7 +1723,12 @@ fn set_provider_check_id(app: &AppWindow, id: &str, check_id: &str) {
             row
         })
         .collect::<Vec<_>>();
-    app.set_providers(ModelRc::new(VecModel::from(rows)));
+    sync_rows(
+        app.get_providers(),
+        rows,
+        |row| row.id.clone(),
+        |model| app.set_providers(model),
+    );
     filter_providers(app, &app.get_provider_query());
 }
 
@@ -1746,7 +1751,12 @@ fn update_provider_check(
         })
         .collect::<Vec<_>>();
     if changed {
-        app.set_providers(ModelRc::new(VecModel::from(rows)));
+        sync_rows(
+            app.get_providers(),
+            rows,
+            |row| row.id.clone(),
+            |model| app.set_providers(model),
+        );
         filter_providers(app, &app.get_provider_query());
     }
 }
@@ -6312,6 +6322,204 @@ mod tests {
     }
 
     #[test]
+    fn provider_checks_preserve_workbench_animation_and_expanded_models() {
+        use slint::platform::{
+            Platform, PointerEventButton, WindowAdapter, WindowEvent,
+            software_renderer::MinimalSoftwareWindow,
+        };
+        use std::{cell::Cell, rc::Rc, time::Duration};
+
+        struct PreviewPlatform {
+            window: Rc<MinimalSoftwareWindow>,
+            clock: Rc<Cell<Duration>>,
+        }
+        impl Platform for PreviewPlatform {
+            fn create_window_adapter(&self) -> Result<Rc<dyn WindowAdapter>, slint::PlatformError> {
+                Ok(self.window.clone())
+            }
+            fn duration_since_start(&self) -> Duration {
+                self.clock.get()
+            }
+        }
+        let window = MinimalSoftwareWindow::new(Default::default());
+        let clock = Rc::new(Cell::new(Duration::ZERO));
+        slint::platform::set_platform(Box::new(PreviewPlatform {
+            window: window.clone(),
+            clock: clock.clone(),
+        }))
+        .unwrap();
+        let app = AppWindow::new().unwrap();
+        app.global::<Theme>().set_animations_enabled(true);
+        app.global::<Theme>().set_system_reduced_motion(false);
+        app.set_loading(false);
+        initialize_provider_icons(&app).unwrap();
+        app.show().unwrap();
+
+        let draw = |state: &str| {
+            slint::platform::update_timers_and_animations();
+            let size = WindowAdapter::size(window.as_ref());
+            let mut pixels =
+                slint::SharedPixelBuffer::<slint::Rgb8Pixel>::new(size.width, size.height);
+            window.request_redraw();
+            window.draw_if_needed(|renderer| {
+                renderer.render(pixels.make_mut_slice(), size.width as usize);
+            });
+            if !state.is_empty()
+                && let Some(output) = std::env::var_os("SWITCHX_WORKBENCH_CHECK_SNAPSHOTS")
+            {
+                use std::io::Write;
+                let output = PathBuf::from(output);
+                assert!(output.is_absolute());
+                std::fs::create_dir_all(&output).unwrap();
+                let theme = if app.global::<Theme>().get_dark() {
+                    "dark"
+                } else {
+                    "light"
+                };
+                let name = format!("{theme}-{}x{}-{state}.ppm", size.width, size.height);
+                let mut file = std::fs::File::create(output.join(name)).unwrap();
+                write!(file, "P6\n{} {}\n255\n", size.width, size.height).unwrap();
+                file.write_all(pixels.as_bytes()).unwrap();
+            }
+            pixels
+        };
+        let advance = |millis| clock.set(clock.get() + Duration::from_millis(millis));
+        let settle = || {
+            draw("");
+            advance(200);
+            draw("");
+            advance(500);
+            draw("");
+        };
+
+        for (width, height) in [(1200, 820), (1000, 680)] {
+            app.window()
+                .set_size(slint::PhysicalSize::new(width, height));
+            for dark in [false, true] {
+                app.invoke_set_appearance(dark);
+                app.set_active_page(1);
+                app.set_active_page(0);
+                app.set_model_scroll_y(0.0);
+                let rows = [
+                    ("chatgpt", "ChatGPT", "openai", true, false),
+                    ("grok", "Grok", "grok", true, true),
+                    ("api", "API", "anthropic", false, false),
+                ]
+                .map(|(id, name, icon, subscription, grok)| {
+                    let brand = provider_icon_row(&app, icon);
+                    ProviderRow {
+                        id: id.into(),
+                        name: name.into(),
+                        icon: brand.icon,
+                        icon_id: brand.id,
+                        monochrome: brand.monochrome,
+                        is_subscription: subscription,
+                        is_grok: grok,
+                        model_count: 3,
+                        ready_model_count: 3,
+                        selected_model_count: 3,
+                        models: ModelRc::new(VecModel::from(
+                            (0..3)
+                                .map(|index| ModelRow {
+                                    public_id: format!("{id}-{index}").into(),
+                                    display_name: format!("Synthetic model {index}").into(),
+                                    saved: true,
+                                    ready: true,
+                                    included: true,
+                                    ..Default::default()
+                                })
+                                .collect::<Vec<_>>(),
+                        )),
+                        ..Default::default()
+                    }
+                });
+                app.set_providers(ModelRc::new(VecModel::from(rows.to_vec())));
+                filter_providers(&app, "");
+                app.set_selected_model_count(9);
+                app.set_selectable_model_count(9);
+                settle();
+                let collapsed = draw("collapsed");
+                let position = slint::LogicalPosition::new(width as f32 - 100.0, 350.0);
+                window.dispatch_event(WindowEvent::PointerPressed {
+                    position,
+                    button: PointerEventButton::Left,
+                });
+                window.dispatch_event(WindowEvent::PointerReleased {
+                    position,
+                    button: PointerEventButton::Left,
+                });
+                window.dispatch_event(WindowEvent::PointerMoved {
+                    position: slint::LogicalPosition::new(500.0, 200.0),
+                });
+                settle();
+                let expanded = draw("");
+                assert!(
+                    collapsed.as_bytes() != expanded.as_bytes(),
+                    "expanding models must change the workbench"
+                );
+                window.dispatch_event(WindowEvent::PointerScrolled {
+                    position: slint::LogicalPosition::new(500.0, 500.0),
+                    delta_x: 0.0,
+                    delta_y: -24.0,
+                });
+                settle();
+                let expanded = draw("expanded");
+                let providers = app.get_providers();
+                let filtered = app.get_filtered_providers();
+                let scroll_y = app.get_model_scroll_y();
+                assert!(scroll_y < 0.0, "expanded models must be scrolled into view");
+                let unchanged = |state: &str| {
+                    let frame = draw(state);
+                    assert!(
+                        frame.as_bytes() == expanded.as_bytes(),
+                        "{state} must preserve visible cards and expanded models at {width}x{height}, dark={dark}"
+                    );
+                    assert_eq!(app.get_providers(), providers);
+                    assert_eq!(app.get_filtered_providers(), filtered);
+                    assert_eq!(app.get_model_scroll_y(), scroll_y);
+                    advance(100);
+                    let frame = draw("");
+                    assert!(
+                        frame.as_bytes() == expanded.as_bytes(),
+                        "{state} must not replay entry animations"
+                    );
+                };
+                for id in ["chatgpt", "grok", "api"] {
+                    set_provider_check_id(&app, id, id);
+                    unchanged("started");
+                }
+                for elapsed_ms in [1000, 2000, 10000, 14000] {
+                    advance(1000);
+                    for id in ["chatgpt", "grok", "api"] {
+                        update_provider_check(&app, id, id, |row| {
+                            row.check_stage = if id == "chatgpt" {
+                                "读取登录状态"
+                            } else {
+                                "读取模型目录"
+                            }
+                            .into();
+                            row.check_elapsed_ms = elapsed_ms;
+                        });
+                        unchanged("progress");
+                    }
+                }
+                for id in ["chatgpt", "grok", "api"] {
+                    let result = if id == "grok" {
+                        Err("合成检查失败".into())
+                    } else {
+                        Ok(ProviderCheckResult {
+                            message: "合成检查完成".into(),
+                            detail: "合成检查详情".into(),
+                        })
+                    };
+                    finish_provider_check(&app, id, id, 15000, result);
+                    unchanged("finished");
+                }
+            }
+        }
+    }
+
+    #[test]
     fn checking_one_provider_keeps_other_connections_interactive() {
         use slint::platform::{
             Platform, PointerEventButton, WindowAdapter, WindowEvent,
@@ -6356,7 +6564,8 @@ mod tests {
             },
         ]));
         app.set_providers(providers.clone());
-        app.set_filtered_providers(providers);
+        filter_providers(&app, "");
+        assert_ne!(app.get_filtered_providers(), providers);
         let (sender, mut receiver) = mpsc::channel(8);
         connect_provider_checks(&app, &sender);
         app.on_begin_xai_editor({
@@ -6574,6 +6783,7 @@ mod tests {
         };
         app.set_provider_query("Grok".into());
         show_result(&app, Ok(snapshot.clone()));
+        assert_eq!(app.get_providers().row_count(), 2);
         assert_eq!(
             app.get_filtered_providers()
                 .row_data(0)
