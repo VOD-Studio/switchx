@@ -7,15 +7,16 @@
 //! Connection directory/workbench: add --connection-workbench.
 //! Shared workspace menu and operation feedback: add --workspace-feedback.
 //! Activity timeline: add --activity-design (entry, arrivals, pause, details, filter).
+//! API connection editor: add --provider-editor-design.
 
 #[cfg(target_os = "macos")]
 #[path = "../src/macos.rs"]
 pub mod macos;
 
 use switchx::ui::{
-    AccountRow, AppWindow, BatchModelRow, BatchSummary, CodexQuotaRow, ConnectionModelRow,
-    ModelRow, ProviderIconRow, ProviderRow, RequestBar, RequestRow, RequestStats, Theme,
-    XaiQuotaRow,
+    AccountRow, AppWindow, BatchModelRow, BatchSummary, CodeSpan, CodexQuotaRow,
+    ConnectionModelRow, ModelRow, ProviderIconRow, ProviderRow, RequestBar, RequestRow,
+    RequestStats, SyntaxHighlighting, Theme, XaiQuotaRow,
 };
 
 use slint::platform::software_renderer::{MinimalSoftwareWindow, RepaintBufferType};
@@ -1336,6 +1337,222 @@ fn render_activity_design(
     Ok(())
 }
 
+fn render_provider_editor(
+    app: &AppWindow,
+    window: &MinimalSoftwareWindow,
+    output: &Path,
+) -> Result<(), Box<dyn Error>> {
+    app.global::<SyntaxHighlighting>().on_line_count(|source| {
+        source
+            .as_str()
+            .split('\n')
+            .count()
+            .try_into()
+            .unwrap_or(i32::MAX)
+    });
+    app.global::<SyntaxHighlighting>()
+        .on_spans(|source, language| {
+            let spans = switchx::code_highlight::spans(source.as_str(), language.as_str())
+                .into_iter()
+                .map(|span| CodeSpan {
+                    text: span.text.into(),
+                    prefix: span.prefix.into(),
+                    line_text: span.line_text.into(),
+                    line: span.line,
+                    kind: span.kind as i32,
+                })
+                .collect::<Vec<_>>();
+            ModelRc::new(VecModel::from(spans))
+        });
+    app.set_active_page(1);
+    app.set_edit_id("preview-api".into());
+    app.set_edit_name("Podlink".into());
+    app.set_edit_url("https://api.example.invalid/v1".into());
+    app.set_edit_model("gpt-6-luna".into());
+    app.set_edit_icon_name("Anthropic".into());
+    app.set_edit_icon(provider_icons::load_image(
+        provider_icons::icon("anthropic").unwrap(),
+    )?);
+    app.set_edit_use_common_config(true);
+    app.set_edit_context_1m(true);
+    app.set_edit_compact_limit("900000".into());
+    app.set_edit_config_preview(
+        concat!(
+            "model_provider = \"switchx_direct_preview\"\n",
+            "model = \"gpt-6-luna\"\n",
+            "web_search = \"live\"\n",
+            "model_context_window = 1000000\n",
+            "model_auto_compact_token_limit = 900000\n\n",
+            "approval_policy = \"never\"\n",
+            "sandbox_mode = \"danger-full-access\"\n",
+            "model_reasoning_effort = \"high\"\n",
+            "service_tier = \"default\"\n\n",
+            "[model_providers.switchx_direct_preview]\n",
+            "name = \"Podlink\"\n",
+            "base_url = \"https://api.example.invalid/v1\"\n",
+            "wire_api = \"responses\"\n\n",
+            "[features]\n",
+            "shell_tool = true\n",
+            "apply_patch_freeform = true\n"
+        )
+        .into(),
+    );
+    if std::env::args().any(|arg| arg == "--provider-editor-native") {
+        app.window().set_size(PhysicalSize::new(1200, 820));
+        app.global::<Theme>().set_animations_enabled(true);
+        app.invoke_set_appearance(true);
+        app.set_editor_open(true);
+        return Ok(app.run()?);
+    }
+    let saves = Rc::new(Cell::new(0));
+    let saved = saves.clone();
+    app.on_save_provider(move |_, _, _, _, _| saved.set(saved.get() + 1));
+    let deletes = Rc::new(Cell::new(0));
+    let deleted = deletes.clone();
+    app.on_delete_provider(move |_| deleted.set(deleted.get() + 1));
+    let fetches = Rc::new(Cell::new(0));
+    let fetched = fetches.clone();
+    app.on_fetch_models(move |_| fetched.set(fetched.get() + 1));
+    for (width, height) in [(1200, 820), (1000, 680), (1600, 1000)] {
+        app.window().set_size(PhysicalSize::new(width, height));
+        let left = (width as f32 - 1120.0).max(60.0) + 26.0;
+        let right = left + 312.0;
+        for dark in [false, true] {
+            let suffix = format!("{}-{width}x{height}", if dark { "dark" } else { "light" });
+            set_theme(app, window, dark);
+            app.set_delete_confirm(false);
+            app.set_editor_open(true);
+            snapshot(window, output, &format!("provider-editor-{suffix}"))?;
+
+            // Configuration preferences expand without moving the footer.
+            click(window, width as f32 - 126.0, 164.0);
+            render(window);
+            click(window, right + 72.0, 239.0);
+            assert!(
+                !app.get_edit_use_common_config(),
+                "whole-row switch must toggle"
+            );
+            click(window, right + 72.0, 239.0);
+            assert!(app.get_edit_use_common_config());
+            click(window, right + 70.0, 292.0);
+            assert!(!app.get_edit_context_1m(), "context control must toggle");
+            snapshot(window, output, &format!("provider-context-off-{suffix}"))?;
+            click(window, right + 70.0, 292.0);
+            assert!(app.get_edit_context_1m());
+            snapshot(window, output, &format!("provider-options-{suffix}"))?;
+            click(window, width as f32 - 126.0, 164.0);
+            render(window);
+
+            click(window, width as f32 - 44.0, 164.0);
+            snapshot(window, output, &format!("provider-expanded-{suffix}"))?;
+            click(window, width as f32 - 44.0, 164.0);
+            render(window);
+
+            if width == 1200 {
+                let count = fetches.get();
+                click(window, left + 136.0, 588.0);
+                assert_eq!(
+                    fetches.get(),
+                    count + 1,
+                    "model discovery must be reachable"
+                );
+            }
+            app.set_edit_key("synthetic-clear-check".into());
+            let count = saves.get();
+            click(window, width as f32 - 90.0, height as f32 - 46.0);
+            assert_eq!(
+                saves.get(),
+                count + 1,
+                "save must remain visible at every size"
+            );
+            assert!(
+                app.get_edit_key().is_empty(),
+                "saving clears the credential draft"
+            );
+            app.set_delete_confirm(false);
+            let count = deletes.get();
+            click(window, left + 56.0, height as f32 - 46.0);
+            assert!(app.get_delete_confirm());
+            assert_eq!(deletes.get(), count, "delete still requires a second click");
+            click(window, left + 56.0, height as f32 - 46.0);
+            assert_eq!(deletes.get(), count + 1);
+            app.set_edit_key("synthetic-clear-check".into());
+            click(window, width as f32 - 202.0, height as f32 - 46.0);
+            assert!(!app.get_editor_open(), "cancel must remain reachable");
+            assert!(
+                app.get_edit_key().is_empty(),
+                "cancelling clears the credential draft"
+            );
+            render(window);
+        }
+    }
+
+    // Capture a reversible width transition and verify reduced-motion settling.
+    app.window().set_size(PhysicalSize::new(1200, 820));
+    set_theme(app, window, true);
+    app.set_delete_confirm(false);
+    app.set_editor_open(true);
+    render(window);
+    app.global::<Theme>().set_animations_enabled(true);
+    click(window, 1156.0, 164.0);
+    let first = render_now(window);
+    let mut elapsed = 0;
+    for at in [0, 16, 48, 96, 160, 240, 340, 480] {
+        frame(at - elapsed);
+        elapsed = at;
+        snapshot_now(window, output, &format!("provider-expand-{at:03}ms"))?;
+    }
+    let last = render_now(window);
+    assert_ne!(first.as_bytes(), last.as_bytes(), "expansion must animate");
+    click(window, 1156.0, 164.0);
+    render_now(window);
+    frame(96);
+    click(window, 1156.0, 164.0);
+    render_now(window);
+    frame(480);
+    assert_eq!(
+        last.as_bytes(),
+        render_now(window).as_bytes(),
+        "interrupted expansion settles to the same layout"
+    );
+    for reduced in [false, true] {
+        app.global::<Theme>().set_animations_enabled(reduced);
+        app.global::<Theme>().set_system_reduced_motion(reduced);
+        click(window, 1156.0, 164.0);
+        let immediate = render_now(window);
+        frame(600);
+        assert_eq!(
+            immediate.as_bytes(),
+            render_now(window).as_bytes(),
+            "disabled motion settles immediately"
+        );
+    }
+    app.global::<Theme>().set_system_reduced_motion(false);
+    app.global::<Theme>().set_animations_enabled(false);
+    click(window, 1156.0, 164.0);
+    render(window);
+    app.set_edit_config_error("合成配置错误：请检查压缩阈值。".into());
+    snapshot(window, output, "provider-config-error-dark")?;
+    let count = saves.get();
+    click(window, 1110.0, 774.0);
+    assert_eq!(saves.get(), count, "invalid configuration cannot be saved");
+    app.set_edit_config_error("".into());
+    app.set_editor_open(false);
+    render(window);
+
+    app.set_edit_id("".into());
+    app.set_edit_key("synthetic-new-connection".into());
+    app.set_editor_open(true);
+    render(window);
+    let rows = batch_rows("");
+    app.set_batch_summary(summarize(&rows));
+    app.set_batch_models(ModelRc::new(VecModel::from(rows)));
+    snapshot(window, output, "provider-new-discovered-dark")?;
+    app.set_editor_open(false);
+    println!("Synthetic API editor previews: {}", output.display());
+    Ok(())
+}
+
 fn main() -> Result<(), Box<dyn Error>> {
     let output = std::env::args()
         .nth(1)
@@ -1347,7 +1564,8 @@ fn main() -> Result<(), Box<dyn Error>> {
     fs::create_dir_all(output)?;
     let window = MinimalSoftwareWindow::new(RepaintBufferType::NewBuffer);
     let native_connections = std::env::args().any(|arg| arg == "--connections-native");
-    if native_connections {
+    let native_provider = std::env::args().any(|arg| arg == "--provider-editor-native");
+    if native_connections || native_provider {
         #[cfg(target_os = "macos")]
         macos::configure_window()?;
     } else {
@@ -1356,6 +1574,10 @@ fn main() -> Result<(), Box<dyn Error>> {
     let app = AppWindow::new()?;
     app.set_loading(false);
     app.global::<Theme>().set_animations_enabled(false);
+    if native_provider || std::env::args().any(|arg| arg == "--provider-editor-design") {
+        app.show()?;
+        return render_provider_editor(&app, &window, output);
+    }
     if std::env::args().any(|arg| arg == "--connection-workbench") {
         app.show()?;
         return render_connection_workbench(&app, &window, output);

@@ -1,0 +1,100 @@
+import { Theme } from "../tokens.slint";
+
+// A whole-row switch with native keyboard and accessibility semantics.
+export component ConnectionOption inherits Rectangle {
+    in property <string> title;
+    in property <string> detail;
+    in property <bool> enabled: true;
+    in-out property <bool> checked;
+    height: 58px;
+    min-width: 160px;
+    border-radius: 10px;
+    border-width: 1px;
+    border-color: keyboard.has-focus ? Theme.brand : touch.has-hover ? Theme.brand.with-alpha(0.5) : Theme.border;
+    background: root.checked ? Theme.brand-surface.with-alpha(0.5) : touch.has-hover ? Theme.raised : Theme.inset;
+    opacity: root.enabled ? 1 : 0.45;
+    animate background, border-color, opacity { duration: Theme.fast; }
+    forward-focus: keyboard;
+    accessible-role: checkbox;
+    accessible-label: root.title + "，" + root.detail;
+    accessible-checked: root.checked;
+    accessible-enabled: root.enabled;
+    accessible-action-default => { root.toggle(); }
+    function toggle() { if root.enabled { root.checked = !root.checked; } }
+
+    Text {
+        x: 12px;
+        y: 11px;
+        width: max(0px, parent.width - 68px);
+        height: 18px;
+        text: root.title;
+        font-size: 12px;
+        font-weight: 500;
+        color: Theme.primary-text;
+        overflow: elide;
+        accessible-role: none;
+    }
+
+    Text {
+        x: 12px;
+        y: 32px;
+        width: max(0px, parent.width - 68px);
+        height: 14px;
+        text: root.detail;
+        font-size: 10px;
+        color: Theme.muted-text;
+        overflow: elide;
+        accessible-role: none;
+    }
+
+    Rectangle {
+        x: parent.width - 48px;
+        y: (parent.height - self.height) / 2;
+        width: 34px;
+        height: 20px;
+        border-radius: 10px;
+        background: root.checked ? Theme.brand : Theme.border;
+        animate background { duration: Theme.fast; }
+        Rectangle {
+            x: root.checked ? 17px : 3px;
+            y: 3px;
+            width: 14px;
+            height: 14px;
+            border-radius: 7px;
+            background: root.checked ? Theme.on-brand : Theme.panel;
+            animate x {
+                duration: Theme.page-motion;
+                easing: cubic-bezier(0.34, 1.3, 0.64, 1);
+            }
+            animate background { duration: Theme.fast; }
+        }
+    }
+
+    touch := TouchArea {
+        enabled: root.enabled;
+        mouse-cursor: pointer;
+        clicked => { keyboard.focus(); root.toggle(); }
+    }
+
+    keyboard := FocusScope {
+        width: 0px;
+        enabled: root.enabled;
+        key-pressed(event) => {
+            if event.text == Key.Space || event.text == Key.Return { root.toggle(); return accept; }
+            return reject;
+        }
+    }
+}
+
+export component ConnectionField inherits VerticalLayout {
+    in property <string> label;
+    spacing: 7px;
+    Text {
+        text: root.label;
+        font-size: 11px;
+        font-weight: 500;
+        color: Theme.muted-text;
+    }
+
+    @children
+}

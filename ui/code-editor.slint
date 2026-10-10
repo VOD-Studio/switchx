@@ -11,6 +11,7 @@ export struct CodeSpan {
 
 export global SyntaxHighlighting {
     pure callback spans(string, string) -> [CodeSpan];
+    pure callback line-count(string) -> int;
 }
 
 export component CodeEditor inherits Rectangle {
@@ -19,6 +20,8 @@ export component CodeEditor inherits Rectangle {
     in property <bool> enabled <=> input.enabled;
     in property <bool> read-only <=> input.read-only;
     in property <string> placeholder-text;
+    in property <bool> show-line-numbers: false;
+    in property <length> content-padding: 8px;
     callback edited(string);
 
     background: Theme.raised;
@@ -69,10 +72,10 @@ export component CodeEditor inherits Rectangle {
         }
 
         scroll := ScrollView {
-            x: 8px;
-            y: 8px;
-            width: parent.width - 16px;
-            height: parent.height - 16px;
+            x: root.content-padding + (root.show-line-numbers ? 38px : 0px);
+            y: root.content-padding;
+            width: max(0px, parent.width - self.x - root.content-padding);
+            height: max(0px, parent.height - root.content-padding * 2);
             enabled: root.enabled;
             content-width: max(self.visible-width, input.preferred-width);
             content-height: max(self.visible-height, input.preferred-height);
@@ -158,6 +161,25 @@ export component CodeEditor inherits Rectangle {
                 font-size: input.font-size;
                 accessible-role: none;
             }
+        }
+    }
+
+    if root.show-line-numbers: Rectangle {
+        x: root.content-padding;
+        y: root.content-padding;
+        width: 28px;
+        height: max(0px, parent.height - root.content-padding * 2);
+        clip: true;
+        accessible-role: none;
+        for index in SyntaxHighlighting.line-count(root.text): Text {
+            y: index * root.line-height + scroll.content-y;
+            height: root.line-height;
+            text: index + 1;
+            font-family: input.font-family;
+            font-size: input.font-size;
+            color: Theme.muted-text.with-alpha(0.5);
+            horizontal-alignment: right;
+            accessible-role: none;
         }
     }
 
