@@ -204,6 +204,9 @@ export component WorkbenchConnection inherits Rectangle {
                         background: root.default-model == model.public-id ? root.accent.with-alpha(0.09) : Theme.inset;
                         animate background { duration: Theme.page-motion; }
                         Rectangle {
+                            x: 18px;
+                            y: parent.height - self.height;
+                            width: parent.width - 36px;
                             height: 1px;
                             background: Theme.border;
                         }

@@ -33,6 +33,8 @@ sh scripts/bundle-macos.sh
 
 最终 `make check` 通过：Rust / Slint 格式检查、全目标 Clippy、222 个测试通过，1 个既有 CLI 测试忽略。合成预览的整组操作、移除 / 撤销、保存可达性和动画帧变化断言通过，本地 `target/debug/SwitchX.app` 构建完成。
 
+展开后的模型分隔线固定在行底部，并从两侧缩进。合成预览在两种主题与尺寸下逐像素检查行中部保持底色，常规尺寸同时检查边界处存在分隔线。
+
 ## 截图
 
 ![连接工作台](screenshots/connection-workbench/workbench-dark.png)
