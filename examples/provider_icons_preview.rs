@@ -540,14 +540,31 @@ fn render_connection_workbench(
                     1,
                     "whole-connection selection must be reachable"
                 );
-                click(window, 1100.0, 458.0);
-                snapshot(window, output, &format!("workbench-expanded-{suffix}"))?;
-                click(window, 1100.0, 458.0);
             }
+            let expand_x = width as f32 - 100.0;
+            click(window, expand_x, 458.0);
+            snapshot(window, output, &format!("workbench-expanded-{suffix}"))?;
+            let pixels = render(window);
+            let sample_x = width as usize - 430;
+            let pixel = |y: usize| pixels.as_slice()[y * width as usize + sample_x];
+            // Empty space beside the model label must stay clear through the
+            // row midpoint; the separator belongs below all row content.
+            for y in 509..519 {
+                assert_eq!(
+                    pixel(y),
+                    pixel(507),
+                    "divider crosses the model row at {suffix}, y={y}"
+                );
+            }
+            if height == 820 {
+                assert_ne!(
+                    pixel(545),
+                    pixel(507),
+                    "row boundary separator is missing at {suffix}"
+                );
+            }
+            click(window, expand_x, 458.0);
             if width == 1200 && dark {
-                click(window, 1100.0, 458.0);
-                snapshot(window, output, &format!("workbench-expanded-{suffix}"))?;
-                click(window, 1100.0, 458.0);
                 click(window, 860.0, 294.0);
                 snapshot(window, output, &format!("workbench-direct-{suffix}"))?;
                 click(window, 785.0, 294.0);
