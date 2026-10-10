@@ -1,17 +1,28 @@
-import { ReasoningPicker } from "reasoning-picker.slint";
+import { ReasoningPicker, ReasoningChoices } from "reasoning-picker.slint";
 import { Theme } from "../tokens.slint";
 import {
+    AnimatedSection,
     QuietComboBox as ComboBox,
     QuietButton,
     QuietSegmented,
-    SurfaceCard,
     QuietLineEdit as LineEdit,
 } from "../components.slint";
+import { QuietScrollView } from "../scroll-view.slint";
 import { FeedbackBanner } from "../feedback-banner.slint";
 import { ModelBatchPicker } from "model-batch-picker.slint";
 import { BatchModelRow, BatchSummary } from "../view-models.slint";
+import {
+    ConfirmDeleteButton,
+    ContextDial,
+    CopyButton,
+    MappingFieldRow,
+    MappingFormat,
+    MappingHero,
+    MappingSection,
+    ReasoningLadder,
+} from "model-mapping-surfaces.slint";
 
-export component ModelEditor inherits SurfaceCard {
+export component ModelEditor inherits Rectangle {
     in property <bool> busy;
     in property <[string]> fetched-models;
     in property <bool> fetching-models;
@@ -47,6 +58,8 @@ export component ModelEditor inherits SurfaceCard {
     callback dismiss-discovery();
     callback save-model();
     callback delete-model();
+    // Runs after the name returns to automatic so the owner can derive it again.
+    callback restore-display-name();
     callback batch-toggle(int);
     callback batch-select-all(bool);
     callback batch-filter(string);
@@ -55,23 +68,59 @@ export component ModelEditor inherits SurfaceCard {
 
     private property <bool> adding: root.model-original-id == "";
     private property <bool> batch: root.adding && root.batch-mode;
-    // Both forms stay mounted; the stage height and content cross-fade between them.
+    // Both forms stay mounted and cross-fade with a short slide.
     private property <float> batch-reveal: root.batch ? 1 : 0;
     animate batch-reveal {
         duration: Theme.page-motion;
         easing: cubic-bezier(0.22, 1, 0.36, 1);
     }
+    // Opening the single form, or returning to it, replays the staggered entrance.
+    private property <bool> single-shown: root.model-editor-open && !root.batch;
+    private property <int> replay: 0;
+    changed single-shown => {
+        if root.single-shown {
+            root.replay += 1;
+            body.content-y = 0px;
+        }
+    }
+    private property <bool> advanced-open: false;
+    changed model-editor-open => {
+        if root.model-editor-open { root.advanced-open = root.model-source-path != ""; }
+    }
+    // The last section grows below the fold, so the view eases after it.
+    private property <bool> following: false;
+    Timer {
+        interval: 16ms;
+        running: root.following;
+        triggered => {
+            let target = min(0px, body.visible-height - body.content-height);
+            if Theme.page-motion == 0ms || (advanced.reveal >= 1 && abs(target - body.content-y) < 1px) {
+                body.content-y = target;
+                root.following = false;
+            } else {
+                body.content-y += (target - body.content-y) * 0.25;
+            }
+        }
+    }
 
-    height: layout.preferred-height;
-    layout := VerticalLayout {
-        padding: 18px;
-        spacing: 16px;
-        HorizontalLayout {
+    private property <bool> locked: root.busy || root.config-managed;
+    private property <bool> discovering: root.fetching-models && root.discovery-scope == 1;
+    private property <string> reasoning-summary: ReasoningChoices.label(root.model-reasoning-levels);
+    private property <bool> has-default: root.model-default-reasoning != "" && root.model-default-reasoning != "未设置";
+    private property <string> context-summary: root.model-context-window == "" ? "默认 128K 上下文"
+        : root.model-context-window.is-float() ? MappingFormat.tokens(root.model-context-window.to-float()) + " 上下文" : "上下文待修正";
+
+    vertical-stretch: 1;
+    min-height: 240px;
+    VerticalLayout {
+        spacing: 14px;
+        if root.adding: HorizontalLayout {
+            height: 32px;
             spacing: 12px;
             Text {
-                text: (root.adding ? "添加模型 · " : "编辑模型映射 · ") + root.model-provider-name;
+                text: "添加模型 · " + root.model-provider-name;
                 color: Theme.primary-text;
-                font-size: 16px;
+                font-size: 15px;
                 font-weight: 600;
                 vertical-alignment: center;
                 overflow: elide;
@@ -79,220 +128,377 @@ export component ModelEditor inherits SurfaceCard {
                 min-width: 0px;
             }
 
-            if root.adding: QuietSegmented {
+            QuietSegmented {
                 width: 184px;
                 options: ["批量选择", "单个映射"];
                 current-index: root.batch-mode ? 0 : 1;
+                selection-background: Theme.brand-surface;
                 enabled: !root.busy;
                 selected(index) => { root.batch-mode = index == 0; }
             }
         }
 
         Rectangle {
-            height: single.preferred-height + (picker.preferred-height - single.preferred-height) * root.batch-reveal;
-            single := VerticalLayout {
+            vertical-stretch: 1;
+            single := Rectangle {
                 x: 22px * root.batch-reveal;
-                y: 0px;
                 width: parent.width;
-                height: self.preferred-height;
+                height: parent.height;
                 opacity: 1 - root.batch-reveal;
                 visible: root.batch-reveal < 0.99;
-                spacing: 9px;
-                HorizontalLayout {
-                    spacing: 10px;
-                    Text {
-                        width: 96px;
-                        text: "公开模型 ID";
-                        color: Theme.muted-text;
-                        vertical-alignment: center;
-                    }
-
-                    LineEdit {
-                        text <=> root.model-public-id;
-                        accessible-label: "公开模型 ID";
-                    }
-                }
-
-                HorizontalLayout {
-                    spacing: 10px;
-                    Text {
-                        width: 96px;
-                        text: "菜单显示名";
-                        color: Theme.muted-text;
-                        vertical-alignment: center;
-                    }
-
-                    LineEdit {
-                        text <=> root.model-display-name;
-                        accessible-label: "模型显示名称";
-                        edited(text) => { root.model-display-name-custom = true; }
-                    }
-                }
-
                 VerticalLayout {
-                    HorizontalLayout {
-                        spacing: 10px;
-                        Text {
-                            width: 96px;
-                            text: "实际请求模型";
-                            color: Theme.muted-text;
-                            vertical-alignment: center;
+                    Rectangle {
+                        vertical-stretch: 1;
+                        body := QuietScrollView {
+                            enabled: !root.batch;
+                            horizontal-scrollbar-policy: always-off;
+                            VerticalLayout {
+                                alignment: start;
+                                padding-top: 2px;
+                                padding-bottom: 22px;
+                                spacing: 14px;
+                                MappingHero {
+                                    display-name: root.model-display-name;
+                                    public-id: root.model-public-id;
+                                    upstream-id: root.model-upstream-id;
+                                    provider-name: root.model-provider-name;
+                                    meta: root.model-provider-name + " · " + root.context-summary + " · " + (root.reasoning-summary == "" ? "未设思考等级" : root.reasoning-summary);
+                                    adding: root.adding;
+                                    locked: root.config-managed;
+                                    running: root.single-shown;
+                                    replay: root.replay;
+                                }
+
+                                MappingSection {
+                                    title: "Codex 中的名字";
+                                    caption: "菜单显示名，以及路由使用的公开模型 ID";
+                                    icon: @image-url("../../assets/ui/terminal.svg");
+                                    badge: root.model-display-name-custom ? "自定义名称" : "自动命名";
+                                    active: name-field.has-focus || id-field.has-focus;
+                                    replay: root.replay;
+                                    delay: 90ms;
+                                    VerticalLayout {
+                                        spacing: 10px;
+                                        MappingFieldRow {
+                                            label: "菜单显示名";
+                                            focused: name-field.has-focus;
+                                            missing: root.model-display-name == "";
+                                            name-field := LineEdit {
+                                                text <=> root.model-display-name;
+                                                placeholder-text: "Codex 模型菜单中的名称";
+                                                accessible-label: "模型显示名称";
+                                                edited(text) => { root.model-display-name-custom = true; }
+                                            }
+
+                                            restore := Rectangle {
+                                                property <float> reveal: root.model-display-name-custom ? 1 : 0;
+                                                animate reveal {
+                                                    duration: Theme.page-motion;
+                                                    easing: cubic-bezier(0.22, 1, 0.36, 1);
+                                                }
+                                                width: 104px * self.reveal;
+                                                horizontal-stretch: 0;
+                                                clip: true;
+                                                visible: self.reveal > 0;
+                                                QuietButton {
+                                                    x: 8px + 12px * (1 - restore.reveal);
+                                                    width: 96px;
+                                                    text: "恢复自动";
+                                                    icon: @image-url("../../assets/refresh.svg");
+                                                    icon-width: 13px;
+                                                    icon-height: 13px;
+                                                    icon-color: Theme.brand;
+                                                    opacity: restore.reveal;
+                                                    enabled: !root.busy && root.model-display-name-custom;
+                                                    clicked => {
+                                                        root.model-display-name-custom = false;
+                                                        root.restore-display-name();
+                                                    }
+                                                }
+                                            }
+                                        }
+
+                                        MappingFieldRow {
+                                            label: "公开模型 ID";
+                                            focused: id-field.has-focus;
+                                            missing: root.model-public-id == "";
+                                            id-field := LineEdit {
+                                                text <=> root.model-public-id;
+                                                font-family: "Menlo";
+                                                font-size: 12px;
+                                                placeholder-text: "Codex 请求使用的模型 ID";
+                                                accessible-label: "公开模型 ID";
+                                            }
+
+                                            CopyButton {
+                                                label: "复制公开模型 ID";
+                                                enabled: root.model-public-id != "";
+                                                copy => {
+                                                    id-field.select-all();
+                                                    id-field.copy();
+                                                    id-field.clear-selection();
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+
+                                MappingSection {
+                                    title: "上游请求";
+                                    caption: "发送到 " + (root.model-provider-name == "" ? "上游" : root.model-provider-name) + " 的实际模型";
+                                    icon: @image-url("../../assets/ui/link.svg");
+                                    badge: root.discovery-scope == 1 && root.fetched-models.length > 0 ? "已获取 " + root.fetched-models.length + " 个" : "";
+                                    active: upstream-field.has-focus || discovered.has-focus;
+                                    replay: root.replay;
+                                    delay: 150ms;
+                                    VerticalLayout {
+                                        MappingFieldRow {
+                                            label: "实际请求模型";
+                                            focused: upstream-field.has-focus;
+                                            missing: root.model-upstream-id == "";
+                                            upstream-field := LineEdit {
+                                                text <=> root.model-upstream-id;
+                                                placeholder-text: "上游实际模型 ID";
+                                                accessible-label: "映射实际请求模型";
+                                            }
+
+                                            QuietButton {
+                                                width: 128px;
+                                                text: root.discovering ? "获取中…" : "获取模型列表";
+                                                icon: root.discovering ? @image-url("../../assets/ui/loader.svg") : @image-url("../../assets/refresh.svg");
+                                                icon-width: 14px;
+                                                icon-height: 14px;
+                                                icon-color: Theme.brand;
+                                                loading: root.discovering;
+                                                enabled: !root.busy && !root.config-managed;
+                                                clicked => { root.fetch-models(1); }
+                                            }
+                                        }
+
+                                        // Only the visible form shows discovery, so switching replays the banner.
+                                        FeedbackBanner {
+                                            tone: root.discovery-scope == 1 && !root.batch ? root.discovery-tone : 0;
+                                            loading: root.discovery-scope == 1 && !root.batch && root.fetching-models;
+                                            title: root.discovery-tone == 3 ? "获取模型列表失败" : "";
+                                            message: root.discovery-scope == 1 && !root.batch ? root.discovery-message : "";
+                                            hint: root.discovery-tone == 3 ? "确认上游地址可访问、API Key 有效后重试" : "";
+                                            retryable: true;
+                                            dismissible: true;
+                                            actions-enabled: !root.busy && !root.config-managed;
+                                            retry => { root.fetch-models(1); }
+                                            dismiss => { root.dismiss-discovery(); }
+                                        }
+
+                                        AnimatedSection {
+                                            expanded: root.discovery-scope == 1 && root.fetched-models.length > 0;
+                                            content-height: 46px;
+                                            MappingFieldRow {
+                                                y: 10px;
+                                                height: 36px;
+                                                label: "从列表选择";
+                                                focused: discovered.has-focus;
+                                                discovered := ComboBox {
+                                                    model: root.fetched-models;
+                                                    current-value: root.model-upstream-id;
+                                                    accessible-label: "选择探测到的映射模型";
+                                                    enabled: !root.busy;
+                                                    selected(value) => { root.model-upstream-id = value; }
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+
+                                MappingSection {
+                                    title: "上下文窗口";
+                                    caption: "决定 Codex 的剩余上下文与自动压缩时机";
+                                    icon: @image-url("../../assets/ui/blocks.svg");
+                                    active: dial.has-focus;
+                                    replay: root.replay;
+                                    delay: 210ms;
+                                    dial := ContextDial {
+                                        text <=> root.model-context-window;
+                                    }
+                                }
+
+                                MappingSection {
+                                    title: "思考等级";
+                                    caption: root.reasoning-summary == "" ? "尚未选择等级，点击柱条添加" : root.reasoning-summary + (root.has-default ? " · 默认 " + root.model-default-reasoning : " · 未设默认");
+                                    icon: @image-url("../../assets/ui/activity.svg");
+                                    active: picker.expanded;
+                                    replay: root.replay;
+                                    delay: 270ms;
+                                    VerticalLayout {
+                                        spacing: 12px;
+                                        ReasoningLadder {
+                                            levels <=> root.model-reasoning-levels;
+                                            default-level <=> root.model-default-reasoning;
+                                            enabled: !root.locked;
+                                            replay: root.replay;
+                                        }
+
+                                        HorizontalLayout {
+                                            spacing: 12px;
+                                            Text {
+                                                text: "点击柱条切换等级；在右侧列表中搜索或设置默认等级。";
+                                                color: Theme.muted-text;
+                                                font-size: 11px;
+                                                vertical-alignment: center;
+                                                wrap: word-wrap;
+                                                horizontal-stretch: 1;
+                                            }
+
+                                            picker := ReasoningPicker {
+                                                width: 210px;
+                                                horizontal-stretch: 0;
+                                                levels <=> root.model-reasoning-levels;
+                                                default-level <=> root.model-default-reasoning;
+                                                label: "模型支持的思考等级";
+                                                enabled: !root.locked;
+                                            }
+                                        }
+                                    }
+                                }
+
+                                MappingSection {
+                                    title: "导入完整资料";
+                                    caption: "可选 · 从目录 JSON 保留完整能力和指令";
+                                    icon: @image-url("../../assets/ui/folder.svg");
+                                    badge: root.model-source-path != "" ? "已填写" : "";
+                                    collapsible: true;
+                                    expanded <=> root.advanced-open;
+                                    toggled(open) => { root.following = open; }
+                                    active: source-field.has-focus;
+                                    replay: root.replay;
+                                    delay: 330ms;
+                                    advanced := AnimatedSection {
+                                        expanded: root.advanced-open;
+                                        content-height: advanced-body.preferred-height;
+                                        advanced-body := VerticalLayout {
+                                            height: self.preferred-height;
+                                            spacing: 10px;
+                                            MappingFieldRow {
+                                                label: "目录 JSON";
+                                                focused: source-field.has-focus;
+                                                source-field := LineEdit {
+                                                    text <=> root.model-source-path;
+                                                    icon: @image-url("../../assets/ui/folder.svg");
+                                                    placeholder-text: "可选：绝对路径，导入完整模型资料";
+                                                    accessible-label: "模型资料 JSON 文件绝对路径";
+                                                    enabled: root.advanced-open;
+                                                }
+                                            }
+
+                                            Text {
+                                                text: "填写参数即可生成模型目录；也可导入 JSON 保留完整能力和指令。保存后预览发布，重启 Codex 刷新模型菜单。";
+                                                color: Theme.muted-text;
+                                                font-size: 11px;
+                                                wrap: word-wrap;
+                                            }
+                                        }
+                                    }
+                                }
+                            }
                         }
 
-                        LineEdit {
-                            text <=> root.model-upstream-id;
-                            placeholder-text: "上游实际模型 ID";
-                            accessible-label: "映射实际请求模型";
+                        // Fades content into the footer while more remains below.
+                        Rectangle {
+                            x: 0px;
+                            y: parent.height - self.height;
+                            width: max(0px, parent.width - 14px);
+                            height: 30px;
+                            background: @linear-gradient(180deg, Theme.panel.with-alpha(0) 0%, Theme.panel 100%);
+                            opacity: body.content-y > -(body.content-height - body.visible-height) + 2px ? 1 : 0;
+                            animate opacity { duration: Theme.fast; }
+                        }
+                    }
+
+                    Rectangle {
+                        height: 1px;
+                        background: Theme.border;
+                    }
+
+                    HorizontalLayout {
+                        padding-top: 14px;
+                        spacing: 10px;
+                        if !root.adding: ConfirmDeleteButton {
+                            text: "删除映射";
+                            confirm-text: "确认删除映射";
+                            confirming <=> root.model-delete-confirm;
+                            enabled: !root.locked;
+                            confirmed => { root.delete-model(); }
+                        }
+                        Text {
+                            text: root.config-managed ? "配置受管理，暂不能保存" : "保存后预览发布 · 重启 Codex 刷新菜单";
+                            color: root.config-managed ? Theme.warning : Theme.muted-text;
+                            font-size: 11px;
+                            vertical-alignment: center;
+                            overflow: elide;
+                            horizontal-stretch: 1;
+                            min-width: 0px;
+                        }
+
+                        QuietButton {
+                            width: 84px;
+                            horizontal-stretch: 0;
+                            text: "取消";
+                            clicked => { root.model-editor-open = false; }
                         }
 
                         QuietButton {
                             width: 132px;
-                            text: root.fetching-models && root.discovery-scope == 1 ? "获取中…" : "获取模型列表";
-                            icon: root.fetching-models && root.discovery-scope == 1 ? @image-url("../../assets/ui/loader.svg") : @image-url("../../assets/refresh.svg");
+                            horizontal-stretch: 0;
+                            text: root.busy ? "正在保存…" : root.adding ? "添加映射" : "保存映射";
+                            primary: true;
+                            loading: root.busy;
+                            icon: root.busy ? @image-url("../../assets/ui/loader.svg") : @image-url("../../assets/ui/check.svg");
                             icon-width: 14px;
                             icon-height: 14px;
-                            icon-color: Theme.brand;
-                            loading: root.fetching-models && root.discovery-scope == 1;
-                            enabled: !root.busy && !root.config-managed;
-                            clicked => { root.fetch-models(1); }
-                        }
-                    }
-
-                    // Only the visible form shows discovery, so switching replays the banner.
-                    FeedbackBanner {
-                        tone: root.discovery-scope == 1 && !root.batch ? root.discovery-tone : 0;
-                        loading: root.discovery-scope == 1 && !root.batch && root.fetching-models;
-                        title: root.discovery-tone == 3 ? "获取模型列表失败" : "";
-                        message: root.discovery-scope == 1 && !root.batch ? root.discovery-message : "";
-                        hint: root.discovery-tone == 3 ? "确认上游地址可访问、API Key 有效后重试" : "";
-                        retryable: true;
-                        dismissible: true;
-                        actions-enabled: !root.busy && !root.config-managed;
-                        retry => { root.fetch-models(1); }
-                        dismiss => { root.dismiss-discovery(); }
-                    }
-                }
-
-                if root.discovery-scope == 1 && root.fetched-models.length > 0: ComboBox {
-                    model: root.fetched-models;
-                    current-value: root.model-upstream-id;
-                    accessible-label: "选择探测到的映射模型";
-                    enabled: !root.busy;
-                    selected(value) => { root.model-upstream-id = value; }
-                }
-
-                HorizontalLayout {
-                    spacing: 10px;
-                    Text {
-                        width: 96px;
-                        text: "上下文窗口";
-                        color: Theme.muted-text;
-                        vertical-alignment: center;
-                    }
-
-                    LineEdit {
-                        text <=> root.model-context-window;
-                        placeholder-text: "留空使用 128000；导入时保留原值";
-                        accessible-label: "模型上下文窗口";
-                    }
-                }
-
-                HorizontalLayout {
-                    spacing: 10px;
-                    Text {
-                        width: 96px;
-                        text: "思考等级";
-                        color: Theme.muted-text;
-                        vertical-alignment: center;
-                    }
-
-                    ReasoningPicker {
-                        levels <=> root.model-reasoning-levels;
-                        default-level <=> root.model-default-reasoning;
-                        label: "模型支持的思考等级";
-                        enabled: !root.busy && !root.config-managed;
-                    }
-                }
-
-                HorizontalLayout {
-                    spacing: 10px;
-                    Text {
-                        width: 96px;
-                        text: "目录 JSON";
-                        color: Theme.muted-text;
-                        vertical-alignment: center;
-                    }
-
-                    LineEdit {
-                        text <=> root.model-source-path;
-                        placeholder-text: "可选：绝对路径，导入完整模型资料";
-                        accessible-label: "模型资料 JSON 文件绝对路径";
-                    }
-                }
-
-                Text {
-                    text: "填写参数即可生成模型目录；也可导入 JSON 保留完整能力和指令。保存后预览发布，重启 Codex 刷新模型菜单。";
-                    color: Theme.muted-text;
-                    font-size: 12px;
-                    wrap: word-wrap;
-                }
-
-                HorizontalLayout {
-                    spacing: 8px;
-                    QuietButton {
-                        text: "保存映射";
-                        primary: true;
-                        enabled: !root.busy && !root.config-managed;
-                        clicked => { root.save-model(); }
-                    }
-
-                    QuietButton {
-                        text: "取消";
-                        clicked => { root.model-editor-open = false; }
-                    }
-
-                    if root.model-original-id != "": QuietButton {
-                        text: root.model-delete-confirm ? "确认删除映射" : "删除映射";
-                        enabled: !root.busy && !root.config-managed;
-                        clicked => {
-                            if (root.model-delete-confirm) { root.delete-model(); }
-                            else { root.model-delete-confirm = true; }
+                            icon-color: Theme.on-brand;
+                            enabled: !root.locked;
+                            clicked => { root.save-model(); }
                         }
                     }
                 }
             }
 
-            picker := ModelBatchPicker {
+            QuietScrollView {
                 x: -22px * (1 - root.batch-reveal);
-                y: 0px;
                 width: parent.width;
-                height: self.preferred-height;
+                height: parent.height;
                 opacity: root.batch-reveal;
                 visible: root.batch-reveal > 0.01;
-                rows: root.batch-rows;
-                summary: root.batch-summary;
-                provider-name: root.model-provider-name;
-                busy: root.busy;
-                locked: root.config-managed;
-                fetching: root.fetching-models && root.discovery-scope == 1;
-                saving: root.batch-saving;
-                discovery-tone: root.discovery-scope == 1 && root.batch ? root.discovery-tone : 0;
-                discovery-message: root.discovery-scope == 1 && root.batch ? root.discovery-message : "";
-                query <=> root.batch-query;
-                shared-context <=> root.batch-context;
-                shared-levels <=> root.batch-levels;
-                shared-default <=> root.batch-default;
-                shared-levels-label: root.batch-levels-label;
-                reasoning-options: root.batch-reasoning-options;
-                list-height: root.batch-list-height;
-                fetch => { root.fetch-models(1); }
-                dismiss-discovery => { root.dismiss-discovery(); }
-                toggle(index) => { root.batch-toggle(index); }
-                select-all(checked) => { root.batch-select-all(checked); }
-                filter(query) => { root.batch-filter(query); }
-                edit(index, context, levels) => { root.batch-edit(index, context, levels); }
-                save => { root.save-batch(); }
-                cancel => { root.model-editor-open = false; }
+                enabled: root.batch;
+                horizontal-scrollbar-policy: always-off;
+                VerticalLayout {
+                    alignment: start;
+                    ModelBatchPicker {
+                        rows: root.batch-rows;
+                        summary: root.batch-summary;
+                        provider-name: root.model-provider-name;
+                        busy: root.busy;
+                        locked: root.config-managed;
+                        fetching: root.discovering;
+                        saving: root.batch-saving;
+                        discovery-tone: root.discovery-scope == 1 && root.batch ? root.discovery-tone : 0;
+                        discovery-message: root.discovery-scope == 1 && root.batch ? root.discovery-message : "";
+                        query <=> root.batch-query;
+                        shared-context <=> root.batch-context;
+                        shared-levels <=> root.batch-levels;
+                        shared-default <=> root.batch-default;
+                        shared-levels-label: root.batch-levels-label;
+                        reasoning-options: root.batch-reasoning-options;
+                        list-height: root.batch-list-height;
+                        fetch => { root.fetch-models(1); }
+                        dismiss-discovery => { root.dismiss-discovery(); }
+                        toggle(index) => { root.batch-toggle(index); }
+                        select-all(checked) => { root.batch-select-all(checked); }
+                        filter(query) => { root.batch-filter(query); }
+                        edit(index, context, levels) => { root.batch-edit(index, context, levels); }
+                        save => { root.save-batch(); }
+                        cancel => { root.model-editor-open = false; }
+                    }
+                }
             }
         }
     }

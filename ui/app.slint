@@ -1542,53 +1542,48 @@ export component AppWindow inherits Window {
         busy: root.busy;
         error-message: root.error-code == "" ? "" : root.error-message + " · " + root.error-action;
         dismissed => { root.model-editor-open = false; }
-        ScrollView {
-            VerticalLayout {
-                ModelEditor {
-                    busy: root.busy;
-                    fetched-models: root.fetched-models;
-                    fetching-models: root.fetching-models;
-                    discovery-message: root.discovery-message;
-                    discovery-scope: root.discovery-scope;
-                    discovery-tone: root.discovery-tone;
-                    config-managed: root.config-managed;
-                    border-width: 0px;
-                    background: transparent;
-                    model-editor-open <=> root.model-editor-open;
-                    model-provider-name: root.model-provider-name;
-                    model-upstream-id <=> root.model-upstream-id;
-                    model-public-id <=> root.model-public-id;
-                    model-display-name <=> root.model-display-name;
-                    model-display-name-custom <=> root.model-display-name-custom;
-                    model-source-path <=> root.model-source-path;
-                    model-original-id: root.model-original-id;
-                    model-context-window <=> root.model-context-window;
-                    model-reasoning-levels <=> root.model-reasoning-levels;
-                    model-default-reasoning <=> root.model-default-reasoning;
-                    model-reasoning-options: root.model-reasoning-options;
-                    model-delete-confirm <=> root.model-delete-confirm;
-                    batch-mode <=> root.model-batch-mode;
-                    batch-rows: root.batch-models;
-                    batch-summary: root.batch-summary;
-                    batch-saving: root.batch-saving;
-                    batch-query <=> root.batch-query;
-                    batch-context <=> root.batch-context;
-                    batch-levels <=> root.batch-levels;
-                    batch-default <=> root.batch-default;
-                    batch-levels-label: root.batch-levels-label;
-                    batch-reasoning-options: root.batch-reasoning-options;
-                    batch-list-height: clamp(root.height - 548px, 232px, 460px);
-                    fetch-models(scope) => { root.fetch-models(scope); }
-                    dismiss-discovery => { root.reset-model-discovery(); }
-                    save-model() => { root.save-model(); }
-                    delete-model() => { root.delete-model(); }
-                    batch-toggle(index) => { root.batch-toggle(index); }
-                    batch-select-all(checked) => { root.batch-select-all(checked); }
-                    batch-filter(query) => { root.batch-filter(query); }
-                    batch-edit(index, context, levels) => { root.batch-edit(index, context, levels); }
-                    save-batch => { root.save-batch-models(); }
-                }
-            }
+        ModelEditor {
+            busy: root.busy;
+            fetched-models: root.fetched-models;
+            fetching-models: root.fetching-models;
+            discovery-message: root.discovery-message;
+            discovery-scope: root.discovery-scope;
+            discovery-tone: root.discovery-tone;
+            config-managed: root.config-managed;
+            model-editor-open <=> root.model-editor-open;
+            model-provider-name: root.model-provider-name;
+            model-upstream-id <=> root.model-upstream-id;
+            model-public-id <=> root.model-public-id;
+            model-display-name <=> root.model-display-name;
+            model-display-name-custom <=> root.model-display-name-custom;
+            model-source-path <=> root.model-source-path;
+            model-original-id: root.model-original-id;
+            model-context-window <=> root.model-context-window;
+            model-reasoning-levels <=> root.model-reasoning-levels;
+            model-default-reasoning <=> root.model-default-reasoning;
+            model-reasoning-options: root.model-reasoning-options;
+            model-delete-confirm <=> root.model-delete-confirm;
+            batch-mode <=> root.model-batch-mode;
+            batch-rows: root.batch-models;
+            batch-summary: root.batch-summary;
+            batch-saving: root.batch-saving;
+            batch-query <=> root.batch-query;
+            batch-context <=> root.batch-context;
+            batch-levels <=> root.batch-levels;
+            batch-default <=> root.batch-default;
+            batch-levels-label: root.batch-levels-label;
+            batch-reasoning-options: root.batch-reasoning-options;
+            batch-list-height: clamp(root.height - 470px, 232px, 460px);
+            fetch-models(scope) => { root.fetch-models(scope); }
+            dismiss-discovery => { root.reset-model-discovery(); }
+            save-model() => { root.save-model(); }
+            delete-model() => { root.delete-model(); }
+            restore-display-name => { root.update-model-display-name(); }
+            batch-toggle(index) => { root.batch-toggle(index); }
+            batch-select-all(checked) => { root.batch-select-all(checked); }
+            batch-filter(query) => { root.batch-filter(query); }
+            batch-edit(index, context, levels) => { root.batch-edit(index, context, levels); }
+            save-batch => { root.save-batch-models(); }
         }
     }
 
