@@ -73,18 +73,6 @@ export component AppWindow inherits Window {
     init => { DropdownViewport.size = root.dropdown-viewport; }
     changed dropdown-viewport => { DropdownViewport.size = root.dropdown-viewport; }
 
-    MenuBar {
-        Menu {
-            title: "导航";
-            MenuItem {
-                title: "快速操作";
-                shortcut: @keys(Control + K);
-                enabled: !root.modal-open;
-                activated => { root.command-open = true; }
-            }
-        }
-    }
-
     public function set-appearance(dark: bool) {
         Theme.dark = dark;
         Palette.color-scheme = dark ? ColorScheme.dark : ColorScheme.light;
@@ -526,10 +514,9 @@ export component AppWindow inherits Window {
 
     in-out property <bool> publish-drawer-open: false;
     in-out property <bool> direct-drawer-open: false;
-    in-out property <bool> command-open: false;
     property <bool> page-entered: true;
     property <bool> new-connection-form: (root.editor-open && root.edit-id == "") || (root.subscription-editor-open && root.subscription-id == "") || (root.xai-editor-open && root.xai-provider-id == "");
-    property <bool> modal-open: root.workspace-open || root.account-removing-id != "" || root.account-login-confirm-open || root.drawer-open || root.connection-picker-open || root.connection-models-open || root.xai-editor-open || root.editor-open || root.subscription-editor-open || root.common-config-editor-open || root.icon-picker-open || root.model-editor-open || root.fallback-editor-open || root.publish-drawer-open || root.direct-drawer-open || root.delete-account-confirm || root.command-open;
+    property <bool> modal-open: root.workspace-open || root.account-removing-id != "" || root.account-login-confirm-open || root.drawer-open || root.connection-picker-open || root.connection-models-open || root.xai-editor-open || root.editor-open || root.subscription-editor-open || root.common-config-editor-open || root.icon-picker-open || root.model-editor-open || root.fallback-editor-open || root.publish-drawer-open || root.direct-drawer-open || root.delete-account-confirm;
     property <string> page-title: root.active-page == 0 ? "模型，随手可用。" : root.active-page == 1 ? "连接" : root.active-page == 3 ? "每次请求，有迹可循。" : root.active-page == 4 ? "让工作流更顺手。" : "让它适合你。";
     property <string> page-label: root.active-page == 0 ? "工作台" : root.active-page == 1 ? "连接" : root.active-page == 3 ? "活动" : root.active-page == 4 ? "工具箱" : "设置";
     property <string> page-subtitle: root.active-page == 0 ? "配好连接，整组模型随手可用。" : root.active-page == 1 ? "账号与上游，集中管理。" : root.active-page == 3 ? "查看模型、耗时与结果。" : root.active-page == 4 ? "MCP 与 Skills，独立于模型连接。" : "外观、工作空间和配置，各在其位。";
@@ -543,25 +530,6 @@ export component AppWindow inherits Window {
     changed modal-open => { if (!root.modal-open) { app-keyboard.focus(); } }
 
     app-keyboard := FocusScope {
-        capture-key-pressed(event) => {
-            if (!root.modal-open && (event.modifiers.control || event.modifiers.meta) && (event.text == "k" || event.text == "K")) {
-                root.command-open = true;
-                return accept;
-            }
-            return reject;
-        }
-        quick-command := KeyBinding {
-            keys: @keys(Control + K);
-            enabled: !root.modal-open;
-            activated => { root.command-open = true; }
-        }
-
-        KeyBinding {
-            keys: @keys(Meta + K);
-            enabled: !root.modal-open;
-            activated => { root.command-open = true; }
-        }
-
         FocusScope {
             enabled: !root.modal-open;
             HorizontalLayout {
@@ -802,14 +770,6 @@ export component AppWindow inherits Window {
                             WindowMoveArea {
                                 horizontal-stretch: 1;
                                 enabled: root.native-titlebar-overlay && !root.full-screen;
-                            }
-
-                            QuietButton {
-                                y: (parent.height - self.height) / 2;
-                                width: 126px;
-                                text: "快速操作  " + quick-command.keys.to-string();
-                                ghost: true;
-                                clicked => { root.command-open = true; }
                             }
 
                             QuietButton {
@@ -1997,53 +1957,6 @@ export component AppWindow inherits Window {
         dismissed => { root.drawer-open = false; app-keyboard.focus(); }
         restore-requested => { root.restore-config(root.config-home); }
         configure-requested => { root.drawer-open = false; root.active-page = 5; app-keyboard.focus(); }
-    }
-
-    Drawer {
-        open: root.command-open;
-        title: "快速操作";
-        subtitle: "常用页面与操作，随手可达。";
-        panel-width: 410px;
-        dismissed => { root.command-open = false; app-keyboard.focus(); }
-        VerticalLayout {
-            spacing: 8px;
-            for item in [
-                { label: "工作台", page: 0 },
-                { label: "连接与账号", page: 1 },
-                { label: "请求活动", page: 3 },
-                { label: "工具箱", page: 4 },
-                { label: "设置与恢复", page: 5 }
-            ]: QuietButton {
-                text: item.label + "  →";
-                left-aligned: true;
-                ghost: true;
-                height: 45px;
-                clicked => { root.command-open = false; root.active-page = item.page; app-keyboard.focus(); }
-            }
-            Rectangle {
-                height: 1px;
-                background: Theme.border;
-            }
-
-            QuietButton {
-                text: "添加连接";
-                left-aligned: true;
-                height: 45px;
-                ghost: true;
-                enabled: !root.busy && !root.config-managed;
-                clicked => { root.command-open = false; root.open-connection-picker(); }
-            }
-
-            Rectangle {
-                vertical-stretch: 1;
-            }
-
-            Text {
-                text: "Esc 关闭";
-                color: Theme.muted-text;
-                font-size: 11px;
-            }
-        }
     }
 }
 

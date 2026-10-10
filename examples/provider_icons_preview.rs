@@ -218,9 +218,9 @@ fn render_batch_models(
             show(batch_rows(""));
             snapshot(window, output, &format!("batch-list-{suffix}"))?;
             // The parameter chip of the first row expands its inline editor.
-            click(window, width as f32 - 178.0, 369.0);
+            click(window, width as f32 - 178.0, 329.0);
             snapshot(window, output, &format!("batch-expanded-{suffix}"))?;
-            click(window, width as f32 - 178.0, 369.0);
+            click(window, width as f32 - 178.0, 329.0);
 
             app.set_batch_query("coder".into());
             show(batch_rows("coder"));
@@ -382,7 +382,7 @@ fn render_connections_motion(
             }
             let initial = render_now(window);
             for (target, name) in [(1, "accounts"), (0, "upstreams")] {
-                click(window, if target == 1 { 360.0 } else { 260.0 }, 222.0);
+                click(window, if target == 1 { 360.0 } else { 260.0 }, 182.0);
                 assert_eq!(app.get_connections_tab(), target);
                 let mut elapsed = 0;
                 for at in [
@@ -392,7 +392,7 @@ fn render_connections_motion(
                     elapsed = at;
                     let pixels = render_now(window);
                     // Tab changes keep the title/subtitle still throughout the transition.
-                    for y in 60..194 {
+                    for y in 20..154 {
                         let start = (y * width as usize + 208) * 3;
                         let end = (y * width as usize + width as usize - 30) * 3;
                         assert_eq!(
@@ -403,7 +403,7 @@ fn render_connections_motion(
                     snapshot_now(window, output, &format!("tabs-{name}-{suffix}-{at:03}ms"))?;
                     if target == 1 && at == 32 {
                         // The still-visible outgoing toolbar must not dispatch actions.
-                        click(window, width as f32 - 208.0, 284.0);
+                        click(window, width as f32 - 208.0, 244.0);
                         assert_eq!(checks.get(), 0);
                     }
                 }
@@ -537,7 +537,7 @@ fn render_connection_workbench(
             app.set_active_page(0);
             snapshot(window, output, &format!("workbench-connections-{suffix}"))?;
             if width == 1200 && !dark {
-                click(window, 1090.0, 398.0);
+                click(window, 1090.0, 358.0);
                 render(window);
                 assert_eq!(
                     toggles.get(),
@@ -546,32 +546,32 @@ fn render_connection_workbench(
                 );
             }
             let expand_x = width as f32 - 100.0;
-            click(window, expand_x, 458.0);
+            click(window, expand_x, 418.0);
             snapshot(window, output, &format!("workbench-expanded-{suffix}"))?;
             let pixels = render(window);
             let sample_x = width as usize - 430;
             let pixel = |y: usize| pixels.as_slice()[y * width as usize + sample_x];
             // Empty space beside the model label must stay clear through the
             // row midpoint; the separator belongs below all row content.
-            for y in 509..519 {
+            for y in 469..479 {
                 assert_eq!(
                     pixel(y),
-                    pixel(507),
+                    pixel(467),
                     "divider crosses the model row at {suffix}, y={y}"
                 );
             }
             if height == 820 {
                 assert_ne!(
-                    pixel(545),
-                    pixel(507),
+                    pixel(505),
+                    pixel(467),
                     "row boundary separator is missing at {suffix}"
                 );
             }
-            click(window, expand_x, 458.0);
+            click(window, expand_x, 418.0);
             if width == 1200 && dark {
-                click(window, 860.0, 294.0);
+                click(window, 860.0, 254.0);
                 snapshot(window, output, &format!("workbench-direct-{suffix}"))?;
-                click(window, 785.0, 294.0);
+                click(window, 785.0, 254.0);
             }
             app.set_active_page(1);
             app.set_connection_models_id("podlink".into());
@@ -632,7 +632,7 @@ fn render_connection_workbench(
             app.set_busy(false);
             render(window);
             if width == 1200 && dark {
-                click(window, 1132.0, 378.0);
+                click(window, 1132.0, 338.0);
                 render(window);
                 assert!(
                     app.get_connection_models().row_data(0).unwrap().removing,
@@ -640,7 +640,7 @@ fn render_connection_workbench(
                 );
                 assert!(app.get_connection_models_dirty());
                 snapshot(window, output, "connection-directory-remove-dark")?;
-                click(window, 1110.0, 365.0);
+                click(window, 1110.0, 325.0);
                 render(window);
                 assert!(
                     !app.get_connection_models().row_data(0).unwrap().removing,
@@ -670,7 +670,7 @@ fn render_connection_workbench(
     app.set_active_page(0);
     app.global::<Theme>().set_animations_enabled(true);
     render(window);
-    click(window, 1100.0, 458.0);
+    click(window, 1100.0, 418.0);
     for index in 0..12 {
         frame(30);
         snapshot_now(window, output, &format!("workbench-motion-{index:02}"))?;
@@ -709,16 +709,16 @@ fn render_workspace_feedback(
             app.set_action_message("".into());
             app.set_notification_open(false);
             snapshot(window, output, &format!("workspace-workbench-{suffix}"))?;
-            click(window, 405.0, 69.0);
+            click(window, 405.0, 29.0);
             assert!(app.get_workspace_open());
             snapshot(window, output, &format!("workspace-menu-{suffix}"))?;
-            click(window, 490.0, 310.0);
+            click(window, 490.0, 270.0);
             render(window);
             assert_eq!(app.get_active_page(), 5);
             assert!(!app.get_workspace_open());
-            click(window, 405.0, 69.0);
+            click(window, 405.0, 29.0);
             render(window);
-            click(window, 490.0, 354.0);
+            click(window, 490.0, 314.0);
             render(window);
             assert!(!app.get_workspace_open());
             app.set_active_page(0);
@@ -748,7 +748,7 @@ fn render_workspace_feedback(
         app.set_xai_pending(pending == 2);
         app.set_workspace_open(true);
         render(window);
-        click(window, 490.0, 354.0);
+        click(window, 490.0, 314.0);
         render(window);
         assert_eq!(switches.get(), 4);
         assert!(app.get_workspace_open());
@@ -764,14 +764,14 @@ fn render_workspace_feedback(
     app.set_error_action("".into());
     app.set_action_message("已取消发布预览".into());
     render(window);
-    click(window, 1148.0, 139.0);
+    click(window, 1148.0, 99.0);
     assert!(
         !app.get_notification_open(),
         "toast close action must remain reachable"
     );
-    click(window, 1158.0, 69.0);
+    click(window, 1158.0, 29.0);
     render(window);
-    click(window, 1110.0, 201.0);
+    click(window, 1110.0, 161.0);
     render(window);
     assert!(
         app.get_drawer_open(),
@@ -787,7 +787,7 @@ fn render_workspace_feedback(
         "identical feedback must replay"
     );
     window.dispatch_event(WindowEvent::PointerMoved {
-        position: slint::LogicalPosition::new(850.0, 165.0),
+        position: slint::LogicalPosition::new(850.0, 125.0),
     });
     for _ in 0..65 {
         frame(100);
@@ -804,7 +804,7 @@ fn render_workspace_feedback(
         !app.get_notification_open(),
         "info must close after six seconds"
     );
-    click(window, 1158.0, 69.0);
+    click(window, 1158.0, 29.0);
     render(window);
     assert!(
         app.get_notification_open(),
@@ -894,8 +894,8 @@ fn render_workspace_feedback(
     Ok(())
 }
 
-// Sidebar item centers below the in-window menu bar, without a native titlebar overlay.
-const SIDEBAR_ITEMS: [(i32, f32); 5] = [(0, 231.0), (1, 277.0), (3, 323.0), (4, 395.0), (5, 441.0)];
+// Sidebar item centers without a native titlebar overlay.
+const SIDEBAR_ITEMS: [(i32, f32); 5] = [(0, 191.0), (1, 237.0), (3, 283.0), (4, 355.0), (5, 401.0)];
 
 fn sidebar_pixels(pixels: &SharedPixelBuffer<Rgb8Pixel>) -> Vec<u8> {
     let row = pixels.width() as usize * 3;
@@ -1297,7 +1297,7 @@ fn render_activity_design(
             )?;
 
             // Hovering a pulse bar names its request.
-            let mut position = slint::LogicalPosition::new(width as f32 - 90.0, 290.0);
+            let mut position = slint::LogicalPosition::new(width as f32 - 90.0, 250.0);
             window.dispatch_event(WindowEvent::PointerMoved { position });
             frame(200);
             snapshot_now(window, output, &format!("activity-pulse-hover-{suffix}"))?;
@@ -1430,25 +1430,25 @@ fn main() -> Result<(), Box<dyn Error>> {
         render(&window);
         app.set_drawer_open(true);
         render(&window);
-        click(&window, 500.0, 568.0);
+        click(&window, 500.0, 548.0);
         render(&window);
         assert!(
             app.get_status_directories_expanded(),
             "directory disclosure must expand"
         );
-        click(&window, 816.0, 546.0);
+        click(&window, 816.0, 526.0);
         render(&window);
         assert_eq!(
             CLIPBOARD.with(|value| value.borrow().clone()),
             app.get_config_home().as_str()
         );
-        click(&window, 816.0, 600.0);
+        click(&window, 816.0, 580.0);
         render(&window);
         assert_eq!(
             CLIPBOARD.with(|value| value.borrow().clone()),
             app.get_data_path().as_str()
         );
-        click(&window, 760.0, 704.0);
+        click(&window, 760.0, 684.0);
         render(&window);
         assert!(!app.get_drawer_open());
         assert_eq!(
@@ -1473,13 +1473,13 @@ fn main() -> Result<(), Box<dyn Error>> {
         );
         app.set_busy(true);
         render(&window);
-        click(&window, 550.0, 645.0);
+        click(&window, 550.0, 625.0);
         click(&window, 20.0, 200.0);
         assert_eq!(restored.get(), 0, "busy restore must not run");
         assert!(app.get_drawer_open(), "busy outside click must not dismiss");
         app.set_busy(false);
         render(&window);
-        click(&window, 550.0, 645.0);
+        click(&window, 550.0, 625.0);
         assert_eq!(
             restored.get(),
             1,
@@ -1597,7 +1597,7 @@ fn main() -> Result<(), Box<dyn Error>> {
                 model.set_vec(rows.clone());
                 snapshot(&window, output, &format!("connections-ready-{suffix}"))?;
                 window.dispatch_event(WindowEvent::PointerMoved {
-                    position: slint::LogicalPosition::new(500.0, 310.0),
+                    position: slint::LogicalPosition::new(500.0, 270.0),
                 });
                 snapshot(&window, output, &format!("connections-hover-{suffix}"))?;
                 window.dispatch_event(WindowEvent::PointerExited);
@@ -1708,7 +1708,8 @@ fn main() -> Result<(), Box<dyn Error>> {
     if std::env::args().any(|arg| arg == "--accounts-design" || arg == "--connections-motion") {
         app.set_active_page(1);
         app.set_connections_tab(1);
-        app.set_action_message("合成账号界面检查；未访问实际账号或 Codex 配置".into());
+        app.set_status_text("合成账号界面检查；未访问实际账号或 Codex 配置".into());
+        app.show()?;
         let chatgpt_account = AccountRow {
             id: "design-chatgpt".into(),
             label: "personal@example.invalid".into(),
@@ -1808,13 +1809,13 @@ fn main() -> Result<(), Box<dyn Error>> {
         app.global::<Theme>().set_animations_enabled(false);
         app.set_native_login_expanded(false);
         render(&window);
-        click(&window, 1126.0, 348.0);
+        click(&window, 1126.0, 308.0);
         snapshot(&window, output, "accounts-menu-dark-1200x820")?;
-        click(&window, 1000.0, 474.0);
+        click(&window, 1000.0, 434.0);
         render(&window);
         assert!(app.get_account_login_confirm_open());
         assert_eq!(writes.get(), 0, "Selecting login must only open its review");
-        click(&window, 720.0, 488.0);
+        click(&window, 720.0, 468.0);
         render(&window);
         assert_eq!(writes.get(), 1);
         assert!(!app.get_account_login_confirm_open());
