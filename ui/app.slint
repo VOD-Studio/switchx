@@ -1235,7 +1235,7 @@ export component AppWindow inherits Window {
         open: (root.connection-picker-open || root.editor-open || root.subscription-editor-open || root.xai-editor-open || root.connection-models-open) && !root.icon-picker-open && !root.common-config-editor-open;
         title: root.connection-models-open ? root.connection-models-name : root.connection-picker-open || root.new-connection-form ? "添加连接" : root.editor-open ? "API 连接" : root.subscription-editor-open ? "ChatGPT 订阅" : "Grok 订阅连接";
         subtitle: root.connection-picker-open ? "选择订阅账号或 API 服务，继续配置连接。" : "连接设置与模型目录分别保存，完成后在工作台启用。";
-        panel-width: root.editor-open || root.subscription-editor-open ? min(1120px, root.width - 60px) : 820px;
+        panel-width: root.editor-open || root.subscription-editor-open || root.xai-editor-open ? min(1120px, root.width - 60px) : 820px;
         animate panel-width {
             duration: Theme.drawer-motion;
             easing: cubic-bezier(0.22, 1, 0.36, 1);
@@ -1437,6 +1437,7 @@ export component AppWindow inherits Window {
 
                         if root.xai-editor-open || root.departing-connection-form == 3: XaiEditor {
                             busy: root.busy;
+                            compact: root.height < 760px;
                             border-width: 0px;
                             background: transparent;
                             config-managed: root.config-managed;
@@ -1445,11 +1446,11 @@ export component AppWindow inherits Window {
                             accounts: root.xai-account-options;
                             choice <=> root.xai-account-choice;
                             delete-confirm <=> root.delete-confirm;
-                            error: root.error-message;
                             save => { root.save-xai(); }
                             cancel => { root.xai-editor-open = false; root.delete-confirm = false; }
                             delete-provider(id) => { root.delete-provider(id); }
                             manage-accounts => { root.xai-editor-open = false; root.connections-tab = 1; root.active-page = 1; root.xai-account-action(0, ""); }
+                            configure-models => { root.begin-connection-models(root.xai-provider-id); }
                         }
                     }
                 }
