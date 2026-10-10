@@ -1,3 +1,4 @@
 others/
 target/
 .DS_Store
+.claude/
