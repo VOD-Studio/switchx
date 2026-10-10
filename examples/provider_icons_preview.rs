@@ -8,6 +8,7 @@
 //! Shared workspace menu and operation feedback: add --workspace-feedback.
 //! Activity timeline: add --activity-design (entry, arrivals, pause, details, filter).
 //! API connection editor: add --provider-editor-design.
+//! Add-connection navigation: add --connection-picker-motion (frames and back actions).
 //! Reasoning multi-select: add --reasoning-picker (themes, sizes, and motion).
 
 #[cfg(target_os = "macos")]
@@ -16,8 +17,8 @@ pub mod macos;
 
 use switchx::ui::{
     AccountRow, AppWindow, BatchModelRow, BatchSummary, CodeSpan, CodexQuotaRow,
-    ConnectionModelRow, ModelRow, ProviderIconRow, ProviderRow, RequestBar, RequestRow,
-    RequestStats, SyntaxHighlighting, Theme, XaiQuotaRow,
+    ConnectionModelRow, ModelRow, ProviderIconRow, ProviderPresetRow, ProviderRow, RequestBar,
+    RequestRow, RequestStats, SyntaxHighlighting, Theme, XaiQuotaRow,
 };
 
 use slint::platform::software_renderer::{MinimalSoftwareWindow, RepaintBufferType};
@@ -1674,6 +1675,206 @@ fn render_provider_editor(
     Ok(())
 }
 
+fn render_connection_picker_motion(
+    app: &AppWindow,
+    window: &MinimalSoftwareWindow,
+    output: &Path,
+) -> Result<(), Box<dyn Error>> {
+    // Synthetic callbacks follow production's open-form / close-picker ordering.
+    app.set_active_page(1);
+    app.set_provider_presets(ModelRc::new(VecModel::from(
+        switchx::app::PROVIDER_PRESETS
+            .iter()
+            .map(|preset| {
+                Ok(ProviderPresetRow {
+                    id: preset.id.into(),
+                    name: preset.name.into(),
+                    icon: slint::Image::load_from_svg_data(preset.icon)?,
+                    monochrome: preset.monochrome,
+                })
+            })
+            .collect::<Result<Vec<_>, slint::LoadImageError>>()?,
+    )));
+    let selections = Rc::new(Cell::new(0));
+    let selected = selections.clone();
+    let weak = app.as_weak();
+    app.on_begin_provider_editor(move |_| {
+        let app = weak.upgrade().unwrap();
+        selected.set(selected.get() + 1);
+        app.set_edit_id("".into());
+        app.set_edit_name("DeepSeek".into());
+        app.set_edit_url("https://api.example.invalid/v1".into());
+        app.set_edit_model("synthetic-model".into());
+        app.set_edit_key("".into());
+        app.set_edit_preset_id("deepseek".into());
+        app.set_edit_icon_name("DeepSeek".into());
+        app.set_edit_icon(
+            provider_icons::load_image(provider_icons::icon("deepseek").unwrap()).unwrap(),
+        );
+        app.set_edit_config_preview("model = \"synthetic-model\"\nweb_search = \"live\"\n".into());
+        app.set_editor_open(true);
+        app.set_connection_picker_open(false);
+    });
+    let weak = app.as_weak();
+    app.on_begin_subscription_editor(move |_| {
+        let app = weak.upgrade().unwrap();
+        app.set_subscription_id("".into());
+        app.set_subscription_name("ChatGPT".into());
+        app.set_subscription_account_ids(ModelRc::new(VecModel::from(vec!["".into()])));
+        app.set_subscription_account_options(ModelRc::new(VecModel::from(vec![
+            "跟随 Codex 登录".into(),
+        ])));
+        app.set_subscription_editor_open(true);
+        app.set_connection_picker_open(false);
+    });
+    let weak = app.as_weak();
+    app.on_cancel_subscription_editor(move || {
+        let app = weak.upgrade().unwrap();
+        app.set_subscription_editor_open(false);
+        app.set_subscription_editor_pending(false);
+        app.set_subscription_auth_json("".into());
+    });
+    let weak = app.as_weak();
+    app.on_begin_xai_editor(move |_| {
+        let app = weak.upgrade().unwrap();
+        app.set_xai_provider_id("".into());
+        app.set_xai_provider_name("Grok".into());
+        app.set_xai_editor_open(true);
+        app.set_connection_picker_open(false);
+    });
+    let saves = Rc::new(Cell::new(0));
+    let saved = saves.clone();
+    app.on_save_provider(move |_, _, _, _, _| saved.set(saved.get() + 1));
+
+    for (width, height) in [(1200, 820), (1000, 680)] {
+        app.window().set_size(PhysicalSize::new(width, height));
+        let picker_left = width as f32 - 820.0 + 26.0;
+        let api_left = (width as f32 - 1120.0).max(60.0) + 26.0;
+        for dark in [false, true] {
+            app.global::<Theme>().set_animations_enabled(false);
+            set_theme(app, window, dark);
+            app.invoke_open_connection_picker();
+            let suffix = format!("{}-{width}x{height}", if dark { "dark" } else { "light" });
+            snapshot(window, output, &format!("connection-picker-{suffix}"))?;
+            app.global::<Theme>().set_animations_enabled(true);
+            click(window, picker_left + 90.0, 280.0);
+            assert!(app.get_editor_open());
+            let mut elapsed = 0;
+            for at in [0, 16, 48, 96, 160, 240, 340, 480] {
+                frame(at - elapsed);
+                elapsed = at;
+                snapshot_now(
+                    window,
+                    output,
+                    &format!("connection-forward-{suffix}-{at:03}ms"),
+                )?;
+            }
+            app.set_edit_key("synthetic-unsaved-key".into());
+            render_now(window);
+            click(window, api_left + 50.0, 108.0);
+            assert!(
+                app.get_connection_picker_open(),
+                "back returns one level to the picker"
+            );
+            assert!(!app.get_editor_open());
+            assert!(
+                app.get_edit_key().is_empty(),
+                "back clears the draft immediately"
+            );
+            let before = saves.get();
+            click(window, width as f32 - 90.0, height as f32 - 46.0);
+            assert_eq!(saves.get(), before, "outgoing save is inert");
+            let mut elapsed = 0;
+            for at in [0, 16, 48, 96, 160, 240, 340, 480] {
+                frame(at - elapsed);
+                elapsed = at;
+                snapshot_now(
+                    window,
+                    output,
+                    &format!("connection-back-{suffix}-{at:03}ms"),
+                )?;
+            }
+            assert_ne!(
+                fs::read(output.join(format!("connection-back-{suffix}-016ms.ppm")))?,
+                fs::read(output.join(format!("connection-back-{suffix}-480ms.ppm")))?,
+                "return has intermediate animation frames"
+            );
+
+            // Rapid retargeting and resize settle on a usable picker.
+            click(window, picker_left + 90.0, 280.0);
+            render_now(window);
+            frame(96);
+            app.invoke_return_to_connection_picker();
+            render_now(window);
+            frame(48);
+            app.invoke_begin_provider_editor("".into());
+            render_now(window);
+            frame(48);
+            app.invoke_return_to_connection_picker();
+            app.window().set_size(PhysicalSize::new(width + 40, height));
+            render_now(window);
+            frame(600);
+            app.window().set_size(PhysicalSize::new(width, height));
+            render_now(window);
+            frame(600);
+            let count = selections.get();
+            click(window, picker_left + 90.0, 280.0);
+            assert_eq!(
+                selections.get(),
+                count + 1,
+                "picker works after rapid reversal and resize"
+            );
+            render_now(window);
+            frame(600);
+            app.invoke_return_to_connection_picker();
+            render_now(window);
+            frame(600);
+
+            // The same back affordance applies to both subscription forms.
+            for (x, chatgpt) in [(picker_left + 90.0, true), (picker_left + 440.0, false)] {
+                click(window, x, 160.0);
+                render_now(window);
+                frame(600);
+                assert_eq!(app.get_subscription_editor_open(), chatgpt);
+                assert_eq!(app.get_xai_editor_open(), !chatgpt);
+                app.set_subscription_auth_json("synthetic-unsaved-credential".into());
+                click(window, picker_left + 50.0, 108.0);
+                assert!(app.get_connection_picker_open());
+                assert!(app.get_subscription_auth_json().is_empty());
+                assert!(!app.get_subscription_editor_open());
+                assert!(!app.get_xai_editor_open());
+                render_now(window);
+                frame(600);
+            }
+
+            for reduced in [false, true] {
+                app.global::<Theme>().set_animations_enabled(reduced);
+                app.global::<Theme>().set_system_reduced_motion(reduced);
+                click(window, picker_left + 90.0, 280.0);
+                render_now(window);
+                click(window, api_left + 50.0, 108.0);
+                assert!(app.get_connection_picker_open());
+                window.dispatch_event(WindowEvent::PointerMoved {
+                    position: slint::LogicalPosition::new(5.0, 5.0),
+                });
+                let immediate = render_now(window);
+                frame(1000);
+                assert_eq!(
+                    immediate.as_bytes(),
+                    render_now(window).as_bytes(),
+                    "disabled/reduced motion returns immediately"
+                );
+            }
+            app.global::<Theme>().set_system_reduced_motion(false);
+        }
+    }
+    println!(
+        "Synthetic connection navigation and motion checks: {}",
+        output.display()
+    );
+    Ok(())
+}
+
 fn main() -> Result<(), Box<dyn Error>> {
     let output = std::env::args()
         .nth(1)
@@ -1696,6 +1897,10 @@ fn main() -> Result<(), Box<dyn Error>> {
     switchx::reasoning_picker::connect(&app);
     app.set_loading(false);
     app.global::<Theme>().set_animations_enabled(false);
+    if std::env::args().any(|arg| arg == "--connection-picker-motion") {
+        app.show()?;
+        return render_connection_picker_motion(&app, &window, output);
+    }
     if native_provider || std::env::args().any(|arg| arg == "--provider-editor-design") {
         app.show()?;
         return render_provider_editor(&app, &window, output);
