@@ -1,0 +1,206 @@
+import { Theme } from "../tokens.slint";
+
+// Keep entrance motion inside stable surfaces, including the no-motion path.
+export component SubscriptionStage inherits Rectangle {
+    in property <duration> wait: 48ms;
+    in property <length> content-height;
+    private property <bool> landed: false;
+    private property <float> arrival: Theme.drawer-motion == 0ms ? 1 : root.landed ? 1 : 0;
+    animate arrival {
+        duration: Theme.drawer-motion;
+        easing: cubic-bezier(0.22, 1, 0.36, 1);
+    }
+    Timer {
+        interval: root.wait;
+        running: !root.landed;
+        triggered => { root.landed = true; }
+    }
+
+    preferred-height: root.content-height;
+    min-height: root.content-height;
+    vertical-stretch: 0;
+    Rectangle {
+        y: 12px * (1 - root.arrival);
+        width: root.width;
+        height: root.height;
+        opacity: root.arrival;
+        @children
+    }
+}
+
+export component SubscriptionIdentity inherits Rectangle {
+    in property <string> name;
+    in property <string> platform;
+    in property <image> icon;
+    in property <bool> monochrome;
+    in property <bool> enabled: true;
+    callback pick();
+    private property <float> hover: touch.has-hover && root.enabled ? 1 : 0;
+    animate hover {
+        duration: Theme.page-motion;
+        easing: ease-out;
+    }
+    private property <bool> landed: false;
+    private property <float> sheen: root.landed ? 1 : 0;
+    animate sheen {
+        duration: Theme.fast > 0ms ? 840ms : 0ms;
+        easing: ease-in-out;
+    }
+    Timer {
+        interval: 64ms;
+        running: !root.landed;
+        triggered => { root.landed = true; }
+    }
+
+    border-radius: 14px;
+    border-width: 1px;
+    border-color: keyboard.has-focus ? Theme.brand : Theme.brand.with-alpha(0.08 + 0.25 * root.hover);
+    background: Theme.brand-surface.with-alpha(0.5 + 0.2 * root.hover);
+    animate background, border-color { duration: Theme.fast; }
+    clip: true;
+    forward-focus: keyboard;
+    accessible-role: button;
+    accessible-label: "选择 ChatGPT 订阅头像";
+    accessible-enabled: root.enabled;
+    accessible-action-default => { if root.enabled { root.pick(); } }
+
+    HorizontalLayout {
+        padding: 12px;
+        spacing: 12px;
+        cross-axis-alignment: center;
+        Rectangle {
+            width: 58px;
+            height: 58px;
+            horizontal-stretch: 0;
+            border-radius: 12px;
+            border-width: 1px;
+            border-color: Theme.brand.with-alpha(0.12 + root.hover * 0.35);
+            background: Theme.panel;
+            animate border-color { duration: Theme.fast; }
+            Image {
+                x: (parent.width - self.width) / 2;
+                y: (parent.height - self.height) / 2 - 2px * root.hover;
+                width: root.icon.width > root.icon.height * 2 ? 44px : 32px;
+                height: 32px;
+                source: root.icon;
+                image-fit: contain;
+                colorize: root.monochrome ? Theme.primary-text : transparent;
+                transform-rotation: -4deg * root.hover;
+            }
+        }
+
+        VerticalLayout {
+            spacing: 5px;
+            alignment: center;
+            Text {
+                text: root.name == "" ? "新的 ChatGPT 连接" : root.name;
+                font-size: 17px;
+                font-weight: 600;
+                color: Theme.primary-text;
+                overflow: elide;
+            }
+
+            Text {
+                text: (root.platform == "" ? "OpenAI" : root.platform) + " · 点击更换头像";
+                font-size: 10px;
+                color: Theme.muted-text;
+                overflow: elide;
+            }
+        }
+    }
+
+    Rectangle {
+        x: -96px + root.sheen * (root.width + 96px);
+        width: 96px;
+        height: root.height;
+        background: @linear-gradient(90deg, transparent, Theme.brand.with-alpha(0.1), transparent);
+        visible: Theme.fast > 0ms && root.sheen < 1;
+        accessible-role: none;
+    }
+
+    touch := TouchArea {
+        enabled: root.enabled;
+        mouse-cursor: pointer;
+        clicked => { keyboard.focus(); root.pick(); }
+    }
+
+    keyboard := FocusScope {
+        width: 0px;
+        enabled: root.enabled;
+        key-pressed(event) => {
+            if event.text == Key.Space || event.text == Key.Return { root.pick(); return accept; }
+            return reject;
+        }
+    }
+}
+
+export component SubscriptionBindingHint inherits Rectangle {
+    in property <int> choice;
+    in property <string> detail;
+    private property <bool> landed: false;
+    private property <float> ping: root.landed ? 1 : 0;
+    animate ping {
+        duration: Theme.drawer-motion;
+        easing: ease-out;
+    }
+    changed choice => { root.landed = false; }
+    Timer {
+        interval: 24ms;
+        running: !root.landed;
+        triggered => { root.landed = true; }
+    }
+
+    height: hint.preferred-height;
+    border-radius: 10px;
+    background: Theme.inset;
+    border-width: 1px;
+    border-color: Theme.border;
+    animate background, border-color { duration: Theme.page-motion; }
+    hint := VerticalLayout {
+        padding: 12px;
+        spacing: 7px;
+        HorizontalLayout {
+            height: 16px;
+            spacing: 8px;
+            cross-axis-alignment: center;
+            Rectangle {
+                width: 10px;
+                height: 10px;
+                horizontal-stretch: 0;
+                Rectangle {
+                    x: (parent.width - self.width) / 2;
+                    y: (parent.height - self.height) / 2;
+                    width: 8px + 14px * root.ping;
+                    height: self.width;
+                    border-radius: self.width / 2;
+                    border-width: 1px;
+                    border-color: Theme.brand;
+                    opacity: Theme.fast == 0ms ? 0 : 1 - root.ping;
+                }
+
+                Rectangle {
+                    x: 2px;
+                    y: 2px;
+                    width: 6px;
+                    height: 6px;
+                    border-radius: 3px;
+                    background: Theme.brand;
+                }
+            }
+
+            Text {
+                text: root.choice == 0 ? "跟随 Codex 登录" : "已选择保存账号";
+                font-size: 11px;
+                font-weight: 500;
+                color: Theme.primary-text;
+            }
+        }
+
+        Text {
+            text: root.detail;
+            font-size: 11px;
+            color: Theme.muted-text;
+            wrap: word-wrap;
+        }
+    }
+}

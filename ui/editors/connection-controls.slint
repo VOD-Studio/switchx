@@ -6,6 +6,7 @@ export component ConnectionOption inherits Rectangle {
     in property <string> detail;
     in property <bool> enabled: true;
     in-out property <bool> checked;
+    callback toggled();
     height: 58px;
     min-width: 160px;
     border-radius: 10px;
@@ -20,7 +21,7 @@ export component ConnectionOption inherits Rectangle {
     accessible-checked: root.checked;
     accessible-enabled: root.enabled;
     accessible-action-default => { root.toggle(); }
-    function toggle() { if root.enabled { root.checked = !root.checked; } }
+    function toggle() { if root.enabled { root.checked = !root.checked; root.toggled(); } }
 
     Text {
         x: 12px;
