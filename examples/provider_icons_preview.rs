@@ -11,6 +11,8 @@
 //! Add-connection navigation: add --connection-picker-motion (frames and back actions).
 //! ChatGPT subscription editor: add --subscription-editor-design.
 //! Reasoning multi-select: add --reasoning-picker (themes, sizes, and motion).
+//! Model mapping editor: add --model-editor-design (states, actions, and motion)
+//! or --model-editor-native (window; add --light for the light theme).
 
 #[cfg(target_os = "macos")]
 #[path = "../src/macos.rs"]
@@ -222,9 +224,9 @@ fn render_batch_models(
             show(batch_rows(""));
             snapshot(window, output, &format!("batch-list-{suffix}"))?;
             // The parameter chip of the first row expands its inline editor.
-            click(window, width as f32 - 178.0, 329.0);
+            click(window, width as f32 - 160.0, 309.0);
             snapshot(window, output, &format!("batch-expanded-{suffix}"))?;
-            click(window, width as f32 - 178.0, 329.0);
+            click(window, width as f32 - 160.0, 309.0);
 
             app.set_batch_query("coder".into());
             show(batch_rows("coder"));
@@ -452,6 +454,279 @@ fn render_connections_motion(
         "Synthetic tab transitions and interruption checks: {}",
         output.display()
     );
+    Ok(())
+}
+
+fn scroll(window: &MinimalSoftwareWindow, x: f32, y: f32, delta_y: f32) {
+    window.dispatch_event(WindowEvent::PointerScrolled {
+        position: slint::LogicalPosition::new(x, y),
+        delta_x: 0.0,
+        delta_y,
+    });
+}
+
+fn open_mapping(app: &AppWindow, original_id: &str) {
+    app.set_active_page(0);
+    app.set_model_provider_id("preview-subscription".into());
+    app.set_model_provider_name("ChatGPT 订阅".into());
+    app.set_model_original_id(original_id.into());
+    app.set_model_display_name_custom(false);
+    app.set_model_upstream_id("synthetic-sol".into());
+    app.set_model_display_name("synthetic-sol/ChatGPT 订阅".into());
+    app.set_model_public_id("sx-chatgpt-0000preview0000-synthetic-sol".into());
+    app.set_model_context_window("272000".into());
+    app.set_model_reasoning_levels("low, medium, high, xhigh, max, ultra".into());
+    app.set_model_default_reasoning("low".into());
+    app.set_model_source_path("".into());
+    app.set_model_delete_confirm(false);
+    app.set_model_batch_mode(false);
+    app.set_discovery_scope(0);
+    app.set_discovery_tone(0);
+    app.set_discovery_message("".into());
+    app.set_fetched_models(ModelRc::new(VecModel::from(Vec::new())));
+    app.set_config_managed(false);
+    app.set_model_editor_open(true);
+}
+
+// Every `step` milliseconds through `end`, for smooth motion frames.
+fn every(step: u64, end: u64) -> Vec<u64> {
+    (0..=end).step_by(step as usize).collect()
+}
+
+fn type_text(window: &MinimalSoftwareWindow, text: &str) {
+    window.dispatch_event(WindowEvent::KeyPressed { text: text.into() });
+    window.dispatch_event(WindowEvent::KeyReleased { text: text.into() });
+}
+
+fn render_model_editor(
+    app: &AppWindow,
+    window: &MinimalSoftwareWindow,
+    output: &Path,
+) -> Result<(), Box<dyn Error>> {
+    const SAVED_ID: &str = "sx-chatgpt-0000preview0000-synthetic-sol";
+    let weak = app.as_weak();
+    app.on_update_model_display_name(move || {
+        let app = weak.upgrade().unwrap();
+        if !app.get_model_display_name_custom() {
+            let name = format!(
+                "{}/{}",
+                app.get_model_upstream_id(),
+                app.get_model_provider_name()
+            );
+            app.set_model_display_name(name.into());
+        }
+    });
+    if std::env::args().any(|arg| arg == "--model-editor-native") {
+        app.window().set_size(PhysicalSize::new(1200, 820));
+        app.global::<Theme>().set_animations_enabled(true);
+        app.invoke_set_appearance(!std::env::args().any(|arg| arg == "--light"));
+        open_mapping(app, SAVED_ID);
+        return Ok(app.run()?);
+    }
+    let saves = Rc::new(Cell::new(0));
+    let saved = saves.clone();
+    app.on_save_model(move || saved.set(saved.get() + 1));
+    let deletes = Rc::new(Cell::new(0));
+    let deleted = deletes.clone();
+    app.on_delete_model(move || deleted.set(deleted.get() + 1));
+    let fetches = Rc::new(Cell::new(0));
+    let fetched = fetches.clone();
+    app.on_fetch_models(move |scope| {
+        assert_eq!(scope, 1);
+        fetched.set(fetched.get() + 1);
+    });
+    for (width, height) in [(1200, 820), (1000, 680)] {
+        app.window().set_size(PhysicalSize::new(width, height));
+        let (w, h) = (width as f32, height as f32);
+        // The form fills a 648px column whose scroll gutter is 14px.
+        let ladder_x = |index: usize| w - 623.0 + index as f32 * 76.0;
+        for dark in [false, true] {
+            let suffix = format!("{}-{width}x{height}", if dark { "dark" } else { "light" });
+            app.global::<Theme>().set_animations_enabled(false);
+            set_theme(app, window, dark);
+            open_mapping(app, SAVED_ID);
+            snapshot(window, output, &format!("mapping-edit-{suffix}"))?;
+
+            // Typing a name makes it custom; restoring derives it again.
+            click(window, w - 400.0, 364.0);
+            type_text(window, "!");
+            assert!(app.get_model_display_name_custom());
+            snapshot(window, output, &format!("mapping-custom-name-{suffix}"))?;
+            click(window, w - 104.0, 364.0);
+            assert!(!app.get_model_display_name_custom());
+            assert_eq!(app.get_model_display_name(), "synthetic-sol/ChatGPT 订阅");
+
+            CLIPBOARD.with(|value| value.borrow_mut().clear());
+            click(window, w - 75.0, 410.0);
+            assert_eq!(CLIPBOARD.with(|value| value.borrow().clone()), SAVED_ID);
+            snapshot(window, output, &format!("mapping-copied-{suffix}"))?;
+
+            let count = fetches.get();
+            click(window, w - 120.0, 535.0);
+            assert_eq!(fetches.get(), count + 1, "the fetch button requests models");
+            app.set_discovery_scope(1);
+            app.set_discovery_tone(1);
+            app.set_discovery_message("已获取 3 个模型".into());
+            app.set_fetched_models(ModelRc::new(VecModel::from(vec![
+                "synthetic-sol".into(),
+                "synthetic-terra".into(),
+                "synthetic-luna".into(),
+            ])));
+            snapshot(window, output, &format!("mapping-discovered-{suffix}"))?;
+            app.set_discovery_scope(0);
+            app.set_discovery_message("".into());
+            app.set_fetched_models(ModelRc::new(VecModel::from(Vec::new())));
+            render(window);
+
+            // Scrolled to the end, the presets sit 486px above the window's bottom.
+            scroll(window, w - 350.0, 400.0, -4000.0);
+            snapshot(window, output, &format!("mapping-bottom-{suffix}"))?;
+            click(window, w - 119.0, h - 486.0);
+            assert_eq!(app.get_model_context_window(), "1000000");
+            snapshot(window, output, &format!("mapping-context-1m-{suffix}"))?;
+            app.set_model_context_window("0".into());
+            snapshot(window, output, &format!("mapping-context-invalid-{suffix}"))?;
+            app.set_model_context_window("".into());
+            snapshot(window, output, &format!("mapping-context-default-{suffix}"))?;
+            app.set_model_context_window("272000".into());
+
+            click(window, ladder_x(0), h - 290.0);
+            assert_eq!(
+                app.get_model_reasoning_levels(),
+                "none, low, medium, high, xhigh, max, ultra"
+            );
+            // Removing the default level clears the default.
+            click(window, ladder_x(2), h - 290.0);
+            assert_eq!(
+                app.get_model_reasoning_levels(),
+                "none, medium, high, xhigh, max, ultra"
+            );
+            assert_eq!(app.get_model_default_reasoning(), "");
+            snapshot(window, output, &format!("mapping-ladder-{suffix}"))?;
+            app.set_model_reasoning_levels("low, medium, high, xhigh, max, ultra".into());
+            app.set_model_default_reasoning("low".into());
+
+            click(window, w - 360.0, h - 131.0);
+            snapshot(window, output, &format!("mapping-advanced-{suffix}"))?;
+
+            let count = deletes.get();
+            click(window, w - 624.0, h - 44.0);
+            assert!(app.get_model_delete_confirm());
+            assert_eq!(deletes.get(), count, "delete needs confirmation");
+            snapshot(window, output, &format!("mapping-delete-armed-{suffix}"))?;
+            click(window, w - 624.0, h - 44.0);
+            assert_eq!(deletes.get(), count + 1);
+            app.set_model_delete_confirm(false);
+
+            let count = saves.get();
+            click(window, w - 92.0, h - 44.0);
+            assert_eq!(saves.get(), count + 1, "save is reachable at every size");
+            app.set_config_managed(true);
+            click(window, w - 92.0, h - 44.0);
+            assert_eq!(
+                saves.get(),
+                count + 1,
+                "managed configuration blocks saving"
+            );
+            scroll(window, w - 350.0, 400.0, 4000.0);
+            snapshot(window, output, &format!("mapping-locked-{suffix}"))?;
+            app.set_config_managed(false);
+
+            click(window, w - 210.0, h - 44.0);
+            assert!(!app.get_model_editor_open(), "cancel closes the editor");
+            render(window);
+
+            open_mapping(app, "");
+            app.set_model_public_id("".into());
+            app.set_model_upstream_id("".into());
+            app.set_model_display_name("".into());
+            app.set_model_context_window("".into());
+            app.set_model_reasoning_levels("".into());
+            app.set_model_default_reasoning("未设置".into());
+            snapshot(window, output, &format!("mapping-add-{suffix}"))?;
+            app.set_batch_summary(summarize(&batch_rows("")));
+            app.set_batch_models(ModelRc::new(VecModel::from(batch_rows(""))));
+            app.set_model_batch_mode(true);
+            snapshot(window, output, &format!("mapping-batch-{suffix}"))?;
+            app.set_model_editor_open(false);
+            render(window);
+        }
+    }
+
+    // Motion: staggered entrance, the travelling route, and each control's response.
+    app.window().set_size(PhysicalSize::new(1200, 820));
+    for dark in [false, true] {
+        let theme = if dark { "dark" } else { "light" };
+        app.global::<Theme>().set_animations_enabled(false);
+        set_theme(app, window, dark);
+        app.global::<Theme>().set_animations_enabled(true);
+        open_mapping(app, SAVED_ID);
+        play(
+            window,
+            output,
+            &format!("mapping-motion-open-{theme}"),
+            &every(32, 1600),
+        )?;
+        play(
+            window,
+            output,
+            &format!("mapping-motion-route-{theme}"),
+            &every(32, 3392),
+        )?;
+        click(window, 1081.0, 708.0);
+        play(
+            window,
+            output,
+            &format!("mapping-motion-context-{theme}"),
+            &every(32, 800),
+        )?;
+        click(window, 1125.0, 410.0);
+        play(
+            window,
+            output,
+            &format!("mapping-motion-copy-{theme}"),
+            &every(32, 480),
+        )?;
+        click(window, 576.0, 776.0);
+        play(
+            window,
+            output,
+            &format!("mapping-motion-delete-{theme}"),
+            &every(32, 480),
+        )?;
+        app.set_model_delete_confirm(false);
+        scroll(window, 850.0, 400.0, -4000.0);
+        play(window, output, "unused", &[400])?;
+        click(window, 577.0, 530.0);
+        play(
+            window,
+            output,
+            &format!("mapping-motion-ladder-{theme}"),
+            &every(32, 480),
+        )?;
+        // The view eases after the last section as it expands.
+        click(window, 840.0, 689.0);
+        play(
+            window,
+            output,
+            &format!("mapping-motion-advanced-{theme}"),
+            &every(32, 480),
+        )?;
+        app.set_model_editor_open(false);
+        play(window, output, "unused", &[480])?;
+        // The entrance replays on the next opening.
+        open_mapping(app, SAVED_ID);
+        play(
+            window,
+            output,
+            &format!("mapping-motion-reopen-{theme}"),
+            &[0, 160, 960],
+        )?;
+        app.set_model_editor_open(false);
+        play(window, output, "unused", &[480])?;
+    }
+    app.global::<Theme>().set_animations_enabled(false);
+    println!("Synthetic model mapping editor: {}", output.display());
     Ok(())
 }
 
@@ -2219,7 +2494,8 @@ fn main() -> Result<(), Box<dyn Error>> {
     let window = MinimalSoftwareWindow::new(RepaintBufferType::NewBuffer);
     let native_connections = std::env::args().any(|arg| arg == "--connections-native");
     let native_provider = std::env::args().any(|arg| arg == "--provider-editor-native");
-    if native_connections || native_provider {
+    let native_model = std::env::args().any(|arg| arg == "--model-editor-native");
+    if native_connections || native_provider || native_model {
         #[cfg(target_os = "macos")]
         macos::configure_window()?;
     } else {
@@ -2244,6 +2520,10 @@ fn main() -> Result<(), Box<dyn Error>> {
     if std::env::args().any(|arg| arg == "--reasoning-picker") {
         app.show()?;
         return render_reasoning_picker(&app, &window, output);
+    }
+    if native_model || std::env::args().any(|arg| arg == "--model-editor-design") {
+        app.show()?;
+        return render_model_editor(&app, &window, output);
     }
     if std::env::args().any(|arg| arg == "--connection-workbench") {
         app.show()?;
