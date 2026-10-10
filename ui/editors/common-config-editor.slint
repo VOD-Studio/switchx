@@ -1,11 +1,304 @@
-import { QuietScrollView as ScrollView } from "../scroll-view.slint";
 import { Theme } from "../tokens.slint";
-import { QuietButton, SurfaceCard } from "../components.slint";
-import { CodeEditor } from "../code-editor.slint";
+import { QuietButton, SurfaceCard, AnimatedSection } from "../components.slint";
+import { CodeEditor, SyntaxHighlighting } from "../code-editor.slint";
+import { FeedbackBanner } from "../feedback-banner.slint";
+
+// Independent entrances make the drawer unfold in a short cascade.
+component ConfigArrival inherits Rectangle {
+    in property <bool> open;
+    in property <duration> lag;
+    private property <float> reveal: root.open ? 1 : 0;
+    animate reveal {
+        duration: Theme.drawer-motion;
+        delay: root.open && Theme.drawer-motion > 0ms ? root.lag : 0ms;
+        easing: cubic-bezier(0.22, 1, 0.36, 1);
+    }
+    opacity: root.reveal;
+    Rectangle {
+        y: 14px * (1 - root.reveal);
+        width: root.width;
+        height: root.height;
+        @children
+    }
+}
+
+component ConfigTag inherits Rectangle {
+    in property <string> text;
+    in property <image> icon;
+    in property <bool> open;
+    in property <int> order;
+    private property <float> reveal: root.open ? 1 : 0;
+    animate reveal {
+        duration: Theme.page-motion;
+        delay: root.open && Theme.page-motion > 0ms ? 140ms + root.order * 60ms : 0ms;
+        easing: cubic-bezier(0.22, 1, 0.36, 1);
+    }
+    height: 26px;
+    horizontal-stretch: 0;
+    opacity: root.reveal;
+    Rectangle {
+        y: (1 - root.reveal) * 8px;
+        width: root.width;
+        height: root.height;
+        background: Theme.panel.with-alpha(0.65);
+        border-color: Theme.brand.with-alpha(0.16);
+        border-width: 1px;
+        border-radius: 6px;
+        HorizontalLayout {
+            padding-left: 9px;
+            padding-right: 9px;
+            spacing: 6px;
+            cross-axis-alignment: center;
+            Image {
+                width: 12px;
+                height: 12px;
+                source: root.icon;
+                colorize: Theme.brand;
+            }
+
+            Text {
+                text: root.text;
+                color: Theme.muted-text;
+                font-size: 11px;
+            }
+        }
+    }
+}
+
+component ConfigHero inherits Rectangle {
+    in property <bool> open;
+    in property <bool> compact;
+    private property <bool> motion: root.open && Theme.animations-enabled && !Theme.system-reduced-motion;
+    private property <angle> phase: root.motion ? 360deg * mod(animation-tick(), 6400ms) / 6400ms : 0deg;
+    private property <float> spread: root.open ? 1 : 0;
+    animate spread {
+        duration: Theme.drawer-motion;
+        delay: root.open && Theme.drawer-motion > 0ms ? 120ms : 0ms;
+        easing: cubic-bezier(0.22, 1, 0.36, 1);
+    }
+    height: root.compact ? 124px : 148px;
+    border-radius: 16px;
+    border-width: 1px;
+    border-color: Theme.brand.with-alpha(0.24);
+    background: @linear-gradient(115deg, Theme.brand-surface 0%, Theme.code-key.with-alpha(Theme.dark ? 0.06 : 0.045) 100%);
+    clip: true;
+    Rectangle {
+        x: parent.width - 170px;
+        y: -40px;
+        width: 230px;
+        height: 230px;
+        border-radius: 115px;
+        border-width: 1px;
+        border-color: Theme.brand.with-alpha(0.1);
+        accessible-role: none;
+    }
+
+    Rectangle {
+        x: parent.width - 136px;
+        y: -6px;
+        width: 162px;
+        height: 162px;
+        border-radius: 81px;
+        background: Theme.brand.with-alpha(0.035);
+        border-width: 1px;
+        border-color: Theme.brand.with-alpha(0.12);
+        accessible-role: none;
+    }
+
+    VerticalLayout {
+        padding: root.compact ? 16px : 22px;
+        spacing: root.compact ? 7px : 10px;
+        alignment: center;
+        Text {
+            text: "CODEX  /  SHARED CONFIG";
+            color: Theme.brand;
+            font-family: "Menlo";
+            font-size: 9px;
+            letter-spacing: 1px;
+        }
+
+        Text {
+            text: "一份配置，处处顺手。";
+            color: Theme.primary-text;
+            font-size: root.compact ? 23px : 28px;
+            font-weight: 600;
+        }
+
+        Text {
+            text: "切换连接，保留熟悉的工作习惯。";
+            color: Theme.muted-text;
+            font-size: 12px;
+        }
+
+        HorizontalLayout {
+            spacing: 7px;
+            height: 26px;
+            ConfigTag {
+                width: 67px;
+                text: "插件";
+                icon: @image-url("../../assets/ui/blocks.svg");
+                open: root.open;
+                order: 0;
+            }
+
+            ConfigTag {
+                width: 72px;
+                text: "Hook";
+                icon: @image-url("../../assets/ui/terminal.svg");
+                open: root.open;
+                order: 1;
+            }
+
+            ConfigTag {
+                width: 90px;
+                text: "环境变量";
+                icon: @image-url("../../assets/ui/code.svg");
+                open: root.open;
+                order: 2;
+            }
+
+            Rectangle {
+                horizontal-stretch: 1;
+            }
+        }
+    }
+    // The frame clock is inactive when closed or reduced motion is requested.
+    Rectangle {
+        x: parent.width - 160px;
+        y: (parent.height - self.height) / 2;
+        width: 130px;
+        height: 110px;
+        visible: root.width > 560px;
+        accessible-role: none;
+        Rectangle {
+            x: 20px + 22px * root.spread;
+            y: 20px - 10px * root.spread + 3px * sin(root.phase);
+            width: 64px;
+            height: 72px;
+            transform-rotation: 14deg * root.spread;
+            border-radius: 12px;
+            border-width: 1px;
+            border-color: Theme.code-key.with-alpha(0.3);
+            background: Theme.code-key.with-alpha(Theme.dark ? 0.12 : 0.08);
+        }
+
+        Rectangle {
+            x: 20px - 8px * root.spread;
+            y: 20px + 8px * root.spread - 3px * sin(root.phase);
+            width: 64px;
+            height: 72px;
+            transform-rotation: -14deg * root.spread;
+            border-radius: 12px;
+            border-width: 1px;
+            border-color: Theme.brand.with-alpha(0.36);
+            background: Theme.brand.with-alpha(0.13);
+        }
+
+        Rectangle {
+            x: 24px;
+            y: 17px + 3px * sin(root.phase + 90deg);
+            width: 64px;
+            height: 72px;
+            border-radius: 12px;
+            border-width: 1px;
+            border-color: Theme.brand.with-alpha(0.5);
+            background: @linear-gradient(145deg, Theme.panel 0%, Theme.brand-surface 100%);
+            drop-shadow-blur: 16px;
+            drop-shadow-offset-y: 8px;
+            drop-shadow-color: Theme.dark ? #00000035 : #334f3d18;
+            Image {
+                x: 20px;
+                y: 15px;
+                width: 24px;
+                height: 24px;
+                source: @image-url("../../assets/ui/code.svg");
+                colorize: Theme.brand;
+            }
+
+            Rectangle {
+                x: 17px;
+                y: 47px;
+                width: 30px;
+                height: 3px;
+                border-radius: 2px;
+                background: Theme.brand.with-alpha(0.38);
+            }
+
+            Rectangle {
+                x: 17px;
+                y: 55px;
+                width: 20px;
+                height: 3px;
+                border-radius: 2px;
+                background: Theme.brand.with-alpha(0.2);
+            }
+        }
+
+        Rectangle {
+            x: 100px;
+            y: 78px - 4px * sin(root.phase);
+            width: 7px;
+            height: 7px;
+            border-radius: 4px;
+            background: Theme.code-key.with-alpha(0.6);
+        }
+    }
+}
+
+component ConfigAction inherits Rectangle {
+    in property <string> text;
+    in property <image> icon;
+    in property <brush> icon-color;
+    in property <bool> primary;
+    in property <bool> ghost;
+    in property <bool> loading;
+    in property <bool> enabled: true;
+    callback clicked();
+    height: 42px;
+    forward-focus: action;
+    accessible-role: none;
+    private property <float> sheen: action.hovered && root.enabled ? 1 : 0;
+    animate sheen {
+        duration: Theme.fast > 0ms ? 650ms : 0ms;
+        easing: cubic-bezier(0.22, 1, 0.36, 1);
+    }
+    action := QuietButton {
+        width: root.width;
+        height: root.height;
+        text: root.text;
+        icon: root.icon;
+        icon-color: root.icon-color;
+        primary: root.primary;
+        ghost: root.ghost;
+        loading: root.loading;
+        enabled: root.enabled;
+        border-radius: 10px;
+        border-color: root.primary ? Theme.solid : self.hovered && root.enabled ? Theme.brand : Theme.border;
+        clicked => { root.clicked(); }
+    }
+
+    Rectangle {
+        width: root.width;
+        height: root.height;
+        border-radius: 10px;
+        clip: true;
+        accessible-role: none;
+        Rectangle {
+            x: -self.width + (parent.width + self.width) * root.sheen;
+            width: parent.width * 0.45;
+            height: parent.height;
+            opacity: root.sheen > 0 && root.sheen < 1 ? 1 : 0;
+            background: @linear-gradient(105deg, #ffffff00 0%, #ffffff.with-alpha(Theme.dark ? 0.1 : 0.25) 50%, #ffffff00 100%);
+        }
+    }
+}
 
 export component CommonConfigEditor inherits SurfaceCard {
+    in property <bool> open;
+    in property <bool> compact;
     in property <bool> busy;
     in-out property <string> common-config-draft;
+    in property <string> common-config-saved;
     in property <string> common-config-error;
     in property <string> common-config-message;
     in property <string> common-config-current-source;
@@ -14,149 +307,396 @@ export component CommonConfigEditor inherits SurfaceCard {
     callback save-common-config();
     callback cancel-common-config();
 
+    private property <bool> help-open: false;
+    private property <bool> focus-mode: false;
+    private property <float> intro-reveal: root.focus-mode ? 0 : 1;
+    animate intro-reveal {
+        duration: Theme.drawer-motion;
+        easing: cubic-bezier(0.22, 1, 0.36, 1);
+    }
+    private property <bool> dirty: root.common-config-draft != root.common-config-saved;
+    private property <int> operation: 0;
+    private property <float> edit-reveal: root.dirty ? 1 : 0;
+    animate edit-reveal {
+        duration: Theme.page-motion;
+        easing: cubic-bezier(0.22, 1, 0.36, 1);
+    }
+    changed open => {
+        if root.open { root.help-open = false; root.focus-mode = false; root.operation = 0; }
+    }
+    changed busy => { if !root.busy { root.operation = 0; } }
     vertical-stretch: 1;
     VerticalLayout {
-        padding: 18px;
-        spacing: 12px;
-        HorizontalLayout {
-            height: 36px;
-            Text {
-                text: "编辑通用配置片段";
-                color: Theme.primary-text;
-                font-size: 17px;
-                font-weight: 600;
-                vertical-alignment: center;
-            }
-
-            Rectangle {
-                horizontal-stretch: 1;
-            }
-
-            QuietButton {
-                width: 108px;
-                horizontal-stretch: 0;
-                text: "返回上游";
-                enabled: !root.busy;
-                clicked => { root.cancel-common-config(); }
+        spacing: root.compact ? 12px : 16px;
+        ConfigArrival {
+            height: (root.compact ? 124px : 148px) * root.intro-reveal;
+            visible: root.intro-reveal > 0;
+            clip: true;
+            open: root.open;
+            lag: 40ms;
+            hero := ConfigHero {
+                open: root.open && !root.focus-mode;
+                compact: root.compact;
+                opacity: root.intro-reveal;
             }
         }
 
-        ScrollView {
-            vertical-stretch: 1;
-            VerticalLayout {
-                spacing: 12px;
-                SurfaceCard {
-                    height: 184px;
-                    background: Theme.brand-surface;
-                    border-color: Theme.brand;
-                    VerticalLayout {
-                        padding: 14px;
-                        spacing: 7px;
-                        Text {
-                            text: "什么是通用配置片段？";
-                            color: Theme.brand;
-                            font-size: 14px;
-                            font-weight: 600;
-                        }
-
-                        Text {
-                            text: "用于在不同供应商之间共享插件、Hook、环境变量和其他非敏感 Codex 设置。";
-                            color: Theme.primary-text;
-                            font-size: 12px;
-                            wrap: word-wrap;
-                        }
-
-                        Text {
-                            text: "首次使用会从目标 Codex 配置自动提取；打开此页加载已保存的片段。";
-                            color: Theme.muted-text;
-                            font-size: 12px;
-                            wrap: word-wrap;
-                        }
-
-                        Text {
-                            text: "“从编辑内容提取”会提取供应商表单当前 config.toml 的通用部分并立即保存。手动修改后需点击“保存”。";
-                            color: Theme.muted-text;
-                            font-size: 12px;
-                            wrap: word-wrap;
-                        }
-
-                        Text {
-                            text: "取消只丢弃手动草稿，已完成的提取仍保留。提取会排除供应商、认证和 MCP 项，片段在勾选“应用通用配置”后切换时生效。";
-                            color: Theme.muted-text;
-                            font-size: 12px;
-                            wrap: word-wrap;
-                        }
-                    }
-                }
-
-                if root.common-config-current-source != "": Text {
-                    text: "提取来源：" + root.common-config-current-source;
-                    color: Theme.muted-text;
-                    font-size: 12px;
-                    wrap: word-wrap;
+        VerticalLayout {
+            spacing: 8px;
+            HorizontalLayout {
+                height: 28px;
+                spacing: 10px;
+                cross-axis-alignment: center;
+                Text {
+                    text: "配置片段";
+                    color: Theme.primary-text;
+                    font-size: 13px;
+                    font-weight: 600;
+                    horizontal-stretch: 0;
                 }
 
                 Text {
-                    text: "config.toml (TOML) · 直连或发布路由时与供应商配置合并";
+                    text: root.config-managed ? "当前配置由路由管理" : "在连接之间共享";
+                    horizontal-stretch: 0;
                     color: Theme.muted-text;
-                    font-size: 12px;
-                    wrap: word-wrap;
+                    font-size: 11px;
+                    overflow: elide;
                 }
 
-                CodeEditor {
-                    height: 208px;
-                    vertical-stretch: 0;
-                    text <=> root.common-config-draft;
-                    placeholder-text: "在此填写可共享的 Codex TOML 配置";
-                    enabled: !root.busy && !root.config-managed;
-                    accessible-label: "Codex 通用配置片段";
+                Rectangle {
+                    horizontal-stretch: 1;
                 }
 
-                if root.common-config-error != "": Text {
-                    text: root.common-config-error;
-                    color: Theme.error;
-                    font-size: 12px;
-                    wrap: word-wrap;
+                QuietButton {
+                    width: 108px;
+                    height: 28px;
+                    horizontal-stretch: 0;
+                    text: root.help-open ? "收起说明" : "使用说明";
+                    ghost: true;
+                    selected: root.help-open;
+                    icon: @image-url("../../assets/ui/chevron-down.svg");
+                    icon-width: 12px;
+                    icon-height: 12px;
+                    icon-angle: root.help-open ? 180deg : 0deg;
+                    icon-color: Theme.muted-text;
+                    clicked => { root.help-open = !root.help-open; }
                 }
+            }
 
-                if root.common-config-message != "": Text {
-                    text: root.common-config-message;
-                    color: Theme.muted-text;
-                    font-size: 12px;
-                    wrap: word-wrap;
+            AnimatedSection {
+                expanded: root.help-open;
+                content-height: 120px;
+                Rectangle {
+                    width: parent.width;
+                    height: 120px;
+                    background: Theme.inset;
+                    border-radius: 12px;
+                    HorizontalLayout {
+                        padding: 14px;
+                        spacing: 22px;
+                        VerticalLayout {
+                            spacing: 7px;
+                            alignment: start;
+                            Text {
+                                text: "01  提取与保存";
+                                color: Theme.brand;
+                                font-size: 12px;
+                                font-weight: 600;
+                            }
+
+                            Text {
+                                text: "首次使用从目标 Codex 自动提取，之后加载已保存片段。下方提取按钮会从连接表单立即提取并保存，排除供应商、认证与 MCP 项。";
+                                color: Theme.muted-text;
+                                font-size: 12px;
+                                wrap: word-wrap;
+                            }
+                        }
+
+                        Rectangle {
+                            width: 1px;
+                            horizontal-stretch: 0;
+                            background: Theme.border;
+                        }
+
+                        VerticalLayout {
+                            spacing: 7px;
+                            alignment: start;
+                            Text {
+                                text: "02  应用到连接";
+                                color: Theme.brand;
+                                font-size: 12px;
+                                font-weight: 600;
+                            }
+
+                            Text {
+                                text: "手动编辑后点击保存。勾选“应用通用配置”后，片段在直连或发布路由时合并。取消只丢弃手动草稿，已完成的提取仍保留。";
+                                color: Theme.muted-text;
+                                font-size: 12px;
+                                wrap: word-wrap;
+                            }
+                        }
+                    }
                 }
             }
         }
 
-        HorizontalLayout {
-            height: 36px;
-            spacing: 8px;
-            QuietButton {
-                min-width: 160px;
-                text: "从编辑内容提取";
-                enabled: !root.busy && !root.config-managed;
-                clicked => { root.extract-common-config(); }
-            }
-
+        ConfigArrival {
+            open: root.open;
+            lag: 110ms;
+            vertical-stretch: 1;
+            min-height: 128px;
             Rectangle {
-                horizontal-stretch: 1;
-            }
+                border-radius: 14px;
+                border-width: 1px;
+                border-color: code.has-focus ? Theme.brand.with-alpha(0.75) : Theme.border;
+                background: Theme.inset;
+                drop-shadow-blur: code.has-focus ? 16px : 0px;
+                drop-shadow-color: Theme.brand.with-alpha(0.06);
+                animate border-color, drop-shadow-blur { duration: Theme.page-motion; }
+                VerticalLayout {
+                    spacing: 0px;
+                    Rectangle {
+                        height: 45px;
+                        background: Theme.raised.with-alpha(0.65);
+                        border-top-left-radius: 14px;
+                        border-top-right-radius: 14px;
+                        HorizontalLayout {
+                            padding-left: 16px;
+                            padding-right: 16px;
+                            spacing: 10px;
+                            cross-axis-alignment: center;
+                            Image {
+                                width: 16px;
+                                height: 16px;
+                                source: @image-url("../../assets/ui/code.svg");
+                                colorize: Theme.brand;
+                            }
 
-            QuietButton {
-                width: 80px;
-                horizontal-stretch: 0;
-                text: "取消";
-                enabled: !root.busy;
-                clicked => { root.cancel-common-config(); }
-            }
+                            Text {
+                                text: "config.toml";
+                                color: Theme.primary-text;
+                                font-family: "Menlo";
+                                font-size: 12px;
+                                horizontal-stretch: 0;
+                            }
 
-            QuietButton {
-                width: 92px;
-                horizontal-stretch: 0;
-                text: "保存";
-                primary: true;
-                enabled: !root.busy && !root.config-managed;
-                clicked => { root.save-common-config(); }
+                            Rectangle {
+                                width: 6px * root.edit-reveal;
+                                height: 6px;
+                                horizontal-stretch: 0;
+                                border-radius: 3px;
+                                background: Theme.warning;
+                                opacity: root.edit-reveal;
+                            }
+
+                            Text {
+                                text: "共享片段";
+                                horizontal-stretch: 1;
+                                color: Theme.muted-text;
+                                font-size: 11px;
+                            }
+
+                            Text {
+                                text: root.common-config-draft == "" ? "0 行" : SyntaxHighlighting.line-count(root.common-config-draft) + " 行";
+                                color: Theme.muted-text;
+                                font-family: "Menlo";
+                                font-size: 10px;
+                                horizontal-stretch: 0;
+                            }
+
+                            Rectangle {
+                                width: 44px;
+                                height: 22px;
+                                horizontal-stretch: 0;
+                                border-radius: 5px;
+                                background: Theme.brand.with-alpha(0.1);
+                                Text {
+                                    text: "TOML";
+                                    color: Theme.brand;
+                                    font-family: "Menlo";
+                                    font-size: 9px;
+                                    horizontal-alignment: center;
+                                    vertical-alignment: center;
+                                }
+                            }
+
+                            QuietButton {
+                                width: 28px;
+                                height: 28px;
+                                horizontal-stretch: 0;
+                                text: root.focus-mode ? "退出专注编辑" : "专注编辑";
+                                icon-only: true;
+                                ghost: true;
+                                selected: root.focus-mode;
+                                icon: root.focus-mode ? @image-url("../../assets/ui/minus.svg") : @image-url("../../assets/ui/expand.svg");
+                                icon-width: 14px;
+                                icon-height: 14px;
+                                icon-color: root.focus-mode ? Theme.brand : Theme.muted-text;
+                                enabled: root.open && !root.busy;
+                                clicked => {
+                                    root.focus-mode = !root.focus-mode;
+                                    if root.focus-mode { root.help-open = false; }
+                                    code.focus();
+                                }
+                            }
+                        }
+
+                        Rectangle {
+                            y: parent.height - 1px;
+                            height: 1px;
+                            background: Theme.border;
+                        }
+
+                        Rectangle {
+                            y: parent.height - 2px;
+                            height: 2px;
+                            width: code.has-focus ? 148px : 0px;
+                            x: 0px;
+                            background: @linear-gradient(90deg, Theme.brand 0%, Theme.brand.with-alpha(0.2) 100%);
+                            animate width {
+                                duration: Theme.page-motion;
+                                easing: ease-out;
+                            }
+                        }
+                    }
+
+                    code := CodeEditor {
+                        vertical-stretch: 1;
+                        text <=> root.common-config-draft;
+                        placeholder-text: "# 从连接表单提取，或在这里写下你的 Codex 配置\n\nweb_search = \"live\"\n\n[features]\n";
+                        enabled: root.open && !root.busy && !root.config-managed;
+                        show-line-numbers: true;
+                        content-padding: root.compact ? 12px : 16px;
+                        border-width: 0px;
+                        border-radius: 0px;
+                        background: Theme.dark ? #181d21 : #fcfdfb;
+                        accessible-label: "Codex 通用配置片段";
+                    }
+
+                    Rectangle {
+                        height: 34px;
+                        border-bottom-left-radius: 14px;
+                        border-bottom-right-radius: 14px;
+                        background: Theme.raised.with-alpha(0.35);
+                        HorizontalLayout {
+                            padding-left: 14px;
+                            padding-right: 14px;
+                            spacing: 7px;
+                            cross-axis-alignment: center;
+                            Image {
+                                width: 12px;
+                                height: 12px;
+                                source: @image-url("../../assets/ui/link.svg");
+                                colorize: Theme.muted-text;
+                            }
+
+                            Text {
+                                text: root.common-config-current-source == "" ? "打开时加载已保存的片段" : "提取来源 · " + root.common-config-current-source;
+                                horizontal-stretch: 1;
+                                color: Theme.muted-text;
+                                font-size: 10px;
+                                overflow: elide;
+                            }
+
+                            Text {
+                                text: "UTF-8";
+                                color: Theme.muted-text.with-alpha(0.7);
+                                font-family: "Menlo";
+                                font-size: 9px;
+                                horizontal-stretch: 0;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        FeedbackBanner {
+            top-gap: 0px;
+            tone: root.common-config-error != "" ? 3 : 1;
+            loading: root.busy;
+            title: root.busy ? (root.operation == 1 ? "正在提取配置" : "正在保存配置") : root.common-config-error != "" ? "请检查配置片段" : "提取完成";
+            message: root.busy ? "正在处理通用配置片段…" : root.common-config-error != "" ? root.common-config-error : root.common-config-message;
+        }
+
+        ConfigArrival {
+            height: 72px;
+            open: root.open;
+            lag: 180ms;
+            VerticalLayout {
+                spacing: 10px;
+                HorizontalLayout {
+                    height: 20px;
+                    spacing: 7px;
+                    cross-axis-alignment: center;
+                    Rectangle {
+                        width: 5px;
+                        height: 5px;
+                        horizontal-stretch: 0;
+                        border-radius: 3px;
+                        background: root.config-managed ? Theme.warning : root.dirty ? Theme.warning : Theme.brand;
+                        animate background { duration: Theme.fast; }
+                    }
+
+                    Text {
+                        text: root.config-managed ? "路由管理中，请恢复配置后编辑" : root.dirty ? "有未保存的更改" : "与已保存片段一致";
+                        color: root.dirty || root.config-managed ? Theme.warning : Theme.muted-text;
+                        font-size: 11px;
+                        horizontal-stretch: 0;
+                        animate color { duration: Theme.fast; }
+                    }
+
+                    Text {
+                        text: "·  下次切换连接时应用";
+                        horizontal-stretch: 0;
+                        color: Theme.muted-text;
+                        font-size: 11px;
+                    }
+
+                    Rectangle {
+                        horizontal-stretch: 1;
+                    }
+                }
+
+                HorizontalLayout {
+                    height: 42px;
+                    spacing: 10px;
+                    ConfigAction {
+                        width: 186px;
+                        horizontal-stretch: 0;
+                        text: root.busy && root.operation == 1 ? "正在提取…" : "从连接表单提取";
+                        icon: root.busy && root.operation == 1 ? @image-url("../../assets/ui/loader.svg") : @image-url("../../assets/ui/arrow-down.svg");
+                        icon-color: Theme.brand;
+                        loading: root.busy && root.operation == 1;
+                        enabled: root.open && !root.busy && !root.config-managed;
+                        clicked => { root.operation = 1; root.extract-common-config(); }
+                    }
+
+                    Rectangle {
+                        horizontal-stretch: 1;
+                    }
+
+                    ConfigAction {
+                        width: 86px;
+                        horizontal-stretch: 0;
+                        text: "取消";
+                        ghost: true;
+                        enabled: root.open && !root.busy;
+                        clicked => { root.cancel-common-config(); }
+                    }
+
+                    ConfigAction {
+                        width: 126px;
+                        horizontal-stretch: 0;
+                        text: root.busy && root.operation == 2 ? "正在保存…" : "保存片段";
+                        primary: true;
+                        icon: root.busy && root.operation == 2 ? @image-url("../../assets/ui/loader.svg") : @image-url("../../assets/ui/check.svg");
+                        icon-color: Theme.on-brand;
+                        loading: root.busy && root.operation == 2;
+                        enabled: root.open && !root.busy && !root.config-managed;
+                        clicked => { root.operation = 2; root.save-common-config(); }
+                    }
+                }
             }
         }
     }
