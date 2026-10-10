@@ -99,7 +99,7 @@ fn model_header_tracks_selection_and_respects_disabled_states() {
     set_selection(&app, 3);
     draw(&window, "before-failed-save");
     for _ in 0..2 {
-        click(&window, 240.0, 346.0);
+        click(&window, 240.0, 306.0);
         assert_eq!(last.get(), (true, false));
     }
     assert_eq!(calls.get(), 2);
@@ -116,7 +116,7 @@ fn model_header_tracks_selection_and_respects_disabled_states() {
             },
         );
         let before = calls.get();
-        click(&window, 240.0, 346.0);
+        click(&window, 240.0, 306.0);
         assert_eq!(calls.get(), before + 1);
         assert_eq!(last.get(), (true, false));
         set_selection(&app, 10);
@@ -135,16 +135,16 @@ fn model_header_tracks_selection_and_respects_disabled_states() {
 
     set_selection(&app, 3);
     draw(&window, "before-selected-filter");
-    click(&window, 1015.0, 294.0);
+    click(&window, 1015.0, 254.0);
     draw(&window, "selected-filter-dark");
-    click(&window, 240.0, 346.0);
+    click(&window, 240.0, 306.0);
     assert_eq!(last.get(), (false, true));
     set_selection(&app, 0);
     draw(&window, "empty-selected-dark");
     let before = calls.get();
-    click(&window, 240.0, 346.0);
+    click(&window, 240.0, 306.0);
     assert_eq!(calls.get(), before);
-    click(&window, 935.0, 294.0);
+    click(&window, 935.0, 254.0);
 
     for (busy, managed, loading) in [
         (true, false, false),
@@ -156,7 +156,7 @@ fn model_header_tracks_selection_and_respects_disabled_states() {
         app.set_config_managed(managed);
         app.set_loading(loading);
         draw(&window, "disabled-dark");
-        click(&window, 240.0, 346.0);
+        click(&window, 240.0, 306.0);
         assert_eq!(calls.get(), before);
     }
     app.set_busy(false);
@@ -166,14 +166,14 @@ fn model_header_tracks_selection_and_respects_disabled_states() {
     app.set_selected_model_count(0);
     app.set_selectable_model_count(0);
     draw(&window, "empty-dark");
-    click(&window, 240.0, 346.0);
+    click(&window, 240.0, 306.0);
     assert_eq!(calls.get(), before);
     app.set_models(ModelRc::new(VecModel::from(vec![ModelRow {
         display_name: "待补充资料的模型".into(),
         ..Default::default()
     }])));
     draw(&window, "unavailable-dark");
-    click(&window, 240.0, 346.0);
+    click(&window, 240.0, 306.0);
     assert_eq!(calls.get(), before);
 
     set_selection(&app, 3);
@@ -188,7 +188,7 @@ fn model_header_tracks_selection_and_respects_disabled_states() {
                 "compact-light"
             },
         );
-        click(&window, 240.0, 346.0);
+        click(&window, 240.0, 306.0);
         assert_eq!(last.get(), (true, false));
     }
     assert_eq!(calls.get(), before + 2);
