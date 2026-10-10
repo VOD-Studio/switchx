@@ -45,7 +45,6 @@ import { ActivityPage } from "pages/activity.slint";
 import { ConfigPage } from "pages/config.slint";
 import { ConnectionStatusDialog } from "connection-status.slint";
 import { WorkspaceMenu } from "workspace-menu.slint";
-import { OperationNotice } from "operation-notice.slint";
 
 export {
     XaiQuotaRow,
@@ -86,8 +85,6 @@ export component AppWindow inherits Window {
     in-out property <int> active-page: 0;
     in-out property <bool> drawer-open: false;
     in-out property <bool> workspace-open: false;
-    in-out property <bool> notification-open <=> operation-notice.open;
-    in-out property <int> feedback-sequence: 0;
     in-out property <bool> status-directories-expanded: false;
     changed drawer-open => { if (root.drawer-open) { root.status-directories-expanded = false; } }
     in-out property <bool> loading: true;
@@ -759,41 +756,6 @@ export component AppWindow inherits Window {
                                 icon-color: Theme.muted-text;
                                 clicked => { root.set-appearance(!Theme.dark); }
                             }
-
-                            QuietButton {
-                                y: (parent.height - self.height) / 2;
-                                width: 88px;
-                                text: "连接状态";
-                                ghost: true;
-                                clicked => { root.drawer-open = true; }
-                            }
-
-                            Rectangle {
-                                y: (parent.height - self.height) / 2;
-                                width: 36px;
-                                height: 36px;
-                                QuietButton {
-                                    text: operation-notice.has-message ? "查看最近的操作反馈" : "暂无操作反馈";
-                                    icon-only: true;
-                                    ghost: true;
-                                    selected: root.notification-open && operation-notice.has-message;
-                                    icon: @image-url("../assets/ui/bell.svg");
-                                    icon-color: Theme.muted-text;
-                                    enabled: operation-notice.has-message;
-                                    clicked => { operation-notice.toggle(); }
-                                }
-
-                                Rectangle {
-                                    x: 25px;
-                                    y: 6px;
-                                    width: 5px;
-                                    height: 5px;
-                                    border-radius: 3px;
-                                    background: operation-notice.has-error ? Theme.error : Theme.brand;
-                                    opacity: operation-notice.has-message ? 1 : 0;
-                                    animate opacity, background { duration: Theme.page-motion; }
-                                }
-                            }
                         }
                     }
 
@@ -1221,15 +1183,6 @@ export component AppWindow inherits Window {
         details => { root.workspace-open = false; root.drawer-open = true; }
     }
 
-    operation-notice := OperationNotice {
-        message: root.error-code != "" ? root.error-message : root.action-message;
-        hint: root.error-code != "" ? root.error-action : "";
-        error: root.error-code != "";
-        sequence: root.feedback-sequence;
-        blocked: root.modal-open || root.busy || root.loading;
-        details => { root.drawer-open = true; }
-        dismissed => { app-keyboard.focus(); }
-    }
 
     connection-drawer := Drawer {
         open: (root.connection-picker-open || root.editor-open || root.subscription-editor-open || root.xai-editor-open || root.connection-models-open) && !root.icon-picker-open && !root.common-config-editor-open;

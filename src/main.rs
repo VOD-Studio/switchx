@@ -1,8 +1,11 @@
 use switchx::ui::{
     AccountRow, AppWindow, BatchModelRow, BatchSummary, CodeSpan, CodexQuotaRow,
     ConnectionModelRow, ModelRow, ProviderIconRow, ProviderPresetRow, ProviderRow, RequestBar,
-    RequestRow, RequestStats, SwitchXTray, SyntaxHighlighting, Theme, XaiQuotaRow,
+    RequestRow, RequestStats, SwitchXTray, SyntaxHighlighting, XaiQuotaRow,
 };
+
+#[cfg(target_os = "macos")]
+use switchx::ui::Theme;
 
 #[cfg(target_os = "macos")]
 mod macos;
@@ -568,7 +571,6 @@ fn show_action_feedback(app: &AppWindow, result: Result<String, String>) {
             app.set_error_action("检查输入或刷新后重试；发生配置冲突时先检查目标文件。".into());
         }
     }
-    app.set_feedback_sequence(app.get_feedback_sequence().wrapping_add(1));
 }
 
 struct AccountView {
@@ -5670,6 +5672,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use switchx::ui::Theme;
 
     #[test]
     fn paused_request_rows_keep_aged_history_and_count_arrivals() {
