@@ -4629,6 +4629,14 @@ fn credential_from_args(
 }
 
 fn connect_syntax_highlighting(app: &AppWindow) {
+    app.global::<SyntaxHighlighting>().on_line_count(|source| {
+        source
+            .as_str()
+            .split('\n')
+            .count()
+            .try_into()
+            .unwrap_or(i32::MAX)
+    });
     app.global::<SyntaxHighlighting>()
         .on_spans(|source, language| {
             let spans = code_highlight::spans(source.as_str(), language.as_str())
@@ -7168,7 +7176,8 @@ mod tests {
                     }
                     app.set_edit_key("synthetic-unsaved-key".into());
                     draw("before-back-from-api");
-                    click(left + 50.0, 148.0);
+                    let api_left = (width as f32 - 1120.0).max(60.0) + 26.0;
+                    click(api_left + 50.0, 148.0);
                     assert!(app.get_connection_picker_open());
                     assert!(app.get_edit_key().is_empty());
                 }

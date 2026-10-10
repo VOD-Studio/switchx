@@ -1298,7 +1298,7 @@ export component AppWindow inherits Window {
         open: (root.connection-picker-open || root.editor-open || root.subscription-editor-open || root.xai-editor-open || root.connection-models-open) && !root.icon-picker-open && !root.common-config-editor-open;
         title: root.connection-models-open ? root.connection-models-name : root.connection-picker-open || root.new-connection-form ? "添加连接" : root.editor-open ? "API 连接" : root.subscription-editor-open ? "ChatGPT 订阅" : "Grok 订阅连接";
         subtitle: root.connection-picker-open ? "选择订阅账号或 API 服务，继续配置连接。" : "连接设置与模型目录分别保存，完成后在工作台启用。";
-        panel-width: 820px;
+        panel-width: root.editor-open ? min(1120px, root.width - 60px) : 820px;
         busy: root.busy;
         error-message: root.error-code == "" ? "" : root.error-message + " · " + root.error-action;
         dismissed => { root.close-connection-editor(); }
@@ -1333,40 +1333,59 @@ export component AppWindow inherits Window {
                     overflow: elide;
                 }
             }
-            if !root.connection-picker-open && !root.new-connection-form: editor-tabs := Rectangle {
+            if !root.connection-picker-open && !root.new-connection-form: HorizontalLayout {
                 height: 44px;
-                border-radius: 10px;
-                background: Theme.inset;
-                property <string> connection-id: root.connection-models-open ? root.connection-models-id : root.editor-open ? root.edit-id : root.subscription-editor-open ? root.subscription-id : root.xai-provider-id;
-                Rectangle {
-                    x: root.connection-models-open ? parent.width / 2 + 3px : 4px;
-                    y: 4px;
-                    width: parent.width / 2 - 7px;
-                    height: 36px;
-                    border-radius: 8px;
-                    background: Theme.brand-surface;
-                    animate x {
-                        duration: Theme.drawer-motion;
-                        easing: cubic-bezier(0.22, 1, 0.36, 1);
+                spacing: 16px;
+                cross-axis-alignment: center;
+                editor-tabs := Rectangle {
+                    width: 320px;
+                    horizontal-stretch: 0;
+                    height: 44px;
+                    border-radius: 10px;
+                    background: Theme.inset;
+                    property <string> connection-id: root.connection-models-open ? root.connection-models-id : root.editor-open ? root.edit-id : root.subscription-editor-open ? root.subscription-id : root.xai-provider-id;
+                    Rectangle {
+                        x: root.connection-models-open ? parent.width / 2 + 3px : 4px;
+                        y: 4px;
+                        width: parent.width / 2 - 7px;
+                        height: 36px;
+                        border-radius: 8px;
+                        background: Theme.brand-surface;
+                        animate x {
+                            duration: Theme.drawer-motion;
+                            easing: cubic-bezier(0.22, 1, 0.36, 1);
+                        }
+                    }
+
+                    HorizontalLayout {
+                        padding: 4px;
+                        spacing: 6px;
+                        QuietButton {
+                            text: "连接设置";
+                            ghost: true;
+                            tab: true;
+                            enabled: !root.busy;
+                            clicked => { if root.connection-models-open { root.edit-connection(editor-tabs.connection-id); } }
+                        }
+
+                        QuietButton {
+                            text: "模型目录";
+                            ghost: true;
+                            tab: true;
+                            enabled: !root.busy && !root.config-managed;
+                            clicked => { if !root.connection-models-open { root.begin-connection-models(editor-tabs.connection-id); } }
+                        }
                     }
                 }
 
-                HorizontalLayout {
-                    padding: 4px;
-                    spacing: 6px;
-                    QuietButton {
-                        text: "连接设置";
-                        ghost: true;
-                        enabled: !root.busy;
-                        clicked => { if root.connection-models-open { root.edit-connection(editor-tabs.connection-id); } }
-                    }
+                Rectangle {
+                    horizontal-stretch: 1;
+                }
 
-                    QuietButton {
-                        text: "模型目录";
-                        ghost: true;
-                        enabled: !root.busy && !root.config-managed;
-                        clicked => { if !root.connection-models-open { root.begin-connection-models(editor-tabs.connection-id); } }
-                    }
+                Text {
+                    text: root.editor-open ? "API 连接 / 设置" : root.connection-models-open ? "连接 / 模型目录" : "订阅连接 / 设置";
+                    color: Theme.muted-text;
+                    font-size: 11px;
                 }
             }
             if root.connection-models-open: ConnectionModels {
@@ -1393,50 +1412,47 @@ export component AppWindow inherits Window {
                 save => { root.save-connection-models(); }
                 cancel => { root.connection-models-open = false; }
             }
-            if root.editor-open: ScrollView {
-                VerticalLayout {
-                    ProviderEditor {
-                        busy: root.busy;
-                        editor-open <=> root.editor-open;
-                        delete-confirm <=> root.delete-confirm;
-                        edit-id: root.edit-id;
-                        edit-name <=> root.edit-name;
-                        edit-url <=> root.edit-url;
-                        edit-model <=> root.edit-model;
-                        edit-key <=> root.edit-key;
-                        edit-remote-compaction <=> root.edit-remote-compaction;
-                        edit-use-common-config <=> root.edit-use-common-config;
-                        edit-context-1m <=> root.edit-context-1m;
-                        edit-compact-limit <=> root.edit-compact-limit;
-                        edit-config-preview: root.edit-config-preview;
-                        edit-config-error: root.edit-config-error;
-                        edit-preset-id: root.edit-preset-id;
-                        edit-icon-name: root.edit-icon-name;
-                        edit-icon: root.edit-icon;
-                        edit-icon-monochrome: root.edit-icon-monochrome;
-                        fetched-models: root.fetched-models;
-                        fetching-models: root.fetching-models;
-                        discovery-message: root.discovery-message;
-                        discovery-scope: root.discovery-scope;
-                        discovery-tone: root.discovery-tone;
-                        config-managed: root.config-managed;
-                        batch-rows: root.batch-models;
-                        batch-summary: root.batch-summary;
-                        batch-query <=> root.batch-query;
-                        border-width: 0px;
-                        background: transparent;
-                        batch-toggle(index) => { root.batch-toggle(index); }
-                        batch-select-all(checked) => { root.batch-select-all(checked); }
-                        batch-filter(query) => { root.batch-filter(query); }
-                        save-provider(id, name, url, model, key) => { root.save-provider(id, name, url, model, key); }
-                        open-common-config() => { root.open-common-config(); }
-                        delete-provider(id) => { root.delete-provider(id); }
-                        open-provider-preset-link(api-key-page) => { root.open-provider-preset-link(api-key-page); }
-                        open-provider-icon-picker() => { root.open-provider-icon-picker(); }
-                        fetch-models(scope) => { root.fetch-models(scope); }
-                        dismiss-discovery => { root.reset-model-discovery(); }
-                    }
-                }
+            if root.editor-open: ProviderEditor {
+                busy: root.busy;
+                compact: root.height < 760px;
+                editor-open <=> root.editor-open;
+                delete-confirm <=> root.delete-confirm;
+                edit-id: root.edit-id;
+                edit-name <=> root.edit-name;
+                edit-url <=> root.edit-url;
+                edit-model <=> root.edit-model;
+                edit-key <=> root.edit-key;
+                edit-remote-compaction <=> root.edit-remote-compaction;
+                edit-use-common-config <=> root.edit-use-common-config;
+                edit-context-1m <=> root.edit-context-1m;
+                edit-compact-limit <=> root.edit-compact-limit;
+                edit-config-preview: root.edit-config-preview;
+                edit-config-error: root.edit-config-error;
+                edit-preset-id: root.edit-preset-id;
+                edit-icon-name: root.edit-icon-name;
+                edit-icon: root.edit-icon;
+                edit-icon-monochrome: root.edit-icon-monochrome;
+                fetched-models: root.fetched-models;
+                fetching-models: root.fetching-models;
+                discovery-message: root.discovery-message;
+                discovery-scope: root.discovery-scope;
+                discovery-tone: root.discovery-tone;
+                config-managed: root.config-managed;
+                batch-rows: root.batch-models;
+                batch-summary: root.batch-summary;
+                batch-query <=> root.batch-query;
+                border-width: 0px;
+                background: transparent;
+                batch-toggle(index) => { root.batch-toggle(index); }
+                batch-select-all(checked) => { root.batch-select-all(checked); }
+                batch-filter(query) => { root.batch-filter(query); }
+                save-provider(id, name, url, model, key) => { root.save-provider(id, name, url, model, key); }
+                open-common-config() => { root.open-common-config(); }
+                delete-provider(id) => { root.delete-provider(id); }
+                open-provider-preset-link(api-key-page) => { root.open-provider-preset-link(api-key-page); }
+                open-provider-icon-picker() => { root.open-provider-icon-picker(); }
+                fetch-models(scope) => { root.fetch-models(scope); }
+                dismiss-discovery => { root.reset-model-discovery(); }
             }
 
             if root.subscription-editor-open: SubscriptionEditor {
