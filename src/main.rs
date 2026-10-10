@@ -6323,14 +6323,14 @@ mod tests {
                 set_provider_check_id(&app, "synthetic-grok", "");
                 draw();
                 window.dispatch_event(WindowEvent::PointerScrolled {
-                    position: slint::LogicalPosition::new(500.0, 440.0),
+                    position: slint::LogicalPosition::new(500.0, 400.0),
                     delta_x: 0.0,
                     delta_y: 2000.0,
                 });
                 draw();
                 let visible_cards = app.get_filtered_providers();
                 // Use the footer check action, then the other card's controls.
-                click(width as f32 - 88.0, 445.0);
+                click(width as f32 - 88.0, 405.0);
                 assert!(
                     !app.get_busy(),
                     "one provider check must not lock the whole app"
@@ -6370,13 +6370,13 @@ mod tests {
                     receiver.try_recv().is_err(),
                     "duplicate checks must be ignored"
                 );
-                click(width as f32 - 88.0, 608.0);
+                click(width as f32 - 88.0, 568.0);
                 let Ok(Command::Check { id, check_id, .. }) = receiver.try_recv() else {
                     panic!("the other connection must still be checkable");
                 };
                 assert_eq!(id, "synthetic-grok");
                 let grok_check = check_id;
-                click(width as f32 - 122.0, 537.0);
+                click(width as f32 - 122.0, 497.0);
                 assert!(
                     matches!(receiver.try_recv(), Ok(Command::BeginXaiEditor(id)) if id == "synthetic-grok")
                 );
@@ -7124,26 +7124,26 @@ mod tests {
                 app.invoke_set_appearance(dark);
                 let suffix = format!("{}-{width}x{height}", if dark { "dark" } else { "light" });
                 draw(&format!("connections-{suffix}"));
-                click(width as f32 - 100.0, 282.0);
+                click(width as f32 - 100.0, 242.0);
                 assert!(app.get_connection_picker_open());
                 draw(&format!("picker-{suffix}"));
-                click(left + 90.0, 200.0);
+                click(left + 90.0, 160.0);
                 assert!(app.get_subscription_editor_open());
                 assert!(!app.get_connection_picker_open());
                 draw(&format!("chatgpt-{suffix}"));
                 app.set_subscription_auth_json("synthetic-unsaved-credential".into());
-                click(left + 50.0, 148.0);
+                click(left + 50.0, 108.0);
                 assert!(app.get_connection_picker_open());
                 assert!(app.get_subscription_auth_json().is_empty());
                 draw("back-from-chatgpt");
-                click(left + 440.0, 200.0);
+                click(left + 440.0, 160.0);
                 assert!(app.get_xai_editor_open());
                 draw(&format!("grok-{suffix}"));
-                click(left + 50.0, 148.0);
+                click(left + 50.0, 108.0);
                 assert!(app.get_connection_picker_open());
                 assert!(!app.get_xai_editor_open());
                 draw("back-from-grok");
-                click(left + 90.0, 320.0);
+                click(left + 90.0, 280.0);
                 assert!(app.get_editor_open());
                 assert!(app.get_edit_url().is_empty());
                 draw(&format!("custom-api-{suffix}"));
@@ -7156,7 +7156,7 @@ mod tests {
                     draw("before-api-preset");
                     click(
                         left + 90.0 + (index % 2) as f32 * 350.0,
-                        410.0 + (index / 2) as f32 * 90.0,
+                        370.0 + (index / 2) as f32 * 90.0,
                     );
                     assert!(app.get_editor_open(), "{}", preset.id);
                     assert_eq!(app.get_edit_preset_id(), preset.id);
@@ -7168,7 +7168,7 @@ mod tests {
                     }
                     app.set_edit_key("synthetic-unsaved-key".into());
                     draw("before-back-from-api");
-                    click(left + 50.0, 148.0);
+                    click(left + 50.0, 108.0);
                     assert!(app.get_connection_picker_open());
                     assert!(app.get_edit_key().is_empty());
                 }
@@ -7188,7 +7188,7 @@ mod tests {
             app.set_config_managed(managed);
             app.set_chatgpt_login_pending(pending);
             draw("disabled-choice");
-            click(356.0, 200.0);
+            click(356.0, 160.0);
             assert_eq!(calls.get(), before);
         }
         app.set_busy(false);
@@ -7199,16 +7199,16 @@ mod tests {
         assert!(!app.get_connection_picker_open());
         app.invoke_open_connection_picker();
         draw("before-chatgpt-close");
-        click(356.0, 200.0);
+        click(356.0, 160.0);
         app.set_subscription_auth_json("synthetic-unsaved-credential".into());
         escape();
         assert!(!app.get_subscription_editor_open());
         assert!(app.get_subscription_auth_json().is_empty());
         app.invoke_open_connection_picker();
         draw("before-grok-close");
-        click(706.0, 200.0);
+        click(706.0, 160.0);
         draw("grok-before-close");
-        click(964.0, 84.0);
+        click(964.0, 44.0);
         assert!(!app.get_xai_editor_open());
         for (busy, managed) in [(true, false), (false, true)] {
             app.set_busy(busy);
