@@ -834,14 +834,15 @@ fn render_workspace_feedback(
             app.set_action_message("".into());
             app.set_notification_open(false);
             snapshot(window, output, &format!("workspace-workbench-{suffix}"))?;
-            click(window, 405.0, 29.0);
+            // The top-bar workspace entry is removed; exercise the menu directly.
+            app.set_workspace_open(true);
             assert!(app.get_workspace_open());
             snapshot(window, output, &format!("workspace-menu-{suffix}"))?;
             click(window, 490.0, 270.0);
             render(window);
             assert_eq!(app.get_active_page(), 5);
             assert!(!app.get_workspace_open());
-            click(window, 405.0, 29.0);
+            app.set_workspace_open(true);
             render(window);
             click(window, 490.0, 314.0);
             render(window);
