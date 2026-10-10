@@ -34,8 +34,9 @@ export component SubscriptionIdentity inherits Rectangle {
     in property <image> icon;
     in property <bool> monochrome;
     in property <bool> enabled: true;
+    in property <bool> interactive: true;
     callback pick();
-    private property <float> hover: touch.has-hover && root.enabled ? 1 : 0;
+    private property <float> hover: touch.has-hover && root.enabled && root.interactive ? 1 : 0;
     animate hover {
         duration: Theme.page-motion;
         easing: ease-out;
@@ -59,10 +60,7 @@ export component SubscriptionIdentity inherits Rectangle {
     animate background, border-color { duration: Theme.fast; }
     clip: true;
     forward-focus: keyboard;
-    accessible-role: button;
-    accessible-label: "选择 ChatGPT 订阅头像";
-    accessible-enabled: root.enabled;
-    accessible-action-default => { if root.enabled { root.pick(); } }
+    accessible-role: none;
 
     HorizontalLayout {
         padding: 12px;
@@ -101,7 +99,7 @@ export component SubscriptionIdentity inherits Rectangle {
             }
 
             Text {
-                text: (root.platform == "" ? "OpenAI" : root.platform) + " · 点击更换头像";
+                text: (root.platform == "" ? "OpenAI" : root.platform) + (root.interactive ? " · 点击更换头像" : " · 订阅连接");
                 font-size: 10px;
                 color: Theme.muted-text;
                 overflow: elide;
@@ -118,15 +116,22 @@ export component SubscriptionIdentity inherits Rectangle {
         accessible-role: none;
     }
 
+    if root.interactive: Rectangle {
+        accessible-role: button;
+        accessible-label: "选择 ChatGPT 订阅头像";
+        accessible-enabled: root.enabled;
+        accessible-action-default => { if root.enabled { root.pick(); } }
+    }
+
     touch := TouchArea {
-        enabled: root.enabled;
+        enabled: root.enabled && root.interactive;
         mouse-cursor: pointer;
         clicked => { keyboard.focus(); root.pick(); }
     }
 
     keyboard := FocusScope {
         width: 0px;
-        enabled: root.enabled;
+        enabled: root.enabled && root.interactive;
         key-pressed(event) => {
             if event.text == Key.Space || event.text == Key.Return { root.pick(); return accept; }
             return reject;
@@ -137,6 +142,8 @@ export component SubscriptionIdentity inherits Rectangle {
 export component SubscriptionBindingHint inherits Rectangle {
     in property <int> choice;
     in property <string> detail;
+    in property <string> default-label: "跟随 Codex 登录";
+    in property <string> saved-label: "已选择保存账号";
     private property <bool> landed: false;
     private property <float> ping: root.landed ? 1 : 0;
     animate ping {
@@ -189,7 +196,7 @@ export component SubscriptionBindingHint inherits Rectangle {
             }
 
             Text {
-                text: root.choice == 0 ? "跟随 Codex 登录" : "已选择保存账号";
+                text: root.choice == 0 ? root.default-label : root.saved-label;
                 font-size: 11px;
                 font-weight: 500;
                 color: Theme.primary-text;

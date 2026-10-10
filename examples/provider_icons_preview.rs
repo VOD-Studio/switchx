@@ -11,6 +11,7 @@
 //! API connection editor: add --provider-editor-design.
 //! Add-connection navigation: add --connection-picker-motion (frames and back actions).
 //! ChatGPT subscription editor: add --subscription-editor-design.
+//! Grok subscription editor: add --xai-editor-design.
 //! Reasoning multi-select: add --reasoning-picker (themes, sizes, and motion).
 //! Shared configuration: add --common-config-design or --common-config-native.
 
@@ -1494,6 +1495,171 @@ fn connect_code_highlighting(app: &AppWindow) {
         });
 }
 
+fn render_xai_editor(
+    app: &AppWindow,
+    window: &MinimalSoftwareWindow,
+    output: &Path,
+) -> Result<(), Box<dyn Error>> {
+    app.set_active_page(1);
+    app.set_xai_provider_name("Grok · 工作账号".into());
+    app.set_xai_account_ids(ModelRc::new(VecModel::from(vec![
+        "@default".into(),
+        "synthetic-grok-account".into(),
+    ])));
+    app.set_xai_account_options(ModelRc::new(VecModel::from(vec![
+        "跟随默认 Grok 账号（发布时固定）".into(),
+        "工作账号 · preview@example.invalid".into(),
+    ])));
+    let saves = Rc::new(Cell::new(0));
+    let saved = saves.clone();
+    app.on_save_xai(move || saved.set(saved.get() + 1));
+    let models = Rc::new(Cell::new(0));
+    let model = models.clone();
+    app.on_begin_connection_models(move |id| {
+        assert_eq!(id, "preview-grok");
+        model.set(model.get() + 1);
+    });
+    let deletes = Rc::new(Cell::new(0));
+    let deleted = deletes.clone();
+    app.on_delete_provider(move |id| {
+        assert_eq!(id, "preview-grok");
+        deleted.set(deleted.get() + 1);
+    });
+    let accounts = Rc::new(Cell::new(0));
+    let managed = accounts.clone();
+    app.on_xai_account_action(move |action, _| {
+        if action == 0 {
+            managed.set(managed.get() + 1);
+        }
+    });
+    for (width, height) in [(1200, 820), (1000, 680), (1600, 1000)] {
+        app.window().set_size(PhysicalSize::new(width, height));
+        let left = (width as f32 - 1120.0).max(60.0) + 26.0;
+        let right = left + 312.0;
+        for dark in [false, true] {
+            set_theme(app, window, dark);
+            let suffix = format!("{}-{width}x{height}", if dark { "dark" } else { "light" });
+            app.set_xai_provider_id("preview-grok".into());
+            app.set_delete_confirm(false);
+            app.set_xai_account_choice(1);
+            app.set_xai_editor_open(true);
+            snapshot(window, output, &format!("xai-editor-{suffix}"))?;
+            click(
+                window,
+                left + 245.0,
+                if height < 760 { 354.0 } else { 386.0 },
+            );
+            render(window);
+            for key in [slint::platform::Key::Home, slint::platform::Key::Return] {
+                window.dispatch_event(WindowEvent::KeyPressed { text: key.into() });
+                window.dispatch_event(WindowEvent::KeyReleased { text: key.into() });
+            }
+            render(window);
+            assert_eq!(
+                app.get_xai_account_choice(),
+                0,
+                "the account picker supports keyboard selection"
+            );
+            app.set_xai_account_choice(1);
+            render(window);
+            let count = models.get();
+            click(
+                window,
+                right + 90.0,
+                height as f32 - if height < 760 { 133.0 } else { 137.0 },
+            );
+            assert_eq!(models.get(), count + 1, "the model directory is reachable");
+            let count = saves.get();
+            click(window, width as f32 - 90.0, height as f32 - 46.0);
+            assert_eq!(saves.get(), count + 1, "save remains in the fixed footer");
+            let model_count = models.get();
+            app.set_config_managed(true);
+            snapshot(window, output, &format!("xai-managed-{suffix}"))?;
+            click(window, width as f32 - 90.0, height as f32 - 46.0);
+            click(
+                window,
+                right + 90.0,
+                height as f32 - if height < 760 { 133.0 } else { 137.0 },
+            );
+            assert_eq!(saves.get(), count + 1);
+            assert_eq!(models.get(), model_count, "managed models cannot be edited");
+            app.set_config_managed(false);
+            app.set_busy(true);
+            snapshot(window, output, &format!("xai-saving-{suffix}"))?;
+            click(window, width as f32 - 202.0, height as f32 - 46.0);
+            assert!(app.get_xai_editor_open(), "saving prevents cancellation");
+            app.set_busy(false);
+            let count = deletes.get();
+            click(window, left + 56.0, height as f32 - 46.0);
+            assert!(app.get_delete_confirm());
+            assert_eq!(deletes.get(), count, "deletion requires confirmation");
+            click(window, left + 56.0, height as f32 - 46.0);
+            assert_eq!(deletes.get(), count + 1);
+            app.set_delete_confirm(false);
+            app.set_xai_account_choice(0);
+            snapshot(window, output, &format!("xai-default-{suffix}"))?;
+            let count = accounts.get();
+            click(
+                window,
+                left + 140.0,
+                if height < 760 { 492.0 } else { 538.0 },
+            );
+            assert_eq!(accounts.get(), count + 1, "account management is reachable");
+            assert_eq!(app.get_connections_tab(), 1);
+            assert!(!app.get_xai_editor_open());
+            app.set_connections_tab(0);
+            app.set_xai_editor_open(true);
+            app.set_error_code("synthetic-preview-error".into());
+            app.set_error_message("合成保存错误：绑定的 Grok 账号不可用，请重新选择。".into());
+            app.set_error_action("在账号管理中检查后重试".into());
+            snapshot(window, output, &format!("xai-error-{suffix}"))?;
+            app.set_error_code("".into());
+            app.set_error_message("".into());
+            app.set_error_action("".into());
+            app.set_xai_editor_open(false);
+            app.set_xai_provider_id("".into());
+            app.set_xai_editor_open(true);
+            snapshot(window, output, &format!("xai-new-{suffix}"))?;
+            let count = saves.get();
+            click(window, width as f32 - 90.0, height as f32 - 46.0);
+            assert_eq!(saves.get(), count + 1, "new connections can be saved");
+            click(window, width as f32 - 220.0, height as f32 - 46.0);
+            assert!(!app.get_xai_editor_open(), "cancel remains reachable");
+        }
+    }
+    app.window().set_size(PhysicalSize::new(1200, 820));
+    set_theme(app, window, true);
+    app.set_xai_provider_id("preview-grok".into());
+    app.global::<Theme>().set_animations_enabled(true);
+    app.set_xai_editor_open(true);
+    play(
+        window,
+        output,
+        "xai-enter",
+        &[0, 64, 144, 256, 416, 640, 960],
+    )?;
+    app.set_xai_account_choice(1);
+    play(window, output, "xai-binding", &[0, 64, 144, 256, 416, 640])?;
+    for reduced in [false, true] {
+        app.global::<Theme>().set_animations_enabled(reduced);
+        app.global::<Theme>().set_system_reduced_motion(reduced);
+        app.set_xai_editor_open(false);
+        render_now(window);
+        app.set_xai_editor_open(true);
+        let immediate = render_now(window);
+        frame(960);
+        assert!(
+            immediate.as_bytes() == render_now(window).as_bytes(),
+            "disabled entry motion settles immediately"
+        );
+    }
+    println!(
+        "Synthetic Grok subscription layout and interaction checks: {}",
+        output.display()
+    );
+    Ok(())
+}
+
 fn render_subscription_editor(
     app: &AppWindow,
     window: &MinimalSoftwareWindow,
@@ -2459,8 +2625,7 @@ fn render_connection_picker_motion(
                 assert_eq!(app.get_subscription_editor_open(), chatgpt);
                 assert_eq!(app.get_xai_editor_open(), !chatgpt);
                 app.set_subscription_auth_json("synthetic-unsaved-credential".into());
-                let form_left = if chatgpt { api_left } else { picker_left };
-                click(window, form_left + 50.0, 108.0);
+                click(window, api_left + 50.0, 108.0);
                 assert!(app.get_connection_picker_open());
                 assert!(app.get_subscription_auth_json().is_empty());
                 assert!(!app.get_subscription_editor_open());
@@ -2532,6 +2697,10 @@ fn main() -> Result<(), Box<dyn Error>> {
     if native_common || std::env::args().any(|arg| arg == "--common-config-design") {
         app.show()?;
         return render_common_config(&app, &window, output);
+    }
+    if std::env::args().any(|arg| arg == "--xai-editor-design") {
+        app.show()?;
+        return render_xai_editor(&app, &window, output);
     }
     if native_provider || std::env::args().any(|arg| arg == "--provider-editor-design") {
         app.show()?;

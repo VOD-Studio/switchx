@@ -1,101 +1,401 @@
 import { Theme } from "../tokens.slint";
+import { QuietScrollView as ScrollView } from "../scroll-view.slint";
 import {
     QuietButton,
     QuietLineEdit as LineEdit,
     QuietComboBox as ComboBox,
+    StatusPill,
     SurfaceCard,
 } from "../components.slint";
+import { ConnectionField } from "connection-controls.slint";
+import {
+    SubscriptionStage,
+    SubscriptionIdentity,
+    SubscriptionBindingHint,
+} from "subscription-surfaces.slint";
+
+component SetupStep inherits Rectangle {
+    in property <string> number;
+    in property <string> title;
+    in property <string> detail;
+    in property <bool> current;
+    height: step.preferred-height;
+    step := HorizontalLayout {
+        spacing: 12px;
+        alignment: start;
+        Rectangle {
+            width: 28px;
+            height: 28px;
+            horizontal-stretch: 0;
+            border-radius: 9px;
+            background: root.current ? Theme.brand-surface : Theme.raised;
+            Text {
+                text: root.number;
+                font-size: 11px;
+                font-weight: 600;
+                color: root.current ? Theme.brand : Theme.muted-text;
+                horizontal-alignment: center;
+                vertical-alignment: center;
+            }
+        }
+
+        VerticalLayout {
+            spacing: 5px;
+            Text {
+                text: root.title;
+                font-size: 12px;
+                font-weight: 500;
+                color: Theme.primary-text;
+            }
+
+            Text {
+                text: root.detail;
+                font-size: 11px;
+                color: Theme.muted-text;
+                wrap: word-wrap;
+            }
+        }
+    }
+}
+
 export component XaiEditor inherits SurfaceCard {
     in property <bool> busy;
+    in property <bool> compact;
     in property <bool> config-managed;
     in property <string> provider-id;
     in-out property <string> provider-name;
     in property <[string]> accounts;
     in-out property <int> choice;
     in-out property <bool> delete-confirm;
-    in property <string> error;
     callback save();
     callback cancel();
     callback delete-provider(string);
     callback manage-accounts();
+    callback configure-models();
+    private property <bool> has-choice: root.choice >= 0 && root.choice < root.accounts.length;
+    private property <string> account-label: !root.has-choice ? "请选择 Grok 账号" : root.choice == 0 ? "跟随默认 Grok 账号" : root.accounts[root.choice];
+    private property <string> binding-detail: root.choice == 0 ? "发布时使用默认 Grok 账号，并在本次路由中固定。切换默认账号后，重新发布即可应用。" : "这条连接使用所选的保存账号。更换账号时，在此重新选择并保存连接。";
+
+    vertical-stretch: 1;
+    min-height: 300px;
     VerticalLayout {
-        padding: 18px;
         spacing: 16px;
-        Text {
-            text: root.provider-id == "" ? "添加 Grok 订阅连接" : "编辑 Grok 订阅连接";
-            color: Theme.primary-text;
-            font-size: 17px;
-            font-weight: 600;
+        HorizontalLayout {
+            spacing: 20px;
+            Rectangle {
+                width: 292px;
+                horizontal-stretch: 0;
+                ScrollView {
+                    horizontal-scrollbar-policy: always-off;
+                    VerticalLayout {
+                        padding-right: 4px;
+                        spacing: root.compact ? 10px : 18px;
+                        alignment: start;
+                        SubscriptionStage {
+                            wait: 32ms;
+                            content-height: root.compact ? 72px : 84px;
+                            SubscriptionIdentity {
+                                name: root.provider-name == "" ? "新的 Grok 连接" : root.provider-name;
+                                platform: "xAI";
+                                icon: @image-url("../../assets/providers/icons/grok.svg");
+                                monochrome: true;
+                                interactive: false;
+                            }
+                        }
+
+                        SubscriptionStage {
+                            wait: 88ms;
+                            content-height: fields.preferred-height;
+                            fields := VerticalLayout {
+                                spacing: root.compact ? 10px : 16px;
+                                alignment: start;
+                                HorizontalLayout {
+                                    height: 20px;
+                                    cross-axis-alignment: center;
+                                    Text {
+                                        text: "连接信息";
+                                        font-size: 13px;
+                                        font-weight: 600;
+                                        color: Theme.primary-text;
+                                    }
+
+                                    Rectangle {
+                                        horizontal-stretch: 1;
+                                    }
+
+                                    StatusPill {
+                                        width: 50px;
+                                        height: 20px;
+                                        label: "订阅";
+                                        ink: Theme.brand;
+                                        fill: Theme.brand-surface;
+                                    }
+                                }
+
+                                ConnectionField {
+                                    label: "连接名称";
+                                    LineEdit {
+                                        text <=> root.provider-name;
+                                        placeholder-text: "例如 Grok · 工作账号";
+                                        accessible-label: "Grok 连接名称";
+                                        enabled: !root.busy && !root.config-managed;
+                                    }
+                                }
+
+                                ConnectionField {
+                                    label: "绑定账号";
+                                    ComboBox {
+                                        model: root.accounts;
+                                        current-index <=> root.choice;
+                                        accessible-label: "为 Grok 订阅连接选择已保存账号";
+                                        enabled: !root.busy && !root.config-managed;
+                                    }
+                                }
+
+                                SubscriptionBindingHint {
+                                    choice: root.choice;
+                                    default-label: "跟随默认账号";
+                                    saved-label: "指定保存账号";
+                                    detail: root.binding-detail;
+                                }
+
+                                QuietButton {
+                                    text: "管理 Grok 账号";
+                                    icon: @image-url("../../assets/ui/connections.svg");
+                                    icon-color: Theme.brand;
+                                    enabled: !root.busy;
+                                    clicked => { root.manage-accounts(); }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+
+            SubscriptionStage {
+                wait: 112ms;
+                content-height: 0px;
+                horizontal-stretch: 1;
+                vertical-stretch: 1;
+                VerticalLayout {
+                    spacing: 12px;
+                    HorizontalLayout {
+                        height: 44px;
+                        spacing: 10px;
+                        cross-axis-alignment: center;
+                        Rectangle {
+                            width: 38px;
+                            height: 38px;
+                            border-radius: 11px;
+                            background: Theme.brand-surface;
+                            Image {
+                                x: 10px;
+                                y: 10px;
+                                width: 18px;
+                                height: 18px;
+                                source: @image-url("../../assets/ui/connections.svg");
+                                colorize: Theme.brand;
+                            }
+                        }
+
+                        VerticalLayout {
+                            spacing: 4px;
+                            Text {
+                                text: "订阅概览";
+                                font-size: 16px;
+                                font-weight: 600;
+                                color: Theme.primary-text;
+                            }
+
+                            Text {
+                                text: "账号绑定 · 模型准备";
+                                font-size: 11px;
+                                color: Theme.muted-text;
+                            }
+                        }
+
+                        Rectangle {
+                            horizontal-stretch: 1;
+                        }
+
+                        StatusPill {
+                            width: 64px;
+                            height: 22px;
+                            label: "Grok 订阅";
+                            ink: Theme.brand;
+                            fill: Theme.brand-surface;
+                        }
+                    }
+
+                    Rectangle {
+                        height: binding.preferred-height;
+                        border-radius: 12px;
+                        background: Theme.inset;
+                        border-width: 1px;
+                        border-color: Theme.border;
+                        binding := VerticalLayout {
+                            padding: root.compact ? 16px : 20px;
+                            spacing: 12px;
+                            HorizontalLayout {
+                                height: 20px;
+                                cross-axis-alignment: center;
+                                Text {
+                                    text: "绑定的订阅账号";
+                                    font-size: 11px;
+                                    font-weight: 500;
+                                    color: Theme.muted-text;
+                                }
+
+                                Rectangle {
+                                    horizontal-stretch: 1;
+                                }
+
+                                StatusPill {
+                                    width: 64px;
+                                    height: 20px;
+                                    label: root.choice == 0 ? "默认账号" : "指定账号";
+                                    ink: Theme.muted-text;
+                                    fill: Theme.raised;
+                                }
+                            }
+
+                            Text {
+                                text: root.account-label;
+                                font-size: 17px;
+                                font-weight: 600;
+                                color: Theme.primary-text;
+                                overflow: elide;
+                            }
+
+                            Text {
+                                text: root.choice == 0 ? "在账号管理中设置默认账号，发布连接时核对。" : "发布连接时核对账号状态，准备好后即可使用。";
+                                font-size: 11px;
+                                color: Theme.muted-text;
+                                wrap: word-wrap;
+                            }
+                        }
+                    }
+
+                    Rectangle {
+                        vertical-stretch: 1;
+                        border-radius: 12px;
+                        background: Theme.brand-surface.with-alpha(0.35);
+                        border-width: 1px;
+                        border-color: Theme.brand.with-alpha(0.12);
+                        VerticalLayout {
+                            padding: root.compact ? 16px : 20px;
+                            spacing: root.compact ? 12px : 18px;
+                            HorizontalLayout {
+                                height: 20px;
+                                spacing: 8px;
+                                cross-axis-alignment: center;
+                                Image {
+                                    width: 16px;
+                                    height: 16px;
+                                    source: @image-url("../../assets/ui/blocks.svg");
+                                    colorize: Theme.brand;
+                                }
+
+                                Text {
+                                    text: "准备模型";
+                                    font-size: 13px;
+                                    font-weight: 600;
+                                    color: Theme.primary-text;
+                                }
+                            }
+
+                            ScrollView {
+                                horizontal-scrollbar-policy: always-off;
+                                VerticalLayout {
+                                    padding-right: 4px;
+                                    spacing: root.compact ? 16px : 24px;
+                                    alignment: start;
+                                    SetupStep {
+                                        number: "01";
+                                        title: "保存连接";
+                                        detail: "保存连接名称与账号绑定。";
+                                        current: root.provider-id == "";
+                                    }
+
+                                    SetupStep {
+                                        number: "02";
+                                        title: "配置模型目录";
+                                        detail: "批量添加常用模型，调整上下文与推理参数。";
+                                        current: root.provider-id != "";
+                                    }
+
+                                    SetupStep {
+                                        number: "03";
+                                        title: "在工作台启用";
+                                        detail: "一次加入整组模型，预览并启用连接。";
+                                    }
+                                }
+                            }
+
+                            if root.provider-id != "": QuietButton {
+                                width: 144px;
+                                text: "查看模型目录";
+                                ghost: true;
+                                left-aligned: true;
+                                icon: @image-url("../../assets/ui/arrow.svg");
+                                icon-color: Theme.brand;
+                                enabled: !root.busy && !root.config-managed;
+                                clicked => { root.configure-models(); }
+                            }
+                            if root.provider-id == "": Text {
+                                text: "保存后，继续配置这条连接的模型目录。";
+                                font-size: 11px;
+                                color: Theme.muted-text;
+                                wrap: word-wrap;
+                            }
+                        }
+                    }
+                }
+            }
         }
 
-        Text {
-            text: "连接名称";
-            color: Theme.primary-text;
-            font-size: 13px;
-        }
-
-        LineEdit {
-            text <=> root.provider-name;
-            placeholder-text: "例如：我的 Grok";
-            accessible-label: "Grok 连接名称";
-        }
-
-        Text {
-            text: "绑定账号";
-            color: Theme.primary-text;
-            font-size: 13px;
-        }
-
-        ComboBox {
-            model: root.accounts;
-            current-index <=> root.choice;
-            enabled: !root.busy;
-        }
-
-        QuietButton {
-            text: "管理 Grok 账号";
-            enabled: !root.busy;
-            clicked => { root.manage-accounts(); }
-        }
-
-        Text {
-            text: "保存连接后，在模型目录中批量配置模型，再到工作台一次加入整组模型。";
-            color: Theme.muted-text;
-            font-size: 13px;
-            wrap: word-wrap;
-        }
-
-        if root.error != "": Text {
-            text: root.error;
-            color: Theme.error;
-            font-size: 13px;
-            wrap: word-wrap;
-        }
         Rectangle {
-            vertical-stretch: 1;
+            height: 1px;
+            background: Theme.border;
         }
 
         HorizontalLayout {
+            height: 40px;
             spacing: 8px;
+            cross-axis-alignment: center;
             if root.provider-id != "": QuietButton {
                 text: root.delete-confirm ? "确认删除连接" : "删除连接";
+                width: 112px;
+                ghost: true;
                 enabled: !root.busy && !root.config-managed;
                 clicked => { if root.delete-confirm { root.delete-provider(root.provider-id); } else { root.delete-confirm = true; } }
             }
+            Text {
+                text: "保存连接，在工作台启用。";
+                color: Theme.muted-text;
+                font-size: 11px;
+                overflow: elide;
+            }
+
             Rectangle {
                 horizontal-stretch: 1;
             }
 
             QuietButton {
                 text: "取消";
+                width: 80px;
                 enabled: !root.busy;
                 clicked => { root.cancel(); }
             }
 
             QuietButton {
-                text: root.provider-id == "" ? "保存并配置模型" : "保存连接";
+                text: root.busy ? "正在保存…" : root.provider-id == "" ? "保存并配置模型" : "保存连接";
+                width: root.provider-id == "" ? 152px : 128px;
                 primary: true;
-                enabled: !root.busy && !root.config-managed && root.provider-name != "" && root.accounts.length > 0;
+                loading: root.busy;
+                icon: root.busy ? @image-url("../../assets/ui/loader.svg") : @image-url("../../assets/ui/check.svg");
+                icon-color: Theme.on-brand;
+                enabled: !root.busy && !root.config-managed && root.provider-name != "" && root.has-choice;
                 clicked => { root.save(); }
             }
         }
