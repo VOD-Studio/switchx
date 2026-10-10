@@ -7241,7 +7241,8 @@ mod tests {
                 assert!(!app.get_connection_picker_open());
                 draw(&format!("chatgpt-{suffix}"));
                 app.set_subscription_auth_json("synthetic-unsaved-credential".into());
-                click(left + 50.0, 108.0);
+                let subscription_left = (width as f32 - 1120.0).max(60.0) + 26.0;
+                click(subscription_left + 50.0, 108.0);
                 assert!(app.get_connection_picker_open());
                 assert!(app.get_subscription_auth_json().is_empty());
                 draw("back-from-chatgpt");

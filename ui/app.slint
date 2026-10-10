@@ -1264,7 +1264,7 @@ export component AppWindow inherits Window {
         open: (root.connection-picker-open || root.editor-open || root.subscription-editor-open || root.xai-editor-open || root.connection-models-open) && !root.icon-picker-open && !root.common-config-editor-open;
         title: root.connection-models-open ? root.connection-models-name : root.connection-picker-open || root.new-connection-form ? "添加连接" : root.editor-open ? "API 连接" : root.subscription-editor-open ? "ChatGPT 订阅" : "Grok 订阅连接";
         subtitle: root.connection-picker-open ? "选择订阅账号或 API 服务，继续配置连接。" : "连接设置与模型目录分别保存，完成后在工作台启用。";
-        panel-width: root.editor-open ? min(1120px, root.width - 60px) : 820px;
+        panel-width: root.editor-open || root.subscription-editor-open ? min(1120px, root.width - 60px) : 820px;
         busy: root.busy;
         error-message: root.error-code == "" ? "" : root.error-message + " · " + root.error-action;
         dismissed => { root.close-connection-editor(); }
@@ -1401,6 +1401,7 @@ export component AppWindow inherits Window {
 
             if root.subscription-editor-open: SubscriptionEditor {
                 busy: root.busy;
+                compact: root.height < 760px;
                 border-width: 0px;
                 background: transparent;
                 subscription-id: root.subscription-id;
@@ -1431,6 +1432,7 @@ export component AppWindow inherits Window {
                 open-common-config() => { root.open-common-config(); }
                 delete-provider(id) => { root.delete-provider(id); }
                 open-provider-icon-picker() => { root.open-provider-icon-picker(); }
+                configure-models() => { root.begin-connection-models(root.subscription-id); }
                 navigate(page) => { root.cancel-subscription-editor(); root.connections-tab = 1; root.active-page = 1; }
             }
 
