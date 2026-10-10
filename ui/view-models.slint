@@ -52,6 +52,7 @@ export struct ConnectionModelRow {
     upstream-model: string,
     context-window: string,
     reasoning-levels: string,
+    default-reasoning: string,
     removing: bool,
 }
 
@@ -125,6 +126,7 @@ export struct BatchModelRow {
     source: string,
     template-context: string,
     template-levels: string,
+    template-default: string,
     // Compact labels from catalog::reasoning_label, for the parameter chip.
     template-levels-label: string,
     context: string,

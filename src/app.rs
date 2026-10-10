@@ -1051,6 +1051,7 @@ pub struct BatchCandidate {
     pub source: &'static str,
     pub context_window: String,
     pub reasoning_levels: String,
+    pub default_reasoning: String,
 }
 
 pub struct BatchModel<'a> {
@@ -1156,6 +1157,11 @@ fn candidates_for(
                     .and_then(|value| value["context_window"].as_i64())
                     .map(|value| value.to_string())
                     .unwrap_or_default(),
+                default_reasoning: template
+                    .as_ref()
+                    .and_then(|value| value["default_reasoning_level"].as_str())
+                    .unwrap_or_default()
+                    .into(),
                 reasoning_levels: template
                     .as_ref()
                     .and_then(|value| value["supported_reasoning_levels"].as_array())
@@ -1279,6 +1285,7 @@ pub struct ConnectionModel {
     pub upstream_model: String,
     pub context_window: String,
     pub reasoning_levels: String,
+    pub default_reasoning: String,
 }
 
 pub fn save_connection_models(
@@ -1329,20 +1336,13 @@ pub fn save_connection_models(
         if provider.kind == ProviderKind::Chatgpt && source.is_none() {
             return Err(format!("官方目录没有 {model_id}，请获取模型列表后选择"));
         }
-        let allowed = catalog::reasoning_levels(&draft.reasoning_levels)?;
-        let default = source
-            .as_ref()
-            .and_then(|metadata| metadata["default_reasoning_level"].as_str())
-            .filter(|level| allowed.contains(level))
-            .unwrap_or("")
-            .to_owned();
         let metadata = catalog::mapping_metadata(
             model_id,
             name,
             &catalog::MappingSettings {
                 context_window: &draft.context_window,
                 reasoning_levels: Some(&draft.reasoning_levels),
-                default_reasoning: Some(&default),
+                default_reasoning: Some(&draft.default_reasoning),
             },
             source,
         )
