@@ -46,8 +46,6 @@ export component RoutingPage inherits Rectangle {
     callback launch-codex();
     callback show-direct();
     callback restore-config(string);
-    callback switch-api-preview();
-    callback navigate(int);
     vertical-stretch: 1;
     VerticalLayout {
         spacing: 18px;
@@ -365,48 +363,6 @@ export component RoutingPage inherits Rectangle {
                 primary: true;
                 enabled: !root.busy && (root.route-running || root.direct-active || (!root.direct-mode && !root.config-managed && !root.chatgpt-login-pending && root.selected-model-count > 0));
                 clicked => { if (root.route-running) { root.launch-codex(); } else if (root.direct-active) { root.show-direct(); } else { root.inspect-route(); } }
-            }
-        }
-
-        Rectangle {
-            height: 1px;
-            background: Theme.border;
-        }
-
-        HorizontalLayout {
-            height: 28px;
-            spacing: 8px;
-            Image {
-                y: (parent.height - self.height) / 2;
-                width: 15px;
-                height: 15px;
-                source: @image-url("../../assets/ui/folder.svg");
-                colorize: Theme.muted-text;
-            }
-
-            Text {
-                text: root.config-home;
-                color: Theme.muted-text;
-                font-size: 11px;
-                overflow: elide;
-                vertical-alignment: center;
-            }
-
-            QuietButton {
-                width: 126px;
-                text: "配置与恢复  ↗";
-                ghost: true;
-                height: 28px;
-                clicked => { root.navigate(5); }
-            }
-
-            QuietButton {
-                width: 132px;
-                height: 28px;
-                text: "切回 API 预览";
-                ghost: true;
-                enabled: !root.busy && !root.chatgpt-login-pending;
-                clicked => { root.switch-api-preview(); }
             }
         }
     }

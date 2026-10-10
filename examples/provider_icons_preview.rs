@@ -4,6 +4,7 @@
 //! Tab transitions: add --connections-motion (frames and interruption checks).
 //! Batch model picker: add --batch-models.
 //! Connection directory/workbench: add --connection-workbench.
+//! Shared workspace menu and operation feedback: add --workspace-feedback.
 
 #[cfg(target_os = "macos")]
 #[path = "../src/macos.rs"]
@@ -653,6 +654,215 @@ fn render_connection_workbench(
     Ok(())
 }
 
+fn render_workspace_feedback(
+    app: &AppWindow,
+    window: &MinimalSoftwareWindow,
+    output: &Path,
+) -> Result<(), Box<dyn Error>> {
+    let switches = Rc::new(Cell::new(0));
+    let calls = switches.clone();
+    app.on_subscription_action(move |action| {
+        assert_eq!(
+            action, 4,
+            "workspace action must keep the existing review flow"
+        );
+        calls.set(calls.get() + 1);
+    });
+    for (width, height) in [(1200, 820), (1000, 680)] {
+        app.window().set_size(PhysicalSize::new(width, height));
+        for dark in [false, true] {
+            set_theme(app, window, dark);
+            let suffix = format!("{}-{width}x{height}", if dark { "dark" } else { "light" });
+            app.set_active_page(0);
+            app.set_error_code("".into());
+            app.set_action_message("".into());
+            app.set_notification_open(false);
+            snapshot(window, output, &format!("workspace-workbench-{suffix}"))?;
+            click(window, 405.0, 69.0);
+            assert!(app.get_workspace_open());
+            snapshot(window, output, &format!("workspace-menu-{suffix}"))?;
+            click(window, 490.0, 310.0);
+            render(window);
+            assert_eq!(app.get_active_page(), 5);
+            assert!(!app.get_workspace_open());
+            click(window, 405.0, 69.0);
+            render(window);
+            click(window, 490.0, 354.0);
+            render(window);
+            assert!(!app.get_workspace_open());
+            app.set_active_page(0);
+            app.set_action_message("已取消发布预览".into());
+            render(window);
+            assert!(app.get_notification_open());
+            snapshot(window, output, &format!("workspace-notice-{suffix}"))?;
+            app.set_active_page(1);
+            snapshot(
+                window,
+                output,
+                &format!("workspace-notice-connections-{suffix}"),
+            )?;
+            app.set_error_code("synthetic_conflict".into());
+            app.set_error_message("目标配置已在外部修改，操作尚未完成。".into());
+            app.set_error_action("请在配置与恢复中检查目标文件，再重新预览。".into());
+            snapshot(window, output, &format!("workspace-error-{suffix}"))?;
+            app.set_notification_open(false);
+        }
+    }
+    assert_eq!(switches.get(), 4);
+
+    // Busy and either OAuth login keep API switching disabled in the relocated menu.
+    for pending in 0..3 {
+        app.set_busy(pending == 0);
+        app.set_chatgpt_login_pending(pending == 1);
+        app.set_xai_pending(pending == 2);
+        app.set_workspace_open(true);
+        render(window);
+        click(window, 490.0, 354.0);
+        render(window);
+        assert_eq!(switches.get(), 4);
+        assert!(app.get_workspace_open());
+        app.set_workspace_open(false);
+    }
+    app.set_busy(false);
+    app.set_chatgpt_login_pending(false);
+    app.set_xai_pending(false);
+
+    app.window().set_size(PhysicalSize::new(1200, 820));
+    app.set_error_code("".into());
+    app.set_error_message("".into());
+    app.set_error_action("".into());
+    app.set_action_message("已取消发布预览".into());
+    render(window);
+    click(window, 1148.0, 139.0);
+    assert!(
+        !app.get_notification_open(),
+        "toast close action must remain reachable"
+    );
+    click(window, 1158.0, 69.0);
+    render(window);
+    click(window, 1110.0, 201.0);
+    render(window);
+    assert!(
+        app.get_drawer_open(),
+        "feedback details must open connection status"
+    );
+    app.set_drawer_open(false);
+    render(window);
+    app.set_notification_open(false);
+    app.set_feedback_sequence(app.get_feedback_sequence() + 1);
+    render(window);
+    assert!(
+        app.get_notification_open(),
+        "identical feedback must replay"
+    );
+    window.dispatch_event(WindowEvent::PointerMoved {
+        position: slint::LogicalPosition::new(850.0, 165.0),
+    });
+    for _ in 0..65 {
+        frame(100);
+    }
+    assert!(
+        app.get_notification_open(),
+        "hover must pause auto dismissal"
+    );
+    window.dispatch_event(WindowEvent::PointerExited);
+    for _ in 0..65 {
+        frame(100);
+    }
+    assert!(
+        !app.get_notification_open(),
+        "info must close after six seconds"
+    );
+    click(window, 1158.0, 69.0);
+    render(window);
+    assert!(
+        app.get_notification_open(),
+        "toolbar must reopen the latest feedback"
+    );
+    for _ in 0..65 {
+        frame(100);
+    }
+    assert!(
+        app.get_notification_open(),
+        "manually opened feedback stays readable"
+    );
+    window.dispatch_event(WindowEvent::KeyPressed {
+        text: slint::platform::Key::Escape.into(),
+    });
+    assert!(!app.get_notification_open());
+    app.set_error_code("synthetic_conflict".into());
+    app.set_error_message("合成配置冲突".into());
+    for _ in 0..65 {
+        frame(100);
+    }
+    assert!(
+        app.get_notification_open(),
+        "errors must persist until dismissed"
+    );
+    app.set_notification_open(false);
+    app.set_error_code("".into());
+
+    // The same message waits for a modal to close instead of covering its actions.
+    app.set_drawer_open(true);
+    app.set_feedback_sequence(app.get_feedback_sequence() + 1);
+    for _ in 0..65 {
+        frame(100);
+    }
+    assert!(app.get_notification_open());
+    app.set_drawer_open(false);
+    for _ in 0..65 {
+        frame(100);
+    }
+    assert!(!app.get_notification_open());
+
+    app.set_active_page(0);
+    app.global::<Theme>().set_animations_enabled(true);
+    render(window);
+    app.set_workspace_open(true);
+    let mut elapsed = 0;
+    for at in [16, 48, 80, 120, 160, 200, 240, 280, 340, 420] {
+        frame(at - elapsed);
+        elapsed = at;
+        snapshot_now(window, output, &format!("workspace-motion-open-{at}ms"))?;
+    }
+    assert_ne!(
+        fs::read(output.join("workspace-motion-open-16ms.ppm"))?,
+        fs::read(output.join("workspace-motion-open-420ms.ppm"))?,
+        "the workspace menu must animate between captured frames"
+    );
+    window.dispatch_event(WindowEvent::KeyPressed {
+        text: slint::platform::Key::Escape.into(),
+    });
+    assert!(!app.get_workspace_open());
+    frame(420);
+    app.set_feedback_sequence(app.get_feedback_sequence() + 1);
+    let mut elapsed = 0;
+    for at in [16, 48, 80, 120, 160, 200, 240, 280, 340, 420, 520] {
+        frame(at - elapsed);
+        elapsed = at;
+        snapshot_now(window, output, &format!("workspace-motion-notice-{at}ms"))?;
+    }
+    assert_ne!(
+        fs::read(output.join("workspace-motion-notice-16ms.ppm"))?,
+        fs::read(output.join("workspace-motion-notice-520ms.ppm"))?,
+        "operation feedback must animate between captured frames"
+    );
+    app.global::<Theme>().set_system_reduced_motion(true);
+    app.set_notification_open(false);
+    app.set_workspace_open(true);
+    snapshot(window, output, "workspace-reduced-motion")?;
+    click(window, 760.0, 400.0);
+    assert!(
+        !app.get_workspace_open(),
+        "outside click must dismiss the menu"
+    );
+    println!(
+        "Synthetic workspace and feedback previews: {}",
+        output.display()
+    );
+    Ok(())
+}
+
 fn main() -> Result<(), Box<dyn Error>> {
     let output = std::env::args()
         .nth(1)
@@ -1019,6 +1229,10 @@ fn main() -> Result<(), Box<dyn Error>> {
         completed: true,
         ..Default::default()
     }])));
+    if std::env::args().any(|arg| arg == "--workspace-feedback") {
+        app.show()?;
+        return render_workspace_feedback(&app, &window, output);
+    }
     if std::env::args().any(|arg| arg == "--accounts-design" || arg == "--connections-motion") {
         app.set_active_page(1);
         app.set_connections_tab(1);

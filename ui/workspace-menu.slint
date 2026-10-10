@@ -1,0 +1,178 @@
+import { Theme } from "tokens.slint";
+import { QuietButton, StatusPill } from "components.slint";
+
+// A shared, anchored workspace menu. Actions retain their existing review flows.
+export component WorkspaceMenu inherits Rectangle {
+    in property <bool> open;
+    in property <string> config-home;
+    in property <string> connection-label;
+    in property <bool> managed;
+    in property <bool> connected;
+    in property <bool> actions-enabled;
+    callback dismissed();
+    callback configure();
+    callback switch-api();
+    callback details();
+    private property <float> reveal: root.open ? 1 : 0;
+    animate reveal {
+        duration: Theme.drawer-motion;
+        easing: cubic-bezier(0.22, 1, 0.36, 1);
+    }
+    private property <float> actions-reveal: root.open ? 1 : 0;
+    animate actions-reveal {
+        duration: Theme.page-motion;
+        delay: root.open && Theme.page-motion > 0ms ? 70ms : 0ms;
+        easing: cubic-bezier(0.22, 1, 0.36, 1);
+    }
+    visible: root.reveal > 0;
+    changed open => { if (root.open) { keyboard.focus(); } }
+
+    TouchArea {
+        enabled: root.open;
+        clicked => { root.dismissed(); }
+    }
+
+    keyboard := FocusScope {
+        enabled: root.open;
+        capture-key-pressed(event) => {
+            if (event.text == Key.Escape) { root.dismissed(); return accept; }
+            return reject;
+        }
+        Rectangle {
+            x: 346px;
+            y: 65px - (1 - root.reveal) * 12px;
+            width: 356px;
+            height: content.preferred-height;
+            opacity: root.reveal;
+            border-radius: 16px;
+            border-width: 1px;
+            border-color: Theme.border;
+            background: Theme.panel;
+            drop-shadow-blur: 24px;
+            drop-shadow-offset-y: 8px;
+            drop-shadow-color: Theme.dark ? #00000055 : #18221a22;
+            TouchArea { }
+
+            content := VerticalLayout {
+                padding: 16px;
+                spacing: 12px;
+                HorizontalLayout {
+                    height: 34px;
+                    spacing: 10px;
+                    Rectangle {
+                        width: 34px;
+                        border-radius: 10px;
+                        background: Theme.brand-surface;
+                        Image {
+                            x: 9px;
+                            y: 9px;
+                            width: 16px;
+                            height: 16px;
+                            source: @image-url("../assets/ui/folder.svg");
+                            colorize: Theme.brand;
+                        }
+                    }
+
+                    Text {
+                        text: "Codex 工作空间";
+                        color: Theme.primary-text;
+                        font-size: 14px;
+                        font-weight: 600;
+                        vertical-alignment: center;
+                    }
+
+                    QuietButton {
+                        width: 28px;
+                        height: 28px;
+                        text: "关闭工作空间菜单";
+                        icon-only: true;
+                        ghost: true;
+                        icon: @image-url("../assets/ui/close.svg");
+                        icon-color: Theme.muted-text;
+                        clicked => { root.dismissed(); }
+                    }
+                }
+
+                Rectangle {
+                    height: 64px;
+                    background: Theme.inset;
+                    border-radius: 10px;
+                    VerticalLayout {
+                        padding: 12px;
+                        spacing: 6px;
+                        Text {
+                            text: root.managed ? "当前目录 · SwitchX 管理" : "当前目录 · Codex 本机配置";
+                            color: Theme.muted-text;
+                            font-size: 10px;
+                        }
+
+                        Text {
+                            text: root.config-home == "" ? "尚未选择目录" : root.config-home;
+                            color: Theme.primary-text;
+                            font-family: "Menlo";
+                            font-size: 11px;
+                            overflow: elide;
+                        }
+                    }
+                }
+
+                HorizontalLayout {
+                    height: 24px;
+                    cross-axis-alignment: center;
+                    Text {
+                        text: "连接状态";
+                        color: Theme.muted-text;
+                        font-size: 11px;
+                    }
+
+                    StatusPill {
+                        label: root.connection-label;
+                        ink: root.connected ? Theme.brand : Theme.warning;
+                        fill: root.connected ? Theme.brand-surface : Theme.warning-surface;
+                    }
+
+                    QuietButton {
+                        width: 50px;
+                        height: 24px;
+                        text: "查看";
+                        ghost: true;
+                        clicked => { root.details(); }
+                    }
+                }
+
+                Rectangle {
+                    height: 1px;
+                    background: Theme.border;
+                }
+
+                Rectangle {
+                    height: 80px;
+                    opacity: root.actions-reveal;
+                    VerticalLayout {
+                        y: (1 - root.actions-reveal) * 8px;
+                        height: 80px;
+                        spacing: 8px;
+                        QuietButton {
+                            text: "配置与恢复";
+                            icon: @image-url("../assets/ui/settings.svg");
+                            icon-color: Theme.brand;
+                            left-aligned: true;
+                            ghost: true;
+                            clicked => { root.configure(); }
+                        }
+
+                        QuietButton {
+                            text: "切回 API 预览";
+                            icon: @image-url("../assets/ui/arrow.svg");
+                            icon-color: Theme.muted-text;
+                            left-aligned: true;
+                            ghost: true;
+                            enabled: root.actions-enabled;
+                            clicked => { root.switch-api(); }
+                        }
+                    }
+                }
+            }
+        }
+    }
+}

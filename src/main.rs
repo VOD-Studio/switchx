@@ -414,6 +414,7 @@ fn show_action_feedback(app: &AppWindow, result: Result<String, String>) {
             app.set_error_action("检查输入或刷新后重试；发生配置冲突时先检查目标文件。".into());
         }
     }
+    app.set_feedback_sequence(app.get_feedback_sequence().wrapping_add(1));
 }
 
 struct AccountView {

@@ -22,6 +22,10 @@ UI 编译隔离、依赖调试信息及业务检查复用的验证见 [开发构
 
 macOS 窗口将标题栏融入界面，隐藏独立背景和标题文字，保留系统红黄绿按钮、圆角和窗口缩放。左侧为原生按钮预留空间；拖动左侧顶部或工具栏中间的空白区域可移动窗口。关闭仍隐藏到菜单栏，菜单栏入口可重新打开窗口。其他平台继续使用系统标题栏。
 
+顶部「工作空间」集中显示 Codex 目录、连接状态、「配置与恢复」和「切回 API 预览」。全局操作反馈显示在右上角，普通反馈在六秒后收起，悬停时暂停；错误保留到手动收起。通知图标可回看最近一次反馈，手动打开后不会自动关闭。浮层支持 Esc，沿用主题与减少动态效果设置，API 切换继续进入原有确认流程。深浅主题、1200×820 / 1000×680、计时与动画帧可通过 `cargo run --example provider_icons_preview -- /absolute/output/directory --workspace-feedback` 检查，全部使用合成资料。
+
+界面预览：[工作空间](docs/acceptance/screenshots/workspace-feedback/workspace-menu-dark-1200x820.png)、[操作反馈](docs/acceptance/screenshots/workspace-feedback/workspace-notice-light-1000x680.png)、[浮层动画](docs/acceptance/screenshots/workspace-feedback/workspace-motion.gif)、[通知动画](docs/acceptance/screenshots/workspace-feedback/notice-motion.gif)。
+
 `cargo run --example window_chrome_probe` 用纯 UI 窗口检查 macOS 标题栏、原生按钮、全屏退出、关闭后重新显示和最小尺寸；不读取供应商、凭据或 Codex 配置。见 [标题栏验收与原生截图](docs/acceptance/window-titlebar-2026-10-08.md)。
 
 ### Grok 账号登录与上游路由
