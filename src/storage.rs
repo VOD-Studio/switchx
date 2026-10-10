@@ -949,6 +949,25 @@ impl Store {
         transaction.commit()
     }
 
+    /// Inserts new mappings in one transaction; an existing public ID or
+    /// provider/upstream pair rejects the whole batch.
+    pub fn add_models(&self, models: &[ModelRecord]) -> Result<()> {
+        let transaction = self.connection.unchecked_transaction()?;
+        for model in models {
+            let exists: bool = transaction.query_row(
+                "SELECT EXISTS(SELECT 1 FROM published_models
+                 WHERE public_id = ?1 OR (provider_id = ?2 AND upstream_model = ?3))",
+                params![model.public_id, model.provider_id, model.upstream_model],
+                |row| row.get(0),
+            )?;
+            if exists {
+                return Err(rusqlite::Error::InvalidQuery);
+            }
+            Self::write_model(&transaction, model)?;
+        }
+        transaction.commit()
+    }
+
     pub fn delete_model(&self, public_id: &str) -> Result<bool> {
         Ok(self.connection.execute(
             "DELETE FROM published_models WHERE public_id = ?1",

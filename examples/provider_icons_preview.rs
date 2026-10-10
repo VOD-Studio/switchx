@@ -1,14 +1,15 @@
 //! Render synthetic previews with the real Slint UI and no account or configuration access.
 //! Run: cargo run --example provider_icons_preview -- /absolute/output/directory
 //! Connection cards: add --connections-design (snapshots) or --connections-native (window).
+//! Batch model picker: add --batch-models.
 
 #[cfg(target_os = "macos")]
 #[path = "../src/macos.rs"]
 pub mod macos;
 
 use switchx::ui::{
-    AccountRow, AppWindow, CodexQuotaRow, ModelRow, ProviderIconRow, ProviderRow, RequestRow,
-    Theme, XaiQuotaRow,
+    AccountRow, AppWindow, BatchModelRow, BatchSummary, CodexQuotaRow, ModelRow, ProviderIconRow,
+    ProviderRow, RequestRow, Theme, XaiQuotaRow,
 };
 
 use slint::platform::software_renderer::{MinimalSoftwareWindow, RepaintBufferType};
@@ -107,6 +108,205 @@ fn render_icons(app: &AppWindow, window: &MinimalSoftwareWindow, icons: &[Provid
         render(window);
     }
     app.set_icon_picker_open(false);
+}
+
+fn batch_rows(query: &str) -> Vec<BatchModelRow> {
+    let row = |id: &str| BatchModelRow {
+        id: id.into(),
+        supported: true,
+        matched: id.contains(query),
+        ..Default::default()
+    };
+    vec![
+        BatchModelRow {
+            checked: true,
+            source: "预设参数".into(),
+            template_context: "1048576".into(),
+            template_levels: "low, high, max".into(),
+            template_levels_label: "low, high, max".into(),
+            ..row("synthetic-coder-pro")
+        },
+        BatchModelRow {
+            checked: true,
+            context: "1050000".into(),
+            levels: "low, medium, high, xhigh".into(),
+            levels_label: "low → xhigh".into(),
+            ..row("synthetic-coder-flash")
+        },
+        BatchModelRow {
+            checked: true,
+            ..row("synthetic-chat-max")
+        },
+        row("synthetic-chat-mini"),
+        BatchModelRow {
+            added: true,
+            ..row("synthetic-model-3")
+        },
+        row("synthetic-vision-plus"),
+        BatchModelRow {
+            supported: false,
+            ..row("synthetic reasoner@beta")
+        },
+        row("synthetic-embedding-large"),
+    ]
+}
+
+fn summarize(rows: &[BatchModelRow]) -> BatchSummary {
+    let mut summary = BatchSummary::default();
+    for row in rows {
+        let selected = row.checked && row.supported && !row.added;
+        summary.total += 1;
+        summary.added += i32::from(row.added);
+        summary.selected += i32::from(selected);
+        if row.matched {
+            summary.matched += 1;
+            summary.visible_selectable += i32::from(row.supported && !row.added);
+            summary.visible_selected += i32::from(selected);
+        }
+    }
+    summary
+}
+
+fn render_batch_models(
+    app: &AppWindow,
+    window: &MinimalSoftwareWindow,
+    output: &Path,
+) -> Result<(), Box<dyn Error>> {
+    let show = |rows: Vec<BatchModelRow>| {
+        app.set_batch_summary(summarize(&rows));
+        app.set_batch_models(ModelRc::new(VecModel::from(rows)));
+    };
+    for (width, height) in [(1200, 820), (1000, 680)] {
+        app.window().set_size(PhysicalSize::new(width, height));
+        for dark in [false, true] {
+            let suffix = format!("{}-{width}x{height}", if dark { "dark" } else { "light" });
+            set_theme(app, window, dark);
+            app.set_active_page(0);
+            app.set_model_provider_id("preview-custom".into());
+            app.set_model_provider_name("合成 API 连接".into());
+            app.set_model_original_id("".into());
+            app.set_model_batch_mode(true);
+            app.set_model_editor_open(true);
+            // Let the open-time reset run before filling the picker.
+            render(window);
+
+            app.set_discovery_scope(1);
+            app.set_fetching_models(true);
+            app.set_discovery_tone(0);
+            app.set_discovery_message("正在获取模型列表…".into());
+            snapshot(window, output, &format!("batch-loading-{suffix}"))?;
+
+            app.set_fetching_models(false);
+            app.set_discovery_tone(1);
+            app.set_discovery_message("已获取 8 个模型，其中 1 个已添加".into());
+            app.set_batch_context("200000".into());
+            app.set_batch_levels("low, medium, high".into());
+            app.set_batch_levels_label("low → high".into());
+            app.set_batch_reasoning_options(ModelRc::new(VecModel::from(vec![
+                "未设置".into(),
+                "low".into(),
+                "medium".into(),
+                "high".into(),
+            ])));
+            app.set_batch_default("medium".into());
+            show(batch_rows(""));
+            snapshot(window, output, &format!("batch-list-{suffix}"))?;
+            // The parameter chip of the first row expands its inline editor.
+            click(window, width as f32 - 178.0, 369.0);
+            snapshot(window, output, &format!("batch-expanded-{suffix}"))?;
+            click(window, width as f32 - 178.0, 369.0);
+
+            app.set_batch_query("coder".into());
+            show(batch_rows("coder"));
+            snapshot(window, output, &format!("batch-search-{suffix}"))?;
+
+            app.set_batch_query("no-such-model".into());
+            show(batch_rows("no-such-model"));
+            snapshot(window, output, &format!("batch-no-match-{suffix}"))?;
+
+            app.set_batch_query("".into());
+            show(Vec::new());
+            app.set_discovery_tone(3);
+            app.set_discovery_message("无法连接上游或连接超时".into());
+            snapshot(window, output, &format!("batch-error-{suffix}"))?;
+
+            app.set_model_batch_mode(false);
+            app.set_discovery_tone(0);
+            app.set_discovery_message("".into());
+            snapshot(window, output, &format!("batch-single-{suffix}"))?;
+            app.set_model_editor_open(false);
+            render(window);
+
+            let models = app.get_models();
+            for index in 2..5 {
+                let mut model = models.row_data(index).unwrap();
+                model.fresh = true;
+                models.set_row_data(index, model);
+            }
+            snapshot(window, output, &format!("batch-fresh-{suffix}"))?;
+            for index in 2..5 {
+                let mut model = models.row_data(index).unwrap();
+                model.fresh = false;
+                models.set_row_data(index, model);
+            }
+        }
+    }
+
+    // Frames from the staggered arrival and a row being picked, with motion on.
+    app.window().set_size(PhysicalSize::new(1200, 820));
+    set_theme(app, window, false);
+    app.global::<Theme>().set_animations_enabled(true);
+    app.set_model_batch_mode(true);
+    app.set_model_editor_open(true);
+    render(window);
+    app.set_discovery_scope(1);
+    app.set_discovery_tone(1);
+    app.set_discovery_message("已获取 8 个模型，其中 1 个已添加".into());
+    let mut rows = batch_rows("");
+    rows[2].checked = false;
+    show(rows.clone());
+    let mut elapsed = 0;
+    for at in [16, 120, 260, 420, 1400] {
+        frame(at - elapsed);
+        elapsed = at;
+        snapshot_now(window, output, &format!("batch-motion-arrive-{at}ms"))?;
+    }
+    rows[2].checked = true;
+    let models = app.get_batch_models();
+    models.set_row_data(2, rows[2].clone());
+    app.set_batch_summary(summarize(&rows));
+    let mut elapsed = 0;
+    for at in [60, 140, 400] {
+        frame(at - elapsed);
+        elapsed = at;
+        snapshot_now(window, output, &format!("batch-motion-pick-{at}ms"))?;
+    }
+    app.global::<Theme>().set_animations_enabled(false);
+    Ok(())
+}
+
+fn frame(step_ms: u64) {
+    PREVIEW_TIME.with(|clock| clock.set(clock.get() + Duration::from_millis(step_ms)));
+    slint::platform::update_timers_and_animations();
+}
+
+// Unlike `snapshot`, keeps the clock where `frame` left it.
+fn snapshot_now(
+    window: &MinimalSoftwareWindow,
+    output: &Path,
+    name: &str,
+) -> Result<(), Box<dyn Error>> {
+    let size = WindowAdapter::size(window);
+    let mut pixels = SharedPixelBuffer::<Rgb8Pixel>::new(size.width, size.height);
+    window.request_redraw();
+    window.draw_if_needed(|renderer| {
+        renderer.render(pixels.make_mut_slice(), size.width as usize);
+    });
+    let mut file = std::io::BufWriter::new(fs::File::create(output.join(format!("{name}.ppm")))?);
+    write!(file, "P6\n{} {}\n255\n", pixels.width(), pixels.height())?;
+    file.write_all(pixels.as_bytes())?;
+    file.flush()?;
+    Ok(())
 }
 
 fn main() -> Result<(), Box<dyn Error>> {
@@ -822,6 +1022,11 @@ fn main() -> Result<(), Box<dyn Error>> {
             }
         }
         println!("Synthetic connection-check previews: {}", output.display());
+        return Ok(());
+    }
+    if std::env::args().any(|arg| arg == "--batch-models") {
+        render_batch_models(&app, &window, output)?;
+        println!("Synthetic batch model previews: {}", output.display());
         return Ok(());
     }
     if std::env::args().any(|arg| arg == "--route-launch") {

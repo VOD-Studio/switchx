@@ -813,6 +813,90 @@ export component QuietComboBox inherits Rectangle {
     }
 }
 
+// Equal segments with a raised thumb that glides, slightly overshooting, to the
+// current one. The owner applies `selected`; Left and Right also select.
+export component QuietSegmented inherits Rectangle {
+    in property <[string]> options;
+    in property <bool> enabled: true;
+    in property <int> current-index;
+    callback selected(int);
+    private property <length> segment: (root.width - 6px) / max(1, root.options.length);
+    function choose(index: int) {
+        if (root.enabled && index >= 0 && index < root.options.length && index != root.current-index) {
+            root.selected(index);
+        }
+    }
+
+    height: 32px;
+    min-width: 120px;
+    horizontal-stretch: 0;
+    border-radius: 9px;
+    border-width: 1px;
+    border-color: Theme.border;
+    background: Theme.inset;
+    opacity: root.enabled ? 1 : 0.45;
+    animate background, border-color, opacity { duration: Theme.fast; }
+    forward-focus: keyboard;
+    accessible-role: tab-list;
+
+    Rectangle {
+        x: 3px + root.segment * root.current-index;
+        y: 3px;
+        width: root.segment;
+        height: parent.height - 6px;
+        border-radius: 7px;
+        border-width: 1px;
+        border-color: keyboard.has-focus ? Theme.brand : Theme.border;
+        background: Theme.panel;
+        drop-shadow-blur: 6px;
+        drop-shadow-offset-y: 1px;
+        drop-shadow-color: Theme.dark ? #00000048 : #18221a16;
+        animate x {
+            duration: Theme.page-motion;
+            easing: cubic-bezier(0.34, 1.4, 0.64, 1);
+        }
+        animate background, border-color { duration: Theme.fast; }
+        accessible-role: none;
+    }
+
+    for option[index] in root.options: Rectangle {
+        x: 3px + root.segment * index;
+        y: 3px;
+        width: root.segment;
+        height: parent.height - 6px;
+        accessible-role: tab;
+        accessible-label: option;
+        accessible-item-selected: index == root.current-index;
+        accessible-action-default => { root.choose(index); }
+        Text {
+            text: option;
+            color: index == root.current-index ? Theme.primary-text : segment-touch.has-hover ? Theme.primary-text.with-alpha(0.8) : Theme.muted-text;
+            font-size: 12px;
+            font-weight: index == root.current-index ? 600 : 400;
+            horizontal-alignment: center;
+            vertical-alignment: center;
+            animate color { duration: Theme.fast; }
+            accessible-role: none;
+        }
+
+        segment-touch := TouchArea {
+            enabled: root.enabled;
+            mouse-cursor: pointer;
+            clicked => { keyboard.focus(); root.choose(index); }
+        }
+    }
+
+    keyboard := FocusScope {
+        width: 0px;
+        enabled: root.enabled;
+        key-pressed(event) => {
+            if (event.text == Key.LeftArrow) { root.choose(root.current-index - 1); return accept; }
+            if (event.text == Key.RightArrow) { root.choose(root.current-index + 1); return accept; }
+            return reject;
+        }
+    }
+}
+
 // Keep content mounted while its height and opacity animate in either direction.
 export component AnimatedSection inherits Rectangle {
     in property <bool> expanded;

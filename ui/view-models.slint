@@ -96,6 +96,36 @@ export struct ModelRow {
     fallback-label: string,
     binding-label: string,
     is-subscription: bool,
+    // Set only in the snapshot right after a batch addition, to play its arrival.
+    fresh: bool,
+}
+
+// A discovered upstream model in the batch picker. Empty `context` and `levels`
+// inherit the template values (when `source` is set), then the shared values.
+export struct BatchModelRow {
+    id: string,
+    added: bool,
+    supported: bool,
+    checked: bool,
+    matched: bool,
+    source: string,
+    template-context: string,
+    template-levels: string,
+    // Compact labels from catalog::reasoning_label, for the parameter chip.
+    template-levels-label: string,
+    context: string,
+    levels: string,
+    levels-label: string,
+}
+
+// Counts for the batch picker; `visible-*` cover rows matching the search.
+export struct BatchSummary {
+    total: int,
+    matched: int,
+    added: int,
+    selected: int,
+    visible-selectable: int,
+    visible-selected: int,
 }
 
 export struct RequestRow {

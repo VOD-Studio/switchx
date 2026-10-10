@@ -918,6 +918,209 @@ pub(crate) fn save_mapping_from(
         .map_err(|_| "无法保存模型资料".into())
 }
 
+/// A discovered upstream model and the values a batch addition starts from.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BatchCandidate {
+    pub model_id: String,
+    pub added: bool,
+    pub supported: bool,
+    /// Names the preset or official template; empty for the neutral profile.
+    pub source: &'static str,
+    pub context_window: String,
+    pub reasoning_levels: String,
+}
+
+pub struct BatchModel<'a> {
+    pub upstream_model: &'a str,
+    // Empty values inherit the template, then the shared settings.
+    pub context_window: &'a str,
+    pub reasoning_levels: &'a str,
+}
+
+pub struct BatchInput<'a> {
+    pub provider_id: &'a str,
+    pub models: &'a [BatchModel<'a>],
+    pub context_window: &'a str,
+    pub reasoning_levels: &'a str,
+    pub default_reasoning: &'a str,
+}
+
+// Templates come only from an exact preset address or the official CLI catalog,
+// never from the model name alone.
+fn model_template(
+    provider: &ProviderRecord,
+    model_id: &str,
+    templates: &[serde_json::Value],
+) -> Result<Option<serde_json::Value>, String> {
+    use crate::storage::ProviderKind;
+    match provider.kind {
+        ProviderKind::Chatgpt => Ok(templates
+            .iter()
+            .find(|model| model["slug"] == model_id)
+            .cloned()),
+        ProviderKind::ApiKey => provider_preset(&provider.base_url)
+            .and_then(|preset| {
+                preset
+                    .models
+                    .iter()
+                    .find(|model| model.model_id == model_id)
+            })
+            .map(ModelPreset::metadata)
+            .transpose(),
+        _ => Ok(None),
+    }
+}
+
+pub fn batch_candidates(
+    data_dir: &Path,
+    provider_id: &str,
+    model_ids: &[String],
+    templates: &[serde_json::Value],
+) -> Result<Vec<BatchCandidate>, String> {
+    let store = open_store(data_dir).map_err(|error| error.message())?;
+    let provider = store
+        .provider(provider_id)
+        .map_err(|_| "无法读取上游资料")?
+        .ok_or("上游不存在")?;
+    let models = store.models().map_err(|_| "无法读取模型资料")?;
+    let chatgpt = provider.kind == crate::storage::ProviderKind::Chatgpt;
+    let mut seen = std::collections::HashSet::new();
+    model_ids
+        .iter()
+        .filter(|id| seen.insert(id.as_str()))
+        .map(|id| {
+            let template = model_template(&provider, id, templates)?;
+            Ok(BatchCandidate {
+                model_id: id.clone(),
+                added: models
+                    .iter()
+                    .any(|model| model.provider_id == provider.id && &model.upstream_model == id),
+                supported: crate::direct::validate_model_id(id).is_ok()
+                    && (!chatgpt || template.is_some()),
+                source: match (&template, chatgpt) {
+                    (None, _) => "",
+                    (Some(_), true) => "官方目录",
+                    (Some(_), false) => "预设参数",
+                },
+                context_window: template
+                    .as_ref()
+                    .and_then(|value| value["context_window"].as_i64())
+                    .map(|value| value.to_string())
+                    .unwrap_or_default(),
+                reasoning_levels: template
+                    .as_ref()
+                    .and_then(|value| value["supported_reasoning_levels"].as_array())
+                    .map(|levels| {
+                        levels
+                            .iter()
+                            .filter_map(|level| level["effort"].as_str())
+                            .collect::<Vec<_>>()
+                            .join(", ")
+                    })
+                    .unwrap_or_default(),
+            })
+        })
+        .collect()
+}
+
+/// Returns the new public IDs in input order.
+pub fn save_mappings(data_dir: &Path, input: &BatchInput<'_>) -> Result<Vec<String>, String> {
+    save_mappings_from(data_dir, input, &[])
+}
+
+/// Adds every selected model or none of them. New mappings join the publish
+/// selection, matching a single addition.
+pub(crate) fn save_mappings_from(
+    data_dir: &Path,
+    input: &BatchInput<'_>,
+    templates: &[serde_json::Value],
+) -> Result<Vec<String>, String> {
+    ensure_editable(data_dir)?;
+    if input.models.is_empty() {
+        return Err("请至少选择一个模型".into());
+    }
+    let store = open_store(data_dir).map_err(|error| error.message())?;
+    let provider = store
+        .provider(input.provider_id)
+        .map_err(|_| "无法读取上游资料")?
+        .ok_or("上游不存在")?;
+    let existing = store.models().map_err(|_| "无法读取模型资料")?;
+    let mut records: Vec<ModelRecord> = Vec::with_capacity(input.models.len());
+    for item in input.models {
+        let model_id = item.upstream_model;
+        validate_provider(&provider.name, &provider.base_url, model_id)
+            .map_err(|error| format!("{model_id}：{error}"))?;
+        if existing
+            .iter()
+            .chain(&records)
+            .any(|model| model.provider_id == provider.id && model.upstream_model == model_id)
+        {
+            return Err(format!("{model_id} 已有映射，请刷新列表后重试"));
+        }
+        let template = model_template(&provider, model_id, templates)?;
+        if provider.kind == crate::storage::ProviderKind::Chatgpt && template.is_none() {
+            return Err(format!("目标 CLI 内置官方目录没有 {model_id}"));
+        }
+        let inherit = template.is_some();
+        let context_window = if !item.context_window.trim().is_empty() {
+            item.context_window
+        } else if inherit {
+            ""
+        } else {
+            input.context_window
+        };
+        let reasoning_levels = if !item.reasoning_levels.trim().is_empty() {
+            Some(item.reasoning_levels)
+        } else if inherit {
+            None
+        } else {
+            Some(input.reasoning_levels)
+        };
+        // Changed levels keep the imported default when it still applies.
+        let default_reasoning = reasoning_levels
+            .map(|text| -> Result<String, String> {
+                let allowed = catalog::reasoning_levels(text)
+                    .map_err(|error| format!("{model_id}：{error}"))?;
+                let imported = template
+                    .as_ref()
+                    .and_then(|value| value["default_reasoning_level"].as_str())
+                    .unwrap_or("");
+                Ok([imported, input.default_reasoning]
+                    .into_iter()
+                    .find(|level| allowed.contains(level))
+                    .unwrap_or("")
+                    .to_owned())
+            })
+            .transpose()?;
+        let display_name = format!("{model_id}/{}", provider.name);
+        let metadata = catalog::mapping_metadata(
+            model_id,
+            &display_name,
+            &catalog::MappingSettings {
+                context_window,
+                reasoning_levels,
+                default_reasoning: default_reasoning.as_deref(),
+            },
+            template,
+        )
+        .map_err(|error| format!("{model_id}：{error}"))?;
+        records.push(ModelRecord {
+            provider_id: provider.id.clone(),
+            public_id: format!("sx-{}", new_id()?),
+            display_name,
+            upstream_model: model_id.into(),
+            metadata: metadata.to_string(),
+            enabled: true,
+            fallback_provider_id: None,
+        });
+    }
+    catalog::publish_saved(&records)?;
+    store
+        .add_models(&records)
+        .map_err(|_| "无法保存模型映射；原资料未修改")?;
+    Ok(records.into_iter().map(|model| model.public_id).collect())
+}
+
 pub fn select_model(data_dir: &Path, public_id: &str, enabled: bool) -> Result<(), String> {
     select_models(data_dir, &[public_id.into()], enabled)
 }
@@ -1628,6 +1831,238 @@ mod tests {
         fs::write(path.join("switch-journal.json"), "synthetic journal").unwrap();
         assert!(save("", "sx-blocked", "new-model", "").is_err());
         assert!(delete_model(&path, "sx-second").is_err());
+        drop(store);
+        fs::remove_dir_all(path).unwrap();
+    }
+
+    #[test]
+    fn batch_mappings_are_atomic_and_inherit_row_template_then_shared_values() {
+        let path = env::temp_dir().join(format!("switchx-batch-models-{}", new_id().unwrap()));
+        let store = open_store(&path).unwrap();
+        // The exact DeepSeek address supplies preset parameters for known models only.
+        store
+            .put_provider(&ProviderRecord {
+                kind: crate::storage::ProviderKind::ApiKey,
+                account_binding: None,
+                icon_id: None,
+                id: "deepseek".into(),
+                name: "DeepSeek".into(),
+                base_url: "https://api.deepseek.com".into(),
+                model_id: "deepseek-flash".into(),
+                credential_ref: None,
+            })
+            .unwrap();
+        save_mappings(
+            &path,
+            &BatchInput {
+                provider_id: "deepseek",
+                models: &[BatchModel {
+                    upstream_model: "deepseek-flash",
+                    context_window: "",
+                    reasoning_levels: "",
+                }],
+                context_window: "",
+                reasoning_levels: "",
+                default_reasoning: "",
+            },
+        )
+        .unwrap();
+
+        let ids = [
+            "deepseek-flash",
+            "deepseek-v4-pro",
+            "custom-chat",
+            "deepseek-flash",
+            "bad id",
+        ]
+        .map(String::from);
+        let candidates = batch_candidates(&path, "deepseek", &ids, &[]).unwrap();
+        assert_eq!(candidates.len(), 4, "duplicate discovery IDs collapse");
+        assert!(candidates[0].added);
+        assert_eq!(candidates[1].source, "预设参数");
+        assert_eq!(candidates[1].context_window, "1048576");
+        assert_eq!(candidates[1].reasoning_levels, "low, high, max");
+        assert_eq!(candidates[2].source, "");
+        assert!(candidates[2].supported && !candidates[2].added);
+        assert!(!candidates[3].supported);
+
+        let before = store.models().unwrap();
+        let shared = |models| BatchInput {
+            provider_id: "deepseek",
+            models,
+            context_window: "200000",
+            reasoning_levels: "low, medium, high",
+            default_reasoning: "medium",
+        };
+        for models in [
+            // An existing pair, an invalid row value and an empty batch all write nothing.
+            &[
+                BatchModel {
+                    upstream_model: "custom-chat",
+                    context_window: "",
+                    reasoning_levels: "",
+                },
+                BatchModel {
+                    upstream_model: "deepseek-flash",
+                    context_window: "",
+                    reasoning_levels: "",
+                },
+            ][..],
+            &[BatchModel {
+                upstream_model: "custom-chat",
+                context_window: "0",
+                reasoning_levels: "",
+            }],
+            &[],
+        ] {
+            assert!(save_mappings(&path, &shared(models)).is_err());
+            assert_eq!(store.models().unwrap(), before);
+        }
+
+        let added = save_mappings(
+            &path,
+            &shared(&[
+                BatchModel {
+                    upstream_model: "deepseek-v4-pro",
+                    context_window: "",
+                    reasoning_levels: "",
+                },
+                BatchModel {
+                    upstream_model: "custom-chat",
+                    context_window: "",
+                    reasoning_levels: "",
+                },
+                BatchModel {
+                    upstream_model: "custom-coder",
+                    context_window: "64000",
+                    reasoning_levels: "high, max",
+                },
+            ]),
+        )
+        .unwrap();
+        assert_eq!(added.len(), 3);
+        let models = store.models().unwrap();
+        assert_eq!(models.len(), 4);
+        let metadata = |upstream: &str| -> (ModelRecord, serde_json::Value) {
+            let model = models
+                .iter()
+                .find(|model| model.upstream_model == upstream)
+                .unwrap()
+                .clone();
+            let value = serde_json::from_str(&model.metadata).unwrap();
+            (model, value)
+        };
+        let (preset, preset_metadata) = metadata("deepseek-v4-pro");
+        assert!(preset.enabled);
+        assert_eq!(preset.display_name, "deepseek-v4-pro/DeepSeek");
+        assert_eq!(preset_metadata["context_window"], 1_048_576);
+        assert_eq!(preset_metadata["default_reasoning_level"], "high");
+        let (_, shared_metadata) = metadata("custom-chat");
+        assert_eq!(shared_metadata["context_window"], 200_000);
+        assert_eq!(
+            shared_metadata["supported_reasoning_levels"]
+                .as_array()
+                .unwrap()
+                .len(),
+            3
+        );
+        assert_eq!(shared_metadata["default_reasoning_level"], "medium");
+        let (_, row_metadata) = metadata("custom-coder");
+        assert_eq!(row_metadata["context_window"], 64_000);
+        assert_eq!(
+            row_metadata["default_reasoning_level"],
+            serde_json::Value::Null,
+            "a shared default outside the row's levels is not applied"
+        );
+        let public_ids: std::collections::HashSet<_> =
+            models.iter().map(|model| &model.public_id).collect();
+        assert_eq!(public_ids.len(), 4);
+        assert_eq!(catalog::publish_saved(&models).unwrap().routes.len(), 4);
+
+        fs::write(path.join("switch-journal.json"), "synthetic journal").unwrap();
+        let blocked = [BatchModel {
+            upstream_model: "custom-blocked",
+            context_window: "",
+            reasoning_levels: "",
+        }];
+        assert!(save_mappings(&path, &shared(&blocked)).is_err());
+        assert_eq!(store.models().unwrap().len(), 4);
+        drop(store);
+        fs::remove_dir_all(path).unwrap();
+    }
+
+    #[test]
+    fn batch_subscription_mappings_keep_the_official_template() {
+        let path = env::temp_dir().join(format!("switchx-batch-official-{}", new_id().unwrap()));
+        let store = open_store(&path).unwrap();
+        store
+            .put_provider(&ProviderRecord {
+                kind: crate::storage::ProviderKind::Chatgpt,
+                account_binding: Some(crate::storage::AccountBinding::Native),
+                icon_id: None,
+                id: "plus".into(),
+                name: "Plus".into(),
+                base_url: crate::chatgpt::BASE_URL.into(),
+                model_id: "fixture-official".into(),
+                credential_ref: None,
+            })
+            .unwrap();
+        let mut template = catalog::mapping_metadata(
+            "fixture-official",
+            "Fixture",
+            &catalog::MappingSettings {
+                context_window: "272000",
+                reasoning_levels: Some("low, medium, high"),
+                default_reasoning: Some("medium"),
+            },
+            None,
+        )
+        .unwrap();
+        template["base_instructions"] = "Synthetic official instructions.".into();
+        let templates = [template];
+        let ids = ["fixture-official".into(), "fixture-missing".into()];
+        let candidates = batch_candidates(&path, "plus", &ids, &templates).unwrap();
+        assert_eq!(candidates[0].source, "官方目录");
+        assert_eq!(candidates[0].context_window, "272000");
+        assert!(!candidates[1].supported);
+
+        let input = |upstream_model, reasoning_levels| {
+            save_mappings_from(
+                &path,
+                &BatchInput {
+                    provider_id: "plus",
+                    models: &[BatchModel {
+                        upstream_model,
+                        context_window: "",
+                        reasoning_levels,
+                    }],
+                    context_window: "64000",
+                    reasoning_levels: "",
+                    default_reasoning: "",
+                },
+                &templates,
+            )
+        };
+        assert!(input("fixture-missing", "").is_err());
+        assert_eq!(input("fixture-official", "low, high").unwrap().len(), 1);
+        let saved: serde_json::Value =
+            serde_json::from_str(&store.models().unwrap()[0].metadata).unwrap();
+        assert_eq!(
+            saved["base_instructions"],
+            "Synthetic official instructions."
+        );
+        assert_eq!(
+            saved["context_window"], 272_000,
+            "shared values do not override templates"
+        );
+        assert_eq!(
+            saved["supported_reasoning_levels"]
+                .as_array()
+                .unwrap()
+                .len(),
+            2
+        );
+        assert_eq!(saved["default_reasoning_level"], serde_json::Value::Null);
         drop(store);
         fs::remove_dir_all(path).unwrap();
     }

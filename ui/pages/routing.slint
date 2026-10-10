@@ -271,11 +271,40 @@ export component RoutingPage inherits Rectangle {
                     content-y <=> root.model-scroll-y;
                     VerticalLayout {
                         spacing: 0px;
-                        for model in root.models: Rectangle {
+                        for model in root.models: model-row := Rectangle {
+                            // Rows from a batch addition glow once, then settle.
+                            property <bool> settled: false;
+                            property <float> glow: model.fresh && !self.settled ? 1 : 0;
+                            animate glow {
+                                duration: model-row.settled && Theme.page-motion > 0ms ? 1800ms : 0ms;
+                                easing: ease-out;
+                            }
                             height: !root.selected-only || model.included ? 74px : 0px;
                             visible: !root.selected-only || model.included;
                             background: root.default-model == model.public-id ? Theme.brand-surface.with-alpha(0.45) : Theme.panel;
                             animate background { duration: Theme.fast; }
+                            Timer {
+                                interval: 700ms;
+                                running: model.fresh && !model-row.settled;
+                                triggered => { model-row.settled = true; }
+                            }
+
+                            Rectangle {
+                                background: Theme.brand-surface;
+                                opacity: model-row.glow;
+                                accessible-role: none;
+                            }
+
+                            Rectangle {
+                                x: 0px;
+                                width: 3px;
+                                height: (parent.height - 26px) * model-row.glow;
+                                y: (parent.height - self.height) / 2;
+                                border-radius: 2px;
+                                background: Theme.brand;
+                                accessible-role: none;
+                            }
+
                             Rectangle {
                                 y: parent.height - 1px;
                                 height: 1px;

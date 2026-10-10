@@ -1,0 +1,848 @@
+import { Theme } from "../tokens.slint";
+import {
+    QuietButton,
+    QuietCheckBox,
+    QuietComboBox,
+    QuietLineEdit,
+} from "../components.slint";
+import { QuietScrollView } from "../scroll-view.slint";
+import { FeedbackBanner } from "../feedback-banner.slint";
+import { BatchModelRow, BatchSummary } from "../view-models.slint";
+
+global BatchFormat {
+    // "1048576" reads as "1.05M" and "128000" as "128K"; other text passes through.
+    public pure function tokens(text: string) -> string {
+        if (!text.is-float()) {
+            return text;
+        }
+        let value = text.to-float();
+        if (value >= 1000000) {
+            return (round(value / 10000) / 100) + "M";
+        }
+        if (value >= 1000) {
+            return round(value / 1000) + "K";
+        }
+        return text;
+    }
+}
+
+component RowTag inherits Rectangle {
+    in property <string> text;
+    in property <image> icon;
+    in property <color> ink: Theme.muted-text;
+    in property <color> fill: Theme.raised;
+    height: 24px;
+    horizontal-stretch: 0;
+    border-radius: 12px;
+    background: root.fill;
+    animate background { duration: Theme.fast; }
+    HorizontalLayout {
+        padding-left: 8px;
+        padding-right: 10px;
+        spacing: 5px;
+        Image {
+            y: (parent.height - self.height) / 2;
+            width: 12px;
+            height: 12px;
+            source: root.icon;
+            colorize: root.ink;
+            accessible-role: none;
+        }
+
+        Text {
+            text: root.text;
+            color: root.ink;
+            font-size: 11px;
+            vertical-alignment: center;
+            accessible-role: none;
+        }
+    }
+}
+
+component BatchRow inherits Rectangle {
+    in property <BatchModelRow> item;
+    in property <int> index;
+    // Shared entrance clock, 0 → 1 once per new list.
+    in property <float> clock;
+    in property <bool> expanded;
+    in property <bool> enabled;
+    in property <string> provider-name;
+    in property <string> shared-context;
+    in property <string> shared-levels;
+    in property <string> shared-levels-label;
+    callback toggle();
+    callback expand();
+    callback edit(string, string);
+
+    private property <bool> motion: Theme.animations-enabled && !Theme.system-reduced-motion;
+    private property <bool> selectable: root.item.supported && !root.item.added;
+    private property <bool> active: root.selectable && root.item.checked;
+    // Mirrors the save order: row value, then template, then shared value.
+    private property <string> inherited-context: root.item.template-context != "" ? root.item.template-context
+        : root.shared-context != "" ? root.shared-context : "128000";
+    private property <string> inherited-levels: root.item.source != "" ? root.item.template-levels : root.shared-levels;
+    private property <string> effective-context: root.item.context != "" ? root.item.context : root.inherited-context;
+    private property <string> effective-label: root.item.levels != "" ? root.item.levels-label
+        : root.item.source != "" ? root.item.template-levels-label : root.shared-levels-label;
+    private property <bool> customized: root.item.context != "" || root.item.levels != "";
+    private property <length> line-height: 58px;
+    private property <length> editor-height: 46px;
+
+    // Rows land one after another, 28ms apart up to the 12th, each easing over 420ms.
+    private property <float> arrive: root.motion ? clamp((root.clock * 1100 - min(root.index, 12) * 28) / 420, 0, 1) : 1;
+    private property <float> landed: 1 - (1 - root.arrive) * (1 - root.arrive) * (1 - root.arrive);
+    private property <float> shown: root.item.matched ? 1 : 0;
+    animate shown {
+        duration: Theme.page-motion;
+        easing: cubic-bezier(0.22, 1, 0.36, 1);
+    }
+    private property <float> picked: root.active ? 1 : 0;
+    animate picked {
+        duration: Theme.page-motion;
+        easing: cubic-bezier(0.34, 1.3, 0.64, 1);
+    }
+    private property <float> opened: root.active && root.expanded ? 1 : 0;
+    animate opened {
+        duration: Theme.page-motion;
+        easing: cubic-bezier(0.22, 1, 0.36, 1);
+    }
+
+    height: (root.line-height + root.editor-height * root.opened) * root.shown;
+    visible: root.shown > 0.01;
+    clip: true;
+
+    Rectangle {
+        y: (1 - root.landed) * 12px;
+        height: root.line-height + root.editor-height * root.opened;
+        opacity: root.landed;
+
+        Rectangle {
+            background: Theme.raised;
+            opacity: row-touch.has-hover && root.selectable && root.enabled ? (root.active ? 0.3 : 0.65) : 0;
+            animate opacity { duration: Theme.fast; }
+            accessible-role: none;
+        }
+
+        // Selection wash, fading toward the right edge.
+        Rectangle {
+            opacity: min(1, root.picked);
+            background: @linear-gradient(90deg, Theme.brand-surface 0%, Theme.brand-surface.with-alpha(Theme.dark ? 0.3 : 0.4) 100%);
+            accessible-role: none;
+        }
+
+        // Accent bar grows out from the middle of the first line.
+        Rectangle {
+            x: 0px;
+            width: 3px;
+            height: max(0px, (root.line-height - 22px) * root.picked);
+            y: (root.line-height - self.height) / 2;
+            border-radius: 2px;
+            background: Theme.brand;
+            accessible-role: none;
+        }
+
+        Rectangle {
+            y: parent.height - 1px;
+            height: 1px;
+            background: Theme.border;
+            accessible-role: none;
+        }
+
+        row-touch := TouchArea {
+            height: root.line-height;
+            y: 0px;
+            enabled: root.selectable && root.enabled;
+            mouse-cursor: pointer;
+            clicked => { root.toggle(); }
+        }
+
+        HorizontalLayout {
+            y: 0px;
+            height: root.line-height;
+            padding-left: 14px;
+            padding-right: 12px;
+            spacing: 10px;
+            QuietCheckBox {
+                y: (parent.height - self.height) / 2;
+                width: 28px;
+                text: "";
+                accessible-label: "添加 " + root.item.id;
+                auto-toggle: false;
+                checked: root.item.checked || root.item.added;
+                enabled: root.selectable && root.enabled;
+                toggled => { root.toggle(); }
+            }
+
+            VerticalLayout {
+                alignment: center;
+                spacing: 4px;
+                horizontal-stretch: 1;
+                min-width: 0px;
+                Text {
+                    text: root.item.id;
+                    color: root.selectable ? Theme.primary-text : Theme.muted-text;
+                    font-size: 13px;
+                    font-weight: 500;
+                    overflow: elide;
+                    animate color { duration: Theme.fast; }
+                }
+
+                HorizontalLayout {
+                    spacing: 6px;
+                    Text {
+                        text: root.item.id + "/" + root.provider-name;
+                        color: Theme.muted-text;
+                        font-size: 11px;
+                        vertical-alignment: center;
+                        overflow: elide;
+                        horizontal-stretch: 1;
+                        min-width: 0px;
+                    }
+
+                    if root.item.source != "": Rectangle {
+                        height: 18px;
+                        width: source-text.preferred-width + 14px;
+                        horizontal-stretch: 0;
+                        border-radius: 9px;
+                        background: Theme.brand-surface;
+                        source-text := Text {
+                            text: root.item.source;
+                            color: Theme.brand;
+                            font-size: 10px;
+                            font-weight: 500;
+                            horizontal-alignment: center;
+                            vertical-alignment: center;
+                        }
+                    }
+                }
+            }
+
+            if root.item.added: VerticalLayout {
+                alignment: center;
+                RowTag {
+                    text: "已添加";
+                    icon: @image-url("../../assets/ui/check.svg");
+                }
+            }
+            if !root.item.added && !root.item.supported: VerticalLayout {
+                alignment: center;
+                RowTag {
+                    text: "ID 不受支持";
+                    icon: @image-url("../../assets/ui/alert.svg");
+                    ink: Theme.warning;
+                    fill: Theme.warning-surface;
+                }
+            }
+            if root.selectable: Rectangle {
+                width: 184px;
+                horizontal-stretch: 0;
+                opacity: min(1, root.picked);
+                accessible-role: button;
+                accessible-label: "调整 " + root.item.id + " 的参数";
+                accessible-value: chip-text.text;
+                accessible-enabled: root.active && root.enabled;
+                accessible-action-default => { if (root.active && root.enabled) { root.expand(); } }
+
+                // The chip slides in from the right as the row is picked.
+                Rectangle {
+                    x: (1 - min(1, root.picked)) * 16px;
+                    y: (parent.height - self.height) / 2;
+                    width: parent.width;
+                    height: 28px;
+                    border-radius: 8px;
+                    border-width: 1px;
+                    border-color: root.opened > 0.5 || chip-touch.has-hover ? Theme.brand : root.customized ? Theme.brand.with-alpha(0.5) : Theme.border;
+                    background: chip-touch.pressed ? Theme.raised : Theme.panel;
+                    animate border-color, background { duration: Theme.fast; }
+                    HorizontalLayout {
+                        padding-left: 10px;
+                        padding-right: 8px;
+                        spacing: 6px;
+                        if root.customized: Rectangle {
+                            y: (parent.height - self.height) / 2;
+                            width: 6px;
+                            height: 6px;
+                            border-radius: 3px;
+                            background: Theme.brand;
+                        }
+                        chip-text := Text {
+                            text: BatchFormat.tokens(root.effective-context) + " · " + (root.effective-label == "" ? "不思考" : root.effective-label);
+                            color: root.customized ? Theme.primary-text : Theme.muted-text;
+                            font-size: 11px;
+                            vertical-alignment: center;
+                            overflow: elide;
+                            horizontal-stretch: 1;
+                            min-width: 0px;
+                        }
+
+                        Image {
+                            y: (parent.height - self.height) / 2;
+                            width: 12px;
+                            height: 12px;
+                            source: @image-url("../../assets/ui/chevron-down.svg");
+                            colorize: root.opened > 0.5 ? Theme.brand : Theme.muted-text;
+                            transform-rotation: root.opened * 180deg;
+                            accessible-role: none;
+                        }
+                    }
+
+                    chip-touch := TouchArea {
+                        enabled: root.active && root.enabled;
+                        mouse-cursor: pointer;
+                        clicked => { root.expand(); }
+                    }
+                }
+            }
+        }
+
+        // Mounted only while open or animating, so long lists stay light.
+        if root.opened > 0.01: HorizontalLayout {
+            y: root.line-height - 6px;
+            height: 36px;
+            padding-left: 52px;
+            padding-right: 12px;
+            spacing: 8px;
+            opacity: root.opened;
+            Text {
+                text: "上下文";
+                color: Theme.muted-text;
+                font-size: 11px;
+                vertical-alignment: center;
+            }
+
+            context-edit := QuietLineEdit {
+                width: 112px;
+                horizontal-stretch: 0;
+                text: root.item.context;
+                input-type: number;
+                font-size: 12px;
+                placeholder-text: root.inherited-context;
+                accessible-label: root.item.id + " 的上下文窗口";
+                enabled: root.enabled;
+                edited(text) => { root.edit(text, levels-edit.text); }
+            }
+
+            Text {
+                text: "思考等级";
+                color: Theme.muted-text;
+                font-size: 11px;
+                vertical-alignment: center;
+            }
+
+            levels-edit := QuietLineEdit {
+                text: root.item.levels;
+                font-size: 12px;
+                placeholder-text: root.inherited-levels == "" ? "不设置" : root.inherited-levels;
+                accessible-label: root.item.id + " 的思考等级";
+                enabled: root.enabled;
+                edited(text) => { root.edit(context-edit.text, text); }
+            }
+
+            QuietButton {
+                width: 56px;
+                horizontal-stretch: 0;
+                text: "还原";
+                ghost: true;
+                enabled: root.customized && root.enabled;
+                clicked => {
+                    context-edit.text = "";
+                    levels-edit.text = "";
+                    root.edit("", "");
+                }
+            }
+        }
+    }
+}
+
+// Pick many discovered models at once. Rows hold their own overrides; the
+// shared values below apply to rows without overrides or templates.
+export component ModelBatchPicker inherits Rectangle {
+    in property <[BatchModelRow]> rows;
+    in property <BatchSummary> summary;
+    in property <string> provider-name;
+    in property <bool> busy;
+    in property <bool> locked;
+    in property <bool> fetching;
+    in property <bool> saving;
+    in property <int> discovery-tone;
+    in property <string> discovery-message;
+    in-out property <string> query;
+    in-out property <string> shared-context;
+    in-out property <string> shared-levels;
+    in-out property <string> shared-default;
+    in property <string> shared-levels-label;
+    in property <[string]> reasoning-options;
+    // The owner sizes the list to the window so the actions stay reachable.
+    in property <length> list-height: 372px;
+    callback fetch();
+    callback dismiss-discovery();
+    callback toggle(int);
+    callback select-all(bool);
+    callback filter(string);
+    callback edit(int, string, string);
+    callback save();
+    callback cancel();
+
+    private property <bool> motion: Theme.animations-enabled && !Theme.system-reduced-motion;
+    private property <bool> editable: !root.busy && !root.locked;
+    private property <int> expanded-index: -1;
+    private property <bool> empty: root.rows.length == 0;
+
+    // Replays the staggered entrance whenever a new list arrives.
+    private property <bool> revealed: false;
+    private property <float> clock: root.revealed ? 1 : 0;
+    animate clock { duration: root.revealed && root.motion ? 1100ms : 0ms; }
+    changed rows => {
+        root.revealed = false;
+        root.expanded-index = -1;
+    }
+    Timer {
+        interval: 16ms;
+        running: !root.revealed && !root.empty;
+        triggered => { root.revealed = true; }
+    }
+
+    // Placeholder rows shimmer while the first list loads.
+    private property <bool> skeleton: root.fetching && root.empty;
+    private property <float> shimmer: root.skeleton && root.motion ? 1 : 0;
+    animate shimmer {
+        duration: root.skeleton && root.motion ? 1200ms : 0ms;
+        iteration-count: root.skeleton && root.motion ? -1 : 1;
+        easing: ease-in-out;
+    }
+
+    // The empty-state badge drifts gently.
+    private property <bool> idle: root.empty && !root.fetching;
+    private property <float> drift: root.idle && root.motion ? 1 : 0;
+    animate drift {
+        duration: root.idle && root.motion ? 2800ms : 0ms;
+        iteration-count: root.idle && root.motion ? -1 : 1;
+    }
+
+    // The selection counter pops on every change.
+    private property <int> selected: root.summary.selected;
+    private property <bool> popping: false;
+    private property <float> pop: root.popping ? 1.18 : 1;
+    animate pop {
+        duration: root.popping ? 90ms : 460ms;
+        easing: root.popping ? ease-out : ease-out-back;
+    }
+    // A sheen crosses the add button when the first model is picked.
+    private property <bool> sheen-on: false;
+    private property <float> sheen: root.sheen-on ? 1 : 0;
+    animate sheen {
+        duration: root.sheen-on && root.motion ? 900ms : 0ms;
+        easing: cubic-bezier(0.4, 0, 0.2, 1);
+    }
+    private property <bool> sheen-pending: false;
+    changed selected => {
+        if (root.motion) {
+            root.popping = true;
+        }
+        if (root.selected > 0 && !root.sheen-on) {
+            root.sheen-pending = true;
+        }
+        if (root.selected == 0) {
+            root.sheen-on = false;
+        }
+    }
+    Timer {
+        interval: 90ms;
+        running: root.popping;
+        triggered => { root.popping = false; }
+    }
+
+    Timer {
+        interval: 16ms;
+        running: root.sheen-pending;
+        triggered => {
+            root.sheen-pending = false;
+            root.sheen-on = true;
+        }
+    }
+
+    VerticalLayout {
+        spacing: 14px;
+        VerticalLayout {
+            HorizontalLayout {
+                spacing: 10px;
+                QuietLineEdit {
+                    icon: @image-url("../../assets/ui/search.svg");
+                    text <=> root.query;
+                    placeholder-text: root.empty ? "搜索模型 ID" : "在 " + root.summary.total + " 个模型中搜索";
+                    accessible-label: "搜索上游模型";
+                    enabled: !root.empty;
+                    edited(text) => { root.filter(text); }
+                }
+
+                QuietButton {
+                    width: 132px;
+                    horizontal-stretch: 0;
+                    text: root.fetching ? "获取中…" : root.empty ? "获取模型列表" : "重新获取";
+                    icon: root.fetching ? @image-url("../../assets/ui/loader.svg") : @image-url("../../assets/refresh.svg");
+                    icon-width: 14px;
+                    icon-height: 14px;
+                    icon-color: Theme.brand;
+                    loading: root.fetching;
+                    enabled: root.editable;
+                    clicked => { root.fetch(); }
+                }
+            }
+
+            FeedbackBanner {
+                tone: root.discovery-tone;
+                loading: root.fetching;
+                title: root.discovery-tone == 3 ? "获取模型列表失败" : "";
+                message: root.discovery-message;
+                hint: root.discovery-tone == 3 ? "确认上游可访问、凭据有效后重试，或切换到「单个映射」" : "";
+                retryable: true;
+                dismissible: true;
+                actions-enabled: root.editable;
+                retry => { root.fetch(); }
+                dismiss => { root.dismiss-discovery(); }
+            }
+        }
+
+        Rectangle {
+            height: root.list-height;
+            border-radius: 12px;
+            border-width: 1px;
+            border-color: Theme.border;
+            background: Theme.panel;
+            clip: true;
+            animate background, border-color { duration: Theme.page-motion; }
+            VerticalLayout {
+                Rectangle {
+                    height: 42px;
+                    background: Theme.background;
+                    animate background { duration: Theme.page-motion; }
+                    HorizontalLayout {
+                        padding-left: 14px;
+                        padding-right: 12px;
+                        spacing: 10px;
+                        QuietCheckBox {
+                            y: (parent.height - self.height) / 2;
+                            width: 64px;
+                            text: "全选";
+                            auto-toggle: false;
+                            checked: root.summary.visible-selectable > 0 && root.summary.visible-selected == root.summary.visible-selectable;
+                            indeterminate: root.summary.visible-selected > 0 && root.summary.visible-selected < root.summary.visible-selectable;
+                            enabled: root.editable && root.summary.visible-selectable > 0;
+                            accessible-label: self.checked ? "取消全选可添加的模型" : "全选可添加的模型";
+                            toggled => { root.select-all(!self.checked); }
+                        }
+
+                        Text {
+                            text: root.empty ? (root.fetching ? "正在读取上游模型…" : "尚未获取模型")
+                                : root.query != "" ? "匹配 " + root.summary.matched + " / " + root.summary.total
+                                : root.summary.total + " 个模型" + (root.summary.added > 0 ? " · " + root.summary.added + " 个已添加" : "");
+                            color: Theme.muted-text;
+                            font-size: 11px;
+                            vertical-alignment: center;
+                            overflow: elide;
+                            horizontal-stretch: 1;
+                            min-width: 0px;
+                        }
+
+                        VerticalLayout {
+                            alignment: center;
+                            Rectangle {
+                                height: 24px;
+                                width: count-text.preferred-width + 22px;
+                                border-radius: 12px;
+                                background: root.selected > 0 ? Theme.brand : Theme.raised;
+                                transform-scale: root.pop;
+                                animate background { duration: Theme.fast; }
+                                count-text := Text {
+                                    text: "已选 " + root.selected;
+                                    color: root.selected > 0 ? Theme.on-brand : Theme.muted-text;
+                                    font-size: 11px;
+                                    font-weight: 600;
+                                    horizontal-alignment: center;
+                                    vertical-alignment: center;
+                                    animate color { duration: Theme.fast; }
+                                }
+                            }
+                        }
+                    }
+                }
+
+                Rectangle {
+                    height: 1px;
+                    background: Theme.border;
+                }
+
+                Rectangle {
+                    vertical-stretch: 1;
+                    QuietScrollView {
+                        visible: !root.empty;
+                        VerticalLayout {
+                            alignment: start;
+                            for row[index] in root.rows: BatchRow {
+                                item: row;
+                                index: index;
+                                clock: root.clock;
+                                expanded: root.expanded-index == index;
+                                enabled: root.editable;
+                                provider-name: root.provider-name;
+                                shared-context: root.shared-context;
+                                shared-levels: root.shared-levels;
+                                shared-levels-label: root.shared-levels-label;
+                                toggle => { root.toggle(index); }
+                                expand => { root.expanded-index = root.expanded-index == index ? -1 : index; }
+                                edit(context, levels) => { root.edit(index, context, levels); }
+                            }
+                        }
+                    }
+
+                    if root.skeleton: Rectangle {
+                        clip: true;
+                        VerticalLayout {
+                            alignment: start;
+                            for index in 6: Rectangle {
+                                height: 58px;
+                                opacity: 1 - index * 0.15;
+                                Rectangle {
+                                    y: parent.height - 1px;
+                                    height: 1px;
+                                    background: Theme.border;
+                                }
+
+                                Rectangle {
+                                    x: 19px;
+                                    y: (parent.height - self.height) / 2;
+                                    width: 17px;
+                                    height: 17px;
+                                    border-radius: 4px;
+                                    background: Theme.raised;
+                                }
+
+                                Rectangle {
+                                    x: 52px;
+                                    y: 16px;
+                                    width: (parent.width - 52px) * (index == 1 || index == 4 ? 0.42 : index == 2 || index == 5 ? 0.3 : 0.52);
+                                    height: 11px;
+                                    border-radius: 5px;
+                                    background: Theme.raised;
+                                }
+
+                                Rectangle {
+                                    x: 52px;
+                                    y: 35px;
+                                    width: (parent.width - 52px) * 0.28;
+                                    height: 8px;
+                                    border-radius: 4px;
+                                    background: Theme.raised.with-alpha(0.7);
+                                }
+                            }
+                        }
+
+                        Rectangle {
+                            width: parent.width * 0.45;
+                            x: -self.width + (parent.width + self.width) * root.shimmer;
+                            background: @linear-gradient(100deg, #ffffff00 0%, #ffffff.with-alpha(Theme.dark ? 0.07 : 0.55) 50%, #ffffff00 100%);
+                            accessible-role: none;
+                        }
+                    }
+                    if root.idle: VerticalLayout {
+                        alignment: center;
+                        spacing: 10px;
+                        padding: 28px;
+                        HorizontalLayout {
+                            alignment: center;
+                            Rectangle {
+                                width: 48px;
+                                height: 48px;
+                                border-radius: 24px;
+                                background: root.discovery-tone >= 2 ? Theme.warning-surface : Theme.brand-surface;
+                                Image {
+                                    x: (parent.width - self.width) / 2;
+                                    y: (parent.height - self.height) / 2 + 3px * sin(root.drift * 360deg);
+                                    width: 22px;
+                                    height: 22px;
+                                    source: root.discovery-tone >= 2 ? @image-url("../../assets/ui/alert.svg") : @image-url("../../assets/ui/blocks.svg");
+                                    colorize: root.discovery-tone >= 2 ? Theme.warning : Theme.brand;
+                                    accessible-role: none;
+                                }
+                            }
+                        }
+
+                        Text {
+                            text: root.locked ? "正在管理 Codex 配置" : root.discovery-tone == 3 ? "没能读到模型列表" : root.discovery-tone == 2 ? "上游没有返回模型" : "从上游挑选模型";
+                            color: Theme.primary-text;
+                            font-size: 14px;
+                            font-weight: 500;
+                            horizontal-alignment: center;
+                        }
+
+                        Text {
+                            text: root.locked ? "恢复原配置后才能添加模型。" : root.discovery-tone >= 2 ? "可以重试，或切换到「单个映射」手动填写模型 ID。" : "获取模型列表后，勾选要放进 Codex 的模型。";
+                            color: Theme.muted-text;
+                            font-size: 12px;
+                            horizontal-alignment: center;
+                            wrap: word-wrap;
+                        }
+                    }
+                    if !root.empty && root.summary.matched == 0: VerticalLayout {
+                        alignment: center;
+                        spacing: 10px;
+                        padding: 28px;
+                        Text {
+                            text: "没有匹配“" + root.query + "”的模型";
+                            color: Theme.primary-text;
+                            font-size: 13px;
+                            horizontal-alignment: center;
+                            overflow: elide;
+                        }
+
+                        HorizontalLayout {
+                            alignment: center;
+                            QuietButton {
+                                width: 96px;
+                                height: 30px;
+                                text: "清除搜索";
+                                ghost: true;
+                                clicked => {
+                                    root.query = "";
+                                    root.filter("");
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        Rectangle {
+            border-radius: 12px;
+            border-width: 1px;
+            border-color: Theme.border;
+            background: Theme.inset;
+            animate background, border-color { duration: Theme.page-motion; }
+            VerticalLayout {
+                padding: 14px;
+                spacing: 10px;
+                HorizontalLayout {
+                    spacing: 8px;
+                    Text {
+                        text: "统一参数";
+                        color: Theme.primary-text;
+                        font-size: 13px;
+                        font-weight: 600;
+                        vertical-alignment: center;
+                    }
+
+                    Text {
+                        text: "用于没有单独设置、也没有预设或官方资料的模型";
+                        color: Theme.muted-text;
+                        font-size: 11px;
+                        vertical-alignment: center;
+                        overflow: elide;
+                        horizontal-stretch: 1;
+                        min-width: 0px;
+                    }
+                }
+
+                HorizontalLayout {
+                    spacing: 10px;
+                    VerticalLayout {
+                        spacing: 6px;
+                        horizontal-stretch: 2;
+                        Text {
+                            text: "上下文窗口";
+                            color: Theme.muted-text;
+                            font-size: 11px;
+                        }
+
+                        QuietLineEdit {
+                            text <=> root.shared-context;
+                            input-type: number;
+                            placeholder-text: "128000";
+                            accessible-label: "统一上下文窗口";
+                            enabled: root.editable;
+                        }
+                    }
+
+                    VerticalLayout {
+                        spacing: 6px;
+                        horizontal-stretch: 3;
+                        Text {
+                            text: "思考等级";
+                            color: Theme.muted-text;
+                            font-size: 11px;
+                        }
+
+                        QuietLineEdit {
+                            text <=> root.shared-levels;
+                            placeholder-text: "例如 low, medium, high";
+                            accessible-label: "统一思考等级";
+                            enabled: root.editable;
+                        }
+                    }
+
+                    VerticalLayout {
+                        spacing: 6px;
+                        width: 120px;
+                        Text {
+                            text: "默认";
+                            color: Theme.muted-text;
+                            font-size: 11px;
+                        }
+
+                        QuietComboBox {
+                            model: root.reasoning-options;
+                            current-value <=> root.shared-default;
+                            accessible-label: "统一默认思考等级";
+                            enabled: root.editable && root.reasoning-options.length > 1;
+                        }
+                    }
+                }
+            }
+        }
+
+        Text {
+            text: "新模型会加入已选，公开 ID 自动生成，之后可逐个编辑。预览发布后重启 Codex 刷新模型菜单。";
+            color: Theme.muted-text;
+            font-size: 12px;
+            wrap: word-wrap;
+        }
+
+        HorizontalLayout {
+            spacing: 8px;
+            Rectangle {
+                height: 36px;
+                horizontal-stretch: 1;
+                QuietButton {
+                    width: parent.width;
+                    text: root.saving ? "正在添加…" : root.selected > 0 ? "添加 " + root.selected + " 个模型" : "勾选要添加的模型";
+                    primary: true;
+                    icon: root.saving ? @image-url("../../assets/ui/loader.svg") : @image-url("../../assets/ui/plus.svg");
+                    icon-width: 14px;
+                    icon-height: 14px;
+                    icon-color: Theme.on-brand;
+                    loading: root.saving;
+                    enabled: root.editable && root.selected > 0;
+                    clicked => { root.save(); }
+                }
+
+                Rectangle {
+                    clip: true;
+                    border-radius: 8px;
+                    accessible-role: none;
+                    Rectangle {
+                        width: parent.width * 0.35;
+                        x: -self.width + (parent.width + self.width) * root.sheen;
+                        opacity: root.sheen > 0 && root.sheen < 1 ? 1 : 0;
+                        background: @linear-gradient(105deg, #ffffff00 0%, #ffffff.with-alpha(Theme.dark ? 0.35 : 0.28) 50%, #ffffff00 100%);
+                        accessible-role: none;
+                    }
+                }
+            }
+
+            QuietButton {
+                text: "取消";
+                clicked => { root.cancel(); }
+            }
+        }
+    }
+}
