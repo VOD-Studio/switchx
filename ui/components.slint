@@ -807,12 +807,18 @@ export component QuietComboBox inherits Rectangle {
 // current one. The owner applies `selected`; Left and Right also select.
 export component QuietSegmented inherits Rectangle {
     in property <[string]> options;
+    in property <[bool]> enabled-options;
     in property <bool> enabled: true;
     in property <int> current-index;
+    in property <brush> selection-background: Theme.panel;
     callback selected(int);
     private property <length> segment: (root.width - 6px) / max(1, root.options.length);
+    function option-is-enabled(index: int) -> bool {
+        return root.enabled && index >= 0 && index < root.options.length
+            && (index >= root.enabled-options.length || root.enabled-options[index]);
+    }
     function choose(index: int) {
-        if (root.enabled && index >= 0 && index < root.options.length && index != root.current-index) {
+        if (root.option-is-enabled(index) && index != root.current-index) {
             root.selected(index);
         }
     }
@@ -836,8 +842,8 @@ export component QuietSegmented inherits Rectangle {
         height: parent.height - 6px;
         border-radius: 7px;
         border-width: 1px;
-        border-color: keyboard.has-focus ? Theme.brand : Theme.border;
-        background: Theme.panel;
+        border-color: root.enabled && keyboard.has-focus ? Theme.brand : Theme.border;
+        background: root.selection-background;
         drop-shadow-blur: 6px;
         drop-shadow-offset-y: 1px;
         drop-shadow-color: Theme.dark ? #00000048 : #18221a16;
@@ -856,6 +862,7 @@ export component QuietSegmented inherits Rectangle {
         height: parent.height - 6px;
         accessible-role: tab;
         accessible-label: option;
+        accessible-enabled: root.option-is-enabled(index);
         accessible-item-selected: index == root.current-index;
         accessible-action-default => { root.choose(index); }
         Text {
@@ -863,6 +870,7 @@ export component QuietSegmented inherits Rectangle {
             color: index == root.current-index ? Theme.primary-text : segment-touch.has-hover ? Theme.primary-text.with-alpha(0.8) : Theme.muted-text;
             font-size: 12px;
             font-weight: index == root.current-index ? 600 : 400;
+            opacity: index < root.enabled-options.length && !root.enabled-options[index] ? 0.45 : 1;
             horizontal-alignment: center;
             vertical-alignment: center;
             animate color { duration: Theme.fast; }
@@ -870,8 +878,8 @@ export component QuietSegmented inherits Rectangle {
         }
 
         segment-touch := TouchArea {
-            enabled: root.enabled;
-            mouse-cursor: pointer;
+            enabled: root.option-is-enabled(index);
+            mouse-cursor: root.option-is-enabled(index) ? pointer : default;
             clicked => { keyboard.focus(); root.choose(index); }
         }
     }
