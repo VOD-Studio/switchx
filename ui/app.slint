@@ -557,7 +557,6 @@ export component AppWindow inherits Window {
 
     property <bool> modal-open: root.workspace-open || root.account-removing-id != "" || root.account-login-confirm-open || root.drawer-open || root.connection-picker-open || root.connection-models-open || root.xai-editor-open || root.editor-open || root.subscription-editor-open || root.common-config-editor-open || root.icon-picker-open || root.model-editor-open || root.fallback-editor-open || root.publish-drawer-open || root.direct-drawer-open || root.delete-account-confirm;
     property <string> page-title: root.active-page == 0 ? "模型，随手可用。" : root.active-page == 1 ? "连接" : root.active-page == 3 ? "每次请求，有迹可循。" : root.active-page == 4 ? "让工作流更顺手。" : "让它适合你。";
-    property <string> page-label: root.active-page == 0 ? "工作台" : root.active-page == 1 ? "连接" : root.active-page == 3 ? "活动" : root.active-page == 4 ? "工具箱" : "设置";
     property <string> page-subtitle: root.active-page == 0 ? "配好连接，整组模型随手可用。" : root.active-page == 1 ? "账号与上游，集中管理。" : root.active-page == 3 ? "查看模型、耗时与结果。" : root.active-page == 4 ? "MCP 与 Skills，独立于模型连接。" : "外观、工作空间和配置，各在其位。";
     animate background { duration: Theme.page-motion; }
     Timer {
@@ -745,25 +744,6 @@ export component AppWindow inherits Window {
                             padding-left: 30px;
                             padding-right: 24px;
                             spacing: 8px;
-                            Text {
-                                width: 128px;
-                                text: "Codex  ›  " + root.page-label;
-                                color: Theme.muted-text;
-                                font-size: 12px;
-                                vertical-alignment: center;
-                            }
-
-                            QuietButton {
-                                y: (parent.height - self.height) / 2;
-                                width: 122px;
-                                text: "工作空间";
-                                icon: @image-url("../assets/ui/folder.svg");
-                                icon-color: Theme.brand;
-                                selected: root.workspace-open;
-                                ghost: true;
-                                clicked => { root.workspace-open = true; }
-                            }
-
                             WindowMoveArea {
                                 horizontal-stretch: 1;
                                 enabled: root.native-titlebar-overlay && !root.full-screen;
