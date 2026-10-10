@@ -12,6 +12,7 @@
 //! Add-connection navigation: add --connection-picker-motion (frames and back actions).
 //! ChatGPT subscription editor: add --subscription-editor-design.
 //! Reasoning multi-select: add --reasoning-picker (themes, sizes, and motion).
+//! Shared configuration: add --common-config-design or --common-config-native.
 
 #[cfg(target_os = "macos")]
 #[path = "../src/macos.rs"]
@@ -1819,6 +1820,287 @@ fn render_subscription_editor(
     Ok(())
 }
 
+fn render_common_config(
+    app: &AppWindow,
+    window: &MinimalSoftwareWindow,
+    output: &Path,
+) -> Result<(), Box<dyn Error>> {
+    connect_code_highlighting(app);
+    app.set_active_page(1);
+    app.set_common_config_saved(
+        concat!(
+            "# Shared across your Codex connections\n",
+            "web_search = \"live\"\n",
+            "model_reasoning_effort = \"high\"\n",
+            "service_tier = \"default\"\n\n",
+            "[features]\n",
+            "shell_tool = true\n",
+            "apply_patch_freeform = true\n\n",
+            "[history]\n",
+            "persistence = \"save-all\"\n\n",
+            "[shell_environment_policy]\n",
+            "inherit = \"core\"\n",
+            "exclude = [\"EXAMPLE_PRIVATE_*\"]\n"
+        )
+        .into(),
+    );
+    app.set_common_config_draft(app.get_common_config_saved());
+    app.set_common_config_current_source("连接表单当前 config.toml".into());
+    let native = std::env::args().any(|arg| arg == "--common-config-native");
+    let saves = Rc::new(Cell::new(0));
+    let extracts = Rc::new(Cell::new(0));
+    let saved = saves.clone();
+    let weak = app.as_weak();
+    app.on_save_common_config(move || {
+        saved.set(saved.get() + 1);
+        if let Some(app) = weak.upgrade() {
+            app.set_busy(true);
+            if native {
+                let weak = app.as_weak();
+                slint::Timer::single_shot(Duration::from_millis(900), move || {
+                    if let Some(app) = weak.upgrade() {
+                        app.set_common_config_saved(app.get_common_config_draft());
+                        app.set_busy(false);
+                        app.set_common_config_editor_open(false);
+                    }
+                });
+            }
+        }
+    });
+    let extracted = extracts.clone();
+    let weak = app.as_weak();
+    app.on_extract_common_config(move || {
+        extracted.set(extracted.get() + 1);
+        if let Some(app) = weak.upgrade() {
+            app.set_busy(true);
+            if native {
+                let weak = app.as_weak();
+                slint::Timer::single_shot(Duration::from_millis(1100), move || {
+                    if let Some(app) = weak.upgrade() {
+                        app.set_common_config_draft(app.get_common_config_saved());
+                        app.set_busy(false);
+                        app.set_common_config_message(
+                            "已从合成连接表单提取并保存；取消不会撤销此次提取。".into(),
+                        );
+                    }
+                });
+            }
+        }
+    });
+    let weak = app.as_weak();
+    app.on_cancel_common_config(move || {
+        if let Some(app) = weak.upgrade()
+            && !app.get_busy()
+        {
+            app.set_common_config_draft(app.get_common_config_saved());
+            app.set_common_config_error("".into());
+            app.set_common_config_message("".into());
+            app.set_common_config_editor_open(false);
+        }
+    });
+    if native {
+        app.window().set_size(PhysicalSize::new(1200, 820));
+        app.global::<Theme>().set_animations_enabled(true);
+        app.invoke_set_appearance(true);
+        app.set_common_config_editor_open(true);
+        return Ok(app.run()?);
+    }
+    for (width, height) in [(1200, 820), (1000, 680)] {
+        app.window().set_size(PhysicalSize::new(width, height));
+        for dark in [false, true] {
+            set_theme(app, window, dark);
+            app.set_common_config_draft(app.get_common_config_saved());
+            app.set_common_config_editor_open(true);
+            let suffix = format!("{}-{width}x{height}", if dark { "dark" } else { "light" });
+            snapshot(window, output, &format!("common-config-{suffix}"))?;
+            let left = width as f32 - 920.0 + 26.0;
+            let help_y = if height < 760 { 230.0 } else { 258.0 };
+            click(window, width as f32 - 80.0, help_y);
+            snapshot(window, output, &format!("common-help-{suffix}"))?;
+            click(window, width as f32 - 80.0, help_y);
+            render(window);
+            click(window, width as f32 - 56.0, help_y + 60.0);
+            snapshot(window, output, &format!("common-focus-{suffix}"))?;
+            click(
+                window,
+                width as f32 - 56.0,
+                help_y + 60.0 - if height < 760 { 124.0 } else { 148.0 },
+            );
+            render(window);
+            // Exercise native input focus and the text binding, then save.
+            click(window, left + 140.0, help_y + 110.0);
+            window.dispatch_event(WindowEvent::KeyPressed { text: " ".into() });
+            window.dispatch_event(WindowEvent::KeyReleased { text: " ".into() });
+            assert_ne!(
+                app.get_common_config_draft(),
+                app.get_common_config_saved(),
+                "the editor must accept keyboard input"
+            );
+            snapshot(window, output, &format!("common-dirty-{suffix}"))?;
+            let count = saves.get();
+            click(window, width as f32 - 89.0, height as f32 - 47.0);
+            assert_eq!(
+                saves.get(),
+                count + 1,
+                "save remains reachable at every size"
+            );
+            assert!(app.get_busy());
+            snapshot(window, output, &format!("common-saving-{suffix}"))?;
+            click(window, width as f32 - 89.0, height as f32 - 47.0);
+            click(window, left + 93.0, height as f32 - 47.0);
+            window.dispatch_event(WindowEvent::KeyPressed {
+                text: slint::platform::Key::Escape.into(),
+            });
+            assert!(
+                app.get_common_config_editor_open(),
+                "busy operations cannot be dismissed"
+            );
+            assert_eq!(
+                saves.get(),
+                count + 1,
+                "busy operations cannot be submitted twice"
+            );
+            app.set_busy(false);
+
+            let count = extracts.get();
+            click(window, left + 93.0, height as f32 - 47.0);
+            assert_eq!(
+                extracts.get(),
+                count + 1,
+                "extract remains reachable at every size"
+            );
+            snapshot(window, output, &format!("common-extracting-{suffix}"))?;
+            app.set_common_config_draft(app.get_common_config_saved());
+            app.set_busy(false);
+            app.set_common_config_message("已从连接表单提取并保存；取消不会撤销此次提取。".into());
+            snapshot(window, output, &format!("common-extracted-{suffix}"))?;
+            app.set_common_config_message("".into());
+            app.set_common_config_error("TOML 第 3 行缺少右引号，请检查后重新保存。".into());
+            snapshot(window, output, &format!("common-error-{suffix}"))?;
+            app.set_common_config_error("".into());
+            app.set_config_managed(true);
+            snapshot(window, output, &format!("common-managed-{suffix}"))?;
+            let saved = saves.get();
+            let extracted = extracts.get();
+            click(window, width as f32 - 89.0, height as f32 - 47.0);
+            click(window, left + 93.0, height as f32 - 47.0);
+            assert_eq!(saves.get(), saved, "managed configuration cannot be saved");
+            assert_eq!(
+                extracts.get(),
+                extracted,
+                "managed configuration cannot be extracted"
+            );
+            app.set_config_managed(false);
+            app.set_common_config_draft("".into());
+            snapshot(window, output, &format!("common-empty-{suffix}"))?;
+            click(window, width as f32 - 205.0, height as f32 - 47.0);
+            assert!(!app.get_common_config_editor_open());
+            assert_eq!(
+                app.get_common_config_draft(),
+                app.get_common_config_saved(),
+                "cancel discards only the manual draft"
+            );
+            app.set_common_config_editor_open(false);
+            render(window);
+        }
+    }
+
+    app.window().set_size(PhysicalSize::new(1200, 820));
+    set_theme(app, window, true);
+    app.global::<Theme>().set_animations_enabled(true);
+    render_now(window);
+    app.set_common_config_editor_open(true);
+    let first = render_now(window);
+    let mut elapsed = 0;
+    for at in [0, 16, 48, 96, 160, 240, 340, 480, 640] {
+        frame(at - elapsed);
+        elapsed = at;
+        snapshot_now(window, output, &format!("common-enter-{at:03}ms"))?;
+    }
+    assert_ne!(
+        first.as_bytes(),
+        render_now(window).as_bytes(),
+        "the drawer and its sections must animate in"
+    );
+    click(window, 1120.0, 258.0);
+    render_now(window);
+    frame(96);
+    snapshot_now(window, output, "common-help-opening-096ms")?;
+    // Reverse twice before settling; controls must stay reachable.
+    click(window, 1120.0, 258.0);
+    render_now(window);
+    frame(48);
+    click(window, 1120.0, 258.0);
+    render_now(window);
+    frame(480);
+    snapshot_now(window, output, "common-help-interrupted-settled")?;
+    app.set_common_config_editor_open(false);
+    render_now(window);
+    frame(96);
+    snapshot_now(window, output, "common-exit-096ms")?;
+    app.set_common_config_editor_open(true);
+    render_now(window);
+    frame(640);
+    snapshot_now(window, output, "common-reopened")?;
+
+    for reduced in [false, true] {
+        app.set_common_config_editor_open(false);
+        frame(640);
+        app.global::<Theme>().set_animations_enabled(reduced);
+        app.global::<Theme>().set_system_reduced_motion(reduced);
+        app.set_common_config_editor_open(true);
+        let still = render_now(window);
+        frame(1500);
+        assert_eq!(
+            still.as_bytes(),
+            render_now(window).as_bytes(),
+            "disabled or reduced motion settles immediately, including the floating artwork"
+        );
+        snapshot_now(
+            window,
+            output,
+            if reduced {
+                "common-system-reduced-motion"
+            } else {
+                "common-motion-disabled"
+            },
+        )?;
+        app.set_common_config_editor_open(false);
+        render_now(window);
+    }
+    app.global::<Theme>().set_system_reduced_motion(false);
+    app.global::<Theme>().set_animations_enabled(true);
+    render_now(window);
+    // A deterministic animation reel for visual review, using only fixtures.
+    for index in 0..120 {
+        match index {
+            1 => app.set_common_config_editor_open(true),
+            24 | 44 => click(window, 1120.0, 258.0),
+            60 => click(window, 1144.0, 318.0),
+            80 => app.set_common_config_draft(
+                format!(
+                    "{}\n# A fresh shared preference\n",
+                    app.get_common_config_saved()
+                )
+                .into(),
+            ),
+            90 => click(window, 1111.0, 773.0),
+            105 => {
+                app.set_busy(false);
+                app.set_common_config_editor_open(false);
+            }
+            _ => {}
+        }
+        snapshot_now(window, output, &format!("common-reel-{index:03}"))?;
+        frame(40);
+    }
+    println!(
+        "Synthetic shared configuration previews: {}",
+        output.display()
+    );
+    Ok(())
+}
+
 fn render_provider_editor(
     app: &AppWindow,
     window: &MinimalSoftwareWindow,
@@ -2227,7 +2509,8 @@ fn main() -> Result<(), Box<dyn Error>> {
     let window = MinimalSoftwareWindow::new(RepaintBufferType::NewBuffer);
     let native_connections = std::env::args().any(|arg| arg == "--connections-native");
     let native_provider = std::env::args().any(|arg| arg == "--provider-editor-native");
-    if native_connections || native_provider {
+    let native_common = std::env::args().any(|arg| arg == "--common-config-native");
+    if native_connections || native_provider || native_common {
         #[cfg(target_os = "macos")]
         macos::configure_window()?;
     } else {
@@ -2245,6 +2528,10 @@ fn main() -> Result<(), Box<dyn Error>> {
     if std::env::args().any(|arg| arg == "--subscription-editor-design") {
         app.show()?;
         return render_subscription_editor(&app, &window, output);
+    }
+    if native_common || std::env::args().any(|arg| arg == "--common-config-design") {
+        app.show()?;
+        return render_common_config(&app, &window, output);
     }
     if native_provider || std::env::args().any(|arg| arg == "--provider-editor-design") {
         app.show()?;
