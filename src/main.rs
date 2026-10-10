@@ -7249,7 +7249,7 @@ mod tests {
                 click(left + 440.0, 160.0);
                 assert!(app.get_xai_editor_open());
                 draw(&format!("grok-{suffix}"));
-                click(left + 50.0, 108.0);
+                click(subscription_left + 50.0, 108.0);
                 assert!(app.get_connection_picker_open());
                 assert!(!app.get_xai_editor_open());
                 draw("back-from-grok");
