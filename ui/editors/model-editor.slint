@@ -1,3 +1,4 @@
+import { ReasoningPicker } from "reasoning-picker.slint";
 import { Theme } from "../tokens.slint";
 import {
     QuietComboBox as ComboBox,
@@ -205,24 +206,11 @@ export component ModelEditor inherits SurfaceCard {
                         vertical-alignment: center;
                     }
 
-                    LineEdit {
-                        text <=> root.model-reasoning-levels;
-                        placeholder-text: "例如 low, medium, high；留空不设置";
-                        accessible-label: "模型支持的思考等级";
-                    }
-
-                    Text {
-                        width: 56px;
-                        text: "默认";
-                        color: Theme.muted-text;
-                        vertical-alignment: center;
-                    }
-
-                    ComboBox {
-                        width: 124px;
-                        model: root.model-reasoning-options;
-                        current-value <=> root.model-default-reasoning;
-                        accessible-label: "模型默认思考等级";
+                    ReasoningPicker {
+                        levels <=> root.model-reasoning-levels;
+                        default-level <=> root.model-default-reasoning;
+                        label: "模型支持的思考等级";
+                        enabled: !root.busy && !root.config-managed;
                     }
                 }
 
