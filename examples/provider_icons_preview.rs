@@ -613,7 +613,7 @@ fn render_connection_workbench(
             app.set_active_page(0);
             snapshot(window, output, &format!("workbench-connections-{suffix}"))?;
             if width == 1200 && !dark {
-                click(window, 1090.0, 358.0);
+                click(window, 1090.0, 290.0);
                 render(window);
                 assert_eq!(
                     toggles.get(),
@@ -622,32 +622,32 @@ fn render_connection_workbench(
                 );
             }
             let expand_x = width as f32 - 100.0;
-            click(window, expand_x, 418.0);
+            click(window, expand_x, 350.0);
             snapshot(window, output, &format!("workbench-expanded-{suffix}"))?;
             let pixels = render(window);
             let sample_x = width as usize - 430;
             let pixel = |y: usize| pixels.as_slice()[y * width as usize + sample_x];
             // Empty space beside the model label must stay clear through the
             // row midpoint; the separator belongs below all row content.
-            for y in 469..479 {
+            for y in 401..411 {
                 assert_eq!(
                     pixel(y),
-                    pixel(467),
+                    pixel(399),
                     "divider crosses the model row at {suffix}, y={y}"
                 );
             }
             if height == 820 {
                 assert_ne!(
-                    pixel(505),
-                    pixel(467),
+                    pixel(437),
+                    pixel(399),
                     "row boundary separator is missing at {suffix}"
                 );
             }
-            click(window, expand_x, 418.0);
+            click(window, expand_x, 350.0);
             if width == 1200 && dark {
-                click(window, 860.0, 254.0);
+                click(window, 860.0, 186.0);
                 snapshot(window, output, &format!("workbench-direct-{suffix}"))?;
-                click(window, 785.0, 254.0);
+                click(window, 785.0, 186.0);
             }
             app.set_active_page(1);
             app.set_connection_models_id("podlink".into());
