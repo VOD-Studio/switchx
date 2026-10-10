@@ -4,8 +4,6 @@ import {
     QuietButton,
     QuietLineEdit,
     QuietCheckBox,
-    AnimatedSection,
-    StatusPill,
 } from "../components.slint";
 import { QuietScrollView } from "../scroll-view.slint";
 import {
@@ -15,6 +13,400 @@ import {
 } from "../view-models.slint";
 import { FeedbackBanner } from "../feedback-banner.slint";
 
+global Motion {
+    out property <bool> on: Theme.animations-enabled && !Theme.system-reduced-motion;
+    // Cubic ease-out for progress values driven by a shared clock.
+    public pure function settle(t: float) -> float {
+        let p = clamp(t, 0, 1);
+        return 1 - (1 - p) * (1 - p) * (1 - p);
+    }
+}
+
+// A rounded counter that pops whenever its text changes.
+component CountBadge inherits Rectangle {
+    in property <string> text;
+    in property <bool> active;
+    // Tinted while its owner is the selected segment.
+    in property <bool> current;
+    in property <bool> loading;
+    private property <bool> popping: false;
+    private property <float> pop: root.popping ? 1.25 : 1;
+    animate pop {
+        duration: root.popping ? 90ms : 480ms;
+        easing: root.popping ? ease-out : ease-out-back;
+    }
+    changed text => { if (Motion.on) { root.popping = true; } }
+    Timer {
+        interval: 90ms;
+        running: root.popping;
+        triggered => { root.popping = false; }
+    }
+
+    width: root.loading ? 20px : max(20px, label.preferred-width + 12px);
+    height: 20px;
+    horizontal-stretch: 0;
+    border-radius: 10px;
+    background: root.active ? Theme.brand : root.current ? Theme.brand-surface : Theme.raised;
+    transform-scale: root.pop;
+    animate background, width { duration: Theme.fast; }
+    accessible-role: none;
+
+    label := Text {
+        text: root.text;
+        visible: !root.loading;
+        color: root.active ? Theme.on-brand : root.current ? Theme.brand : Theme.muted-text;
+        font-size: 10px;
+        font-weight: 600;
+        horizontal-alignment: center;
+        vertical-alignment: center;
+        animate color { duration: Theme.fast; }
+    }
+
+    if root.loading: Image {
+        x: (parent.width - self.width) / 2;
+        y: (parent.height - self.height) / 2;
+        width: 12px;
+        height: 12px;
+        source: @image-url("../../assets/ui/loader.svg");
+        colorize: Theme.brand;
+        transform-rotation: Motion.on ? 360deg * mod(animation-tick(), 800ms) / 800ms : 0deg;
+    }
+}
+
+component Tag inherits Rectangle {
+    in property <string> text;
+    in property <image> icon;
+    in property <color> ink: Theme.muted-text;
+    in property <color> fill: Theme.raised;
+    width: tag-text.preferred-width + (root.icon.width > 0 ? 34px : 18px);
+    height: 22px;
+    horizontal-stretch: 0;
+    border-radius: 11px;
+    background: root.fill;
+    animate background { duration: Theme.fast; }
+    HorizontalLayout {
+        padding-left: root.icon.width > 0 ? 8px : 9px;
+        padding-right: 9px;
+        spacing: 5px;
+        if root.icon.width > 0: Image {
+            y: (parent.height - self.height) / 2;
+            width: 12px;
+            height: 12px;
+            source: root.icon;
+            colorize: root.ink;
+            accessible-role: none;
+        }
+        tag-text := Text {
+            text: root.text;
+            color: root.ink;
+            font-size: 10px;
+            font-weight: 500;
+            vertical-alignment: center;
+            accessible-role: none;
+        }
+    }
+}
+
+// Two pill segments; the thumb springs to the current one and stretches toward
+// its destination while it travels.
+component PaneSwitch inherits Rectangle {
+    in property <int> current;
+    in property <bool> results-enabled;
+    in property <string> catalog-count;
+    in property <string> results-count;
+    in property <bool> results-active;
+    in property <bool> loading;
+    callback choose(int);
+    private property <length> segment: (root.width - 8px) / 2;
+    private property <length> target: 4px + root.segment * root.current;
+
+    height: 40px;
+    horizontal-stretch: 0;
+    border-radius: 20px;
+    border-width: 1px;
+    border-color: Theme.border;
+    background: Theme.inset;
+    forward-focus: keyboard;
+    accessible-role: tab-list;
+
+    thumb := Rectangle {
+        x: root.target;
+        y: 4px;
+        width: root.segment + abs(root.target - self.x) * 0.4;
+        height: parent.height - 8px;
+        border-radius: self.height / 2;
+        border-width: 1px;
+        border-color: keyboard.has-focus ? Theme.brand : Theme.brand.with-alpha(0.3);
+        background: Theme.dark ? Theme.raised : Theme.panel;
+        drop-shadow-blur: 10px;
+        drop-shadow-offset-y: 2px;
+        drop-shadow-color: Theme.dark ? #00000058 : #18221a1c;
+        animate x {
+            duration: Theme.drawer-motion;
+            easing: cubic-bezier(0.34, 1.45, 0.64, 1);
+        }
+        animate border-color { duration: Theme.fast; }
+    }
+
+    for label[index] in ["当前目录", "获取结果"]: segment := Rectangle {
+        property <bool> open: index == 0 || root.results-enabled;
+        x: 4px + root.segment * index;
+        y: 4px;
+        width: root.segment;
+        height: parent.height - 8px;
+        opacity: self.open ? 1 : 0.45;
+        animate opacity { duration: Theme.fast; }
+        accessible-role: tab;
+        accessible-label: label;
+        accessible-enabled: self.open;
+        accessible-item-selected: index == root.current;
+        accessible-action-default => { if (segment.open) { root.choose(index); } }
+
+        HorizontalLayout {
+            alignment: center;
+            spacing: 7px;
+            Text {
+                text: label;
+                color: index == root.current ? Theme.primary-text : touch.has-hover && segment.open ? Theme.primary-text.with-alpha(0.85) : Theme.muted-text;
+                font-size: 12px;
+                font-weight: index == root.current ? 600 : 400;
+                vertical-alignment: center;
+                animate color { duration: Theme.fast; }
+            }
+
+            CountBadge {
+                y: (parent.height - self.height) / 2;
+                text: index == 0 ? root.catalog-count : root.results-count;
+                active: index == 1 && root.results-active;
+                current: index == root.current;
+                loading: index == 1 && root.loading;
+            }
+        }
+
+        touch := TouchArea {
+            enabled: segment.open;
+            mouse-cursor: pointer;
+            clicked => { keyboard.focus(); root.choose(index); }
+        }
+    }
+
+    keyboard := FocusScope {
+        width: 0px;
+        key-pressed(event) => {
+            if (event.text == Key.LeftArrow) { root.choose(0); return accept; }
+            if (event.text == Key.RightArrow && root.results-enabled) { root.choose(1); return accept; }
+            return reject;
+        }
+    }
+}
+
+// Placeholder rows with a sheen, driven by the frame clock because they are
+// usually created already loading.
+component SkeletonList inherits Rectangle {
+    in property <int> count: 6;
+    in property <bool> cards: false;
+    private property <float> sweep: Motion.on ? mod(animation-tick(), 1300ms) / 1300ms : 0;
+    clip: true;
+    accessible-role: none;
+    VerticalLayout {
+        alignment: start;
+        padding-left: root.cards ? 4px : 0px;
+        padding-right: root.cards ? 18px : 0px;
+        padding-top: root.cards ? 2px : 0px;
+        spacing: root.cards ? 10px : 0px;
+        for index in root.count: Rectangle {
+            height: root.cards ? 82px : 42px;
+            opacity: 1 - index * 0.7 / root.count;
+            border-radius: root.cards ? 12px : 0px;
+            border-width: root.cards ? 1px : 0px;
+            border-color: Theme.border;
+            background: root.cards ? Theme.panel : transparent;
+            if !root.cards: Rectangle {
+                x: 14px;
+                y: parent.height - 1px;
+                width: parent.width - 28px;
+                height: 1px;
+                background: Theme.border.with-alpha(0.6);
+            }
+            Rectangle {
+                x: root.cards ? 12px : 17px;
+                y: root.cards ? 19px : (parent.height - self.height) / 2;
+                width: root.cards ? 22px : 17px;
+                height: self.width;
+                border-radius: root.cards ? 11px : 4px;
+                background: Theme.raised;
+            }
+
+            if root.cards: Rectangle {
+                x: 42px;
+                y: 12px;
+                width: (parent.width - 54px) * 0.62;
+                height: 36px;
+                border-radius: 8px;
+                background: Theme.raised.with-alpha(0.8);
+            }
+            if root.cards: Rectangle {
+                x: 42px + (parent.width - 54px) * 0.62 + 8px;
+                y: 12px;
+                width: (parent.width - 54px) * 0.38 - 8px;
+                height: 36px;
+                border-radius: 8px;
+                background: Theme.raised.with-alpha(0.6);
+            }
+            Rectangle {
+                x: root.cards ? 42px : 50px;
+                y: root.cards ? 60px : (parent.height - self.height) / 2;
+                width: (parent.width - self.x) * (root.cards ? 0.34 : mod(index, 3) == 0 ? 0.46 : mod(index, 3) == 1 ? 0.32 : 0.4);
+                height: root.cards ? 8px : 10px;
+                border-radius: 5px;
+                background: Theme.raised;
+            }
+        }
+    }
+
+    Rectangle {
+        width: parent.width * 0.4;
+        x: -self.width + (parent.width + self.width) * root.sweep;
+        background: @linear-gradient(100deg, #ffffff00 0%, #ffffff.with-alpha(Theme.dark ? 0.06 : 0.5) 50%, #ffffff00 100%);
+    }
+}
+
+// One fetched model. Rows land one after another from a shared clock, collapse
+// when filtered out, and light up when picked.
+component CandidateRow inherits Rectangle {
+    in property <BatchModelRow> item;
+    in property <int> index;
+    in property <float> clock;
+    in property <bool> enabled;
+    callback toggle();
+    private property <bool> selectable: root.item.supported && !root.item.added;
+    private property <bool> active: root.selectable && root.item.checked;
+    private property <float> landed: Motion.on ? Motion.settle((root.clock * 1100 - min(root.index, 14) * 32) / 420) : 1;
+    private property <float> shown: root.item.matched ? 1 : 0;
+    animate shown {
+        duration: Theme.page-motion;
+        easing: cubic-bezier(0.22, 1, 0.36, 1);
+    }
+    private property <float> picked: root.active ? 1 : 0;
+    animate picked {
+        duration: Theme.page-motion;
+        easing: cubic-bezier(0.34, 1.3, 0.64, 1);
+    }
+    private property <length> line-height: 42px;
+
+    height: root.line-height * root.shown;
+    visible: root.shown > 0.01;
+    clip: true;
+
+    Rectangle {
+        x: (1 - root.landed) * 24px;
+        y: 0px;
+        width: parent.width;
+        height: root.line-height;
+        opacity: root.landed * root.shown;
+
+        Rectangle {
+            background: Theme.raised;
+            opacity: touch.has-hover && root.selectable && root.enabled ? (root.active ? 0.35 : 0.7) : 0;
+            animate opacity { duration: Theme.fast; }
+        }
+
+        // Selection wash, fading toward the right edge.
+        Rectangle {
+            opacity: clamp(root.picked, 0, 1);
+            background: @linear-gradient(90deg, Theme.brand-surface 0%, Theme.brand-surface.with-alpha(Theme.dark ? 0.25 : 0.35) 100%);
+        }
+
+        // Accent bar grows out from the middle.
+        Rectangle {
+            x: 0px;
+            width: 3px;
+            height: max(0px, (parent.height - 16px) * root.picked);
+            y: (parent.height - self.height) / 2;
+            border-radius: 2px;
+            background: Theme.brand;
+        }
+
+        Rectangle {
+            x: 14px;
+            y: parent.height - 1px;
+            width: parent.width - 28px;
+            height: 1px;
+            background: Theme.border.with-alpha(0.6);
+        }
+
+        touch := TouchArea {
+            enabled: root.selectable && root.enabled;
+            mouse-cursor: pointer;
+            clicked => { root.toggle(); }
+        }
+
+        HorizontalLayout {
+            padding-left: 14px;
+            padding-right: 12px;
+            spacing: 10px;
+            QuietCheckBox {
+                y: (parent.height - self.height) / 2;
+                width: 24px;
+                text: "";
+                accessible-label: "加入 " + root.item.id;
+                auto-toggle: false;
+                checked: root.item.checked || root.item.added;
+                enabled: root.selectable && root.enabled;
+                toggled => { root.toggle(); }
+            }
+
+            Text {
+                text: root.item.id;
+                color: root.selectable ? Theme.primary-text : Theme.muted-text;
+                font-size: 13px;
+                font-weight: root.active ? 600 : 400;
+                vertical-alignment: center;
+                overflow: elide;
+                horizontal-stretch: 1;
+                min-width: 0px;
+                animate color { duration: Theme.fast; }
+            }
+
+            // The slot opens as the row is picked and wipes the tag into view.
+            if root.selectable: Rectangle {
+                width: 62px * max(0, root.picked);
+                horizontal-stretch: 0;
+                clip: true;
+                opacity: clamp(root.picked, 0, 1);
+                Tag {
+                    x: 0px;
+                    y: (parent.height - self.height) / 2;
+                    text: "待加入";
+                    icon: @image-url("../../assets/ui/plus.svg");
+                    ink: Theme.brand;
+                    fill: Theme.panel;
+                }
+            }
+            if root.item.source != "": Tag {
+                y: (parent.height - self.height) / 2;
+                text: root.item.source;
+                ink: Theme.brand;
+                fill: Theme.brand-surface;
+            }
+            if root.item.added: Tag {
+                y: (parent.height - self.height) / 2;
+                text: "已在目录";
+                icon: @image-url("../../assets/ui/check.svg");
+            }
+            if !root.item.added && !root.item.supported: Tag {
+                y: (parent.height - self.height) / 2;
+                text: "不支持";
+                icon: @image-url("../../assets/ui/alert.svg");
+                ink: Theme.warning;
+                fill: Theme.warning-surface;
+            }
+        }
+    }
+}
+
+// A connection's model catalog. Fetched results and the catalog each take the
+// full height and slide between each other, so neither list is squeezed.
 export component ConnectionModels inherits Rectangle {
     in property <bool> busy;
     in property <bool> saving;
@@ -39,375 +431,656 @@ export component ConnectionModels inherits Rectangle {
     callback append();
     callback save();
     callback cancel();
-    property <bool> picker-expanded: false;
-    changed candidates => { if (root.candidates.length > 0) { root.picker-expanded = true; } }
+
+    // 0 shows the catalog, 1 the fetched results.
+    private property <int> pane: 0;
+    private property <bool> has-results: root.candidates.length > 0;
+    private property <bool> results-ready: root.has-results || root.fetching;
+    private property <bool> on-results: root.results-ready && root.pane == 1;
+    private property <float> slide: root.on-results ? 1 : 0;
+    animate slide {
+        duration: Motion.on ? 520ms : 0ms;
+        easing: cubic-bezier(0.3, 1.12, 0.36, 1);
+    }
+    changed fetching => { if (root.fetching) { root.pane = 1; } }
+
+    // Toolbar, lists and footer settle in one after another on open.
+    private property <bool> intro-started: false;
+    private property <float> intro: root.intro-started || !Motion.on ? 1 : 0;
+    animate intro { duration: Motion.on ? 760ms : 0ms; }
+    Timer {
+        interval: 16ms;
+        running: !root.intro-started;
+        triggered => { root.intro-started = true; }
+    }
+
+    pure function phase(start: float) -> float {
+        return Motion.settle((root.intro - start) / 0.6);
+    }
+
+    // Replays the staggered entrance whenever a new result list arrives.
+    private property <bool> revealed: false;
+    private property <float> clock: root.revealed ? 1 : 0;
+    animate clock { duration: root.revealed && Motion.on ? 1100ms : 0ms; }
+    changed candidates => {
+        root.revealed = false;
+        results-scroll.content-y = 0px;
+        if (root.has-results) { root.pane = 1; }
+    }
+    Timer {
+        interval: 16ms;
+        running: !root.revealed && root.has-results;
+        triggered => { root.revealed = true; }
+    }
+
+    // New rows land with their own stagger, then the catalog glides to them.
+    private property <int> stagger-base: 0;
+    private property <bool> follow-tail: false;
+    private property <int> row-count: root.rows.length;
+    private property <length> tail-from;
+    private property <int> tail-step: 14;
+    changed rows => { root.stagger-base = 0; }
+    changed row-count => {
+        if (root.follow-tail) {
+            root.follow-tail = false;
+            root.tail-from = catalog-scroll.content-y;
+            root.tail-step = Motion.on ? 0 : 13;
+        }
+    }
+    Timer {
+        interval: 600ms;
+        running: root.follow-tail;
+        triggered => { root.follow-tail = false; }
+    }
+
+    Timer {
+        interval: 16ms;
+        running: root.tail-step < 14;
+        triggered => {
+            root.tail-step += 1;
+            catalog-scroll.content-y = root.tail-from + (min(0px, catalog-scroll.visible-height - catalog-scroll.content-height) - root.tail-from) * Motion.settle(root.tail-step / 14);
+        }
+    }
+
+    function add-row() {
+        root.stagger-base = root.rows.length;
+        root.follow-tail = true;
+        root.pane = 0;
+        root.add();
+    }
+    function append-selected() {
+        root.stagger-base = root.rows.length;
+        root.follow-tail = true;
+        root.pane = 0;
+        root.append();
+    }
+
+    // The unsaved marker pulses and the action buttons catch a sheen once.
+    // Their overlays check Motion.on so reduced motion also stops a running one.
+    private property <float> ring: root.dirty ? 1 : 0;
+    animate ring {
+        duration: root.dirty && Motion.on ? 1300ms : 0ms;
+        iteration-count: root.dirty && Motion.on ? 2 : 1;
+        easing: ease-out;
+    }
+    private property <float> save-sheen: root.dirty && !root.busy ? 1 : 0;
+    animate save-sheen {
+        duration: root.dirty && !root.busy && Motion.on ? 950ms : 0ms;
+        delay: root.dirty && !root.busy && Motion.on ? 160ms : 0ms;
+        easing: cubic-bezier(0.4, 0, 0.2, 1);
+    }
+    private property <float> add-sheen: root.summary.selected > 0 ? 1 : 0;
+    animate add-sheen {
+        duration: root.summary.selected > 0 && Motion.on ? 900ms : 0ms;
+        easing: cubic-bezier(0.4, 0, 0.2, 1);
+    }
+
+    // Column labels line up with the row fields: inset, padding, index badge.
+    private property <length> card-inset: 4px;
+
     VerticalLayout {
-        spacing: 14px;
         Rectangle {
-            height: 72px;
-            border-radius: 12px;
-            background: @linear-gradient(110deg, Theme.brand-surface, Theme.panel);
-            HorizontalLayout {
-                padding: 16px;
-                spacing: 12px;
-                cross-axis-alignment: center;
-                Image {
-                    width: 24px;
-                    height: 24px;
-                    source: @image-url("../../assets/ui/blocks.svg");
-                    colorize: Theme.brand;
-                }
-
-                VerticalLayout {
-                    spacing: 5px;
-                    Text {
-                        text: "模型在这里准备，一次加入工作台。";
-                        font-size: 16px;
-                        font-weight: 600;
-                        color: Theme.primary-text;
-                    }
-
-                    Text {
-                        text: "直连与聚合共用此目录。保存目录后，在工作台选择连接。";
-                        font-size: 11px;
-                        color: Theme.muted-text;
-                    }
-                }
-            }
-        }
-
-        HorizontalLayout {
-            height: 36px;
-            spacing: 8px;
-            Text {
-                text: "模型目录";
-                color: Theme.primary-text;
-                font-size: 16px;
-                font-weight: 600;
-                vertical-alignment: center;
-            }
-
-            StatusPill {
-                label: root.rows.length + " 项";
-                width: 48px;
-                height: 24px;
-                y: (parent.height - self.height) / 2;
-            }
-
+            height: 40px;
             Rectangle {
-                horizontal-stretch: 1;
-            }
-
-            QuietButton {
-                width: 128px;
-                text: root.fetching ? "正在获取…" : "获取模型列表";
-                icon: root.fetching ? @image-url("../../assets/ui/loader.svg") : @image-url("../../assets/refresh.svg");
-                icon-color: Theme.brand;
-                loading: root.fetching;
-                enabled: !root.busy && !root.managed;
-                clicked => { root.fetch(); }
-            }
-
-            QuietButton {
-                width: 106px;
-                text: "手动添加";
-                icon: @image-url("../../assets/ui/plus.svg");
-                icon-color: Theme.brand;
-                enabled: !root.busy && !root.managed && !root.subscription;
-                clicked => { root.add(); }
-            }
-        }
-
-        if root.discovery-message != "" || root.fetching: FeedbackBanner {
-            tone: root.discovery-tone;
-            message: root.discovery-message;
-            loading: root.fetching;
-        }
-
-        if root.candidates.length > 0: HorizontalLayout {
-            height: 32px;
-            QuietButton {
-                text: root.picker-expanded ? "收起获取结果 ▴" : "展开获取结果 ▾";
-                ghost: true;
-                clicked => { root.picker-expanded = !root.picker-expanded; }
-            }
-
-            Rectangle {
-                horizontal-stretch: 1;
-            }
-
-            QuietButton {
-                text: "加入目录 · " + root.summary.selected;
-                primary: true;
-                enabled: !root.busy && !root.managed && root.summary.selected > 0;
-                clicked => { root.append(); root.picker-expanded = false; }
-            }
-        }
-        if root.candidates.length > 0: AnimatedSection {
-            expanded: root.picker-expanded && root.candidates.length > 0;
-            content-height: 212px;
-            VerticalLayout {
-                spacing: 8px;
+                y: (1 - root.phase(0)) * -10px;
+                height: parent.height;
+                opacity: root.phase(0);
                 HorizontalLayout {
-                    height: 36px;
-                    QuietLineEdit {
-                        text <=> root.query;
-                        placeholder-text: "搜索获取结果";
-                        accessible-label: "搜索模型列表";
-                        edited(value) => { root.filter(value); }
-                    }
-
-                    QuietButton {
-                        width: 90px;
-                        text: "选择全部";
-                        enabled: !root.busy;
-                        clicked => { root.select-all(true); }
-                    }
-
-                    QuietButton {
-                        width: 80px;
-                        text: "清空选择";
-                        enabled: !root.busy;
-                        clicked => { root.select-all(false); }
-                    }
-                }
-
-                QuietScrollView {
-                    VerticalLayout {
-                        spacing: 0px;
-                        for candidate[index] in root.candidates: Rectangle {
-                            height: candidate.matched ? 36px : 0px;
-                            visible: candidate.matched;
-                            background: candidate.checked ? Theme.brand-surface : Theme.inset;
-                            animate background { duration: Theme.fast; }
-                            HorizontalLayout {
-                                padding-left: 10px;
-                                padding-right: 10px;
-                                spacing: 8px;
-                                QuietCheckBox {
-                                    y: (parent.height - self.height) / 2;
-                                    text: candidate.id;
-                                    checked: candidate.checked;
-                                    auto-toggle: false;
-                                    enabled: !root.busy && candidate.supported && !candidate.added;
-                                    toggled => { root.toggle(index); }
-                                }
-
-                                Text {
-                                    text: candidate.added ? "已在目录" : !candidate.supported ? "不支持" : candidate.source;
-                                    color: Theme.muted-text;
-                                    font-size: 10px;
-                                    vertical-alignment: center;
-                                }
-                            }
-                        }
-                    }
-                }
-            }
-        }
-
-        QuietScrollView {
-            vertical-stretch: 1;
-            min-height: 100px;
-            VerticalLayout {
-                alignment: start;
-                spacing: 10px;
-                if root.rows.length == 0: Rectangle {
-                    height: 170px;
-                    border-width: 1px;
-                    border-color: Theme.border;
-                    border-radius: 12px;
-                    background: Theme.inset;
-                    VerticalLayout {
-                        padding: 24px;
-                        spacing: 12px;
-                        alignment: center;
-                        Text {
-                            text: root.busy ? "正在读取目录…" : "为这个连接准备模型";
-                            color: Theme.primary-text;
-                            font-size: 18px;
-                            horizontal-alignment: center;
-                        }
-
-                        Text {
-                            text: root.subscription ? "获取官方模型列表，选择常用模型加入目录。" : "获取模型列表批量添加，也可以手动填写实际模型 ID。";
-                            color: Theme.muted-text;
-                            font-size: 12px;
-                            horizontal-alignment: center;
-                            wrap: word-wrap;
-                        }
-                    }
-                }
-                if root.rows.length > 0: HorizontalLayout {
-                    height: 20px;
-                    padding-left: 12px;
-                    padding-right: 12px;
                     spacing: 8px;
-                    Text {
-                        width: 22px;
-                        text: "";
-                    }
-
-                    Text {
-                        text: "菜单显示名";
-                        color: Theme.muted-text;
-                        font-size: 11px;
-                    }
-
-                    Text {
-                        text: "实际请求模型 ID";
-                        color: Theme.muted-text;
-                        font-size: 11px;
-                    }
-
-                    Text {
-                        width: 100px;
-                        text: "上下文窗口";
-                        color: Theme.muted-text;
-                        font-size: 11px;
-                    }
-
-                    Text {
-                        width: 160px;
-                        text: "思考等级 / 默认";
-                        color: Theme.muted-text;
-                        font-size: 11px;
-                    }
-
-                    Text {
-                        width: 32px;
-                        text: "";
-                    }
-                }
-                for row[index] in root.rows: item := Rectangle {
-                    property <bool> landed: false;
-                    property <float> arrival: self.landed ? 1 : 0;
-                    property <float> removed: row.removing ? 1 : 0;
-                    animate arrival {
-                        duration: Theme.page-motion;
-                        easing: ease-out;
-                    }
-                    animate removed {
-                        duration: Theme.drawer-motion;
-                        easing: cubic-bezier(0.22, 1, 0.36, 1);
-                    }
-                    height: 82px - 46px * self.removed;
-                    border-width: 1px;
-                    border-color: row.removing ? Theme.warning.with-alpha(0.4) : Theme.border;
-                    border-radius: 10px;
-                    background: Theme.panel;
-                    clip: true;
-                    opacity: Theme.page-motion == 0ms ? 1 : self.arrival;
-                    Timer {
-                        interval: max(1ms, Theme.page-motion * min(index, 6) / 5);
-                        running: !item.landed;
-                        triggered => { item.landed = true; }
+                    PaneSwitch {
+                        width: 280px;
+                        current: root.on-results ? 1 : 0;
+                        results-enabled: root.results-ready;
+                        catalog-count: "" + root.rows.length;
+                        results-count: root.has-results ? "" + root.summary.total : "–";
+                        results-active: root.summary.selected > 0;
+                        loading: root.fetching;
+                        choose(index) => { root.pane = index; }
                     }
 
                     Rectangle {
-                        x: 0px;
-                        width: 3px;
-                        height: parent.height - 24px;
-                        y: 12px;
-                        background: row.public-id == "" ? Theme.brand : Theme.border;
-                        border-radius: 2px;
+                        horizontal-stretch: 1;
                     }
 
-                    if !row.removing: VerticalLayout {
-                        padding: 12px;
+                    QuietButton {
+                        y: 2px;
+                        width: 128px;
+                        height: 36px;
+                        horizontal-stretch: 0;
+                        text: root.fetching ? "正在获取…" : root.has-results ? "重新获取" : "获取模型列表";
+                        icon: root.fetching ? @image-url("../../assets/ui/loader.svg") : @image-url("../../assets/refresh.svg");
+                        icon-width: 14px;
+                        icon-height: 14px;
+                        icon-color: Theme.brand;
+                        loading: root.fetching;
+                        enabled: !root.busy && !root.managed;
+                        clicked => { root.fetch(); }
+                    }
+
+                    QuietButton {
+                        y: 2px;
+                        width: 106px;
+                        height: 36px;
+                        horizontal-stretch: 0;
+                        text: "手动添加";
+                        icon: @image-url("../../assets/ui/plus.svg");
+                        icon-width: 14px;
+                        icon-height: 14px;
+                        icon-color: Theme.brand;
+                        enabled: !root.busy && !root.managed && !root.subscription;
+                        clicked => { root.add-row(); }
+                    }
+                }
+            }
+        }
+
+        FeedbackBanner {
+            top-gap: 12px;
+            tone: root.discovery-tone;
+            message: root.discovery-tone >= 2 ? root.discovery-message : "";
+            title: root.discovery-tone == 3 ? "获取模型列表失败" : "";
+            retryable: true;
+            actions-enabled: !root.busy && !root.managed;
+            retry => { root.fetch(); }
+        }
+
+        Rectangle {
+            height: 12px;
+        }
+
+        Rectangle {
+            vertical-stretch: 1;
+            min-height: 170px;
+            clip: true;
+
+            // The catalog.
+            Rectangle {
+                x: -root.slide * (parent.width + 48px);
+                y: (1 - root.phase(0.12)) * 18px;
+                width: parent.width;
+                height: parent.height;
+                opacity: clamp(1 - root.slide, 0, 1) * root.phase(0.12);
+                visible: root.slide < 0.999;
+                VerticalLayout {
+                    spacing: 8px;
+                    if root.rows.length > 0: HorizontalLayout {
+                        height: 16px;
+                        padding-left: root.card-inset + 42px;
+                        padding-right: root.card-inset + 66px;
                         spacing: 8px;
-                        HorizontalLayout {
-                            height: 36px;
-                            spacing: 8px;
-                            Text {
-                                width: 22px;
-                                text: index + 1;
-                                font-size: 12px;
-                                color: Theme.muted-text;
-                                vertical-alignment: center;
-                            }
-
-                            QuietLineEdit {
-                                text <=> row.display-name;
-                                placeholder-text: "菜单显示名";
-                                accessible-label: "模型显示名 " + (index + 1);
-                                enabled: !root.busy && !root.managed;
-                                edited(value) => { root.edited(); }
-                            }
-
-                            QuietLineEdit {
-                                text <=> row.upstream-model;
-                                placeholder-text: "实际模型 ID";
-                                accessible-label: "实际模型 " + (index + 1);
-                                enabled: !root.busy && !root.managed && !root.subscription;
-                                edited(value) => { root.edited(); }
-                            }
-
-                            QuietLineEdit {
-                                width: 100px;
-                                text <=> row.context-window;
-                                placeholder-text: "128000";
-                                input-type: number;
-                                accessible-label: "上下文窗口 " + (index + 1);
-                                enabled: !root.busy && !root.managed;
-                                edited(value) => { root.edited(); }
-                            }
-
-                            ReasoningPicker {
-                                width: 160px;
-                                levels <=> row.reasoning-levels;
-                                default-level <=> row.default-reasoning;
-                                label: "思考等级 " + (index + 1);
-                                enabled: !root.busy && !root.managed;
-                                edited => { root.edited(); }
-                            }
-
-                            QuietButton {
-                                width: 32px;
-                                text: "移除模型 " + (index + 1);
-                                icon-only: true;
-                                ghost: true;
-                                icon: @image-url("../../assets/ui/close.svg");
-                                icon-color: Theme.muted-text;
-                                enabled: !root.busy && !root.managed;
-                                clicked => { row.removing = true; root.edited(); }
-                            }
+                        Text {
+                            text: "菜单显示名";
+                            preferred-width: 180px;
+                            min-width: 0px;
+                            horizontal-stretch: 1;
+                            color: Theme.muted-text;
+                            font-size: 11px;
+                            overflow: elide;
                         }
 
                         Text {
-                            text: row.public-id == "" ? "新增模型 · 保存后可加入工作台" : "公开标识 · " + row.public-id;
-                            font-size: 10px;
+                            text: "实际请求模型 ID";
+                            preferred-width: 180px;
+                            min-width: 0px;
+                            horizontal-stretch: 1;
                             color: Theme.muted-text;
+                            font-size: 11px;
+                            overflow: elide;
+                        }
+
+                        Text {
+                            width: 100px;
+                            text: "上下文窗口";
+                            color: Theme.muted-text;
+                            font-size: 11px;
+                        }
+
+                        Text {
+                            width: 160px;
+                            text: "思考等级 / 默认";
+                            color: Theme.muted-text;
+                            font-size: 11px;
                             overflow: elide;
                         }
                     }
-                    if row.removing: HorizontalLayout {
-                        padding-left: 12px;
-                        padding-right: 8px;
-                        Text {
-                            text: row.display-name + " · 将在保存时移除";
-                            color: Theme.warning;
-                            font-size: 11px;
-                            vertical-alignment: center;
-                            overflow: elide;
+
+                    Rectangle {
+                        vertical-stretch: 1;
+                        catalog-scroll := QuietScrollView {
+                            VerticalLayout {
+                                alignment: start;
+                                padding-left: root.card-inset;
+                                padding-right: root.card-inset;
+                                padding-top: 3px;
+                                padding-bottom: 10px;
+                                spacing: 10px;
+                                for row[index] in root.rows: item := Rectangle {
+                                    property <bool> fresh: row.public-id == "";
+                                    property <bool> landed: false;
+                                    // Without motion, rows are in place from the first frame.
+                                    init => { if (!Motion.on) { self.landed = true; } }
+                                    property <float> arrival: self.landed ? 1 : 0;
+                                    animate arrival {
+                                        duration: Motion.on ? 460ms : 0ms;
+                                        easing: cubic-bezier(0.22, 1, 0.36, 1);
+                                    }
+                                    property <float> removed: row.removing ? 1 : 0;
+                                    animate removed {
+                                        duration: Theme.drawer-motion;
+                                        easing: cubic-bezier(0.22, 1, 0.36, 1);
+                                    }
+                                    // New rows flash brand, then fade back over a second.
+                                    property <bool> glowing: false;
+                                    property <float> glow: self.glowing ? 1 : 0;
+                                    animate glow {
+                                        duration: self.glowing ? 160ms : 1400ms;
+                                        easing: ease-out;
+                                    }
+                                    height: 82px - 40px * self.removed;
+                                    Timer {
+                                        interval: max(1ms, (Motion.on ? 50ms : 0ms) * clamp(index - root.stagger-base, 0, 8));
+                                        running: !item.landed;
+                                        triggered => {
+                                            item.landed = true;
+                                            if (item.fresh && Motion.on) { item.glowing = true; }
+                                        }
+                                    }
+
+                                    Timer {
+                                        interval: 200ms;
+                                        running: item.glowing;
+                                        triggered => { item.glowing = false; }
+                                    }
+
+                                    Rectangle {
+                                        x: -3px;
+                                        y: card.y - 3px;
+                                        width: parent.width + 6px;
+                                        height: parent.height + 6px;
+                                        border-radius: 15px;
+                                        border-width: 2px;
+                                        border-color: Theme.brand.with-alpha(0.5);
+                                        opacity: Motion.on ? item.glow : 0;
+                                    }
+
+                                    card := Rectangle {
+                                        y: (1 - item.arrival) * 14px;
+                                        height: parent.height;
+                                        opacity: item.arrival;
+                                        clip: true;
+                                        border-radius: 12px;
+                                        border-width: 1px;
+                                        border-color: row.removing ? Theme.warning.with-alpha(0.45) : hover.has-hover ? Theme.brand.with-alpha(0.5) : item.fresh ? Theme.brand.with-alpha(0.28) : Theme.border;
+                                        background: row.removing ? Theme.warning-surface : Theme.panel;
+                                        drop-shadow-blur: hover.has-hover && !row.removing ? 14px : 0px;
+                                        drop-shadow-offset-y: hover.has-hover && !row.removing ? 3px : 0px;
+                                        drop-shadow-color: Theme.dark ? #00000050 : #18221a14;
+                                        animate border-color, background, drop-shadow-blur, drop-shadow-offset-y {
+                                            duration: Theme.fast;
+                                            easing: ease-out;
+                                        }
+
+                                        Rectangle {
+                                            background: Theme.brand.with-alpha(Theme.dark ? 0.16 : 0.1);
+                                            opacity: Motion.on ? item.glow : 0;
+                                        }
+
+                                        Rectangle {
+                                            x: 0px;
+                                            width: 3px;
+                                            height: max(0px, parent.height - 24px);
+                                            y: 12px;
+                                            border-radius: 2px;
+                                            background: row.removing ? Theme.warning : item.fresh ? Theme.brand : transparent;
+                                            animate background { duration: Theme.fast; }
+                                        }
+
+                                        hover := TouchArea {
+                                            mouse-cursor: default;
+                                            if item.removed < 0.98: Rectangle {
+                                                y: 0px;
+                                                height: 82px;
+                                                opacity: 1 - item.removed;
+                                                VerticalLayout {
+                                                    padding-left: 12px;
+                                                    padding-right: 12px;
+                                                    padding-top: 12px;
+                                                    padding-bottom: 10px;
+                                                    spacing: 8px;
+                                                    HorizontalLayout {
+                                                        height: 36px;
+                                                        spacing: 8px;
+                                                        Rectangle {
+                                                            y: (parent.height - self.height) / 2;
+                                                            width: 22px;
+                                                            height: 22px;
+                                                            border-radius: 11px;
+                                                            background: item.fresh ? Theme.brand : Theme.raised;
+                                                            Text {
+                                                                text: index + 1;
+                                                                color: item.fresh ? Theme.on-brand : Theme.muted-text;
+                                                                font-size: 10px;
+                                                                font-weight: 600;
+                                                                horizontal-alignment: center;
+                                                                vertical-alignment: center;
+                                                            }
+                                                        }
+
+                                                        QuietLineEdit {
+                                                            text <=> row.display-name;
+                                                            placeholder-text: "菜单显示名";
+                                                            accessible-label: "模型显示名 " + (index + 1);
+                                                            enabled: !root.busy && !root.managed;
+                                                            edited(value) => { root.edited(); }
+                                                        }
+
+                                                        QuietLineEdit {
+                                                            text <=> row.upstream-model;
+                                                            placeholder-text: "实际模型 ID";
+                                                            accessible-label: "实际模型 " + (index + 1);
+                                                            enabled: !root.busy && !root.managed && !root.subscription;
+                                                            edited(value) => { root.edited(); }
+                                                        }
+
+                                                        QuietLineEdit {
+                                                            width: 100px;
+                                                            text <=> row.context-window;
+                                                            placeholder-text: "128000";
+                                                            input-type: number;
+                                                            accessible-label: "上下文窗口 " + (index + 1);
+                                                            enabled: !root.busy && !root.managed;
+                                                            edited(value) => { root.edited(); }
+                                                        }
+
+                                                        ReasoningPicker {
+                                                            width: 160px;
+                                                            levels <=> row.reasoning-levels;
+                                                            default-level <=> row.default-reasoning;
+                                                            label: "思考等级 " + (index + 1);
+                                                            enabled: !root.busy && !root.managed;
+                                                            edited => { root.edited(); }
+                                                        }
+
+                                                        QuietButton {
+                                                            width: 32px;
+                                                            horizontal-stretch: 0;
+                                                            text: "移除模型 " + (index + 1);
+                                                            icon-only: true;
+                                                            ghost: true;
+                                                            icon: @image-url("../../assets/ui/close.svg");
+                                                            icon-color: Theme.muted-text;
+                                                            enabled: !root.busy && !root.managed;
+                                                            clicked => { row.removing = true; root.edited(); }
+                                                        }
+                                                    }
+
+                                                    HorizontalLayout {
+                                                        padding-left: 30px;
+                                                        spacing: 6px;
+                                                        Text {
+                                                            text: item.fresh ? "新增 · 保存后可加入工作台" : "公开标识";
+                                                            color: item.fresh ? Theme.brand : Theme.muted-text;
+                                                            font-size: 10px;
+                                                            vertical-alignment: center;
+                                                        }
+
+                                                        if !item.fresh: Text {
+                                                            text: row.public-id;
+                                                            color: Theme.muted-text;
+                                                            font-family: "Menlo";
+                                                            font-size: 10px;
+                                                            vertical-alignment: center;
+                                                            overflow: elide;
+                                                            horizontal-stretch: 1;
+                                                            min-width: 0px;
+                                                        }
+                                                    }
+                                                }
+                                            }
+                                            if item.removed > 0.02: Rectangle {
+                                                y: 0px;
+                                                height: 42px;
+                                                opacity: item.removed;
+                                                HorizontalLayout {
+                                                    padding-left: 14px;
+                                                    padding-right: 6px;
+                                                    spacing: 8px;
+                                                    Image {
+                                                        y: (parent.height - self.height) / 2;
+                                                        width: 14px;
+                                                        height: 14px;
+                                                        source: @image-url("../../assets/ui/alert.svg");
+                                                        colorize: Theme.warning;
+                                                        accessible-role: none;
+                                                    }
+
+                                                    Text {
+                                                        text: (row.display-name == "" ? "未命名模型" : row.display-name) + " · 将在保存时移除";
+                                                        color: Theme.warning;
+                                                        font-size: 11px;
+                                                        vertical-alignment: center;
+                                                        overflow: elide;
+                                                        horizontal-stretch: 1;
+                                                        min-width: 0px;
+                                                    }
+
+                                                    QuietButton {
+                                                        y: (parent.height - self.height) / 2;
+                                                        width: 64px;
+                                                        height: 30px;
+                                                        horizontal-stretch: 0;
+                                                        text: "撤销";
+                                                        ghost: true;
+                                                        enabled: !root.busy;
+                                                        clicked => { row.removing = false; root.edited(); }
+                                                    }
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                            }
                         }
 
-                        QuietButton {
-                            width: 60px;
-                            height: 30px;
-                            text: "撤销";
-                            ghost: true;
-                            enabled: !root.busy;
-                            clicked => { row.removing = false; root.edited(); }
+                        if root.busy && !root.fetching && root.rows.length == 0: SkeletonList {
+                            count: 3;
+                            cards: true;
+                        }
+                        if (!root.busy || root.fetching) && root.rows.length == 0: empty-state := VerticalLayout {
+                            property <duration> tick: Motion.on ? animation-tick() : 0ms;
+                            alignment: center;
+                            spacing: 10px;
+                            padding: 24px;
+                            HorizontalLayout {
+                                alignment: center;
+                                Rectangle {
+                                    width: 56px;
+                                    height: 56px;
+                                    border-radius: 28px;
+                                    background: Theme.brand-surface;
+                                    // A ring breathes out of the badge while it waits.
+                                    Rectangle {
+                                        property <float> pulse: mod(empty-state.tick, 2400ms) / 2400ms;
+                                        x: (parent.width - self.width) / 2;
+                                        y: (parent.height - self.height) / 2;
+                                        width: 56px + 22px * self.pulse;
+                                        height: self.width;
+                                        border-radius: self.width / 2;
+                                        border-width: 1.5px;
+                                        border-color: Theme.brand;
+                                        opacity: Motion.on ? (1 - self.pulse) * 0.45 : 0;
+                                    }
+
+                                    Image {
+                                        x: (parent.width - self.width) / 2;
+                                        y: (parent.height - self.height) / 2 + 3px * sin(360deg * mod(empty-state.tick, 2800ms) / 2800ms);
+                                        width: 24px;
+                                        height: 24px;
+                                        source: @image-url("../../assets/ui/blocks.svg");
+                                        colorize: Theme.brand;
+                                        accessible-role: none;
+                                    }
+                                }
+                            }
+
+                            Text {
+                                text: "为这个连接准备模型";
+                                color: Theme.primary-text;
+                                font-size: 15px;
+                                font-weight: 600;
+                                horizontal-alignment: center;
+                            }
+
+                            Text {
+                                text: root.subscription ? "获取官方模型列表，勾选常用模型加入目录。" : "获取模型列表批量添加，也可以手动填写实际模型 ID。直连与聚合共用此目录。";
+                                color: Theme.muted-text;
+                                font-size: 12px;
+                                horizontal-alignment: center;
+                                wrap: word-wrap;
+                            }
+                        }
+                    }
+                }
+            }
+
+            // The fetched results.
+            Rectangle {
+                x: (1 - root.slide) * (parent.width + 48px);
+                y: (1 - root.phase(0.12)) * 18px;
+                width: parent.width;
+                height: parent.height;
+                opacity: clamp(root.slide, 0, 1) * root.phase(0.12);
+                visible: root.slide > 0.001;
+                VerticalLayout {
+                    spacing: 10px;
+                    HorizontalLayout {
+                        height: 36px;
+                        spacing: 8px;
+                        QuietLineEdit {
+                            icon: @image-url("../../assets/ui/search.svg");
+                            text <=> root.query;
+                            placeholder-text: root.has-results ? "在 " + root.summary.total + " 个模型中搜索" : "搜索模型 ID";
+                            accessible-label: "搜索获取结果";
+                            enabled: root.has-results && !root.fetching;
+                            edited(value) => { root.filter(value); }
+                        }
+
+                        Rectangle {
+                            width: 96px;
+                            horizontal-stretch: 0;
+                            border-radius: 8px;
+                            border-width: 1px;
+                            border-color: Theme.border;
+                            background: Theme.panel;
+                            HorizontalLayout {
+                                padding-left: 10px;
+                                padding-right: 8px;
+                                QuietCheckBox {
+                                    y: (parent.height - self.height) / 2;
+                                    text: "全选";
+                                    auto-toggle: false;
+                                    checked: root.summary.visible-selectable > 0 && root.summary.visible-selected == root.summary.visible-selectable;
+                                    indeterminate: root.summary.visible-selected > 0 && root.summary.visible-selected < root.summary.visible-selectable;
+                                    enabled: !root.busy && root.summary.visible-selectable > 0;
+                                    accessible-label: self.checked ? "取消全选可加入的模型" : "全选可加入的模型";
+                                    toggled => { root.select-all(!self.checked); }
+                                }
+                            }
+                        }
+                    }
+
+                    Rectangle {
+                        vertical-stretch: 1;
+                        border-radius: 12px;
+                        border-width: 1px;
+                        border-color: Theme.border;
+                        background: Theme.panel;
+                        clip: true;
+                        results-scroll := QuietScrollView {
+                            x: 1px;
+                            y: 1px;
+                            width: parent.width - 2px;
+                            height: parent.height - 2px;
+                            opacity: root.fetching ? 0 : 1;
+                            animate opacity { duration: Theme.fast; }
+                            VerticalLayout {
+                                alignment: start;
+                                for candidate[index] in root.candidates: CandidateRow {
+                                    item: candidate;
+                                    index: index;
+                                    clock: root.clock;
+                                    enabled: !root.busy;
+                                    toggle => { root.toggle(index); }
+                                }
+                            }
+                        }
+
+                        if root.fetching: SkeletonList {
+                            x: 1px;
+                            y: 1px;
+                            width: parent.width - 2px;
+                            height: parent.height - 2px;
+                            count: 7;
+                        }
+                        if !root.fetching && root.has-results && root.summary.matched == 0: VerticalLayout {
+                            alignment: center;
+                            spacing: 10px;
+                            padding: 24px;
+                            Text {
+                                text: "没有匹配“" + root.query + "”的模型";
+                                color: Theme.primary-text;
+                                font-size: 13px;
+                                horizontal-alignment: center;
+                                overflow: elide;
+                            }
+
+                            HorizontalLayout {
+                                alignment: center;
+                                QuietButton {
+                                    width: 96px;
+                                    height: 30px;
+                                    text: "清除搜索";
+                                    ghost: true;
+                                    clicked => {
+                                        root.query = "";
+                                        root.filter("");
+                                    }
+                                }
+                            }
                         }
                     }
                 }
             }
         }
 
-        if root.message != "": FeedbackBanner {
+        FeedbackBanner {
+            top-gap: 12px;
             message: root.message;
             tone: root.message-tone;
+        }
+
+        Rectangle {
+            height: 12px;
         }
 
         Rectangle {
@@ -415,33 +1088,153 @@ export component ConnectionModels inherits Rectangle {
             background: Theme.border;
         }
 
-        HorizontalLayout {
+        Rectangle {
+            height: 12px;
+        }
+
+        // The footer follows the visible pane: save the catalog, or add the picks.
+        Rectangle {
             height: 40px;
-            spacing: 10px;
-            Text {
-                text: root.dirty ? "● 有未保存修改" : "目录已保存在此连接";
-                color: root.dirty ? Theme.warning : Theme.muted-text;
-                font-size: 11px;
-                vertical-alignment: center;
+            opacity: root.phase(0.24);
+            Rectangle {
+                y: -root.slide * 12px;
+                height: parent.height;
+                opacity: clamp(1 - root.slide, 0, 1);
+                visible: root.slide < 0.99;
+                HorizontalLayout {
+                    spacing: 10px;
+                    Rectangle {
+                        y: (parent.height - self.height) / 2;
+                        width: 8px;
+                        height: 8px;
+                        border-radius: 4px;
+                        background: root.dirty ? Theme.warning : Theme.success.with-alpha(0.7);
+                        animate background { duration: Theme.fast; }
+                        Rectangle {
+                            x: (parent.width - self.width) / 2;
+                            y: (parent.height - self.height) / 2;
+                            width: 8px + 16px * root.ring;
+                            height: self.width;
+                            border-radius: self.width / 2;
+                            border-width: 1.5px;
+                            border-color: Theme.warning;
+                            opacity: Motion.on && root.ring > 0 && root.ring < 1 ? (1 - root.ring) * 0.8 : 0;
+                        }
+                    }
+
+                    Text {
+                        text: root.dirty ? "有未保存修改" : "目录已保存在此连接 · 保存后在工作台选择连接";
+                        color: root.dirty ? Theme.warning : Theme.muted-text;
+                        font-size: 11px;
+                        vertical-alignment: center;
+                        overflow: elide;
+                        horizontal-stretch: 1;
+                        min-width: 0px;
+                        animate color { duration: Theme.fast; }
+                    }
+
+                    QuietButton {
+                        width: 100px;
+                        horizontal-stretch: 0;
+                        text: "关闭";
+                        enabled: !root.busy;
+                        clicked => { root.cancel(); }
+                    }
+
+                    Rectangle {
+                        width: 138px;
+                        horizontal-stretch: 0;
+                        QuietButton {
+                            y: (parent.height - self.height) / 2;
+                            width: parent.width;
+                            text: root.saving ? "正在保存…" : "保存模型目录";
+                            primary: true;
+                            icon: root.saving ? @image-url("../../assets/ui/loader.svg") : @image-url("../../assets/ui/check.svg");
+                            icon-width: 14px;
+                            icon-height: 14px;
+                            icon-color: Theme.on-brand;
+                            loading: root.saving;
+                            enabled: root.dirty && !root.busy && !root.managed;
+                            clicked => { root.save(); }
+                        }
+
+                        Rectangle {
+                            y: (parent.height - self.height) / 2;
+                            height: 36px;
+                            clip: true;
+                            border-radius: 8px;
+                            Rectangle {
+                                width: parent.width * 0.4;
+                                x: -self.width + (parent.width + self.width) * root.save-sheen;
+                                opacity: Motion.on && root.save-sheen > 0 && root.save-sheen < 1 ? 1 : 0;
+                                background: @linear-gradient(105deg, #ffffff00 0%, #ffffff.with-alpha(Theme.dark ? 0.35 : 0.3) 50%, #ffffff00 100%);
+                            }
+                        }
+                    }
+                }
             }
 
             Rectangle {
-                horizontal-stretch: 1;
-            }
+                y: (1 - root.slide) * 12px;
+                height: parent.height;
+                opacity: clamp(root.slide, 0, 1);
+                visible: root.slide > 0.01;
+                HorizontalLayout {
+                    spacing: 10px;
+                    CountBadge {
+                        y: (parent.height - self.height) / 2;
+                        text: "已选 " + root.summary.selected;
+                        active: root.summary.selected > 0;
+                    }
 
-            QuietButton {
-                width: 100px;
-                text: "关闭";
-                enabled: !root.busy;
-                clicked => { root.cancel(); }
-            }
+                    Text {
+                        text: root.fetching ? "正在读取上游模型…" : root.summary.selected > 0 ? "加入后可在目录里修改显示名与参数" : root.discovery-tone == 1 ? root.discovery-message : "勾选要加入目录的模型";
+                        color: Theme.muted-text;
+                        font-size: 11px;
+                        vertical-alignment: center;
+                        overflow: elide;
+                        horizontal-stretch: 1;
+                        min-width: 0px;
+                    }
 
-            QuietButton {
-                width: 138px;
-                text: root.saving ? "正在保存…" : "保存模型目录";
-                primary: true;
-                enabled: root.dirty && !root.busy && !root.managed;
-                clicked => { root.save(); }
+                    QuietButton {
+                        width: 100px;
+                        horizontal-stretch: 0;
+                        text: "返回目录";
+                        enabled: root.on-results;
+                        clicked => { root.pane = 0; }
+                    }
+
+                    Rectangle {
+                        width: 138px;
+                        horizontal-stretch: 0;
+                        QuietButton {
+                            y: (parent.height - self.height) / 2;
+                            width: parent.width;
+                            text: "加入目录 · " + root.summary.selected;
+                            primary: true;
+                            icon: @image-url("../../assets/ui/plus.svg");
+                            icon-width: 14px;
+                            icon-height: 14px;
+                            icon-color: Theme.on-brand;
+                            enabled: !root.busy && !root.managed && root.summary.selected > 0;
+                            clicked => { root.append-selected(); }
+                        }
+
+                        Rectangle {
+                            y: (parent.height - self.height) / 2;
+                            height: 36px;
+                            clip: true;
+                            border-radius: 8px;
+                            Rectangle {
+                                width: parent.width * 0.4;
+                                x: -self.width + (parent.width + self.width) * root.add-sheen;
+                                opacity: Motion.on && root.add-sheen > 0 && root.add-sheen < 1 ? 1 : 0;
+                                background: @linear-gradient(105deg, #ffffff00 0%, #ffffff.with-alpha(Theme.dark ? 0.35 : 0.3) 50%, #ffffff00 100%);
+                            }
+                        }
+                    }
+                }
             }
         }
     }
