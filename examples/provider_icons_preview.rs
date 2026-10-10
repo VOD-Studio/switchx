@@ -3,6 +3,7 @@
 //! Connection cards: add --connections-design (snapshots) or --connections-native (window).
 //! Tab transitions: add --connections-motion (frames and interruption checks).
 //! Sidebar navigation: add --sidebar-motion (frames and settle checks).
+//! macOS titlebar spacing: add --native-titlebar-overlay to software previews.
 //! Batch model picker: add --batch-models.
 //! Connection directory/workbench: add --connection-workbench.
 //! Shared workspace menu and operation feedback: add --workspace-feedback.
@@ -1019,7 +1020,7 @@ fn render_workspace_feedback(
 }
 
 // Sidebar item centers without a native titlebar overlay.
-const SIDEBAR_ITEMS: [(i32, f32); 5] = [(0, 191.0), (1, 237.0), (3, 283.0), (4, 355.0), (5, 401.0)];
+const SIDEBAR_ITEMS: [(i32, f32); 5] = [(0, 111.0), (1, 157.0), (3, 203.0), (4, 275.0), (5, 321.0)];
 
 fn sidebar_pixels(pixels: &SharedPixelBuffer<Rgb8Pixel>) -> Vec<u8> {
     let row = pixels.width() as usize * 3;
@@ -1054,7 +1055,13 @@ fn render_sidebar_motion(
         SIDEBAR_ITEMS
             .iter()
             .find(|(item, _)| *item == page)
-            .map(|(_, y)| *y)
+            .map(|(_, y)| {
+                *y + if app.get_native_titlebar_overlay() {
+                    18.0
+                } else {
+                    0.0
+                }
+            })
             .unwrap()
     };
     let path = [1, 5, 0, 4, 3, 0];
@@ -2226,6 +2233,7 @@ fn main() -> Result<(), Box<dyn Error>> {
         slint::platform::set_platform(Box::new(PreviewPlatform(window.clone())))?;
     }
     let app = AppWindow::new()?;
+    app.set_native_titlebar_overlay(std::env::args().any(|arg| arg == "--native-titlebar-overlay"));
     switchx::reasoning_picker::connect(&app);
     app.set_loading(false);
     app.global::<Theme>().set_animations_enabled(false);
