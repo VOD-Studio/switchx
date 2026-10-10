@@ -124,6 +124,7 @@ export component AppWindow inherits Window {
     callback save-connection-models();
     callback connection-model-edited();
     changed connection-picker-open => {
+        if (!root.connection-picker-open) { root.departing-connection-form = 0; }
         if (root.connection-picker-open || root.editor-open || root.subscription-editor-open || root.xai-editor-open) { connection-drawer.focus(); }
     }
     in-out property <string> connection-preset-id: "";
@@ -324,6 +325,7 @@ export component AppWindow inherits Window {
         if (root.active-page != 1) {
             root.dismiss-account-login();
             root.native-login-expanded = false;
+            root.departing-connection-form = 0;
             root.connection-picker-open = false;
             root.connection-preset-id = "";
             if (root.icon-picker-open) { root.close-provider-icon-picker(); }
@@ -345,6 +347,7 @@ export component AppWindow inherits Window {
         if (root.subscription-editor-open && !root.config-editor-updating) { root.load-subscription-auth(); }
     }
     function close-connection-editor() {
+        root.departing-connection-form = 0;
         root.connection-models-open = false;
         root.connection-picker-open = false;
         root.connection-preset-id = "";
@@ -362,6 +365,23 @@ export component AppWindow inherits Window {
             root.error-code = "";
             root.error-message = "";
             root.connection-picker-open = true;
+        }
+    }
+    public function return-to-connection-picker() {
+        if (!root.busy && !root.config-managed && root.new-connection-form) {
+            // Preserve only the visual subtree; credential drafts are cleared now.
+            root.departing-connection-form = Theme.drawer-motion == 0ms ? 0 : root.editor-open ? 1 : root.subscription-editor-open ? 2 : 3;
+            root.connection-picker-open = true;
+            root.connection-preset-id = "";
+            if (root.subscription-editor-open || root.subscription-editor-pending) { root.cancel-subscription-editor(); }
+            root.editor-open = false;
+            root.xai-editor-open = false;
+            root.edit-key = "";
+            root.subscription-auth-json = "";
+            root.delete-confirm = false;
+            root.error-code = "";
+            root.error-message = "";
+            connection-drawer.focus();
         }
     }
     changed route-port => { root.route-preview-ready = false; }
@@ -521,6 +541,20 @@ export component AppWindow inherits Window {
     in-out property <bool> direct-drawer-open: false;
     property <bool> page-entered: true;
     property <bool> new-connection-form: (root.editor-open && root.edit-id == "") || (root.subscription-editor-open && root.subscription-id == "") || (root.xai-editor-open && root.xai-provider-id == "");
+    // 1 = API, 2 = ChatGPT, 3 = Grok. Outgoing controls remain inert.
+    property <int> departing-connection-form: 0;
+    property <int> connection-form-kind: root.editor-open ? 1 : root.subscription-editor-open ? 2 : root.xai-editor-open ? 3 : root.departing-connection-form;
+    property <float> connection-stage-progress: root.connection-picker-open ? 0 : 1;
+    animate connection-stage-progress {
+        duration: Theme.drawer-motion;
+        easing: cubic-bezier(0.22, 1, 0.36, 1);
+    }
+    Timer {
+        interval: max(1ms, Theme.drawer-motion);
+        running: root.connection-picker-open && root.departing-connection-form != 0;
+        triggered => { root.departing-connection-form = 0; }
+    }
+
     property <bool> modal-open: root.workspace-open || root.account-removing-id != "" || root.account-login-confirm-open || root.drawer-open || root.connection-picker-open || root.connection-models-open || root.xai-editor-open || root.editor-open || root.subscription-editor-open || root.common-config-editor-open || root.icon-picker-open || root.model-editor-open || root.fallback-editor-open || root.publish-drawer-open || root.direct-drawer-open || root.delete-account-confirm;
     property <string> page-title: root.active-page == 0 ? "模型，随手可用。" : root.active-page == 1 ? "连接" : root.active-page == 3 ? "每次请求，有迹可循。" : root.active-page == 4 ? "让工作流更顺手。" : "让它适合你。";
     property <string> page-label: root.active-page == 0 ? "工作台" : root.active-page == 1 ? "连接" : root.active-page == 3 ? "活动" : root.active-page == 4 ? "工具箱" : "设置";
@@ -1265,190 +1299,225 @@ export component AppWindow inherits Window {
         title: root.connection-models-open ? root.connection-models-name : root.connection-picker-open || root.new-connection-form ? "添加连接" : root.editor-open ? "API 连接" : root.subscription-editor-open ? "ChatGPT 订阅" : "Grok 订阅连接";
         subtitle: root.connection-picker-open ? "选择订阅账号或 API 服务，继续配置连接。" : "连接设置与模型目录分别保存，完成后在工作台启用。";
         panel-width: root.editor-open ? min(1120px, root.width - 60px) : 820px;
+        animate panel-width {
+            duration: Theme.drawer-motion;
+            easing: cubic-bezier(0.22, 1, 0.36, 1);
+        }
         busy: root.busy;
         error-message: root.error-code == "" ? "" : root.error-message + " · " + root.error-action;
         dismissed => { root.close-connection-editor(); }
-        VerticalLayout {
-            spacing: 14px;
-            if root.connection-picker-open: ConnectionPicker {
-                busy: root.busy;
-                config-managed: root.config-managed;
-                chatgpt-login-pending: root.chatgpt-login-pending || root.xai-pending;
-                provider-presets: root.provider-presets;
-                select-api(id) => { root.connection-preset-id = id; root.begin-provider-editor(""); }
-                select-chatgpt() => { root.begin-subscription-editor(""); }
-                select-grok() => { root.begin-xai-editor(""); }
-            }
-            if !root.connection-picker-open && root.new-connection-form: HorizontalLayout {
-                height: 36px;
-                spacing: 12px;
-                QuietButton {
-                    width: 112px;
-                    horizontal-stretch: 0;
-                    text: "‹ 返回选择";
-                    ghost: true;
-                    enabled: !root.busy;
-                    clicked => { root.open-connection-picker(); }
+        Rectangle {
+            vertical-stretch: 1;
+            clip: true;
+            if root.connection-picker-open || root.connection-stage-progress < 1: Rectangle {
+                width: min(768px, parent.width);
+                height: parent.height;
+                x: parent.width - self.width - 44px * root.connection-stage-progress;
+                opacity: 1 - root.connection-stage-progress;
+                FocusScope {
+                    enabled: root.connection-picker-open;
+                    ConnectionPicker {
+                        busy: root.busy || !root.connection-picker-open;
+                        config-managed: root.config-managed;
+                        arrival: 1 - root.connection-stage-progress;
+                        chatgpt-login-pending: root.chatgpt-login-pending || root.xai-pending;
+                        provider-presets: root.provider-presets;
+                        select-api(id) => { root.connection-preset-id = id; root.begin-provider-editor(""); }
+                        select-chatgpt() => { root.begin-subscription-editor(""); }
+                        select-grok() => { root.begin-xai-editor(""); }
+                    }
                 }
 
-                Text {
-                    text: root.editor-open ? (root.edit-preset-id == "" ? "自定义 API" : root.edit-name) : root.subscription-editor-open ? "ChatGPT 订阅" : "Grok 订阅";
-                    color: Theme.primary-text;
-                    font-size: 13px;
-                    vertical-alignment: center;
-                    overflow: elide;
+                TouchArea {
+                    enabled: !root.connection-picker-open;
                 }
             }
-            if !root.connection-picker-open && !root.new-connection-form: HorizontalLayout {
-                height: 44px;
-                spacing: 16px;
-                cross-axis-alignment: center;
-                editor-tabs := QuietSegmented {
-                    width: 320px;
-                    height: 44px;
-                    options: ["连接设置", "模型目录"];
-                    enabled-options: [true, !root.config-managed];
-                    enabled: !root.busy;
-                    current-index: root.connection-models-open ? 1 : 0;
-                    selection-background: Theme.brand-surface;
-                    property <string> connection-id: root.connection-models-open ? root.connection-models-id : root.editor-open ? root.edit-id : root.subscription-editor-open ? root.subscription-id : root.xai-provider-id;
-                    selected(index) => {
-                        if index == 0 {
-                            root.edit-connection(self.connection-id);
-                        } else {
-                            root.begin-connection-models(self.connection-id);
+            if !root.connection-picker-open || root.departing-connection-form != 0: Rectangle {
+                width: root.connection-form-kind == 1 ? min(1120px, root.width - 60px) - 52px : parent.width;
+                height: parent.height;
+                x: parent.width - self.width + 72px * (1 - root.connection-stage-progress);
+                opacity: root.connection-stage-progress * root.connection-stage-progress;
+                FocusScope {
+                    enabled: !root.connection-picker-open;
+                    VerticalLayout {
+                        spacing: 14px;
+                        if root.new-connection-form || root.departing-connection-form != 0: HorizontalLayout {
+                            height: 36px;
+                            spacing: 12px;
+                            QuietButton {
+                                width: 112px;
+                                horizontal-stretch: 0;
+                                text: "‹ 返回选择";
+                                ghost: true;
+                                enabled: !root.busy && !root.connection-picker-open;
+                                clicked => { root.return-to-connection-picker(); }
+                            }
+
+                            Text {
+                                text: root.connection-form-kind == 1 ? (root.edit-preset-id == "" ? "自定义 API" : root.edit-name) : root.connection-form-kind == 2 ? "ChatGPT 订阅" : "Grok 订阅";
+                                color: Theme.primary-text;
+                                font-size: 13px;
+                                vertical-alignment: center;
+                                overflow: elide;
+                            }
+                        }
+                        if !root.new-connection-form && root.departing-connection-form == 0: HorizontalLayout {
+                            height: 44px;
+                            spacing: 16px;
+                            cross-axis-alignment: center;
+                            editor-tabs := QuietSegmented {
+                                width: 320px;
+                                height: 44px;
+                                options: ["连接设置", "模型目录"];
+                                enabled-options: [true, !root.config-managed];
+                                enabled: !root.busy;
+                                current-index: root.connection-models-open ? 1 : 0;
+                                selection-background: Theme.brand-surface;
+                                property <string> connection-id: root.connection-models-open ? root.connection-models-id : root.editor-open ? root.edit-id : root.subscription-editor-open ? root.subscription-id : root.xai-provider-id;
+                                selected(index) => {
+                                    if index == 0 {
+                                        root.edit-connection(self.connection-id);
+                                    } else {
+                                        root.begin-connection-models(self.connection-id);
+                                    }
+                                }
+                            }
+
+                            Rectangle {
+                                horizontal-stretch: 1;
+                            }
+
+                            Text {
+                                text: root.editor-open ? "API 连接 / 设置" : root.connection-models-open ? "连接 / 模型目录" : "订阅连接 / 设置";
+                                color: Theme.muted-text;
+                                font-size: 11px;
+                            }
+                        }
+                        if root.connection-models-open: ConnectionModels {
+                            busy: root.busy;
+                            saving: root.busy && root.connection-models-saving;
+                            managed: root.config-managed;
+                            subscription: root.connection-models-subscription;
+                            dirty: root.connection-models-dirty;
+                            rows <=> root.connection-models;
+                            message: root.connection-models-message;
+                            message-tone: root.connection-models-tone;
+                            fetching: root.fetching-models && root.discovery-scope == 2;
+                            discovery-message: root.discovery-scope == 2 ? root.discovery-message : "";
+                            discovery-tone: root.discovery-tone;
+                            candidates: root.batch-models;
+                            summary: root.batch-summary;
+                            query <=> root.batch-query;
+                            fetch => { root.fetch-models(2); }
+                            add => { root.add-connection-model(); }
+                            edited => { root.connection-model-edited(); }
+                            toggle(index) => { root.batch-toggle(index); }
+                            select-all(checked) => { root.batch-select-all(checked); }
+                            filter(query) => { root.batch-filter(query); }
+                            append => { root.append-discovered-models(); }
+                            save => { root.save-connection-models(); }
+                            cancel => { root.connection-models-open = false; }
+                        }
+                        if root.editor-open || root.departing-connection-form == 1: ProviderEditor {
+                            busy: root.busy;
+                            compact: root.height < 760px;
+                            editor-open <=> root.editor-open;
+                            delete-confirm <=> root.delete-confirm;
+                            edit-id: root.edit-id;
+                            edit-name <=> root.edit-name;
+                            edit-url <=> root.edit-url;
+                            edit-model <=> root.edit-model;
+                            edit-key <=> root.edit-key;
+                            edit-remote-compaction <=> root.edit-remote-compaction;
+                            edit-use-common-config <=> root.edit-use-common-config;
+                            edit-context-1m <=> root.edit-context-1m;
+                            edit-compact-limit <=> root.edit-compact-limit;
+                            edit-config-preview: root.edit-config-preview;
+                            edit-config-error: root.edit-config-error;
+                            edit-preset-id: root.edit-preset-id;
+                            edit-icon-name: root.edit-icon-name;
+                            edit-icon: root.edit-icon;
+                            edit-icon-monochrome: root.edit-icon-monochrome;
+                            fetched-models: root.fetched-models;
+                            fetching-models: root.fetching-models;
+                            discovery-message: root.discovery-message;
+                            discovery-scope: root.discovery-scope;
+                            discovery-tone: root.discovery-tone;
+                            config-managed: root.config-managed;
+                            batch-rows: root.batch-models;
+                            batch-summary: root.batch-summary;
+                            batch-query <=> root.batch-query;
+                            border-width: 0px;
+                            background: transparent;
+                            batch-toggle(index) => { root.batch-toggle(index); }
+                            batch-select-all(checked) => { root.batch-select-all(checked); }
+                            batch-filter(query) => { root.batch-filter(query); }
+                            save-provider(id, name, url, model, key) => { root.save-provider(id, name, url, model, key); }
+                            open-common-config() => { root.open-common-config(); }
+                            delete-provider(id) => { root.delete-provider(id); }
+                            open-provider-preset-link(api-key-page) => { root.open-provider-preset-link(api-key-page); }
+                            open-provider-icon-picker() => { root.open-provider-icon-picker(); }
+                            fetch-models(scope) => { root.fetch-models(scope); }
+                            dismiss-discovery => { root.reset-model-discovery(); }
+                        }
+
+                        if root.subscription-editor-open || root.departing-connection-form == 2: SubscriptionEditor {
+                            busy: root.busy;
+                            border-width: 0px;
+                            background: transparent;
+                            subscription-id: root.subscription-id;
+                            subscription-name <=> root.subscription-name;
+                            subscription-binding-label: root.subscription-binding-label;
+                            subscription-account-ids: root.subscription-account-ids;
+                            subscription-account-options: root.subscription-account-options;
+                            subscription-account-choice <=> root.subscription-account-choice;
+                            subscription-auth-json <=> root.subscription-auth-json;
+                            subscription-auth-error: root.subscription-auth-error;
+                            delete-confirm <=> root.delete-confirm;
+                            edit-use-common-config <=> root.edit-use-common-config;
+                            edit-context-1m <=> root.edit-context-1m;
+                            edit-compact-limit <=> root.edit-compact-limit;
+                            edit-config-preview <=> root.edit-config-preview;
+                            edit-config-error: root.edit-config-error;
+                            edit-icon-name: root.edit-icon-name;
+                            edit-icon: root.edit-icon;
+                            edit-icon-monochrome: root.edit-icon-monochrome;
+                            config-managed: root.config-managed;
+                            save-subscription(id, name, account-id) => { root.save-subscription(id, name, account-id); }
+                            cancel-subscription-editor() => { root.cancel-subscription-editor(); }
+                            format-subscription-auth() => { root.format-subscription-auth(); }
+                            subscription-auth-edited() => { root.subscription-auth-edited(); }
+                            subscription-config-edited() => { root.subscription-config-edited(); }
+                            update-subscription-context() => { root.update-subscription-context(); }
+                            update-subscription-common() => { root.update-subscription-common(); }
+                            open-common-config() => { root.open-common-config(); }
+                            delete-provider(id) => { root.delete-provider(id); }
+                            open-provider-icon-picker() => { root.open-provider-icon-picker(); }
+                            navigate(page) => { root.cancel-subscription-editor(); root.connections-tab = 1; root.active-page = 1; }
+                        }
+
+                        if root.xai-editor-open || root.departing-connection-form == 3: XaiEditor {
+                            busy: root.busy;
+                            border-width: 0px;
+                            background: transparent;
+                            config-managed: root.config-managed;
+                            provider-id: root.xai-provider-id;
+                            provider-name <=> root.xai-provider-name;
+                            accounts: root.xai-account-options;
+                            choice <=> root.xai-account-choice;
+                            delete-confirm <=> root.delete-confirm;
+                            error: root.error-message;
+                            save => { root.save-xai(); }
+                            cancel => { root.xai-editor-open = false; root.delete-confirm = false; }
+                            delete-provider(id) => { root.delete-provider(id); }
+                            manage-accounts => { root.xai-editor-open = false; root.connections-tab = 1; root.active-page = 1; root.xai-account-action(0, ""); }
                         }
                     }
                 }
 
-                Rectangle {
-                    horizontal-stretch: 1;
+                TouchArea {
+                    enabled: root.connection-picker-open;
                 }
-
-                Text {
-                    text: root.editor-open ? "API 连接 / 设置" : root.connection-models-open ? "连接 / 模型目录" : "订阅连接 / 设置";
-                    color: Theme.muted-text;
-                    font-size: 11px;
-                }
-            }
-            if root.connection-models-open: ConnectionModels {
-                busy: root.busy;
-                saving: root.busy && root.connection-models-saving;
-                managed: root.config-managed;
-                subscription: root.connection-models-subscription;
-                dirty: root.connection-models-dirty;
-                rows <=> root.connection-models;
-                message: root.connection-models-message;
-                message-tone: root.connection-models-tone;
-                fetching: root.fetching-models && root.discovery-scope == 2;
-                discovery-message: root.discovery-scope == 2 ? root.discovery-message : "";
-                discovery-tone: root.discovery-tone;
-                candidates: root.batch-models;
-                summary: root.batch-summary;
-                query <=> root.batch-query;
-                fetch => { root.fetch-models(2); }
-                add => { root.add-connection-model(); }
-                edited => { root.connection-model-edited(); }
-                toggle(index) => { root.batch-toggle(index); }
-                select-all(checked) => { root.batch-select-all(checked); }
-                filter(query) => { root.batch-filter(query); }
-                append => { root.append-discovered-models(); }
-                save => { root.save-connection-models(); }
-                cancel => { root.connection-models-open = false; }
-            }
-            if root.editor-open: ProviderEditor {
-                busy: root.busy;
-                compact: root.height < 760px;
-                editor-open <=> root.editor-open;
-                delete-confirm <=> root.delete-confirm;
-                edit-id: root.edit-id;
-                edit-name <=> root.edit-name;
-                edit-url <=> root.edit-url;
-                edit-model <=> root.edit-model;
-                edit-key <=> root.edit-key;
-                edit-remote-compaction <=> root.edit-remote-compaction;
-                edit-use-common-config <=> root.edit-use-common-config;
-                edit-context-1m <=> root.edit-context-1m;
-                edit-compact-limit <=> root.edit-compact-limit;
-                edit-config-preview: root.edit-config-preview;
-                edit-config-error: root.edit-config-error;
-                edit-preset-id: root.edit-preset-id;
-                edit-icon-name: root.edit-icon-name;
-                edit-icon: root.edit-icon;
-                edit-icon-monochrome: root.edit-icon-monochrome;
-                fetched-models: root.fetched-models;
-                fetching-models: root.fetching-models;
-                discovery-message: root.discovery-message;
-                discovery-scope: root.discovery-scope;
-                discovery-tone: root.discovery-tone;
-                config-managed: root.config-managed;
-                batch-rows: root.batch-models;
-                batch-summary: root.batch-summary;
-                batch-query <=> root.batch-query;
-                border-width: 0px;
-                background: transparent;
-                batch-toggle(index) => { root.batch-toggle(index); }
-                batch-select-all(checked) => { root.batch-select-all(checked); }
-                batch-filter(query) => { root.batch-filter(query); }
-                save-provider(id, name, url, model, key) => { root.save-provider(id, name, url, model, key); }
-                open-common-config() => { root.open-common-config(); }
-                delete-provider(id) => { root.delete-provider(id); }
-                open-provider-preset-link(api-key-page) => { root.open-provider-preset-link(api-key-page); }
-                open-provider-icon-picker() => { root.open-provider-icon-picker(); }
-                fetch-models(scope) => { root.fetch-models(scope); }
-                dismiss-discovery => { root.reset-model-discovery(); }
-            }
-
-            if root.subscription-editor-open: SubscriptionEditor {
-                busy: root.busy;
-                border-width: 0px;
-                background: transparent;
-                subscription-id: root.subscription-id;
-                subscription-name <=> root.subscription-name;
-                subscription-binding-label: root.subscription-binding-label;
-                subscription-account-ids: root.subscription-account-ids;
-                subscription-account-options: root.subscription-account-options;
-                subscription-account-choice <=> root.subscription-account-choice;
-                subscription-auth-json <=> root.subscription-auth-json;
-                subscription-auth-error: root.subscription-auth-error;
-                delete-confirm <=> root.delete-confirm;
-                edit-use-common-config <=> root.edit-use-common-config;
-                edit-context-1m <=> root.edit-context-1m;
-                edit-compact-limit <=> root.edit-compact-limit;
-                edit-config-preview <=> root.edit-config-preview;
-                edit-config-error: root.edit-config-error;
-                edit-icon-name: root.edit-icon-name;
-                edit-icon: root.edit-icon;
-                edit-icon-monochrome: root.edit-icon-monochrome;
-                config-managed: root.config-managed;
-                save-subscription(id, name, account-id) => { root.save-subscription(id, name, account-id); }
-                cancel-subscription-editor() => { root.cancel-subscription-editor(); }
-                format-subscription-auth() => { root.format-subscription-auth(); }
-                subscription-auth-edited() => { root.subscription-auth-edited(); }
-                subscription-config-edited() => { root.subscription-config-edited(); }
-                update-subscription-context() => { root.update-subscription-context(); }
-                update-subscription-common() => { root.update-subscription-common(); }
-                open-common-config() => { root.open-common-config(); }
-                delete-provider(id) => { root.delete-provider(id); }
-                open-provider-icon-picker() => { root.open-provider-icon-picker(); }
-                navigate(page) => { root.cancel-subscription-editor(); root.connections-tab = 1; root.active-page = 1; }
-            }
-
-            if root.xai-editor-open: XaiEditor {
-                busy: root.busy;
-                border-width: 0px;
-                background: transparent;
-                config-managed: root.config-managed;
-                provider-id: root.xai-provider-id;
-                provider-name <=> root.xai-provider-name;
-                accounts: root.xai-account-options;
-                choice <=> root.xai-account-choice;
-                delete-confirm <=> root.delete-confirm;
-                error: root.error-message;
-                save => { root.save-xai(); }
-                cancel => { root.xai-editor-open = false; root.delete-confirm = false; }
-                delete-provider(id) => { root.delete-provider(id); }
-                manage-accounts => { root.xai-editor-open = false; root.connections-tab = 1; root.active-page = 1; root.xai-account-action(0, ""); }
             }
         }
     }
