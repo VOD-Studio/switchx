@@ -1,186 +1,1253 @@
 import { ListView } from "../scroll-view.slint";
 import { Theme } from "../tokens.slint";
-import { QuietButton, StatusPill } from "../components.slint";
-import { RequestRow } from "../view-models.slint";
+import { QuietSegmented } from "../components.slint";
+import { RequestRow, RequestStats, RequestBar } from "../view-models.slint";
 
-export component ActivityPage inherits VerticalLayout {
-    in property <bool> busy;
-    in property <[RequestRow]> requests;
-    in property <string> request-error;
-    callback refresh-requests();
-    property <int> expanded: -1;
-    spacing: 16px;
+// Status vocabulary shared by the pulse, timeline nodes, and detail callouts.
+global Ink {
+    public pure function tone(kind: int) -> color {
+        return kind == 0 ? Theme.success : kind == 1 ? Theme.error : kind == 2 ? Theme.warning : Theme.muted-text;
+    }
+    public pure function label(kind: int) -> string {
+        return kind == 0 ? "完成" : kind == 1 ? "失败" : kind == 2 ? "中断" : "已取消";
+    }
+    public pure function icon(kind: int) -> image {
+        return kind == 0 ? @image-url("../../assets/ui/check.svg") : kind == 1 ? @image-url("../../assets/ui/close.svg") : kind == 2 ? @image-url("../../assets/ui/alert.svg") : @image-url("../../assets/ui/minus.svg");
+    }
+    public pure function duration(ms: float) -> string {
+        return ms >= 1000 ? (round(ms / 100) / 10) + " s" : round(ms) + " ms";
+    }
+}
+
+// A count-up figure: it rises from zero on entry and glides between refreshes.
+component Figure inherits Text {
+    in property <float> value;
+    in property <bool> percent;
+    in property <int> order;
+    private property <bool> motion: Theme.animations-enabled && !Theme.system-reduced-motion;
+    private property <bool> entered: !root.motion;
+    private property <float> shown: root.entered && root.value >= 0 ? root.value : 0;
+    animate shown {
+        duration: root.motion ? 900ms : 0ms;
+        easing: cubic-bezier(0.22, 1, 0.36, 1);
+    }
+    Timer {
+        interval: 80ms + 70ms * root.order;
+        running: !root.entered;
+        triggered => { root.entered = true; }
+    }
+
+    text: root.value < 0 ? "—" : root.percent ? round(root.shown) + "%" : Ink.duration(root.shown);
+    color: Theme.primary-text;
+    font-weight: 600;
+    vertical-alignment: center;
+    accessible-role: AccessibleRole.text;
+}
+
+component Divider inherits Rectangle {
+    width: 1px;
+    background: Theme.border;
+}
+
+component RateBlock inherits VerticalLayout {
+    in property <RequestStats> stats;
+    private property <bool> motion: Theme.animations-enabled && !Theme.system-reduced-motion;
+    private property <bool> entered: !root.motion;
+    private property <int> sum: max(1, root.stats.total);
+    alignment: center;
+    spacing: 7px;
+    Timer {
+        interval: 120ms;
+        running: !root.entered;
+        triggered => { root.entered = true; }
+    }
+
+    Text {
+        text: "成功率";
+        color: Theme.muted-text;
+        font-size: 11px;
+    }
+
+    Figure {
+        value: root.stats.success-rate;
+        percent: true;
+        font-size: 30px;
+        color: root.stats.success-rate < 0 ? Theme.muted-text : root.stats.success-rate >= 90 ? Theme.success : root.stats.success-rate >= 60 ? Theme.warning : Theme.error;
+        animate color { duration: Theme.page-motion; }
+    }
+
+    // Completed, abnormal, and cancelled shares; widths grow from the left on entry.
+    bar := Rectangle {
+        height: 5px;
+        border-radius: 3px;
+        clip: true;
+        background: Theme.raised;
+        private property <float> grow: root.entered ? 1 : 0;
+        animate grow {
+            duration: root.motion ? 820ms : 0ms;
+            easing: cubic-bezier(0.22, 1, 0.36, 1);
+        }
+        // Animate the shares, not the derived widths, so refreshes and entry compose.
+        private property <float> done-share: root.stats.completed / root.sum;
+        private property <float> failed-share: root.stats.failed / root.sum;
+        private property <float> cancelled-share: root.stats.cancelled / root.sum;
+        animate done-share, failed-share, cancelled-share {
+            duration: Theme.page-motion;
+            easing: ease-out;
+        }
+        private property <length> done: self.width * self.done-share * self.grow;
+        private property <length> failed: self.width * self.failed-share * self.grow;
+        private property <length> cancelled: self.width * self.cancelled-share * self.grow;
+        Rectangle {
+            x: 0px;
+            width: bar.done;
+            background: Theme.success;
+        }
+
+        Rectangle {
+            x: bar.done;
+            width: bar.failed;
+            background: Theme.error;
+        }
+
+        Rectangle {
+            x: bar.done + bar.failed;
+            width: bar.cancelled;
+            background: Theme.muted-text.with-alpha(0.55);
+        }
+    }
+
+    Text {
+        text: "完成 " + root.stats.completed + " · 异常 " + root.stats.failed + " · 取消 " + root.stats.cancelled;
+        color: Theme.muted-text;
+        font-size: 11px;
+        overflow: elide;
+    }
+}
+
+component Latency inherits HorizontalLayout {
+    in property <string> label;
+    in property <float> value;
+    in property <int> order;
+    spacing: 10px;
+    Text {
+        width: 42px;
+        text: root.label;
+        color: Theme.muted-text;
+        font-size: 11px;
+        vertical-alignment: center;
+    }
+
+    Figure {
+        value: root.value;
+        order: root.order;
+        font-size: 14px;
+        horizontal-alignment: right;
+        horizontal-stretch: 1;
+    }
+}
+
+// The last requests as bars, newest on the right. Height is a log-scaled duration,
+// so one slow call never flattens the rest; existing bars glide left as new ones land.
+component PulseChart inherits Rectangle {
+    in property <[RequestBar]> bars;
+    in property <int> sync;
+    in property <int> capacity: 48;
+    private property <bool> motion: Theme.animations-enabled && !Theme.system-reduced-motion;
+    private property <bool> entering: root.motion;
+    private property <int> hovered: -1;
+    private property <length> chart-height: root.height - 24px;
+    private property <length> step: root.width / root.capacity;
+    private property <length> gap: min(3px, root.step * 0.35);
+    Timer {
+        interval: 900ms;
+        running: root.entering;
+        triggered => { root.entering = false; }
+    }
+
+    Text {
+        x: 0px;
+        y: 0px;
+        width: parent.width;
+        height: 14px;
+        text: root.hovered >= 0 && root.hovered < root.bars.length ? root.bars[root.hovered].label
+            : root.bars.length == 0 ? "等待请求…" : "最近 " + root.bars.length + " 次 · 柱高为耗时";
+        color: root.hovered >= 0 ? Theme.primary-text : Theme.muted-text;
+        font-size: 11px;
+        overflow: elide;
+        animate color { duration: Theme.fast; }
+    }
+
+    plot := Rectangle {
+        y: 24px;
+        height: root.chart-height;
+        for line in [0.25, 0.5, 0.75]: Rectangle {
+            y: plot.height * (1 - line);
+            height: 1px;
+            background: Theme.border.with-alpha(0.45);
+        }
+        Rectangle {
+            y: plot.height - 1px;
+            height: 1px;
+            background: Theme.border;
+        }
+
+        for bar[index] in root.bars: Rectangle {
+            private property <bool> newest: index == root.bars.length - 1;
+            private property <bool> fresh: bar.stamp > 0 && bar.stamp == root.sync;
+            private property <bool> grown: !root.motion;
+            private property <float> rise: self.grown ? 1 : 0;
+            private property <float> ping: 0;
+            animate rise {
+                duration: root.motion ? (root.entering ? 620ms : 520ms) : 0ms;
+                delay: root.entering ? 9ms * index : 0ms;
+                easing: cubic-bezier(0.34, 1.45, 0.64, 1);
+            }
+            animate ping {
+                duration: root.motion && self.fresh ? 1100ms : 0ms;
+                iteration-count: 2;
+                easing: ease-out;
+            }
+            // Wait until the entering page has painted so `rise` animates from zero.
+            Timer {
+                interval: root.entering ? 80ms : 16ms;
+                running: !parent.grown;
+                triggered => {
+                    parent.grown = true;
+                    if (parent.fresh && root.motion) { parent.ping = 1; }
+                }
+            }
+
+            x: root.width - (root.bars.length - index) * root.step + root.gap / 2;
+            width: max(1px, root.step - root.gap);
+            animate x {
+                duration: root.motion ? 520ms : 0ms;
+                easing: cubic-bezier(0.22, 1, 0.36, 1);
+            }
+            y: 0px;
+            height: plot.height;
+
+            private property <color> tone: Ink.tone(bar.kind);
+            private property <length> level-height: max(3px, plot.height * max(0.05, bar.level) * self.rise);
+            Rectangle {
+                y: parent.height - parent.level-height;
+                height: parent.level-height;
+                border-radius: min(3px, self.width / 2);
+                background: @linear-gradient(180deg, parent.tone.with-alpha(root.hovered == index || parent.newest ? 1 : 0.85) 0%, parent.tone.with-alpha(root.hovered == index ? 0.75 : 0.42) 100%);
+                opacity: root.hovered < 0 || root.hovered == index ? 1 : 0.45;
+                animate opacity { duration: Theme.fast; }
+            }
+
+            // Newest bar: a beacon, with a ripple when it is a live arrival.
+            if index == root.bars.length - 1: Rectangle {
+                private property <length> size: 6px + 16px * parent.ping;
+                x: (parent.width - self.size) / 2;
+                y: parent.height - parent.level-height - 9px - self.size / 2 + 3px;
+                width: self.size;
+                height: self.size;
+                border-radius: self.size / 2;
+                border-width: 1.5px;
+                border-color: parent.tone.with-alpha(0.7 * (1 - parent.ping));
+                visible: parent.ping > 0 && parent.ping < 1;
+            }
+            if index == root.bars.length - 1: Rectangle {
+                x: (parent.width - 6px) / 2;
+                y: parent.height - parent.level-height - 12px;
+                width: 6px;
+                height: 6px;
+                border-radius: 3px;
+                background: parent.tone;
+                drop-shadow-blur: 6px;
+                drop-shadow-color: parent.tone.with-alpha(0.7);
+                opacity: parent.rise > 0.6 ? 1 : 0;
+                animate opacity { duration: Theme.fast; }
+            }
+
+            TouchArea {
+                changed has-hover => {
+                    if (self.has-hover) { root.hovered = index; } else if (root.hovered == index) { root.hovered = -1; }
+                }
+            }
+        }
+    }
+}
+
+component PulseCard inherits Rectangle {
+    in property <RequestStats> stats;
+    in property <[RequestBar]> bars;
+    in property <int> sync;
+    height: 118px;
+    border-radius: 16px;
+    border-width: 1px;
+    border-color: Theme.border;
+    background: Theme.panel;
+    clip: true;
+    animate background, border-color { duration: Theme.page-motion; }
+    Rectangle {
+        background: @linear-gradient(110deg, Theme.brand.with-alpha(Theme.dark ? 0.11 : 0.07) 0%, Theme.brand.with-alpha(0) 48%);
+    }
+
     HorizontalLayout {
-        height: 36px;
-        spacing: 10px;
-        Text {
-            text: "最近请求";
-            color: Theme.primary-text;
-            font-size: 17px;
-            font-weight: 500;
-            vertical-alignment: center;
+        padding-left: 20px;
+        padding-right: 20px;
+        padding-top: 16px;
+        padding-bottom: 16px;
+        spacing: 22px;
+        RateBlock {
+            width: 176px;
+            stats: root.stats;
+        }
+
+        Divider { }
+
+        VerticalLayout {
+            width: 128px;
+            alignment: center;
+            spacing: 9px;
+            Latency {
+                label: "P50";
+                value: root.stats.p50-ms;
+                order: 1;
+            }
+
+            Latency {
+                label: "P95";
+                value: root.stats.p95-ms;
+                order: 1;
+            }
+
+            Latency {
+                label: "首事件";
+                value: root.stats.first-event-ms;
+                order: 1;
+            }
+        }
+
+        Divider { }
+
+        PulseChart {
+            horizontal-stretch: 1;
+            bars: root.bars;
+            sync: root.sync;
+        }
+    }
+}
+
+// Breathes once per refresh, so the page shows it is polling without animating while idle.
+component LiveBadge inherits Rectangle {
+    in property <bool> live;
+    in property <bool> loading;
+    in property <float> pulse;
+    in property <string> text;
+    horizontal-stretch: 0;
+    height: 30px;
+    border-radius: 15px;
+    background: root.live ? Theme.brand-surface : Theme.raised;
+    animate background { duration: Theme.page-motion; }
+    accessible-role: AccessibleRole.text;
+    accessible-label: root.text;
+    HorizontalLayout {
+        padding-left: 13px;
+        padding-right: 14px;
+        spacing: 9px;
+        Rectangle {
+            width: 8px;
+            Rectangle {
+                private property <length> size: 8px + 16px * root.pulse;
+                x: (parent.width - self.size) / 2;
+                y: (parent.height - self.size) / 2;
+                width: self.size;
+                height: self.size;
+                border-radius: self.size / 2;
+                background: Theme.success.with-alpha(0.45 * (1 - root.pulse));
+                visible: root.live && root.pulse > 0 && root.pulse < 1;
+            }
+
+            Rectangle {
+                y: (parent.height - 8px) / 2;
+                width: 8px;
+                height: 8px;
+                border-radius: 4px;
+                background: root.live ? Theme.success : Theme.muted-text;
+                opacity: root.loading ? 0.6 : 1;
+                animate background, opacity { duration: Theme.fast; }
+            }
         }
 
         Text {
-            text: root.requests.length + " 条 / 最近 100 条";
+            text: root.text;
+            color: root.live ? Theme.success : Theme.muted-text;
+            font-size: 12px;
+            font-weight: 600;
+            vertical-alignment: center;
+            animate color { duration: Theme.fast; }
+        }
+    }
+}
+
+component FollowSwitch inherits Rectangle {
+    in property <bool> on;
+    callback toggled();
+    private property <bool> motion: Theme.animations-enabled && !Theme.system-reduced-motion;
+    width: 138px;
+    height: 30px;
+    border-radius: 15px;
+    border-width: 1px;
+    border-color: touch.has-hover || focus.has-focus ? Theme.brand.with-alpha(0.6) : Theme.border;
+    background: touch.pressed ? Theme.raised : Theme.panel;
+    animate border-color, background { duration: Theme.fast; }
+    accessible-role: checkbox;
+    accessible-label: "自动滚动到最新";
+    accessible-checked: root.on;
+    accessible-action-default => { root.toggled(); }
+    Text {
+        x: 13px;
+        width: parent.width - 60px;
+        text: root.on ? "跟随最新" : "已暂停滚动";
+        color: root.on ? Theme.primary-text : Theme.warning;
+        font-size: 12px;
+        font-weight: 500;
+        vertical-alignment: center;
+        animate color { duration: Theme.fast; }
+    }
+
+    track := Rectangle {
+        x: parent.width - self.width - 6px;
+        y: (parent.height - self.height) / 2;
+        width: 34px;
+        height: 20px;
+        border-radius: 10px;
+        background: root.on ? Theme.brand : Theme.raised;
+        border-width: 1px;
+        border-color: root.on ? Theme.brand : Theme.border;
+        animate background, border-color { duration: Theme.page-motion; }
+        Rectangle {
+            x: root.on ? parent.width - self.width - 3px : 3px;
+            y: (parent.height - self.height) / 2;
+            width: touch.pressed ? 17px : 14px;
+            height: 14px;
+            border-radius: 7px;
+            background: root.on ? Theme.on-brand : Theme.muted-text;
+            drop-shadow-blur: 3px;
+            drop-shadow-offset-y: 1px;
+            drop-shadow-color: #00000030;
+            animate x {
+                duration: root.motion ? 320ms : 0ms;
+                easing: cubic-bezier(0.34, 1.56, 0.64, 1);
+            }
+            animate width, background { duration: Theme.fast; }
+        }
+    }
+
+    touch := TouchArea {
+        mouse-cursor: pointer;
+        clicked => { focus.focus(); root.toggled(); }
+    }
+
+    focus := FocusScope {
+        width: 0px;
+        key-pressed(event) => {
+            if (event.text == " " || event.text == "\n") { root.toggled(); return accept; }
+            return reject;
+        }
+    }
+}
+
+// Response headers, first event, and completion as nested segments: dim while waiting,
+// brighter once headers arrive, solid while streaming. Length follows `span`.
+component Waterfall inherits Rectangle {
+    in property <RequestRow> request;
+    in property <float> span: 1;
+    in property <color> tone;
+    private property <float> total: max(1, root.request.duration-ms);
+    private property <float> headers: root.request.headers-ms < 0 ? 1 : min(1, root.request.headers-ms / root.total);
+    private property <float> first: root.request.first-event-ms < 0 ? 1 : min(1, root.request.first-event-ms / root.total);
+    private property <length> extent: root.width * root.span;
+    border-radius: root.height / 2;
+    background: Theme.raised;
+    clip: true;
+    Rectangle {
+        x: 0px;
+        width: root.extent;
+        border-radius: root.height / 2;
+        background: root.tone.with-alpha(0.26);
+    }
+
+    Rectangle {
+        x: root.extent * root.headers;
+        width: root.extent * (1 - root.headers);
+        border-radius: root.height / 2;
+        background: root.tone.with-alpha(0.55);
+    }
+
+    Rectangle {
+        x: root.extent * root.first;
+        width: root.extent * (1 - root.first);
+        border-radius: root.height / 2;
+        background: root.tone;
+    }
+}
+
+component Legend inherits HorizontalLayout {
+    in property <color> ink;
+    in property <string> label;
+    in property <string> value;
+    horizontal-stretch: 0;
+    spacing: 6px;
+    Rectangle {
+        width: 8px;
+        Rectangle {
+            y: (parent.height - 8px) / 2;
+            height: 8px;
+            border-radius: 2px;
+            background: root.ink;
+        }
+    }
+
+    Text {
+        text: root.label;
+        color: Theme.muted-text;
+        font-size: 11px;
+        vertical-alignment: center;
+    }
+
+    Text {
+        text: root.value;
+        color: Theme.primary-text;
+        font-size: 12px;
+        font-weight: 600;
+        vertical-alignment: center;
+    }
+}
+
+component Fact inherits VerticalLayout {
+    in property <string> label;
+    in property <string> value;
+    spacing: 3px;
+    Text {
+        text: root.label;
+        color: Theme.muted-text;
+        font-size: 11px;
+    }
+
+    Text {
+        text: root.value;
+        color: Theme.primary-text;
+        font-size: 12px;
+        overflow: elide;
+    }
+}
+
+component Callout inherits Rectangle {
+    in property <image> icon;
+    in property <string> text;
+    in property <color> ink;
+    border-radius: 9px;
+    background: root.ink.with-alpha(Theme.dark ? 0.12 : 0.09);
+    HorizontalLayout {
+        padding: 9px;
+        padding-left: 11px;
+        spacing: 9px;
+        VerticalLayout {
+            alignment: start;
+            padding-top: 1px;
+            Image {
+                width: 14px;
+                height: 14px;
+                source: root.icon;
+                colorize: root.ink;
+            }
+        }
+
+        Text {
+            text: root.text;
+            color: root.ink;
+            font-size: 12px;
+            wrap: word-wrap;
+            vertical-alignment: center;
+        }
+    }
+}
+
+// One timeline entry. The rail stays continuous between rows while the node and
+// card slide in; live arrivals ripple and briefly glow in their status colour.
+component RequestItem inherits Rectangle {
+    in property <RequestRow> request;
+    in property <bool> first;
+    in property <bool> last;
+    in property <bool> expanded;
+    in property <bool> fresh;
+    in property <int> cascade: -1;
+    callback toggle();
+
+    private property <bool> motion: Theme.animations-enabled && !Theme.system-reduced-motion;
+    private property <color> tone: Ink.tone(root.request.kind);
+    private property <length> head: 64px;
+    private property <length> rail-x: 19px;
+    private property <length> card-x: 42px;
+    private property <bool> entered: !root.motion || (!root.fresh && root.cascade < 0);
+    private property <float> reveal: root.entered ? 1 : 0;
+    animate reveal {
+        duration: root.motion ? 560ms : 0ms;
+        easing: cubic-bezier(0.22, 1, 0.36, 1);
+    }
+    private property <bool> pinging: false;
+    private property <float> ping: root.pinging ? 1 : 0;
+    animate ping {
+        duration: root.pinging ? 1100ms : 0ms;
+        iteration-count: 2;
+        easing: ease-out;
+    }
+    private property <bool> lit: root.fresh && root.motion;
+    private property <float> glow: root.lit ? 1 : 0;
+    animate glow {
+        duration: root.lit ? 0ms : 2400ms;
+        easing: ease-out;
+    }
+    Timer {
+        interval: (root.cascade >= 0 ? 80ms : 16ms) + 42ms * max(0, root.cascade);
+        running: !root.entered;
+        triggered => {
+            root.entered = true;
+            root.pinging = root.fresh && root.motion;
+        }
+    }
+
+    Timer {
+        interval: 900ms;
+        running: root.lit;
+        triggered => { root.lit = false; }
+    }
+
+    private property <float> open: root.expanded ? 1 : 0;
+    animate open {
+        duration: root.motion ? 380ms : 0ms;
+        easing: cubic-bezier(0.22, 1, 0.36, 1);
+    }
+    private property <float> hover: touch.has-hover ? 1 : 0;
+    animate hover { duration: Theme.fast; }
+
+    // Collapsed rows skip measuring their hidden details.
+    height: root.open > 0 ? root.head + (details.preferred-height + 6px) * root.open : root.head;
+    accessible-role: list-item;
+    accessible-label: root.request.model + "，" + Ink.label(root.request.kind) + "，" + root.request.duration + "，" + root.request.clock;
+    accessible-expandable: true;
+    accessible-expanded: root.expanded;
+    accessible-action-default => { root.toggle(); }
+    accessible-action-expand => { root.toggle(); }
+
+    // Rail: from the previous node to the next, behind this row's node.
+    Rectangle {
+        x: root.rail-x - 1px;
+        y: root.first ? root.head / 2 : 0px;
+        width: 2px;
+        height: (root.last ? root.head / 2 : root.height) - self.y;
+        background: Theme.border;
+    }
+
+    Rectangle {
+        private property <length> size: 24px + 26px * root.ping;
+        x: root.rail-x - self.size / 2;
+        y: root.head / 2 - self.size / 2;
+        width: self.size;
+        height: self.size;
+        border-radius: self.size / 2;
+        border-width: 2px;
+        border-color: root.tone.with-alpha(0.6 * (1 - root.ping));
+        visible: root.ping > 0 && root.ping < 1;
+    }
+
+    node := Rectangle {
+        private property <length> size: 24px * (0.55 + 0.45 * root.reveal);
+        x: root.rail-x - self.size / 2;
+        y: root.head / 2 - self.size / 2;
+        width: self.size;
+        height: self.size;
+        border-radius: self.size / 2;
+        // Mask the rail with the page colour before tinting.
+        background: Theme.background;
+        opacity: root.reveal;
+        Rectangle {
+            border-radius: parent.border-radius;
+            background: root.tone.with-alpha(Theme.dark ? 0.2 : 0.14);
+            border-width: 1.5px;
+            border-color: root.tone.with-alpha(0.55 + 0.45 * root.glow);
+        }
+
+        Image {
+            width: parent.width * 0.5;
+            height: parent.height * 0.5;
+            source: Ink.icon(root.request.kind);
+            colorize: root.tone;
+        }
+    }
+
+    card := Rectangle {
+        x: root.card-x + (1 - root.reveal) * 26px;
+        y: 3px;
+        width: root.width - root.card-x - 2px;
+        height: root.height - 6px;
+        opacity: root.reveal;
+        border-radius: 14px;
+        clip: true;
+        background: root.expanded ? Theme.panel : Theme.panel.with-alpha(root.hover * 0.8);
+        border-width: 1px;
+        border-color: root.expanded ? Theme.border : Theme.border.with-alpha(root.hover * 0.8);
+        drop-shadow-blur: root.expanded ? 14px : 0px;
+        drop-shadow-offset-y: root.expanded ? 4px : 0px;
+        drop-shadow-color: Theme.dark ? #00000040 : #26392d14;
+        animate background, border-color { duration: Theme.page-motion; }
+        Rectangle {
+            background: @linear-gradient(90deg, root.tone.with-alpha(0.22 * root.glow) 0%, root.tone.with-alpha(0) 72%);
+            visible: root.glow > 0;
+        }
+
+        HorizontalLayout {
+            y: 0px;
+            height: root.head - 6px;
+            padding-left: 16px;
+            padding-right: 14px;
+            spacing: 16px;
+            VerticalLayout {
+                horizontal-stretch: 1;
+                alignment: center;
+                spacing: 5px;
+                Text {
+                    text: root.request.model;
+                    color: Theme.primary-text;
+                    font-size: 14px;
+                    font-weight: 600;
+                    overflow: elide;
+                }
+
+                HorizontalLayout {
+                    height: 18px;
+                    spacing: 8px;
+                    Text {
+                        text: root.request.clock;
+                        color: Theme.muted-text;
+                        font-size: 11px;
+                        vertical-alignment: center;
+                    }
+
+                    Rectangle {
+                        horizontal-stretch: 0;
+                        border-radius: 5px;
+                        background: Theme.raised;
+                        HorizontalLayout {
+                            padding-left: 6px;
+                            padding-right: 6px;
+                            Text {
+                                text: root.request.provider;
+                                color: Theme.primary-text.with-alpha(0.82);
+                                font-size: 11px;
+                                vertical-alignment: center;
+                                overflow: elide;
+                            }
+                        }
+                    }
+
+                    Text {
+                        horizontal-stretch: 1;
+                        min-width: 40px;
+                        text: "→  " + root.request.upstream;
+                        color: Theme.muted-text;
+                        font-size: 11px;
+                        vertical-alignment: center;
+                        overflow: elide;
+                    }
+                }
+            }
+
+            Rectangle {
+                width: 60px;
+                Rectangle {
+                    y: (parent.height - self.height) / 2;
+                    height: 22px;
+                    border-radius: 11px;
+                    background: root.tone.with-alpha(Theme.dark ? 0.16 : 0.12);
+                    Text {
+                        text: Ink.label(root.request.kind);
+                        color: root.tone;
+                        font-size: 11px;
+                        font-weight: 600;
+                        horizontal-alignment: center;
+                        vertical-alignment: center;
+                    }
+                }
+            }
+
+            VerticalLayout {
+                width: 128px;
+                alignment: center;
+                spacing: 8px;
+                Text {
+                    text: root.request.duration;
+                    color: root.request.kind == 0 ? Theme.primary-text : Theme.muted-text;
+                    font-size: 14px;
+                    font-weight: 600;
+                    horizontal-alignment: right;
+                }
+
+                Waterfall {
+                    height: 4px;
+                    request: root.request;
+                    tone: root.tone;
+                    span: max(0.04, root.request.level) * root.reveal;
+                }
+            }
+
+            Rectangle {
+                width: 16px;
+                Image {
+                    width: 14px;
+                    height: 14px;
+                    source: @image-url("../../assets/ui/chevron-down.svg");
+                    colorize: root.hover > 0 || root.expanded ? Theme.primary-text : Theme.muted-text;
+                    transform-rotation: 180deg * root.open;
+                    animate colorize { duration: Theme.fast; }
+                }
+            }
+        }
+
+        details := VerticalLayout {
+            y: root.head - 6px;
+            height: self.preferred-height;
+            padding-left: 16px;
+            padding-right: 16px;
+            padding-bottom: 10px;
+            spacing: 12px;
+            opacity: root.open;
+            visible: root.open > 0;
+            Rectangle {
+                height: 1px;
+                background: Theme.border;
+            }
+
+            Rectangle {
+                height: 8px;
+                Waterfall {
+                    request: root.request;
+                    tone: root.tone;
+                    span: root.open;
+                }
+            }
+
+            HorizontalLayout {
+                spacing: 18px;
+                Legend {
+                    ink: root.tone.with-alpha(0.26);
+                    label: "响应头";
+                    value: root.request.headers-ms < 0 ? "—" : Ink.duration(root.request.headers-ms);
+                }
+
+                Legend {
+                    ink: root.tone.with-alpha(0.55);
+                    label: "首事件";
+                    value: root.request.first-event-ms < 0 ? "—" : Ink.duration(root.request.first-event-ms);
+                }
+
+                Legend {
+                    ink: root.tone;
+                    label: "总耗时";
+                    value: root.request.duration;
+                }
+
+                Rectangle {
+                    horizontal-stretch: 1;
+                }
+            }
+
+            HorizontalLayout {
+                spacing: 22px;
+                Fact {
+                    label: "开始时间";
+                    value: root.request.time;
+                }
+
+                Fact {
+                    label: "上游 HTTP";
+                    value: root.request.http == "" ? "—" : root.request.http;
+                }
+
+                Fact {
+                    label: "结果";
+                    value: root.request.status;
+                }
+
+                Fact {
+                    horizontal-stretch: 1;
+                    label: "路由版本";
+                    value: root.request.generation;
+                }
+            }
+
+            Fact {
+                label: "请求 ID";
+                value: root.request.id;
+            }
+
+            if root.request.fallback != "": Callout {
+                icon: @image-url("../../assets/ui/link.svg");
+                text: root.request.fallback;
+                ink: Theme.warning;
+            }
+            if root.request.error != "": Callout {
+                icon: Ink.icon(root.request.kind);
+                text: root.request.error;
+                ink: root.tone;
+            }
+        }
+    }
+
+    touch := TouchArea {
+        x: root.card-x;
+        width: root.width - root.card-x;
+        height: root.head;
+        mouse-cursor: pointer;
+        clicked => { root.toggle(); }
+    }
+}
+
+component EmptyState inherits Rectangle {
+    in property <bool> filtered;
+    in property <bool> route-running;
+    private property <bool> motion: Theme.animations-enabled && !Theme.system-reduced-motion;
+    private property <bool> started;
+    private property <float> wave: root.started ? 1 : 0;
+    animate wave {
+        duration: root.started ? 2400ms : 0ms;
+        iteration-count: -1;
+        easing: ease-out;
+    }
+    // Animations run on change, so start the radar one frame after creation.
+    Timer {
+        interval: 16ms;
+        running: root.motion && !root.started;
+        triggered => { root.started = true; }
+    }
+
+    VerticalLayout {
+        alignment: center;
+        spacing: 14px;
+        Rectangle {
+            height: 92px;
+            for ring in [0, 0.33, 0.66]: Rectangle {
+                private property <float> phase: mod(root.wave + ring, 1);
+                private property <length> size: 36px + 56px * self.phase;
+                x: (parent.width - self.size) / 2;
+                y: (parent.height - self.size) / 2;
+                width: self.size;
+                height: self.size;
+                border-radius: self.size / 2;
+                border-width: 1.5px;
+                border-color: Theme.brand.with-alpha(0.5 * (1 - self.phase));
+                visible: root.motion && !root.filtered;
+            }
+            Rectangle {
+                x: (parent.width - 44px) / 2;
+                y: (parent.height - 44px) / 2;
+                width: 44px;
+                height: 44px;
+                border-radius: 22px;
+                background: Theme.brand-surface;
+                Image {
+                    width: 22px;
+                    height: 22px;
+                    source: @image-url("../../assets/ui/activity.svg");
+                    colorize: Theme.brand;
+                }
+            }
+        }
+
+        Text {
+            text: root.filtered ? "没有符合筛选的请求" : root.route-running ? "正在等待第一条请求…" : "还没有请求记录";
+            color: Theme.primary-text;
+            font-size: 17px;
+            font-weight: 600;
+            horizontal-alignment: center;
+        }
+
+        Text {
+            text: root.filtered ? "切换到「全部」查看其他结果。" : root.route-running ? "路由已启用，请求完成后会实时出现在这里。" : "启用路由并完成请求后，结果会实时出现在这里。";
             color: Theme.muted-text;
             font-size: 12px;
-            vertical-alignment: center;
+            horizontal-alignment: center;
+        }
+    }
+}
+
+export component ActivityPage inherits VerticalLayout {
+    in property <[RequestRow]> requests;
+    in property <RequestStats> stats;
+    in property <[RequestBar]> bars;
+    in property <int> sync;
+    in property <bool> loading;
+    in property <string> request-error;
+    in property <bool> write-failed;
+    in property <bool> route-running;
+    // Polling runs only while this page exists and the window is shown.
+    in property <bool> live: true;
+    in-out property <int> filter;
+    in-out property <bool> following: true;
+    in-out property <int> unseen;
+    callback refresh-requests();
+    callback filter-requests(int);
+
+    private property <bool> motion: Theme.animations-enabled && !Theme.system-reduced-motion;
+    private property <string> expanded-id;
+    // Following stays off after an explicit pause until the reader turns it back on.
+    private property <bool> paused-manually;
+    private property <bool> entering: true;
+    private property <int> settle-ticks;
+    private property <bool> gliding;
+    private property <length> bottom-y: min(0px, list.visible-height - list.content-height);
+    private property <length> distance: list.content-y - root.bottom-y;
+    private property <bool> pulse-on;
+    private property <float> pulse: root.pulse-on ? 1 : 0;
+    animate pulse {
+        duration: root.pulse-on && root.motion ? 1000ms : 0ms;
+        easing: ease-out;
+    }
+
+    function resume() {
+        root.following = true;
+        root.paused-manually = false;
+        root.unseen = 0;
+        root.glide();
+    }
+    function glide() {
+        if (root.motion && root.settle-ticks >= 12) {
+            root.gliding = true;
+        } else {
+            list.content-y = root.bottom-y;
+        }
+    }
+    function pause(manual: bool) {
+        root.following = false;
+        root.paused-manually = manual;
+        root.gliding = false;
+    }
+
+    init => {
+        root.following = true;
+        root.unseen = 0;
+        root.refresh-requests();
+    }
+    changed live => {
+        if (root.live) { root.refresh-requests(); }
+    }
+    changed bottom-y => {
+        if (root.following && root.settle-ticks >= 12) { root.glide(); }
+    }
+
+    Timer {
+        interval: 2s;
+        running: root.live;
+        triggered => {
+            root.refresh-requests();
+            root.pulse-on = false;
+        }
+    }
+
+    // Re-arm the heartbeat one frame after it resets.
+    Timer {
+        interval: 16ms;
+        running: !root.pulse-on && root.motion && root.live;
+        triggered => { root.pulse-on = true; }
+    }
+
+    Timer {
+        interval: 520ms;
+        running: root.entering;
+        triggered => { root.entering = false; }
+    }
+
+    // Virtualized rows refine the content height over the first frames; hold the
+    // view on the newest entry until it settles instead of gliding from the top.
+    Timer {
+        interval: 16ms;
+        running: root.settle-ticks < 12;
+        triggered => {
+            if (root.following) { list.content-y = root.bottom-y; }
+            root.settle-ticks += 1;
+        }
+    }
+
+    Timer {
+        interval: 16ms;
+        running: root.gliding;
+        triggered => {
+            if (abs(root.bottom-y - list.content-y) < 1px) {
+                list.content-y = root.bottom-y;
+                root.gliding = false;
+            } else {
+                list.content-y = list.content-y + (root.bottom-y - list.content-y) * 0.2;
+            }
+        }
+    }
+
+    spacing: 14px;
+    PulseCard {
+        stats: root.stats;
+        bars: root.bars;
+        sync: root.sync;
+    }
+
+    HorizontalLayout {
+        height: 30px;
+        spacing: 12px;
+        LiveBadge {
+            live: root.live;
+            loading: root.loading;
+            pulse: root.pulse;
+            text: root.live ? "实时 · 每 2 秒" : "已暂停刷新";
+        }
+
+        QuietSegmented {
+            width: 300px;
+            height: 30px;
+            options: [
+                "全部 " + root.stats.total,
+                "完成 " + root.stats.completed,
+                "异常 " + root.stats.failed,
+                "取消 " + root.stats.cancelled
+            ];
+            current-index: root.filter;
+            selected(index) => {
+                root.filter = index;
+                root.filter-requests(index);
+                root.resume();
+                root.settle-ticks = 0;
+            }
         }
 
         Rectangle {
             horizontal-stretch: 1;
         }
 
-        QuietButton {
-            width: 102px;
-            text: root.busy ? "刷新中…" : "刷新记录";
-            enabled: !root.busy;
-            clicked => { root.refresh-requests(); }
+        FollowSwitch {
+            on: root.following;
+            toggled => {
+                if (root.following) { root.pause(true); } else { root.resume(); }
+            }
         }
     }
 
-    if root.request-error != "": Text {
-        text: root.request-error;
-        color: Theme.warning;
-        wrap: word-wrap;
+    if root.request-error != "" || root.write-failed: Callout {
+        icon: @image-url("../../assets/ui/alert.svg");
+        text: root.request-error != "" ? root.request-error : "部分请求记录写入失败；请检查数据库权限和磁盘空间";
+        ink: Theme.warning;
     }
-    if root.requests.length == 0: VerticalLayout {
-        padding: 36px;
-        spacing: 12px;
-        Text {
-            text: "还没有请求记录。";
-            color: Theme.primary-text;
-            font-size: 21px;
-            font-weight: 500;
-            horizontal-alignment: center;
-        }
 
-        Text {
-            text: "启用路由并完成请求后，结果会出现在这里。";
-            color: Theme.muted-text;
-            font-size: 13px;
-            horizontal-alignment: center;
-        }
-    }
-    ListView {
+    Rectangle {
         vertical-stretch: 1;
-        for request[index] in root.requests: Rectangle {
-            height: root.expanded == index ? (request.fallback == "" ? 180px : 204px) : 83px;
-            animate height {
-                duration: Theme.page-motion;
-                easing: ease-out;
-            }
-            clip: true;
-            background: root.expanded == index ? Theme.panel : transparent;
-            animate background { duration: Theme.fast; }
-            Rectangle {
-                y: parent.height - 1px;
-                height: 1px;
-                background: Theme.border;
-            }
-
-            HorizontalLayout {
-                x: 12px;
-                y: 0px;
-                width: parent.width - 24px;
-                height: 82px;
-                spacing: 15px;
-                VerticalLayout {
-                    alignment: center;
-                    spacing: 5px;
-                    Text {
-                        text: request.route;
-                        color: Theme.primary-text;
-                        font-size: 14px;
-                        font-weight: 500;
-                        overflow: elide;
-                    }
-
-                    Text {
-                        text: request.time;
-                        color: Theme.muted-text;
-                        font-size: 11px;
-                    }
-                }
-
-                Text {
-                    width: 75px;
-                    text: request.duration;
-                    color: Theme.muted-text;
-                    font-size: 12px;
-                    wrap: word-wrap;
-                    vertical-alignment: center;
-                }
-
-                Rectangle {
-                    width: 170px;
-                    StatusPill {
-                        x: 0px;
-                        y: (parent.height - self.height) / 2;
-                        width: request.cancelled ? 170px : 96px;
-                        label: request.status;
-                        ink: request.completed ? Theme.success : request.cancelled ? Theme.muted-text : Theme.warning;
-                        fill: request.completed ? Theme.brand-surface : Theme.raised;
-                    }
-                }
-
-                QuietButton {
-                    y: (parent.height - self.height) / 2;
-                    width: 66px;
-                    text: root.expanded == index ? "收起" : "详情";
-                    ghost: true;
-                    clicked => { root.expanded = root.expanded == index ? -1 : index; }
+        list := ListView {
+            scrolled => {
+                if (root.distance > 32px) {
+                    if (root.following) { root.pause(false); }
+                } else if (root.distance <= 2px && !root.following && !root.paused-manually) {
+                    root.resume();
                 }
             }
-
-            Rectangle {
-                x: 12px;
-                y: 83px;
-                width: parent.width - 24px;
-                height: parent.height - 95px;
-                opacity: root.expanded == index ? 1 : 0;
-                animate opacity { duration: Theme.page-motion; }
-                VerticalLayout {
-                    spacing: 6px;
-                    Text {
-                        text: request.timing;
-                        color: Theme.muted-text;
-                        font-size: 12px;
-                        wrap: word-wrap;
-                    }
-
-                    Text {
-                        text: request.detail;
-                        color: Theme.muted-text;
-                        font-size: 12px;
-                        wrap: word-wrap;
-                    }
-
-                    if request.fallback != "": Text {
-                        text: request.fallback;
-                        color: Theme.muted-text;
-                        font-size: 12px;
-                        wrap: word-wrap;
-                    }
-                    if request.error != "": Text {
-                        text: request.error;
-                        color: request.cancelled ? Theme.muted-text : Theme.warning;
-                        font-size: 12px;
-                        wrap: word-wrap;
-                    }
-                    Rectangle {
-                        vertical-stretch: 1;
+            for request[index] in root.requests: RequestItem {
+                request: request;
+                first: index == 0;
+                last: index == root.requests.length - 1;
+                expanded: root.expanded-id == request.id;
+                fresh: request.stamp > 0 && request.stamp == root.sync;
+                cascade: root.entering ? min(8, root.requests.length - 1 - index) : -1;
+                toggle => {
+                    if (root.expanded-id == request.id) {
+                        root.expanded-id = "";
+                    } else {
+                        root.expanded-id = request.id;
+                        // Reading an older entry should not be scrolled away by arrivals.
+                        if (!self.last && root.following) { root.pause(false); }
                     }
                 }
             }
         }
+
+        // Soft top edge once the list scrolls under the toolbar.
+        Rectangle {
+            y: 0px;
+            width: list.visible-width;
+            height: 22px;
+            background: @linear-gradient(180deg, Theme.background 0%, Theme.background.with-alpha(0) 100%);
+            opacity: list.content-y < -4px ? 1 : 0;
+            animate opacity { duration: Theme.fast; }
+        }
+
+        if root.requests.length == 0: EmptyState {
+            filtered: root.filter != 0 && root.stats.total > 0;
+            route-running: root.route-running;
+        }
+
+        jump := Rectangle {
+            private property <bool> shown: !root.following && (root.distance > 40px || root.unseen > 0);
+            private property <float> reveal: self.shown ? 1 : 0;
+            animate reveal {
+                duration: root.motion ? 340ms : 0ms;
+                easing: cubic-bezier(0.34, 1.4, 0.64, 1);
+            }
+            x: (list.visible-width - self.width) / 2;
+            y: parent.height - self.height - 14px + (1 - self.reveal) * 22px;
+            width: jump-label.preferred-width + 52px;
+            height: 34px;
+            border-radius: 17px;
+            background: jump-touch.has-hover ? Theme.solid.with-alpha(0.9) : Theme.solid;
+            drop-shadow-blur: 16px;
+            drop-shadow-offset-y: 5px;
+            drop-shadow-color: Theme.dark ? #00000070 : #18221a38;
+            // The overshoot belongs to the position; opacity must stay within 0..1.
+            opacity: clamp(self.reveal, 0, 1);
+            visible: self.reveal > 0.01;
+            animate background { duration: Theme.fast; }
+            accessible-role: button;
+            accessible-label: jump-label.text;
+            accessible-action-default => { root.resume(); }
+            Image {
+                x: 16px;
+                y: (parent.height - self.height) / 2 + (jump-touch.has-hover ? 1px : 0px);
+                width: 15px;
+                height: 15px;
+                source: @image-url("../../assets/ui/arrow-down.svg");
+                colorize: Theme.on-brand;
+                animate y { duration: Theme.fast; }
+            }
+
+            jump-label := Text {
+                x: 38px;
+                text: root.unseen > 0 ? root.unseen + " 条新请求" : "回到最新";
+                color: Theme.on-brand;
+                font-size: 12px;
+                font-weight: 600;
+                vertical-alignment: center;
+            }
+
+            jump-touch := TouchArea {
+                enabled: jump.shown;
+                mouse-cursor: pointer;
+                clicked => { root.resume(); }
+            }
+        }
     }
 
-    Text {
-        text: "仅保存路由请求的必要元数据，正文与凭据不进入记录。用量与费用统计尚未接入。";
-        color: Theme.muted-text;
-        font-size: 11px;
-        wrap: word-wrap;
+    HorizontalLayout {
+        spacing: 7px;
+        Image {
+            width: 12px;
+            source: @image-url("../../assets/ui/lock.svg");
+            colorize: Theme.muted-text;
+        }
+
+        Text {
+            text: "仅保存路由请求的必要元数据，正文与凭据不进入记录。用量与费用统计尚未接入。";
+            color: Theme.muted-text;
+            font-size: 11px;
+            overflow: elide;
+            horizontal-stretch: 1;
+        }
     }
 }

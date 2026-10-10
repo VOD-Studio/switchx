@@ -142,15 +142,48 @@ export struct BatchSummary {
     visible-selected: int,
 }
 
+// One routed request. `kind`: 0 completed, 1 failed, 2 interrupted, 3 cancelled.
+// Timings are milliseconds, or -1 when the stage was never reached; `level` is the
+// log-scaled duration in 0..1 shared with the pulse chart.
+// `stamp` is the refresh generation that first saw the row; 0 for the initial load.
 export struct RequestRow {
+    id: string,
     time: string,
-    route: string,
-    timing: string,
+    clock: string,
+    model: string,
+    provider: string,
+    upstream: string,
     duration: string,
-    detail: string,
+    duration-ms: int,
+    level: float,
+    headers-ms: int,
+    first-event-ms: int,
+    http: string,
+    generation: string,
     status: string,
-    completed: bool,
-    cancelled: bool,
+    kind: int,
     error: string,
     fallback: string,
+    stamp: int,
+}
+
+// Aggregates for the activity header; rates and latencies are -1 without data.
+export struct RequestStats {
+    total: int,
+    completed: int,
+    failed: int,
+    cancelled: int,
+    success-rate: float,
+    p50-ms: float,
+    p95-ms: float,
+    first-event-ms: float,
+}
+
+// One bar of the activity pulse; `level` is a log-scaled duration in 0..1.
+export struct RequestBar {
+    id: string,
+    level: float,
+    kind: int,
+    label: string,
+    stamp: int,
 }
