@@ -48,6 +48,7 @@ export component StatusPill inherits Rectangle {
 }
 
 export component QuietButton {
+    out property <bool> hovered: hit-area.has-hover;
     in property <string> text;
     in property <string> description: "";
     in property <image> icon;
