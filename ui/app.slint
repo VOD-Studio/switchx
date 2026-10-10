@@ -5,6 +5,7 @@ import { QuietScrollView as ScrollView } from "scroll-view.slint";
 import { Theme } from "tokens.slint";
 import {
     QuietButton,
+    QuietSegmented,
     QuietCheckBox as CheckBox,
     QuietComboBox as ComboBox,
     QuietLineEdit as LineEdit,
@@ -1298,43 +1299,20 @@ export component AppWindow inherits Window {
                 height: 44px;
                 spacing: 16px;
                 cross-axis-alignment: center;
-                editor-tabs := Rectangle {
+                editor-tabs := QuietSegmented {
                     width: 320px;
-                    horizontal-stretch: 0;
                     height: 44px;
-                    border-radius: 10px;
-                    background: Theme.inset;
+                    options: ["连接设置", "模型目录"];
+                    enabled-options: [true, !root.config-managed];
+                    enabled: !root.busy;
+                    current-index: root.connection-models-open ? 1 : 0;
+                    selection-background: Theme.brand-surface;
                     property <string> connection-id: root.connection-models-open ? root.connection-models-id : root.editor-open ? root.edit-id : root.subscription-editor-open ? root.subscription-id : root.xai-provider-id;
-                    Rectangle {
-                        x: root.connection-models-open ? parent.width / 2 + 3px : 4px;
-                        y: 4px;
-                        width: parent.width / 2 - 7px;
-                        height: 36px;
-                        border-radius: 8px;
-                        background: Theme.brand-surface;
-                        animate x {
-                            duration: Theme.drawer-motion;
-                            easing: cubic-bezier(0.22, 1, 0.36, 1);
-                        }
-                    }
-
-                    HorizontalLayout {
-                        padding: 4px;
-                        spacing: 6px;
-                        QuietButton {
-                            text: "连接设置";
-                            ghost: true;
-                            tab: true;
-                            enabled: !root.busy;
-                            clicked => { if root.connection-models-open { root.edit-connection(editor-tabs.connection-id); } }
-                        }
-
-                        QuietButton {
-                            text: "模型目录";
-                            ghost: true;
-                            tab: true;
-                            enabled: !root.busy && !root.config-managed;
-                            clicked => { if !root.connection-models-open { root.begin-connection-models(editor-tabs.connection-id); } }
+                    selected(index) => {
+                        if index == 0 {
+                            root.edit-connection(self.connection-id);
+                        } else {
+                            root.begin-connection-models(self.connection-id);
                         }
                     }
                 }
