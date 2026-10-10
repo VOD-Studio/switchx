@@ -98,6 +98,7 @@ export component AccountsPage inherits ScrollView {
         }
 
         XaiAccounts {
+            entry-offset: min(root.accounts.length, 4) + 1;
             other-login-pending: root.chatgpt-login-pending;
             expanded-id <=> root.expanded-grok-id;
             removing-id: root.removing-id;

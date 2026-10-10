@@ -5,6 +5,7 @@ import { ProviderRow } from "../view-models.slint";
 import { ProviderCard } from "provider-card.slint";
 
 export component ProvidersPage inherits VerticalLayout {
+    in property <bool> interactive: true;
     in property <bool> loading;
     in property <bool> busy;
     in property <bool> recovery-only;
@@ -27,6 +28,7 @@ export component ProvidersPage inherits VerticalLayout {
         height: 36px;
         spacing: 10px;
         QuietLineEdit {
+            enabled: root.interactive;
             width: 190px;
             icon: @image-url("../../assets/ui/search.svg");
             placeholder-text: "搜索连接";

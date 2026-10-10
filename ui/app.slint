@@ -457,8 +457,13 @@ export component AppWindow inherits Window {
     }
 
     in-out property <int> connections-tab: 0;
+    // Keep the outgoing page alive until the reversible slide/fade reaches its end.
+    property <float> connections-progress: root.connections-tab == 1 ? 1 : 0;
+    animate connections-progress {
+        duration: root.active-page == 1 ? Theme.drawer-motion : 0ms;
+        easing: cubic-bezier(0.4, 0, 0.2, 1);
+    }
     changed connections-tab => {
-        root.page-entered = Theme.page-motion == 0ms;
         if (root.active-page == 1 && root.connections-tab == 1) { root.xai-account-action(5, ""); root.account-action(6, ""); }
     }
     Timer {
@@ -834,6 +839,19 @@ export component AppWindow inherits Window {
                                     Rectangle {
                                         // Ends where the scroll gutter begins so the actions line up with the cards below.
                                         height: 52px;
+                                        Rectangle {
+                                            x: root.connections-tab == 0 ? 0px : 106px;
+                                            y: 8px;
+                                            width: 98px;
+                                            height: 36px;
+                                            border-radius: 10px;
+                                            background: Theme.brand.with-alpha(Theme.dark ? 0.09 : 0.07);
+                                            animate x {
+                                                duration: Theme.drawer-motion;
+                                                easing: cubic-bezier(0.22, 1, 0.36, 1);
+                                            }
+                                        }
+
                                         HorizontalLayout {
                                             height: 51px;
                                             padding-right: 14px;
@@ -844,6 +862,7 @@ export component AppWindow inherits Window {
                                                 text: "上游连接";
                                                 ghost: true;
                                                 tab: true;
+                                                background: transparent;
                                                 selected: root.connections-tab == 0;
                                                 clicked => { root.connections-tab = 0; }
                                             }
@@ -854,6 +873,7 @@ export component AppWindow inherits Window {
                                                 text: "订阅账号";
                                                 ghost: true;
                                                 tab: true;
+                                                background: transparent;
                                                 selected: root.connections-tab == 1;
                                                 clicked => { root.connections-tab = 1; }
                                             }
@@ -862,31 +882,41 @@ export component AppWindow inherits Window {
                                                 horizontal-stretch: 1;
                                             }
 
-                                            if root.connections-tab == 1: QuietButton {
-                                                y: 9px;
-                                                width: 112px;
+                                            if root.connections-progress > 0: Rectangle {
+                                                width: 266px;
                                                 height: 32px;
-                                                text: "刷新额度";
-                                                icon: @image-url("../assets/refresh.svg");
-                                                icon-color: Theme.muted-text;
-                                                ghost: true;
-                                                enabled: !root.busy && !root.recovery-only && !root.chatgpt-login-pending && !root.xai-pending;
-                                                clicked => { root.account-action(6, ""); root.xai-account-action(5, ""); }
-                                            }
-                                            if root.connections-tab == 1: ComboBox {
                                                 y: 9px;
-                                                width: 146px;
-                                                min-height: 32px;
-                                                max-height: 32px;
-                                                action-menu: true;
-                                                accessible-role: button;
-                                                primary: true;
-                                                trigger-text: "添加账号";
-                                                trigger-icon: @image-url("../assets/ui/plus.svg");
-                                                model: ["ChatGPT 账号", "Grok 账号"];
-                                                item-enabled: [true, !root.config-managed];
-                                                enabled: !root.busy && !root.chatgpt-login-pending && !root.xai-pending;
-                                                selected(value) => { if (value == "ChatGPT 账号") { root.account-action(1, ""); } else { root.xai-account-action(1, ""); } }
+                                                opacity: root.connections-progress * root.connections-progress;
+                                                HorizontalLayout {
+                                                    x: (1 - root.connections-progress) * 12px;
+                                                    width: parent.width;
+                                                    spacing: 8px;
+                                                    QuietButton {
+                                                        width: 112px;
+                                                        height: 32px;
+                                                        text: "刷新额度";
+                                                        icon: @image-url("../assets/refresh.svg");
+                                                        icon-color: Theme.muted-text;
+                                                        ghost: true;
+                                                        enabled: root.connections-tab == 1 && !root.busy && !root.recovery-only && !root.chatgpt-login-pending && !root.xai-pending;
+                                                        clicked => { root.account-action(6, ""); root.xai-account-action(5, ""); }
+                                                    }
+
+                                                    ComboBox {
+                                                        width: 146px;
+                                                        min-height: 32px;
+                                                        max-height: 32px;
+                                                        action-menu: true;
+                                                        accessible-role: button;
+                                                        primary: true;
+                                                        trigger-text: "添加账号";
+                                                        trigger-icon: @image-url("../assets/ui/plus.svg");
+                                                        model: ["ChatGPT 账号", "Grok 账号"];
+                                                        item-enabled: [true, !root.config-managed];
+                                                        enabled: root.connections-tab == 1 && !root.busy && !root.chatgpt-login-pending && !root.xai-pending;
+                                                        selected(value) => { if (value == "ChatGPT 账号") { root.account-action(1, ""); } else { root.xai-account-action(1, ""); } }
+                                                    }
+                                                }
                                             }
                                         }
 
@@ -899,92 +929,132 @@ export component AppWindow inherits Window {
                                         }
 
                                         Rectangle {
-                                            x: root.connections-tab == 0 ? 12px : 118px;
+                                            // The leading edge arrives first; the trailing edge catches up.
+                                            property <length> left-edge: root.connections-tab == 0 ? 12px : 118px;
+                                            property <length> right-edge: root.connections-tab == 0 ? 86px : 192px;
+                                            x: self.left-edge;
                                             y: 49px;
-                                            width: 74px;
+                                            width: self.right-edge - self.left-edge;
                                             height: 2px;
                                             border-radius: 1px;
                                             background: Theme.brand;
-                                            animate x {
-                                                duration: Theme.page-motion;
+                                            animate left-edge {
+                                                duration: root.connections-tab == 1 ? Theme.drawer-motion : Theme.page-motion;
+                                                easing: cubic-bezier(0.22, 1, 0.36, 1);
+                                            }
+                                            animate right-edge {
+                                                duration: root.connections-tab == 1 ? Theme.page-motion : Theme.drawer-motion;
                                                 easing: cubic-bezier(0.22, 1, 0.36, 1);
                                             }
                                         }
                                     }
 
-                                    if root.connections-tab == 0: ProvidersPage {
-                                        loading: root.loading;
-                                        busy: root.busy;
-                                        recovery-only: root.recovery-only;
-                                        providers: root.providers;
-                                        filtered-providers: root.filtered-providers;
-                                        provider-query <=> root.provider-query;
-                                        config-managed: root.config-managed;
-                                        chatgpt-login-pending: root.chatgpt-login-pending || root.xai-pending;
-                                        refresh(check) => { root.refresh(check); }
-                                        filter-providers(query) => { root.filter-providers(query); }
-                                        add-connection() => { root.open-connection-picker(); }
-                                        begin-provider-editor(id) => { root.begin-provider-editor(id); }
-                                        begin-xai-editor(id) => { root.begin-xai-editor(id); }
-                                        begin-subscription-editor(id) => { root.begin-subscription-editor(id); }
-                                        check-provider(id) => { root.check-provider(id); }
-                                        preview-direct(id) => { root.selected-provider-id = id; root.direct-drawer-open = true; root.inspect-direct(id, root.config-home); }
-                                        begin-model-editor(provider-id, model-id) => { root.begin-model-editor(provider-id, model-id); }
-                                    }
-                                    if root.connections-tab == 1: AccountsPage {
-                                        busy: root.busy || root.account-removing-id != "";
-                                        expanded-chatgpt-id <=> root.expanded-chatgpt-account-id;
-                                        expanded-grok-id <=> root.expanded-grok-account-id;
-                                        removing-id: root.account-removing-id;
-                                        recovery-only: root.recovery-only;
-                                        config-managed: root.config-managed;
-                                        auth-status: root.auth-status;
-                                        accounts: root.accounts;
-                                        account-error: root.account-error;
-                                        login-user-code: root.login-user-code;
-                                        login-url: root.login-url;
-                                        chatgpt-login-pending: root.chatgpt-login-pending;
-                                        route-auth-error: root.route-auth-error;
-                                        xai-accounts: root.xai-accounts;
-                                        xai-error: root.xai-account-error;
-                                        xai-user-code: root.xai-user-code;
-                                        xai-login-url: root.xai-login-url;
-                                        xai-pending: root.xai-pending;
-                                        native-expanded <=> root.native-login-expanded;
-                                        request-account-login(account) => {
-                                            root.account-login-confirm-native = false;
-                                            root.account-login-confirm-id = account.id;
-                                            root.account-login-confirm-label = account.label;
-                                            root.account-login-confirm-open = true;
+                                    Rectangle {
+                                        vertical-stretch: 1;
+                                        clip: true;
+                                        if root.connections-progress < 1: Rectangle {
+                                            x: -root.connections-progress * 24px;
+                                            y: root.connections-progress * 6px;
+                                            width: parent.width;
+                                            height: parent.height;
+                                            opacity: (1 - root.connections-progress) * (1 - root.connections-progress);
+                                            FocusScope {
+                                                enabled: root.connections-tab == 0;
+                                                ProvidersPage {
+                                                    interactive: root.connections-tab == 0;
+                                                    loading: root.loading;
+                                                    busy: root.busy || root.connections-tab != 0;
+                                                    recovery-only: root.recovery-only;
+                                                    providers: root.providers;
+                                                    filtered-providers: root.filtered-providers;
+                                                    provider-query <=> root.provider-query;
+                                                    config-managed: root.config-managed;
+                                                    chatgpt-login-pending: root.chatgpt-login-pending || root.xai-pending;
+                                                    refresh(check) => { root.refresh(check); }
+                                                    filter-providers(query) => { root.filter-providers(query); }
+                                                    add-connection() => { root.open-connection-picker(); }
+                                                    begin-provider-editor(id) => { root.begin-provider-editor(id); }
+                                                    begin-xai-editor(id) => { root.begin-xai-editor(id); }
+                                                    begin-subscription-editor(id) => { root.begin-subscription-editor(id); }
+                                                    check-provider(id) => { root.check-provider(id); }
+                                                    preview-direct(id) => { root.selected-provider-id = id; root.direct-drawer-open = true; root.inspect-direct(id, root.config-home); }
+                                                    begin-model-editor(provider-id, model-id) => { root.begin-model-editor(provider-id, model-id); }
+                                                }
+                                            }
+                                            // Fading controls must not receive pointer input on the old page.
+                                            TouchArea {
+                                                enabled: root.connections-tab != 0;
+                                            }
                                         }
-                                        request-native-login() => {
-                                            root.account-login-confirm-native = true;
-                                            root.account-login-confirm-label = "目标 Codex 目录的本机登录";
-                                            root.account-login-confirm-id = "";
-                                            root.account-login-confirm-open = true;
-                                        }
-                                        xai-account-action(action, id) => { root.xai-account-action(action, id); }
-                                        request-xai-removal(account) => {
-                                            root.delete-account-grok = true;
-                                            root.delete-account-id = account.id;
-                                            root.delete-account-label = account.label;
-                                            root.delete-account-references = account.bound-provider-names;
-                                            root.error-code = "";
-                                            root.error-message = "";
-                                            root.error-action = "";
-                                            root.delete-account-confirm = true;
-                                        }
-                                        subscription-action(action) => { root.subscription-action(action); }
-                                        account-action(action, id) => { root.account-action(action, id); }
-                                        request-account-removal(account) => {
-                                            root.delete-account-grok = false;
-                                            root.delete-account-id = account.id;
-                                            root.delete-account-label = account.label;
-                                            root.delete-account-references = account.bound-provider-names;
-                                            root.error-code = "";
-                                            root.error-message = "";
-                                            root.error-action = "";
-                                            root.delete-account-confirm = true;
+                                        if root.connections-progress > 0: Rectangle {
+                                            x: (1 - root.connections-progress) * 24px;
+                                            y: (1 - root.connections-progress) * 6px;
+                                            width: parent.width;
+                                            height: parent.height;
+                                            opacity: root.connections-progress * root.connections-progress;
+                                            FocusScope {
+                                                enabled: root.connections-tab == 1;
+                                                AccountsPage {
+                                                    busy: root.busy || root.account-removing-id != "" || root.connections-tab != 1;
+                                                    expanded-chatgpt-id <=> root.expanded-chatgpt-account-id;
+                                                    expanded-grok-id <=> root.expanded-grok-account-id;
+                                                    removing-id: root.account-removing-id;
+                                                    recovery-only: root.recovery-only;
+                                                    config-managed: root.config-managed;
+                                                    auth-status: root.auth-status;
+                                                    accounts: root.accounts;
+                                                    account-error: root.account-error;
+                                                    login-user-code: root.login-user-code;
+                                                    login-url: root.login-url;
+                                                    chatgpt-login-pending: root.chatgpt-login-pending;
+                                                    route-auth-error: root.route-auth-error;
+                                                    xai-accounts: root.xai-accounts;
+                                                    xai-error: root.xai-account-error;
+                                                    xai-user-code: root.xai-user-code;
+                                                    xai-login-url: root.xai-login-url;
+                                                    xai-pending: root.xai-pending;
+                                                    native-expanded <=> root.native-login-expanded;
+                                                    request-account-login(account) => {
+                                                        root.account-login-confirm-native = false;
+                                                        root.account-login-confirm-id = account.id;
+                                                        root.account-login-confirm-label = account.label;
+                                                        root.account-login-confirm-open = true;
+                                                    }
+                                                    request-native-login() => {
+                                                        root.account-login-confirm-native = true;
+                                                        root.account-login-confirm-label = "目标 Codex 目录的本机登录";
+                                                        root.account-login-confirm-id = "";
+                                                        root.account-login-confirm-open = true;
+                                                    }
+                                                    xai-account-action(action, id) => { root.xai-account-action(action, id); }
+                                                    request-xai-removal(account) => {
+                                                        root.delete-account-grok = true;
+                                                        root.delete-account-id = account.id;
+                                                        root.delete-account-label = account.label;
+                                                        root.delete-account-references = account.bound-provider-names;
+                                                        root.error-code = "";
+                                                        root.error-message = "";
+                                                        root.error-action = "";
+                                                        root.delete-account-confirm = true;
+                                                    }
+                                                    subscription-action(action) => { root.subscription-action(action); }
+                                                    account-action(action, id) => { root.account-action(action, id); }
+                                                    request-account-removal(account) => {
+                                                        root.delete-account-grok = false;
+                                                        root.delete-account-id = account.id;
+                                                        root.delete-account-label = account.label;
+                                                        root.delete-account-references = account.bound-provider-names;
+                                                        root.error-code = "";
+                                                        root.error-message = "";
+                                                        root.error-action = "";
+                                                        root.delete-account-confirm = true;
+                                                    }
+                                                }
+                                            }
+
+                                            TouchArea {
+                                                enabled: root.connections-tab != 1;
+                                            }
                                         }
                                     }
                                 }

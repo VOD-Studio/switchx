@@ -265,12 +265,24 @@ fn account_card_quota_fill_grows_on_entry_and_pulses_only_while_refreshing() {
     app.window().set_size(PhysicalSize::new(820, 500));
     app.show().unwrap();
     draw(&window, "quota-fill-start");
+    let reserved_height = app.get_card_height();
+    assert!(
+        reserved_height > 100.0,
+        "Arrival must reserve the card's final height"
+    );
     // The card enters after 16 ms and the fill starts growing roughly 120 ms later.
     // Draw every step like a running window does; Slint only animates a property
     // that was already rendered before its value changed.
+    advance(16);
+    draw(&window, "quota-card-entry");
     for _ in 0..6 {
-        advance(if app.get_card_height() == 0.0 { 16 } else { 60 });
+        advance(60);
         draw(&window, "quota-fill-step");
+        assert_eq!(
+            app.get_card_height(),
+            reserved_height,
+            "Arrival must not push following cards around"
+        );
     }
     let growing = draw(&window, "quota-fill-growing");
     advance(1200);
