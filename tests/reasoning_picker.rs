@@ -66,6 +66,16 @@ fn settle(window: &MinimalSoftwareWindow) {
 fn row(app: &AppWindow) -> ConnectionModelRow {
     app.get_connection_models().row_data(0).unwrap()
 }
+// The first catalog row's reasoning trigger spans y 233..269. Its 530px panel
+// opens below the trigger when that fits, otherwise at the 12px top margin.
+const TRIGGER_Y: f32 = 251.0;
+fn panel_dy(height: u32) -> f32 {
+    if 233.0 + 36.0 + 8.0 + 530.0 <= height as f32 - 12.0 {
+        265.0
+    } else {
+        0.0
+    }
+}
 fn reset(app: &AppWindow) {
     app.set_connection_models(ModelRc::new(VecModel::from(vec![ConnectionModelRow {
         public_id: "sx-synthetic".into(),
@@ -125,9 +135,10 @@ fn picker_supports_search_multiselect_defaults_keyboard_motion_and_disabled_stat
             draw(&window, "closed");
             let trigger = width as f32 - 140.0;
             let panel_x = width as f32 - 280.0;
-            click(&window, trigger, 338.0);
+            let dy = panel_dy(height);
+            click(&window, trigger, TRIGGER_Y);
             draw(&window, "open");
-            click(&window, panel_x, 160.0);
+            click(&window, panel_x, 160.0 + dy);
             assert!(
                 row(&app).reasoning_levels.starts_with("minimal, low"),
                 "click must add a level"
@@ -137,7 +148,7 @@ fn picker_supports_search_multiselect_defaults_keyboard_motion_and_disabled_stat
             // The search keeps focus after each toggle and accepts uppercase queries.
             text(&window, "HIGH".into());
             draw(&window, "search");
-            click(&window, panel_x, 120.0);
+            click(&window, panel_x, 120.0 + dy);
             assert_eq!(
                 row(&app).reasoning_levels,
                 "minimal, low, medium, xhigh, max"
@@ -148,7 +159,7 @@ fn picker_supports_search_multiselect_defaults_keyboard_motion_and_disabled_stat
             );
             key(&window, Key::Escape);
             draw(&window, "closed-after-search");
-            click(&window, trigger, 338.0);
+            click(&window, trigger, TRIGGER_Y);
             draw(&window, "reopened");
             key(&window, Key::DownArrow);
             key(&window, Key::Return);
@@ -165,9 +176,9 @@ fn picker_supports_search_multiselect_defaults_keyboard_motion_and_disabled_stat
             draw(&window, "no-results-closed");
             reset(&app);
             draw(&window, "default-reset");
-            click(&window, trigger, 338.0);
+            click(&window, trigger, TRIGGER_Y);
             draw(&window, "default-open");
-            click(&window, panel_x, 475.0);
+            click(&window, panel_x, 475.0 + dy);
             draw(&window, "default-menu");
             key(&window, Key::UpArrow);
             assert_eq!(
@@ -179,9 +190,9 @@ fn picker_supports_search_multiselect_defaults_keyboard_motion_and_disabled_stat
             draw(&window, "default-selected");
             click(&window, 300.0, 600.0);
             draw(&window, "dismissed");
-            click(&window, trigger, 338.0);
+            click(&window, trigger, TRIGGER_Y);
             draw(&window, "clear-open");
-            click(&window, width as f32 - 110.0, 447.0);
+            click(&window, width as f32 - 110.0, 447.0 + dy);
             assert!(row(&app).reasoning_levels.is_empty());
             assert!(row(&app).default_reasoning.is_empty());
             click(&window, 300.0, 600.0);
@@ -189,7 +200,7 @@ fn picker_supports_search_multiselect_defaults_keyboard_motion_and_disabled_stat
             reset(&app);
             app.set_config_managed(true);
             draw(&window, "managed");
-            click(&window, trigger, 338.0);
+            click(&window, trigger, TRIGGER_Y);
             key(&window, Key::Return);
             assert!(!app.get_connection_models_dirty());
             app.set_config_managed(false);
@@ -200,7 +211,7 @@ fn picker_supports_search_multiselect_defaults_keyboard_motion_and_disabled_stat
     reset(&app);
     draw(&window, "motion-closed");
     app.global::<Theme>().set_animations_enabled(true);
-    click(&window, 1060.0, 338.0);
+    click(&window, 1060.0, TRIGGER_Y);
     draw(&window, "motion-start");
     advance(48);
     let entering = draw(&window, "motion-entering");
@@ -221,7 +232,7 @@ fn picker_supports_search_multiselect_defaults_keyboard_motion_and_disabled_stat
         closed.as_bytes(),
         "closing must animate"
     );
-    click(&window, 1060.0, 338.0);
+    click(&window, 1060.0, TRIGGER_Y);
     advance(48);
     draw(&window, "reversal-start");
     click(&window, 300.0, 600.0);
@@ -229,27 +240,27 @@ fn picker_supports_search_multiselect_defaults_keyboard_motion_and_disabled_stat
     draw(&window, "reversal-exiting");
     key(&window, Key::Return);
     settle(&window);
-    click(&window, 920.0, 160.0);
+    click(&window, 920.0, 160.0 + panel_dy(820));
     assert!(
         row(&app).reasoning_levels.starts_with("minimal, low"),
         "rapid keyboard reopen must cancel the stale close timer"
     );
     click(&window, 300.0, 600.0);
     settle(&window);
-    click(&window, 1060.0, 338.0);
+    click(&window, 1060.0, TRIGGER_Y);
     settle(&window);
-    click(&window, 920.0, 160.0);
+    click(&window, 920.0, 160.0 + panel_dy(820));
     assert_eq!(row(&app).reasoning_levels, "low, medium, high, xhigh, max");
     app.set_busy(true);
     settle(&window);
-    click(&window, 920.0, 160.0);
+    click(&window, 920.0, 160.0 + panel_dy(820));
     assert_eq!(row(&app).reasoning_levels, "low, medium, high, xhigh, max");
     app.set_busy(false);
     app.global::<Theme>().set_system_reduced_motion(true);
     draw(&window, "reduced-closed");
-    click(&window, 1060.0, 338.0);
+    click(&window, 1060.0, TRIGGER_Y);
     draw(&window, "reduced-open");
-    click(&window, 920.0, 160.0);
+    click(&window, 920.0, 160.0 + panel_dy(820));
     assert_eq!(
         row(&app).reasoning_levels,
         "minimal, low, medium, high, xhigh, max"
