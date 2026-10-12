@@ -17,7 +17,7 @@
 //! Model mapping editor: add --model-editor-design (states, actions, and motion)
 //! or --model-editor-native (window; add --light for the light theme).
 //! Also: --connection-status, --accounts-design, --codex-quota, --xai-quota,
-//! --check-progress, --route-launch, and --layout-only.
+//! --quota-loading-motion, --check-progress, --route-launch, and --layout-only.
 
 mod accounts;
 mod activity;
@@ -139,6 +139,9 @@ fn main() -> Result<(), Box<dyn Error>> {
     }
     if flag("--xai-quota") {
         return accounts::render_xai_quota(&app, &window, output);
+    }
+    if flag("--quota-loading-motion") {
+        return accounts::render_quota_loading_motion(&app, &window, output);
     }
     if flag("--check-progress") {
         return connections::render_check_progress(&app, &window, output);

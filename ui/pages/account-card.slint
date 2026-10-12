@@ -8,6 +8,7 @@ import {
 } from "../components.slint";
 import { AccountRow } from "../view-models.slint";
 import { QuotaWindow } from "../quota-window.slint";
+import { QuotaSpinner, QuotaLoadingPlaceholder } from "../quota-loading.slint";
 import { CodexAccountQuota } from "codex-account-quota.slint";
 
 // Provider group heading shared by the ChatGPT and Grok lists.
@@ -137,7 +138,13 @@ export component AccountCard inherits Rectangle {
     property <string> identity: root.account.id;
     changed identity => { actions.cancel-popup(); }
     property <bool> query-pending: root.grok ? root.account.quota.loading : root.account.codex-quota.loading;
-    property <string> updated-text: root.query-pending ? "更新中…"
+    private property <bool> initial-loading: root.query-pending && (root.grok ? !root.account.quota.has-value && !root.account.requires-reauth : !root.account.codex-quota.has-value);
+    private property <float> loading-reveal: root.initial-loading ? 1 : 0;
+    animate loading-reveal {
+        duration: Theme.page-motion;
+        easing: cubic-bezier(0.22, 1, 0.36, 1);
+    }
+    property <string> updated-text: root.query-pending ? "更新中"
         : root.grok ? ((root.account.requires-reauth || root.account.quota.error != "") && root.account.quota.has-value ? "上次数据 · " + root.account.quota.updated-label : root.account.quota.updated-label)
         : (root.account.codex-quota.error != "" && root.account.codex-quota.has-value ? "上次数据 · " + root.account.codex-quota.updated-label : root.account.codex-quota.updated-label);
     // Reserve the final space during arrival so following groups never jump.
@@ -229,32 +236,22 @@ export component AccountCard inherits Rectangle {
                 horizontal-stretch: 0;
                 HorizontalLayout {
                     spacing: 6px;
+                    cross-axis-alignment: center;
                     Rectangle {
                         horizontal-stretch: 1;
                     }
 
-                    if root.query-pending: QuietButton {
-                        y: (parent.height - self.height) / 2;
-                        width: 18px;
-                        height: 18px;
-                        horizontal-stretch: 0;
-                        text: "正在更新额度";
-                        icon-only: true;
-                        icon: @image-url("../../assets/refresh.svg");
-                        icon-width: 14px;
-                        icon-height: 14px;
-                        icon-color: Theme.muted-text;
-                        ghost: true;
-                        loading: true;
-                        enabled: false;
+                    if root.query-pending: QuotaSpinner {
+                        active: root.query-pending;
                     }
                     Text {
                         text: root.updated-text;
-                        color: Theme.muted-text;
+                        color: root.query-pending ? Theme.brand : Theme.muted-text;
                         font-size: 11px;
                         horizontal-stretch: 0;
                         vertical-alignment: center;
                         overflow: elide;
+                        animate color { duration: Theme.fast; }
                     }
                 }
             }
@@ -325,43 +322,63 @@ export component AccountCard inherits Rectangle {
         }
 
         Rectangle {
-            height: quota-content.preferred-height + 26px;
+            private property <length> content-height: root.initial-loading ? 36px : quota-content.preferred-height;
+            animate content-height {
+                duration: Theme.page-motion;
+                easing: cubic-bezier(0.22, 1, 0.36, 1);
+            }
+            height: self.content-height + 26px;
+            clip: true;
             border-radius: 9px;
             background: Theme.inset;
             border-width: 1px;
-            border-color: Theme.border.with-alpha(0.6);
-            quota-content := VerticalLayout {
+            border-color: root.query-pending ? Theme.brand.with-alpha(0.25) : Theme.border.with-alpha(0.6);
+            animate border-color { duration: Theme.page-motion; }
+            if root.loading-reveal > 0: QuotaLoadingPlaceholder {
                 x: 14px;
                 y: 13px;
                 width: parent.width - 28px;
-                height: self.preferred-height;
-                spacing: 10px;
-                if !root.grok: CodexAccountQuota {
-                    quota: root.account.codex-quota;
-                }
-                if root.grok && root.account.quota.has-value: QuotaWindow {
-                    quota: root.account.quota;
-                    label-width: 74px;
-                    loading: root.account.quota.loading;
-                }
-                if root.grok && root.account.requires-reauth && root.account.quota.has-value: Text {
-                    text: "授权已失效，请重新登录；当前显示上次额度数据。";
-                    color: Theme.warning;
-                    font-size: 12px;
-                    wrap: word-wrap;
-                }
-                if root.grok && !root.account.quota.has-value: Text {
-                    height: 20px;
-                    text: root.account.requires-reauth ? "授权已失效，请重新登录" : root.query-pending ? "正在查询官方额度…" : root.account.quota.error != "" ? "暂时无法查询额度" : "尚未查询额度";
-                    color: root.account.requires-reauth || root.account.quota.error != "" ? Theme.warning : Theme.muted-text;
-                    font-size: 12px;
-                    vertical-alignment: center;
-                }
-                if root.grok && root.account.quota.error != "": Text {
-                    text: root.account.quota.error;
-                    color: Theme.warning;
-                    font-size: 12px;
-                    wrap: word-wrap;
+                opacity: root.loading-reveal;
+                active: root.initial-loading;
+            }
+            Rectangle {
+                x: 14px;
+                y: 13px + root.loading-reveal * 4px;
+                width: parent.width - 28px;
+                height: quota-content.preferred-height;
+                opacity: 1 - root.loading-reveal;
+                visible: root.loading-reveal < 1;
+                quota-content := VerticalLayout {
+                    width: parent.width;
+                    height: self.preferred-height;
+                    spacing: 10px;
+                    if !root.grok: CodexAccountQuota {
+                        quota: root.account.codex-quota;
+                    }
+                    if root.grok && root.account.quota.has-value: QuotaWindow {
+                        quota: root.account.quota;
+                        label-width: 74px;
+                        loading: root.account.quota.loading;
+                    }
+                    if root.grok && root.account.requires-reauth && root.account.quota.has-value: Text {
+                        text: "授权已失效，请重新登录；当前显示上次额度数据。";
+                        color: Theme.warning;
+                        font-size: 12px;
+                        wrap: word-wrap;
+                    }
+                    if root.grok && !root.account.quota.has-value: Text {
+                        height: 20px;
+                        text: root.account.requires-reauth ? "授权已失效，请重新登录" : root.account.quota.error != "" ? "暂时无法查询额度" : "尚未查询额度";
+                        color: root.account.requires-reauth || root.account.quota.error != "" ? Theme.warning : Theme.muted-text;
+                        font-size: 12px;
+                        vertical-alignment: center;
+                    }
+                    if root.grok && root.account.quota.error != "": Text {
+                        text: root.account.quota.error;
+                        color: Theme.warning;
+                        font-size: 12px;
+                        wrap: word-wrap;
+                    }
                 }
             }
         }

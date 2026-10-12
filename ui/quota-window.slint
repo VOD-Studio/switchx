@@ -11,13 +11,9 @@ export component QuotaWindow inherits HorizontalLayout {
     property <color> tone: root.quota.remaining-percent <= 0 ? Theme.error : root.quota.remaining-percent < 10 ? Theme.warning : Theme.brand;
     // The fill grows from empty when the row first appears, then follows updates.
     property <bool> filled: Theme.page-motion == 0ms;
-    property <float> pulse: root.loading && Theme.fast > 0ms ? 1 : 0;
-    animate pulse {
-        duration: root.loading && Theme.fast > 0ms ? 900ms : 0ms;
-        iteration-count: root.loading ? -1 : 1;
-        direction: alternate;
-        easing: ease-in-out;
-    }
+    private property <bool> loading-motion: root.loading && Theme.fast > 0ms;
+    private property <float> pulse: root.loading-motion ? (1 - cos(360deg * mod(animation-tick(), 1800ms) / 1800ms)) / 2 : 0;
+    private property <float> sweep: root.loading-motion ? min(1.4, mod(animation-tick(), 2400ms) / 1800ms) : 0;
     height: 20px;
     spacing: 12px;
     Timer {
@@ -49,14 +45,21 @@ export component QuotaWindow inherits HorizontalLayout {
         Rectangle {
             x: 0px;
             y: 0px;
-            width: root.filled ? parent.width * root.remaining / 100 : 0px;
+            width: root.filled || Theme.page-motion == 0ms ? parent.width * root.remaining / 100 : 0px;
             height: parent.height;
             border-radius: 3px;
             background: root.tone;
-            opacity: 1 - 0.5 * root.pulse;
+            opacity: 1 - 0.12 * root.pulse;
+            clip: true;
             animate width {
                 duration: Theme.page-motion * 2.5;
                 easing: cubic-bezier(0.22, 1, 0.36, 1);
+            }
+            if root.loading-motion: Rectangle {
+                width: max(24px, parent.width * 0.3);
+                height: parent.height;
+                x: -self.width + (parent.width + self.width) * root.sweep;
+                background: @linear-gradient(90deg, Theme.on-brand.with-alpha(0) 0%, Theme.on-brand.with-alpha(0.3) 50%, Theme.on-brand.with-alpha(0) 100%);
             }
         }
     }
