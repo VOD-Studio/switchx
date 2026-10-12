@@ -448,15 +448,17 @@ export component QuietLineEdit inherits Rectangle {
 
                 input := TextInput {
                     property <length> scroll-x;
+                    property <length> cursor-x;
                     x: min(0px, max(parent.width - self.width - self.text-cursor-width, self.scroll-x));
-                    width: max(parent.width - self.text-cursor-width, self.preferred-width);
+                    width: max(parent.width - self.text-cursor-width, max(self.preferred-width, self.cursor-x) + self.text-cursor-width);
                     height: parent.height;
                     font-size: 13px;
                     single-line: true;
                     horizontal-alignment: left;
                     vertical-alignment: center;
                     color: Theme.primary-text;
-                    selection-background-color: Theme.brand-surface;
+                    text-cursor-width: Theme.text-cursor-width;
+                    selection-background-color: Theme.selection-background;
                     selection-foreground-color: Theme.primary-text;
                     accessible-role: none;
                     accepted => { root.accepted(self.text); }
@@ -464,6 +466,7 @@ export component QuietLineEdit inherits Rectangle {
                     key-pressed(event) => { root.key-pressed(event) }
                     key-released(event) => { root.key-released(event) }
                     cursor-position-changed(position) => {
+                        self.cursor-x = position.x;
                         if position.x + self.scroll-x < 0px {
                             self.scroll-x = -position.x;
                         } else if position.x + self.scroll-x > parent.width - self.text-cursor-width {

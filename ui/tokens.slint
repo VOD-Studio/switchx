@@ -17,6 +17,9 @@ export global Theme {
     out property <color> muted-text: dark ? #a3ada5 : #6d7670;
     out property <color> placeholder-text: dark ? #bcc6be : #58665d;
     out property <color> brand: dark ? #a7c4ab : #496b56;
+    // Slint draws Apple-platform carets with the opaque selection color.
+    out property <color> selection-background: brand.with-alpha(0.24);
+    out property <length> text-cursor-width: 2px;
     out property <color> solid: dark ? #bfd4bf : #273f31;
     out property <color> on-brand: dark ? #1b2a20 : #ffffff;
     out property <color> brand-surface: dark ? #29382e : #e8efe6;

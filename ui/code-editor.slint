@@ -78,10 +78,11 @@ export component CodeEditor inherits Rectangle {
             width: max(0px, parent.width - self.x - root.content-padding);
             height: max(0px, parent.height - root.content-padding * 2);
             enabled: root.enabled;
-            content-width: max(self.visible-width, input.preferred-width);
+            content-width: max(self.visible-width, max(input.preferred-width, input.cursor-x) + input.text-cursor-width);
             content-height: max(self.visible-height, input.preferred-height);
 
             input := TextInput {
+                property <length> cursor-x;
                 width: scroll.content-width;
                 height: scroll.content-height;
                 single-line: false;
@@ -89,13 +90,15 @@ export component CodeEditor inherits Rectangle {
                 font-family: "Menlo";
                 font-size: 12px;
                 color: Theme.primary-text;
-                selection-background-color: Theme.brand-surface;
+                text-cursor-width: Theme.text-cursor-width;
+                selection-background-color: Theme.selection-background;
                 selection-foreground-color: Theme.primary-text;
                 input-method-hints: { capitalization: none, auto-correct: false, auto-complete: false };
                 page-height: scroll.visible-height;
                 accessible-role: none;
                 edited => { root.edited(self.text); }
                 cursor-position-changed(position) => {
+                    self.cursor-x = position.x;
                     if position.x + scroll.content-x < 0px {
                         scroll.content-x = min(0px, max(scroll.visible-width - self.width, -position.x));
                     } else if position.x + scroll.content-x > scroll.visible-width - self.text-cursor-width {
