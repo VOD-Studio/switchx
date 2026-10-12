@@ -128,6 +128,7 @@ pub(crate) fn save_mapping_from(
         fallback_provider_id: None,
     };
     catalog::publish_saved(std::slice::from_ref(&model))?;
+    store.check_model_names(std::slice::from_ref(&model))?;
     model.enabled = old.is_none_or(|model| model.enabled);
     model.fallback_provider_id = old
         .filter(|old| old.upstream_model == input.upstream_model)
@@ -377,6 +378,7 @@ pub(crate) fn save_mappings_from(
         });
     }
     catalog::publish_saved(&records)?;
+    store.check_model_names(&records)?;
     store
         .add_models(&records)
         .map_err(|_| "无法保存模型映射；原资料未修改")?;
@@ -414,9 +416,7 @@ pub fn save_connection_models(
         let model_id = draft.upstream_model.trim();
         let name = draft.display_name.trim();
         validate_provider(&provider.name, &provider.base_url, model_id)?;
-        if name.is_empty() || name.chars().count() > 160 || name.chars().any(char::is_control) {
-            return Err("模型显示名须为 1–160 个字符，且不能包含控制字符".into());
-        }
+        catalog::validate_display_name(name)?;
         let old = if draft.public_id.is_empty() {
             None
         } else {
@@ -434,6 +434,9 @@ pub fn save_connection_models(
                 || (!draft.public_id.is_empty() && model.public_id == draft.public_id)
         }) {
             return Err(format!("{model_id} 重复，请为每个实际模型保留一个条目"));
+        }
+        if records.iter().any(|model| model.display_name == name) {
+            return Err(format!("模型名称“{name}”重复，请使用不同名称"));
         }
         let source = if let Some(old) = old.filter(|model| model.upstream_model == model_id) {
             Some(serde_json::from_str(&old.metadata).map_err(|_| "已保存的模型资料损坏")?)
@@ -483,7 +486,10 @@ pub fn save_connection_models(
     }
     store
         .replace_provider_models(provider_id, expected, &records)
-        .map_err(|_| "模型目录在编辑期间已变化，或保存失败；原目录未修改，请重新打开后重试".into())
+        .map_err(|error| match error {
+            rusqlite::Error::InvalidParameterName(message) => message,
+            _ => "模型目录在编辑期间已变化，或保存失败；原目录未修改，请重新打开后重试".into(),
+        })
 }
 
 pub fn select_model(data_dir: &Path, public_id: &str, enabled: bool) -> Result<(), String> {
@@ -598,7 +604,7 @@ mod tests {
                     provider_id: "mock",
                     original_id,
                     public_id,
-                    display_name: "Mapped model",
+                    display_name: upstream_model,
                     upstream_model,
                     catalog_path: "",
                     settings: Some(catalog::MappingSettings {
@@ -632,7 +638,7 @@ mod tests {
         let published = catalog::publish_saved(&store.models().unwrap()).unwrap();
         assert_eq!(published.routes.len(), 1);
         assert_eq!(
-            published.routes["sx-renamed"].upstream_model,
+            published.routes["renamed-model"].upstream_model,
             "renamed-model"
         );
         assert_eq!(published.catalog["models"][0]["context_window"], 192000);

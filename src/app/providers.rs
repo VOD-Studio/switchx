@@ -163,6 +163,7 @@ fn save_provider_inner(
     };
     let picked = picked_models(&record, &models, &defaults, picked)?;
     defaults.extend(picked);
+    store.check_model_names(&defaults)?;
     let options = options
         .map(serde_json::to_string)
         .transpose()

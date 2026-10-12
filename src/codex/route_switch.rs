@@ -217,7 +217,7 @@ impl PreparedSwitch {
             before_providers_table: before.as_table().contains_key("model_providers"),
             local_token_reference: None,
             overlay: Overlay::default(),
-            published_models: publication.routes.keys().cloned().collect(),
+            published_models: publication.model_names().cloned().collect(),
         };
         let catalog = serde_json::to_vec_pretty(&publication.catalog)
             .map_err(|_| "could not serialize model catalog")?;

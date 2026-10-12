@@ -392,6 +392,7 @@ mod tests {
         let backup_model = ModelRecord {
             provider_id: backup.id.clone(),
             public_id: "sx-backup".into(),
+            display_name: "My backup model".into(),
             fallback_provider_id: None,
             ..customized.clone()
         };

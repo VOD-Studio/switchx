@@ -298,14 +298,28 @@ impl RouteSession {
             return Err("Codex 配置目录不存在".into());
         }
         let (models, providers) = selected_inputs(state_dir)?;
-        let config_provider_id = models
-            .iter()
-            .find(|model| model.enabled && model.public_id == default_model)
+        let mut publication = catalog::publish_saved(&models)?;
+        let store = app::open_store(state_dir).map_err(|error| error.message())?;
+        for (alias, id) in store.model_aliases().map_err(|_| "无法读取模型历史名称")? {
+            if let Some(model) = models
+                .iter()
+                .find(|model| model.enabled && model.public_id == id)
+            {
+                publication.add_alias(&alias, model.display_name.trim())?;
+            }
+        }
+        drop(store);
+        let config_provider_id = publication
+            .route(default_model)
             .ok_or("默认模型未发布")?
             .provider_id
             .clone();
         let config_state = app::load_provider_config(state_dir, &config_provider_id)?;
-        let publication = catalog::publish_saved(&models)?;
+        let published_default = publication
+            .aliases
+            .get(default_model)
+            .map(String::as_str)
+            .unwrap_or(default_model);
         let listener = TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, port))
             .await
             .map_err(|_| "本地端口无法使用；请检查端口占用或选择其他端口")?;
@@ -346,7 +360,11 @@ impl RouteSession {
         }) {
             let model = publication.catalog["models"]
                 .as_array()
-                .and_then(|models| models.iter().find(|model| model["slug"] == default_model))
+                .and_then(|models| {
+                    models
+                        .iter()
+                        .find(|model| model["slug"] == published_default)
+                })
                 .ok_or("Grok 默认模型资料缺失")?;
             let proposed: toml_edit::DocumentMut = switch
                 .preview
@@ -412,7 +430,7 @@ impl RouteSession {
                     .unwrap_or_default();
                 format!(
                     "{} → {} / {}{fallback}",
-                    model.public_id,
+                    model.display_name,
                     destination(provider),
                     model.upstream_model
                 )
@@ -683,7 +701,7 @@ impl RouteSession {
             .to_string_lossy()
             .into_owned();
         let catalog_path = prepared.switch.catalog_path().to_path_buf();
-        let public_models = prepared.publication.routes.keys().cloned().collect();
+        let public_models = prepared.publication.model_names().cloned().collect();
         let document: toml_edit::DocumentMut = prepared
             .switch
             .preview
@@ -1193,6 +1211,7 @@ mod tests {
              ALTER TABLE providers DROP COLUMN account_binding;
              ALTER TABLE providers DROP COLUMN kind;
              DROP TABLE session_bindings;
+             DROP TABLE model_aliases;
              PRAGMA user_version = 8;",
             )
             .unwrap();
@@ -1327,6 +1346,7 @@ mod tests {
         store.put_model(&first).unwrap();
         let mut second = first.clone();
         second.public_id = "sx-second".into();
+        second.display_name = "Second".into();
         second.upstream_model = "model-b".into();
         second.fallback_provider_id = None;
         let mut metadata = metadata;
@@ -1337,6 +1357,7 @@ mod tests {
             .put_model(&ModelRecord {
                 provider_id: "backup".into(),
                 public_id: "sx-backup".into(),
+                display_name: "Backup".into(),
                 enabled: false,
                 fallback_provider_id: None,
                 ..first
@@ -1346,6 +1367,7 @@ mod tests {
             .put_model(&ModelRecord {
                 provider_id: "backup".into(),
                 public_id: "sx-unused".into(),
+                display_name: "Unused".into(),
                 upstream_model: "unused-model".into(),
                 metadata: "invalid but unpublished".into(),
                 enabled: false,

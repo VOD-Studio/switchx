@@ -4,7 +4,7 @@ use rusqlite::{Connection, OpenFlags, Result, params};
 
 use crate::credentials::Secret;
 
-const SCHEMA_VERSION: i64 = 11;
+const SCHEMA_VERSION: i64 = 12;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ProviderKind {
@@ -175,7 +175,7 @@ impl Store {
     fn open_compatible(path: &Path, flags: OpenFlags) -> Result<Self> {
         let connection = Connection::open_with_flags(path, flags)?;
         let version: i64 = connection.query_row("PRAGMA user_version", [], |row| row.get(0))?;
-        if !matches!(version, 8 | 9 | 10 | SCHEMA_VERSION) {
+        if !matches!(version, 8 | 9 | 10 | 11 | SCHEMA_VERSION) {
             return Err(rusqlite::Error::InvalidQuery);
         }
         connection.prepare("SELECT settings_config FROM providers LIMIT 0")?;
@@ -399,6 +399,17 @@ impl Store {
             })();
             connection.execute_batch("PRAGMA foreign_keys = ON;")?;
             migration?;
+        }
+        if version < 12 {
+            connection.execute_batch(
+                "BEGIN IMMEDIATE;
+                 CREATE TABLE model_aliases (
+                    alias TEXT PRIMARY KEY NOT NULL,
+                    public_id TEXT NOT NULL REFERENCES published_models(public_id) ON DELETE CASCADE
+                 );
+                 PRAGMA user_version = 12;
+                 COMMIT;",
+            )?;
         }
         Ok(Self { connection })
     }
@@ -880,7 +891,9 @@ impl Store {
     }
 
     pub fn put_model(&self, model: &ModelRecord) -> Result<()> {
-        Self::write_model(&self.connection, model)
+        let transaction = self.connection.unchecked_transaction()?;
+        Self::write_model(&transaction, model)?;
+        transaction.commit()
     }
 
     pub fn set_models_enabled(&self, public_ids: &[String], enabled: bool) -> Result<()> {
@@ -898,6 +911,17 @@ impl Store {
     }
 
     fn write_model(connection: &Connection, model: &ModelRecord) -> Result<()> {
+        use rusqlite::OptionalExtension;
+        Self::validate_model_name(connection, &model.display_name, &model.public_id)?;
+        // IDs also occupy the routing namespace, for pre-upgrade clients.
+        Self::validate_model_name(connection, &model.public_id, &model.public_id)?;
+        let previous: Option<String> = connection
+            .query_row(
+                "SELECT display_name FROM published_models WHERE public_id = ?1",
+                [&model.public_id],
+                |row| row.get(0),
+            )
+            .optional()?;
         let changed = connection.execute(
             "INSERT INTO published_models (provider_id, public_id, display_name, upstream_model, metadata, enabled, fallback_provider_id)
              VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
@@ -913,8 +937,76 @@ impl Store {
         if changed == 0 {
             Err(rusqlite::Error::InvalidQuery)
         } else {
+            if let Some(previous) = previous.filter(|name| name != &model.display_name) {
+                // Legacy databases may have duplicate names. Do not preserve an ambiguous alias.
+                match Self::validate_model_name(connection, &previous, &model.public_id) {
+                    Ok(()) => {
+                        connection.execute(
+                            "INSERT INTO model_aliases (alias, public_id) VALUES (?1, ?2)
+                             ON CONFLICT(alias) DO NOTHING",
+                            params![previous, model.public_id],
+                        )?;
+                    }
+                    Err(rusqlite::Error::InvalidParameterName(_)) => {}
+                    Err(error) => return Err(error),
+                }
+            }
             Ok(())
         }
+    }
+
+    fn validate_model_name(connection: &Connection, name: &str, public_id: &str) -> Result<()> {
+        crate::catalog::validate_display_name(name)
+            .map_err(rusqlite::Error::InvalidParameterName)?;
+        if name != name.trim() {
+            return Err(rusqlite::Error::InvalidParameterName(
+                "模型名称不能包含首尾空格".into(),
+            ));
+        }
+        let exists: bool = connection.query_row(
+            "SELECT EXISTS(SELECT 1 FROM published_models
+                WHERE public_id != ?2 AND (display_name = ?1 OR public_id = ?1)
+                UNION ALL SELECT 1 FROM model_aliases WHERE alias = ?1 AND public_id != ?2)",
+            params![name, public_id],
+            |row| row.get(0),
+        )?;
+        if exists {
+            return Err(rusqlite::Error::InvalidParameterName(format!(
+                "模型名称“{name}”已被使用（包括历史名称），请使用其他名称"
+            )));
+        }
+        Ok(())
+    }
+
+    /// Check before saving for useful feedback; writes repeat this check inside their transaction.
+    pub fn check_model_names(&self, models: &[ModelRecord]) -> std::result::Result<(), String> {
+        let mut names = std::collections::HashMap::new();
+        for model in models {
+            for name in [&model.display_name, &model.public_id] {
+                if names
+                    .insert(name, &model.public_id)
+                    .is_some_and(|id| id != &model.public_id)
+                {
+                    return Err(format!("模型名称“{name}”重复，请使用不同名称"));
+                }
+                Self::validate_model_name(&self.connection, name, &model.public_id).map_err(
+                    |error| match error {
+                        rusqlite::Error::InvalidParameterName(message) => message,
+                        _ => "无法检查模型名称".into(),
+                    },
+                )?;
+            }
+        }
+        Ok(())
+    }
+
+    pub fn model_aliases(&self) -> Result<Vec<(String, String)>> {
+        let mut statement = self
+            .connection
+            .prepare("SELECT alias, public_id FROM model_aliases ORDER BY alias")?;
+        statement
+            .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))?
+            .collect()
     }
 
     pub fn replace_model(&self, original_id: Option<&str>, model: &ModelRecord) -> Result<()> {
@@ -985,6 +1077,18 @@ impl Store {
         if current != expected || models.iter().any(|model| model.provider_id != provider_id) {
             return Err(rusqlite::Error::InvalidQuery);
         }
+        let mut aliases = self.model_aliases()?;
+        for old in &current {
+            if models.iter().any(|model| {
+                model.public_id == old.public_id && model.display_name != old.display_name
+            }) {
+                match Self::validate_model_name(&transaction, &old.display_name, &old.public_id) {
+                    Ok(()) => aliases.push((old.display_name.clone(), old.public_id.clone())),
+                    Err(rusqlite::Error::InvalidParameterName(_)) => {}
+                    Err(error) => return Err(error),
+                }
+            }
+        }
         transaction.execute(
             "DELETE FROM published_models WHERE provider_id = ?1",
             [provider_id],
@@ -992,14 +1096,23 @@ impl Store {
         for model in models {
             // Do not let a draft claim another connection's public ID.
             let exists: bool = transaction.query_row(
-                "SELECT EXISTS(SELECT 1 FROM published_models WHERE public_id = ?1)",
-                [&model.public_id],
+                "SELECT EXISTS(SELECT 1 FROM published_models WHERE public_id = ?1 AND provider_id != ?2)",
+                params![model.public_id, provider_id],
                 |row| row.get(0),
             )?;
             if exists {
                 return Err(rusqlite::Error::InvalidQuery);
             }
             Self::write_model(&transaction, model)?;
+        }
+        for (alias, id) in aliases {
+            if models.iter().any(|model| model.public_id == id) {
+                Self::validate_model_name(&transaction, &alias, &id)?;
+                transaction.execute(
+                    "INSERT INTO model_aliases (alias, public_id) VALUES (?1, ?2) ON CONFLICT(alias) DO NOTHING",
+                    params![alias, id],
+                )?;
+            }
         }
         transaction.commit()
     }
@@ -1127,6 +1240,61 @@ fn settings_with_key(settings: &str, key: &Secret) -> Result<String> {
 mod tests {
     use super::*;
 
+    #[test]
+    fn v11_name_migration_keeps_records_and_rename_aliases_are_transactional() {
+        let path = std::env::temp_dir().join(format!(
+            "switchx-v11-names-{}.sqlite",
+            crate::id::new_id().unwrap()
+        ));
+        let store = Store::open(&path).unwrap();
+        let provider = api_provider();
+        store.put_provider(&provider).unwrap();
+        let model = ModelRecord {
+            provider_id: provider.id.clone(),
+            public_id: "sx-original".into(),
+            display_name: "原名称 / Podlink".into(),
+            upstream_model: "actual".into(),
+            metadata: "synthetic-metadata".into(),
+            enabled: false,
+            fallback_provider_id: None,
+        };
+        store.put_model(&model).unwrap();
+        store
+            .connection
+            .execute_batch("DROP TABLE model_aliases; PRAGMA user_version = 11;")
+            .unwrap();
+        drop(store);
+        // Old journals can still read credentials without schema migration.
+        Store::open_credentials_read_only(&path).unwrap();
+        let store = Store::open(&path).unwrap();
+        assert_eq!(store.models().unwrap(), std::slice::from_ref(&model));
+        assert!(store.model_aliases().unwrap().is_empty());
+        let renamed = ModelRecord {
+            display_name: "新名称 / Podlink".into(),
+            ..model.clone()
+        };
+        store.put_model(&renamed).unwrap();
+        assert_eq!(
+            store.model_aliases().unwrap(),
+            [(model.display_name.clone(), model.public_id.clone())]
+        );
+        let duplicate = ModelRecord {
+            public_id: "sx-other".into(),
+            upstream_model: "other".into(),
+            ..model.clone()
+        };
+        assert!(store.put_model(&duplicate).is_err());
+        assert_eq!(store.models().unwrap(), [renamed]);
+        drop(store);
+        let reopened = Store::open(&path).unwrap();
+        assert_eq!(
+            reopened.model_aliases().unwrap(),
+            [(model.display_name, model.public_id)]
+        );
+        drop(reopened);
+        std::fs::remove_file(path).unwrap();
+    }
+
     fn downgrade_to_v8(store: &Store) {
         store
             .connection
@@ -1134,7 +1302,7 @@ mod tests {
                 "ALTER TABLE providers DROP COLUMN icon_id; ALTER TABLE providers DROP COLUMN account_binding;
              ALTER TABLE providers DROP COLUMN kind;
              DROP TABLE session_bindings;
-             PRAGMA user_version = 8;",
+             DROP TABLE IF EXISTS model_aliases; PRAGMA user_version = 8;",
             )
             .unwrap();
     }
@@ -1180,7 +1348,7 @@ mod tests {
              INSERT INTO old_providers SELECT * FROM providers;
              DROP TABLE providers;
              ALTER TABLE old_providers RENAME TO providers;
-             PRAGMA user_version = 10;
+             DROP TABLE IF EXISTS model_aliases; PRAGMA user_version = 10;
              COMMIT;"
         ).unwrap();
         drop(store);
@@ -1251,7 +1419,7 @@ mod tests {
         store.put_local_token(&reference, &token).unwrap();
         store
             .connection
-            .execute_batch("ALTER TABLE providers DROP COLUMN icon_id; PRAGMA user_version = 9;")
+            .execute_batch("ALTER TABLE providers DROP COLUMN icon_id; DROP TABLE IF EXISTS model_aliases; PRAGMA user_version = 9;")
             .unwrap();
         drop(store);
         for expected_version in [9, SCHEMA_VERSION] {
@@ -2038,7 +2206,7 @@ mod tests {
         store
             .connection
             .execute_batch(
-                "ALTER TABLE providers DROP COLUMN settings_config; ALTER TABLE providers DROP COLUMN icon_id; ALTER TABLE providers DROP COLUMN account_binding; ALTER TABLE providers DROP COLUMN kind; DROP TABLE session_bindings; PRAGMA user_version = 7;",
+                "ALTER TABLE providers DROP COLUMN settings_config; ALTER TABLE providers DROP COLUMN icon_id; ALTER TABLE providers DROP COLUMN account_binding; ALTER TABLE providers DROP COLUMN kind; DROP TABLE session_bindings; DROP TABLE IF EXISTS model_aliases; PRAGMA user_version = 7;",
             )
             .unwrap();
         drop(store);
@@ -2263,7 +2431,7 @@ mod tests {
                  ALTER TABLE providers DROP COLUMN codex_options;
                  ALTER TABLE providers DROP COLUMN settings_config; ALTER TABLE providers DROP COLUMN icon_id; ALTER TABLE providers DROP COLUMN account_binding; ALTER TABLE providers DROP COLUMN kind; DROP TABLE session_bindings;
                  DROP TABLE app_settings;
-                 PRAGMA user_version = 6;",
+                 DROP TABLE IF EXISTS model_aliases; PRAGMA user_version = 6;",
             )
             .unwrap();
         drop(store);
@@ -2328,7 +2496,7 @@ mod tests {
              ALTER TABLE providers DROP COLUMN codex_options;
              ALTER TABLE providers DROP COLUMN settings_config; ALTER TABLE providers DROP COLUMN icon_id; ALTER TABLE providers DROP COLUMN account_binding; ALTER TABLE providers DROP COLUMN kind; DROP TABLE session_bindings;
              DROP TABLE app_settings;
-             PRAGMA user_version = 5;"
+             DROP TABLE IF EXISTS model_aliases; PRAGMA user_version = 5;"
         ).unwrap();
         drop(store);
         let store = Store::open(&path).unwrap();
@@ -2340,6 +2508,7 @@ mod tests {
         );
         let second = ModelRecord {
             public_id: "sx-second".into(),
+            display_name: "Second".into(),
             upstream_model: "second-model".into(),
             enabled: true,
             fallback_provider_id: None,
@@ -2410,7 +2579,7 @@ mod tests {
         assert_eq!(std::fs::read(&path).unwrap(), original);
         Connection::open(&path)
             .unwrap()
-            .execute_batch("PRAGMA user_version = 4;")
+            .execute_batch("DROP TABLE IF EXISTS model_aliases; PRAGMA user_version = 4;")
             .unwrap();
         let old = std::fs::read(&path).unwrap();
         assert!(Store::open_read_only(&path).is_err());
@@ -2459,7 +2628,7 @@ mod tests {
                  ALTER TABLE providers DROP COLUMN codex_options;
                  ALTER TABLE providers DROP COLUMN settings_config; ALTER TABLE providers DROP COLUMN icon_id; ALTER TABLE providers DROP COLUMN account_binding; ALTER TABLE providers DROP COLUMN kind; DROP TABLE session_bindings;
                  DROP TABLE app_settings;
-                 PRAGMA user_version = 4;",
+                 DROP TABLE IF EXISTS model_aliases; PRAGMA user_version = 4;",
             )
             .unwrap();
         drop(store);
@@ -2494,7 +2663,7 @@ mod tests {
         let store = Store::open(&path).unwrap();
         store
             .connection
-            .execute_batch("DROP TABLE request_records; ALTER TABLE published_models DROP COLUMN fallback_provider_id; ALTER TABLE providers DROP COLUMN codex_options; ALTER TABLE providers DROP COLUMN settings_config; ALTER TABLE providers DROP COLUMN icon_id; ALTER TABLE providers DROP COLUMN account_binding; ALTER TABLE providers DROP COLUMN kind; DROP TABLE session_bindings; DROP TABLE app_settings; PRAGMA user_version = 3;")
+            .execute_batch("DROP TABLE request_records; ALTER TABLE published_models DROP COLUMN fallback_provider_id; ALTER TABLE providers DROP COLUMN codex_options; ALTER TABLE providers DROP COLUMN settings_config; ALTER TABLE providers DROP COLUMN icon_id; ALTER TABLE providers DROP COLUMN account_binding; ALTER TABLE providers DROP COLUMN kind; DROP TABLE session_bindings; DROP TABLE app_settings; DROP TABLE IF EXISTS model_aliases; PRAGMA user_version = 3;")
             .unwrap();
         drop(store);
         let store = Store::open(&path).unwrap();
@@ -2610,7 +2779,7 @@ mod tests {
             .execute_batch(
                 "CREATE TABLE providers (id TEXT PRIMARY KEY NOT NULL, name TEXT NOT NULL, base_url TEXT NOT NULL, credential_ref TEXT);
                  INSERT INTO providers VALUES ('old', 'Old', 'https://example.invalid/v1', 'old-ref');
-                 PRAGMA user_version = 1;",
+                 DROP TABLE IF EXISTS model_aliases; PRAGMA user_version = 1;",
             )
             .unwrap();
         drop(connection);
@@ -2634,7 +2803,7 @@ mod tests {
             "CREATE TABLE providers (id TEXT PRIMARY KEY NOT NULL, name TEXT NOT NULL, base_url TEXT NOT NULL, model_id TEXT NOT NULL, credential_ref TEXT);
              INSERT INTO providers VALUES ('one', 'One', 'https://example.invalid/v1', 'same-model', NULL);
              INSERT INTO providers VALUES ('two', 'Two', 'https://example.invalid/v1', 'same-model', NULL);
-             PRAGMA user_version = 2;",
+             DROP TABLE IF EXISTS model_aliases; PRAGMA user_version = 2;",
         ).unwrap();
         drop(connection);
         let store = Store::open(&path).unwrap();

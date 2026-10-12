@@ -7,6 +7,7 @@
 //! `--models` checks two distinct models on one provider, including a manual catalog.
 //! `--desktop-models` opens that fixture for discovery and mapping UI checks.
 //! `--http-only` checks production forwarding without invoking the CLI token helper.
+//! `--model-names` checks named CLI requests and legacy references after a rename.
 
 use std::{
     path::{Path, PathBuf},
@@ -142,6 +143,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let fallback = matches!(mode.as_deref(), Some("--fallback" | "--desktop-fallback"));
     let live_probe = mode.as_deref() == Some("--live-probe");
     let http_only = mode.as_deref() == Some("--http-only");
+    let model_names = mode.as_deref() == Some("--model-names");
     let live_mode = Arc::new(AtomicU8::new(0));
     let root = std::env::temp_dir().join(format!(
         "switchx-routed-probe-{}-{}",
@@ -177,7 +179,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             metadata["slug"] = "shared-model".into();
             let source = root.join(format!("model-{index}.json"));
             std::fs::write(&source, json!({"models":[metadata]}).to_string())?;
-            app::save_model(&data, &provider.id, public_id, name, source.to_str().unwrap())?;
+            let display_name = if model_names {
+                if index == 0 { "qwen3.8-max/Mock Alpha" } else { "通义千问 / Mock Beta" }
+            } else { name };
+            app::save_model(&data, &provider.id, public_id, display_name, source.to_str().unwrap())?;
             if multiple && index == 0 {
                 app::save_mapping(&data, app::ModelInput {
                     provider_id: &provider.id, original_id: "", public_id: "sx-mock-alpha-extra",
@@ -207,6 +212,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             check(route_switch::recovery(&data)?.is_none(), "desktop exited before restoring its route configuration")?;
             check(std::fs::read_to_string(home.join("config.toml"))? == ORIGINAL, "desktop exit changed the original configuration")?;
             println!("Desktop exit left the original configuration restored and no route journal.");
+        } else if model_names {
+            named_models_probe(&data, &home, &helper, &mut seen).await?;
         } else if live_probe {
             live_probe_fixture(&data, &helper, &mut seen, &live_mode).await?;
         } else if fallback {
@@ -709,7 +716,7 @@ async fn headless(
         home.join("config.toml"),
         format!(
             "{}\n# external note\n",
-            active.replace("model = \"sx-mock-alpha\"", "model = \"external-choice\"")
+            active.replace("model = \"Mock Alpha\"", "model = \"external-choice\"")
         ),
     )?;
     check(
@@ -777,6 +784,103 @@ async fn headless(
     Ok(())
 }
 
+async fn named_models_probe(
+    data: &Path,
+    home: &Path,
+    helper: &Path,
+    seen: &mut [mpsc::Receiver<Value>],
+) -> Result<(), Box<dyn std::error::Error>> {
+    let mut session = RouteSession::default();
+    let name = "qwen3.8-max/Mock Alpha";
+    session.prepare(data, home, 0, name, helper).await?;
+    session.apply(data, home, 0, name).await?;
+    let applied: toml_edit::DocumentMut =
+        std::fs::read_to_string(home.join("config.toml"))?.parse()?;
+    check(
+        applied["model"].as_str() == Some(name),
+        "configuration did not use the display name",
+    )?;
+    for (index, model) in [(0, name), (1, "通义千问 / Mock Beta")] {
+        run_cli(home, model).await?;
+        for _ in 0..if index == 0 { 2 } else { 1 } {
+            let request = timeout(Duration::from_secs(3), seen[index].recv())
+                .await?
+                .ok_or("named model was not called")?;
+            check(
+                request["model"] == "shared-model" && seen[1 - index].try_recv().is_err(),
+                "named CLI request used the wrong route",
+            )?;
+        }
+    }
+    session.restore(data, home).await?;
+    let store = Store::open(&data.join("switchx.sqlite"))?;
+    let original = store
+        .models()?
+        .into_iter()
+        .find(|model| model.public_id == "sx-mock-alpha")
+        .unwrap();
+    let renamed = "qwen3.8-max / Renamed Alpha";
+    app::save_mapping(
+        data,
+        app::ModelInput {
+            provider_id: &original.provider_id,
+            original_id: &original.public_id,
+            public_id: &original.public_id,
+            display_name: renamed,
+            upstream_model: &original.upstream_model,
+            catalog_path: "",
+            settings: None,
+        },
+    )?;
+    session
+        .prepare(data, home, 0, &original.public_id, helper)
+        .await?;
+    session.apply(data, home, 0, &original.public_id).await?;
+    let reference = route_switch::recovery(data)?
+        .and_then(|recovery| recovery.local_token_reference)
+        .ok_or("missing local token reference")?;
+    let token = store
+        .local_token(&reference)?
+        .ok_or("missing synthetic local token")?;
+    let address = session.address().ok_or("route is not running")?;
+    let client = reqwest::Client::builder()
+        .no_proxy()
+        .timeout(Duration::from_secs(5))
+        .build()?;
+    for model in [renamed, name, original.public_id.as_str()] {
+        let response = client
+            .post(format!("http://{address}/v1/responses"))
+            .bearer_auth(token.expose())
+            .header(header::CONTENT_TYPE, "application/json")
+            .header("session-id", "00000000-0000-4000-8000-000000000001")
+            .body(json!({"model":model,"input":"compatibility probe","stream":true}).to_string())
+            .send()
+            .await?;
+        check(
+            response.status() == StatusCode::OK
+                && response.text().await?.contains("response.completed"),
+            "rename compatibility request failed",
+        )?;
+        let request = timeout(Duration::from_secs(3), seen[0].recv())
+            .await?
+            .ok_or("compatibility upstream was not called")?;
+        check(
+            request["model"] == "shared-model" && seen[1].try_recv().is_err(),
+            "compatibility reference used the wrong upstream",
+        )?;
+    }
+    session.restore(data, home).await?;
+    check(
+        std::fs::read_to_string(home.join("config.toml"))? == ORIGINAL
+            && route_switch::recovery(data)?.is_none(),
+        "named route failed to restore original configuration",
+    )?;
+    println!(
+        "Named Codex CLI requests (slash, spaces, Unicode), renamed models, old names and stable IDs reached the exact local upstream; original configuration restored."
+    );
+    Ok(())
+}
+
 async fn http_round_trip(
     data: &Path,
     session: &RouteSession,
@@ -839,6 +943,7 @@ async fn run_cli(home: &Path, model: &str) -> Result<(), Box<dyn std::error::Err
         Duration::from_secs(40),
         Command::new(client::cli_executable())
             .args([
+                "--no-daemon",
                 "exec",
                 "--json",
                 "--ephemeral",

@@ -159,7 +159,6 @@ export component ModelEditor inherits Rectangle {
                                 spacing: 14px;
                                 MappingHero {
                                     display-name: root.model-display-name;
-                                    public-id: root.model-public-id;
                                     upstream-id: root.model-upstream-id;
                                     provider-name: root.model-provider-name;
                                     meta: root.model-provider-name + " · " + root.context-summary + " · " + (root.reasoning-summary == "" ? "未设思考等级" : root.reasoning-summary);
@@ -171,16 +170,16 @@ export component ModelEditor inherits Rectangle {
 
                                 MappingSection {
                                     title: "Codex 中的名字";
-                                    caption: "菜单显示名，以及路由使用的公开模型 ID";
+                                    caption: "显示名称用于菜单和本地路由，所有连接的模型名称须唯一";
                                     icon: @image-url("../../assets/ui/terminal.svg");
                                     badge: root.model-display-name-custom ? "自定义名称" : "自动命名";
-                                    active: name-field.has-focus || id-field.has-focus;
+                                    active: name-field.has-focus;
                                     replay: root.replay;
                                     delay: 90ms;
                                     VerticalLayout {
                                         spacing: 10px;
                                         MappingFieldRow {
-                                            label: "菜单显示名";
+                                            label: "显示名称";
                                             focused: name-field.has-focus;
                                             missing: root.model-display-name == "";
                                             name-field := LineEdit {
@@ -216,27 +215,14 @@ export component ModelEditor inherits Rectangle {
                                                     }
                                                 }
                                             }
-                                        }
-
-                                        MappingFieldRow {
-                                            label: "公开模型 ID";
-                                            focused: id-field.has-focus;
-                                            missing: root.model-public-id == "";
-                                            id-field := LineEdit {
-                                                text <=> root.model-public-id;
-                                                font-family: "Menlo";
-                                                font-size: 12px;
-                                                placeholder-text: "Codex 请求使用的模型 ID";
-                                                accessible-label: "公开模型 ID";
-                                            }
 
                                             CopyButton {
-                                                label: "复制公开模型 ID";
-                                                enabled: root.model-public-id != "";
+                                                label: "复制模型名称";
+                                                enabled: root.model-display-name != "";
                                                 copy => {
-                                                    id-field.select-all();
-                                                    id-field.copy();
-                                                    id-field.clear-selection();
+                                                    name-field.select-all();
+                                                    name-field.copy();
+                                                    name-field.clear-selection();
                                                 }
                                             }
                                         }

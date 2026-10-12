@@ -102,7 +102,6 @@ component RailStop inherits Rectangle {
 // travels the rail and lights each stop while the editor is visible.
 export component MappingHero inherits Rectangle {
     in property <string> display-name;
-    in property <string> public-id;
     in property <string> upstream-id;
     in property <string> provider-name;
     in property <string> meta;
@@ -389,10 +388,9 @@ export component MappingHero inherits Rectangle {
                     width: lane.node;
                     height: 52px;
                     icon: @image-url("../../assets/ui/brand.svg");
-                    label: "SwitchX 公开 ID";
-                    value: root.public-id;
-                    placeholder: "公开 ID 待填写";
-                    mono: true;
+                    label: "SwitchX 本地路由";
+                    value: root.provider-name;
+                    placeholder: "请选择连接";
                     glow: lane.glow-1;
                 }
 
