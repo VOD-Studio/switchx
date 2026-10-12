@@ -3,7 +3,9 @@ pub mod catalog;
 pub mod chatgpt;
 pub mod code_highlight;
 pub mod codex;
+pub mod credential_helper;
 pub mod credentials;
+pub mod headless;
 pub mod id;
 #[cfg(target_os = "macos")]
 pub mod macos;
