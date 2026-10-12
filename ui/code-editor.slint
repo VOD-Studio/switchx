@@ -156,10 +156,17 @@ export component CodeEditor inherits Rectangle {
             }
 
             if root.text == "" && input.preedit-text == "": Text {
+                x: 0px;
+                y: 0px;
+                width: scroll.content-width;
+                height: scroll.content-height;
                 text: root.placeholder-text;
-                color: Theme.muted-text;
+                color: Theme.placeholder-text;
                 font-family: input.font-family;
                 font-size: input.font-size;
+                horizontal-alignment: left;
+                vertical-alignment: top;
+                wrap: no-wrap;
                 accessible-role: none;
             }
         }
