@@ -5,7 +5,7 @@ pub mod responses;
 
 use crate::{
     app,
-    chatgpt::accounts::{ensure_directory, private_replace, read_private},
+    chatgpt::accounts::{AccountStoreLock, ensure_directory, private_replace, read_private},
     credentials::Secret,
     storage::{AccountBinding, ModelRecord, ProviderKind, ProviderRecord},
 };
@@ -14,7 +14,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::{
     collections::{BTreeMap, HashMap},
-    fs::{File, OpenOptions},
+    fs::OpenOptions,
     path::{Path, PathBuf},
     sync::{Arc, Mutex},
     time::Duration,
@@ -174,7 +174,7 @@ impl AccountManager {
             Zeroizing::new(serde_json::to_vec_pretty(store).map_err(|_| "无法序列化 Grok 账号")?);
         private_replace(&self.0.path, &bytes, expected)
     }
-    fn lock(&self) -> Result<File, String> {
+    fn lock(&self) -> Result<AccountStoreLock, String> {
         let path = self.0.path.with_extension("lock");
         if let Ok(meta) = std::fs::symlink_metadata(&path)
             && (!meta.is_file() || meta.file_type().is_symlink())
@@ -191,7 +191,7 @@ impl AccountManager {
         let file = opts.open(path).map_err(|_| "无法锁定 Grok 账号文件")?;
         file.try_lock()
             .map_err(|_| "Grok 账号正在其他实例中更新，请稍后重试")?;
-        Ok(file)
+        Ok(AccountStoreLock::from_locked_file(file))
     }
     pub fn list(&self) -> Result<Vec<AccountInfo>, String> {
         let (store, _) = self.read()?;

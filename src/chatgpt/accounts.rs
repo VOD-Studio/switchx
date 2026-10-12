@@ -140,6 +140,21 @@ impl Drop for CachedToken {
     }
 }
 
+pub(crate) struct AccountStoreLock(File);
+
+impl AccountStoreLock {
+    pub(crate) fn from_locked_file(file: File) -> Self {
+        Self(file)
+    }
+}
+
+impl Drop for AccountStoreLock {
+    fn drop(&mut self) {
+        // Closing one descriptor leaves a lock held by cloned or inherited handles.
+        let _ = self.0.unlock();
+    }
+}
+
 struct StoreSession {
     state: State,
     expected: Option<Vec<u8>>,
@@ -1079,7 +1094,7 @@ impl AccountManager {
         self.save(&mut session)
     }
 
-    fn begin(&self) -> Result<(File, StoreSession), String> {
+    fn begin(&self) -> Result<(AccountStoreLock, StoreSession), String> {
         let lock = lock_store(self.0.path.parent().ok_or("账号目录无效")?)?;
         let expected = read_private(&self.0.path)?;
         let store = decode_store(expected.as_deref())?;
@@ -1908,7 +1923,7 @@ pub(crate) fn ensure_directory(path: &Path) -> Result<(), String> {
     fs::create_dir_all(path).map_err(|_| "无法创建账号或 Codex 数据目录".into())
 }
 
-fn lock_store(dir: &Path) -> Result<File, String> {
+fn lock_store(dir: &Path) -> Result<AccountStoreLock, String> {
     let path = dir.join(".switchx-accounts.lock");
     if let Ok(meta) = fs::symlink_metadata(&path)
         && (!meta.is_file() || meta.file_type().is_symlink())
@@ -1925,7 +1940,7 @@ fn lock_store(dir: &Path) -> Result<File, String> {
     let file = options.open(path).map_err(|_| "无法打开账号存储锁")?;
     file.try_lock()
         .map_err(|_| "另一个 SwitchX 实例正在修改账号，请稍后重试")?;
-    Ok(file)
+    Ok(AccountStoreLock(file))
 }
 
 pub(crate) fn read_private(path: &Path) -> Result<Option<Vec<u8>>, String> {
@@ -2020,6 +2035,27 @@ mod tests {
     use super::*;
 
     struct TestHome(PathBuf);
+
+    #[test]
+    fn account_store_lock_excludes_writers_until_owner_releases() {
+        let home = TestHome::new();
+        let lock = lock_store(&home.data()).unwrap();
+        assert!(lock_store(&home.data()).is_err());
+        drop(lock);
+        assert!(lock_store(&home.data()).is_ok());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn account_store_lock_releases_before_cloned_handles_close() {
+        let home = TestHome::new();
+        let lock = lock_store(&home.data()).unwrap();
+        let inherited = lock.0.try_clone().unwrap();
+        drop(lock);
+        let retry = lock_store(&home.data());
+        drop(inherited);
+        assert!(retry.is_ok(), "released account lock: {:?}", retry.err());
+    }
 
     impl TestHome {
         fn new() -> Self {
