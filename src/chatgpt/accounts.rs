@@ -160,6 +160,18 @@ enum CredentialUse {
     Quota,
 }
 
+impl CredentialUse {
+    /// Refusal while a native login shares this account's credentials and
+    /// needs renewal; refreshing here would rotate them behind that login.
+    fn shared_native_login_error(self) -> String {
+        if self == Self::Quota {
+            "当前 Codex 登录需要续期；请先检查并续期原生登录，再刷新额度".into()
+        } else {
+            "原生登录与绑定账号共用凭据且需要续期或同步；请先检查并续期原生登录，再重新预览".into()
+        }
+    }
+}
+
 struct CancelOnDrop(watch::Sender<bool>);
 
 impl Drop for CancelOnDrop {
@@ -796,15 +808,7 @@ impl AccountManager {
     pub async fn quota(&self, id: &str, native_home: &Path) -> Result<Quota, String> {
         let credential = self
             .credential_operation(id, native_home, false, CredentialUse::Quota)
-            .await
-            .map_err(|error| {
-                if error.starts_with("原生登录与绑定账号共用凭据且需要续期或同步")
-                {
-                    "当前 Codex 登录需要续期；请先检查并续期原生登录，再刷新额度".into()
-                } else {
-                    error
-                }
-            })?;
+            .await?;
         super::quota::fetch(
             &self.0.client,
             &self.0.endpoints.usage,
@@ -884,16 +888,13 @@ impl AccountManager {
                     })
             })
         {
-            return Err(
-                "原生登录与绑定账号共用凭据且需要续期或同步；请先检查并续期原生登录，再重新预览"
-                    .into(),
-            );
+            return Err(usage.shared_native_login_error());
         }
         if snapshot.active_id.as_deref() == Some(id) {
             self.sync_snapshot(&mut session, &snapshot)?;
         }
         if usage != CredentialUse::Native {
-            self.guard_native_preview(&mut session, id, &snapshot)?;
+            self.guard_native_preview(&mut session, id, &snapshot, usage)?;
         }
         let token = self
             .resolve_token(&mut session, id, home, &mut snapshot, force, cancel)
@@ -921,6 +922,7 @@ impl AccountManager {
         session: &mut StoreSession,
         id: &str,
         snapshot: &HomeSnapshot,
+        usage: CredentialUse,
     ) -> Result<(), String> {
         let stored = account(&session.state.store, id)?;
         let Some(live) = snapshot
@@ -937,10 +939,7 @@ impl AccountManager {
             || token_expiry(&live.access_token)
                 .is_none_or(|expiry| expiry <= Utc::now().timestamp_millis() + REFRESH_BUFFER_MS)
         {
-            return Err(
-                "原生登录与绑定账号共用凭据且需要续期或同步；请先检查并续期原生登录，再重新预览"
-                    .into(),
-            );
+            return Err(usage.shared_native_login_error());
         }
         cache_live(&mut session.state, id, live);
         self.publish(&session.state)
@@ -1030,7 +1029,7 @@ impl AccountManager {
                 }
                 manager.sync_snapshot(&mut session, &snapshot)?;
                 let native = read_home(&native_home, &session.state.store)?;
-                manager.guard_native_preview(&mut session, &id, &native)?;
+                manager.guard_native_preview(&mut session, &id, &native, CredentialUse::Preview)?;
             }
             if read_private(&native_home.join("auth.json"))? != native_before {
                 return Err("原生登录在账号检查期间已变化，请重新预览".into());
@@ -2192,12 +2191,9 @@ mod tests {
         let expired = serde_json::to_vec(&expired).unwrap();
         fs::write(home.home().join("auth.json"), &expired).unwrap();
         let store = fs::read(home.data().join(STORE_NAME)).unwrap();
-        assert!(
-            manager
-                .quota(&a.id, &home.home())
-                .await
-                .unwrap_err()
-                .contains("请先检查并续期原生登录")
+        assert_eq!(
+            manager.quota(&a.id, &home.home()).await.unwrap_err(),
+            "当前 Codex 登录需要续期；请先检查并续期原生登录，再刷新额度"
         );
         assert_eq!(fs::read(home.home().join("auth.json")).unwrap(), expired);
         assert_eq!(fs::read(home.data().join(STORE_NAME)).unwrap(), store);
