@@ -28,7 +28,7 @@ cd switchx
 cargo run
 ```
 
-界面图片由 Git LFS 保存。克隆后如果图片仍是文本指针，运行 `git lfs pull`，否则界面无法编译。
+界面图片由 Git LFS 保存。克隆后如果图片仍是文本指针，构建会提示运行 `git lfs pull`；下载完成后重新运行 `cargo run`。
 
 在 macOS 上打包：
 
