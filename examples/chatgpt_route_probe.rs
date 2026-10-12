@@ -41,7 +41,9 @@ impl ProbeHome {
             "switchx-subscription-probe-{}",
             switchx::id::new_id()?
         ));
-        let mut builder = std::fs::DirBuilder::new();
+        let builder = std::fs::DirBuilder::new();
+        #[cfg(unix)]
+        let mut builder = builder;
         #[cfg(unix)]
         {
             use std::os::unix::fs::DirBuilderExt;

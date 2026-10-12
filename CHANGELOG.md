@@ -17,3 +17,4 @@
 ### Fixed
 
 - 修正 Windows 平台分支的 Clippy 警告，以及测试对本机 Codex 和固定 Python 路径的依赖，使六个平台的 CI 可在干净环境中运行。
+- 修正四个示例探针中同类的 Windows Clippy 警告，保留 Unix 临时目录的私有权限。

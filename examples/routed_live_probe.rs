@@ -60,7 +60,9 @@ async fn main() -> ProbeResult {
     getrandom::fill(&mut nonce).map_err(|_| "system randomness is unavailable")?;
     let suffix: String = nonce.iter().map(|byte| format!("{byte:02x}")).collect();
     let root = std::env::temp_dir().join(format!("switchx-routed-live-{suffix}"));
-    let mut builder = std::fs::DirBuilder::new();
+    let builder = std::fs::DirBuilder::new();
+    #[cfg(unix)]
+    let mut builder = builder;
     #[cfg(unix)]
     {
         use std::os::unix::fs::DirBuilderExt;

@@ -43,7 +43,9 @@ impl ProbeHome {
             .map(|byte| format!("{byte:02x}"))
             .collect::<String>();
         let path = std::env::temp_dir().join(format!("switchx-chatgpt-probe-{suffix}"));
-        let mut builder = fs::DirBuilder::new();
+        let builder = fs::DirBuilder::new();
+        #[cfg(unix)]
+        let mut builder = builder;
         #[cfg(unix)]
         {
             use std::os::unix::fs::DirBuilderExt;
