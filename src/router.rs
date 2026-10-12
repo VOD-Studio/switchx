@@ -981,7 +981,7 @@ async fn forward(
         );
     };
     tracker.record.public_model = Some(public_id.chars().take(256).collect());
-    let Some(binding) = state.publication.routes.get(&public_id) else {
+    let Some(binding) = state.publication.route(&public_id) else {
         return request_error(
             &mut tracker,
             StatusCode::NOT_FOUND,
@@ -1040,7 +1040,7 @@ async fn forward(
         None
     };
     let model_hint_suffix = routing_hint
-        .and_then(|hint| hint.to_str().ok())
+        .and_then(|hint| std::str::from_utf8(hint.as_bytes()).ok())
         .and_then(|hint| model_routing_hint_suffix(hint, &public_id));
     if let Some(store) = &state.session_store {
         let session = match session_id(&headers) {

@@ -30,9 +30,14 @@ pub fn preview_route(
     if !catalog_path.is_absolute() {
         return Err("catalog path must be absolute".into());
     }
-    if !publication.routes.contains_key(default_model) {
+    if publication.route(default_model).is_none() {
         return Err("default model is not published".into());
     }
+    let default_model = publication
+        .aliases
+        .get(default_model)
+        .map(String::as_str)
+        .unwrap_or(default_model);
     let mut document = current
         .parse::<DocumentMut>()
         .map_err(|_| "invalid Codex TOML")?;

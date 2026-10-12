@@ -998,6 +998,107 @@ async fn spawn_mock(
 }
 
 #[tokio::test]
+async fn display_names_and_hidden_aliases_route_to_the_exact_upstream() {
+    let (upstream_address, mut captured, _, upstream_task) = spawn_mock("/responses", false).await;
+    let records: Vec<_> = [
+        ("sx-first", "qwen3.8-max/Podlink", "first-model"),
+        ("sx-second", "通义千问 / 第二连接", "second-model"),
+    ]
+    .into_iter()
+    .map(|(id, name, actual)| switchx::storage::ModelRecord {
+        provider_id: "api".into(),
+        public_id: id.into(),
+        display_name: name.into(),
+        upstream_model: actual.into(),
+        metadata: switchx::catalog::mapping_metadata(
+            actual,
+            name,
+            &switchx::catalog::MappingSettings {
+                context_window: "",
+                reasoning_levels: None,
+                default_reasoning: None,
+            },
+            None,
+        )
+        .unwrap()
+        .to_string(),
+        enabled: true,
+        fallback_provider_id: None,
+    })
+    .collect();
+    let mut publication = switchx::catalog::publish_saved(&records).unwrap();
+    publication
+        .add_alias("旧名称 / Podlink", &records[0].display_name)
+        .unwrap();
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let token = "synthetic-local-token-for-named-models";
+    let state = RouterState::new(
+        address,
+        token.into(),
+        publication,
+        HashMap::from([(
+            "api".into(),
+            Upstream::new(
+                &format!("http://{upstream_address}"),
+                "synthetic-upstream-key".into(),
+            )
+            .unwrap(),
+        )]),
+    )
+    .unwrap();
+    let router_task = tokio::spawn(async move { serve(listener, state).await.unwrap() });
+    let client = reqwest::Client::builder().no_proxy().build().unwrap();
+    let response = client
+        .get(format!("http://{address}/v1/models"))
+        .bearer_auth(token)
+        .send()
+        .await
+        .unwrap()
+        .bytes()
+        .await
+        .unwrap();
+    let models: Value = serde_json::from_slice(&response).unwrap();
+    assert_eq!(models["data"].as_array().unwrap().len(), 2);
+    assert_eq!(models["data"][0]["id"], records[0].display_name);
+    for (name, actual) in [
+        ("qwen3.8-max/Podlink", "first-model"),
+        ("sx-first", "first-model"),
+        ("旧名称 / Podlink", "first-model"),
+        ("通义千问 / 第二连接", "second-model"),
+        ("sx-second", "second-model"),
+    ] {
+        let response = client
+            .post(format!("http://{address}/v1/responses"))
+            .bearer_auth(token)
+            .header(header::CONTENT_TYPE, "application/json")
+            .body(json!({"model": name, "input": "hello"}).to_string())
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let request = captured.recv().await.unwrap();
+        assert_eq!(request.model, actual);
+        assert_eq!(
+            request.authorization.as_deref(),
+            Some("Bearer synthetic-upstream-key")
+        );
+        assert!(request.local_token.is_none());
+    }
+    let response = client
+        .post(format!("http://{address}/v1/responses"))
+        .bearer_auth(token)
+        .header(header::CONTENT_TYPE, "application/json")
+        .body(json!({"model": "first-model", "input": "hello"}).to_string())
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::NOT_FOUND);
+    router_task.abort();
+    upstream_task.abort();
+}
+
+#[tokio::test]
 async fn exact_routes_stream_and_keep_credentials_isolated() {
     assert!(Upstream::new("http://example.com/v1", "key".into()).is_err());
     assert!(Upstream::new("https://user:secret@example.com/v1", "key".into()).is_err());

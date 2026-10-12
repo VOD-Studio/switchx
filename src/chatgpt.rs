@@ -757,6 +757,7 @@ fn save_subscription_inner(
         }])?;
         additions.push(model);
     }
+    store.check_model_names(&additions)?;
     match options {
         Some(options) => {
             let options = serde_json::to_string(options).map_err(|_| "无法编码订阅配置")?;
@@ -1476,7 +1477,7 @@ done
                 provider_id: PROVIDER_ID,
                 original_id: &existing.public_id,
                 public_id: collision,
-                display_name: &existing.display_name,
+                display_name: "Renamed official model",
                 upstream_model: &existing.upstream_model,
                 catalog_path: "",
                 settings: None,
@@ -1548,6 +1549,7 @@ done
         let api = ModelRecord {
             provider_id: api_provider.id.clone(),
             public_id: "sx-fixture-api".into(),
+            display_name: "Fixture API model".into(),
             enabled: true,
             ..official[0].clone()
         };

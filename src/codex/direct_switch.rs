@@ -245,7 +245,7 @@ impl PreparedDirectSwitch {
             model.enabled = true;
             model.fallback_provider_id = None;
         }
-        let publication = crate::catalog::publish_saved(&direct_models)?;
+        let publication = crate::catalog::publish_direct(&direct_models)?;
         let path = self
             .journal_path
             .parent()

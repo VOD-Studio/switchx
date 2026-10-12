@@ -298,17 +298,17 @@ pub(super) fn render_model_editor(
             headless::key(window, "!");
             assert!(app.get_model_display_name_custom());
             snapshot(window, output, &format!("mapping-custom-name-{suffix}"))?;
-            headless::click(window, w - 104.0, 364.0);
+            headless::click(window, w - 152.0, 364.0);
             assert!(!app.get_model_display_name_custom());
             assert_eq!(app.get_model_display_name(), "synthetic-sol/ChatGPT 订阅");
 
             headless::clear_clipboard();
-            headless::click(window, w - 75.0, 410.0);
-            assert_eq!(headless::clipboard(), SAVED_ID);
+            headless::click(window, w - 75.0, 364.0);
+            assert_eq!(headless::clipboard(), app.get_model_display_name().as_str());
             snapshot(window, output, &format!("mapping-copied-{suffix}"))?;
 
             let count = fetches.get();
-            headless::click(window, w - 120.0, 535.0);
+            headless::click(window, w - 120.0, 490.0);
             assert_eq!(fetches.get(), count + 1, "the fetch button requests models");
             app.set_discovery_scope(1);
             app.set_discovery_tone(1);
@@ -419,14 +419,14 @@ pub(super) fn render_model_editor(
             &format!("mapping-motion-route-{theme}"),
             &every(32, 3392),
         )?;
-        headless::click(window, 1081.0, 708.0);
+        headless::click(window, 1081.0, 662.0);
         play(
             window,
             output,
             &format!("mapping-motion-context-{theme}"),
             &every(32, 800),
         )?;
-        headless::click(window, 1125.0, 410.0);
+        headless::click(window, 1125.0, 364.0);
         play(
             window,
             output,
@@ -513,7 +513,7 @@ pub(super) fn render_reasoning_picker(
             let suffix = format!("{}-{width}x{height}", if dark { "dark" } else { "light" });
             snapshot(window, output, &format!("reasoning-directory-{suffix}"))?;
             app.global::<Theme>().set_animations_enabled(true);
-            headless::click(window, width as f32 - 140.0, 338.0);
+            headless::click(window, width as f32 - 140.0, 251.0);
             play(
                 window,
                 output,

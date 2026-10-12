@@ -48,6 +48,104 @@ fn draft(id: &str) -> ConnectionModel {
 }
 
 #[test]
+fn names_are_global_trimmed_and_renames_keep_identity_and_compatibility() {
+    let fixture = Fixture::new();
+    let store = fixture.store();
+    store.put_provider(&provider("one")).unwrap();
+    store.put_provider(&provider("two")).unwrap();
+    let mut first = draft("coder-pro");
+    first.display_name = "  qwen3.8-max/Podlink  ".into();
+    app::save_connection_models(&fixture.0, "one", &[], &[first], &[]).unwrap();
+    let original = store.models().unwrap();
+    assert_eq!(original[0].display_name, "qwen3.8-max/Podlink");
+    let mut duplicate = draft("coder-mini");
+    duplicate.display_name = "qwen3.8-max/Podlink".into();
+    assert!(
+        app::save_connection_models(&fixture.0, "two", &[], &[duplicate.clone()], &[])
+            .unwrap_err()
+            .contains("已被使用")
+    );
+    assert_eq!(store.models().unwrap(), original);
+
+    let mut renamed = ConnectionModel {
+        public_id: original[0].public_id.clone(),
+        ..draft("coder-pro")
+    };
+    renamed.display_name = "通义千问 / Podlink".into();
+    app::save_connection_models(&fixture.0, "one", &original, &[renamed.clone()], &[]).unwrap();
+    let updated = store.models().unwrap();
+    assert_eq!(updated[0].public_id, original[0].public_id);
+    assert_eq!(
+        store.model_aliases().unwrap(),
+        vec![("qwen3.8-max/Podlink".into(), original[0].public_id.clone())]
+    );
+    app::save_connection_models(&fixture.0, "one", &updated, &[renamed], &[]).unwrap();
+    assert_eq!(
+        fixture.store().model_aliases().unwrap(),
+        store.model_aliases().unwrap()
+    );
+    assert!(
+        app::save_connection_models(&fixture.0, "two", &[], &[duplicate.clone()], &[]).is_err()
+    );
+    duplicate.display_name = "通义千问 / Podlink".into();
+    assert!(app::save_connection_models(&fixture.0, "two", &[], &[duplicate], &[]).is_err());
+
+    let mut a = draft("a");
+    let mut b = draft("b");
+    a.display_name = "重名".into();
+    b.display_name = " 重名 ".into();
+    assert!(
+        app::save_connection_models(&fixture.0, "two", &[], &[a, b], &[])
+            .unwrap_err()
+            .contains("重复")
+    );
+    store.delete_provider("one").unwrap();
+    assert!(store.model_aliases().unwrap().is_empty());
+}
+
+#[test]
+fn legacy_duplicate_names_can_be_resolved_without_ambiguous_aliases() {
+    let fixture = Fixture::new();
+    let store = fixture.store();
+    for id in ["one", "two"] {
+        store.put_provider(&provider(id)).unwrap();
+        let mut model = draft("coder-pro");
+        model.display_name = id.into();
+        app::save_connection_models(&fixture.0, id, &[], &[model], &[]).unwrap();
+    }
+    // Older versions allowed identical display names across connections.
+    rusqlite::Connection::open(fixture.0.join("switchx.sqlite"))
+        .unwrap()
+        .execute(
+            "UPDATE published_models SET display_name = 'legacy name'",
+            [],
+        )
+        .unwrap();
+    let expected: Vec<_> = store
+        .models()
+        .unwrap()
+        .into_iter()
+        .filter(|model| model.provider_id == "one")
+        .collect();
+    let renamed = ConnectionModel {
+        public_id: expected[0].public_id.clone(),
+        display_name: "unique name / one".into(),
+        ..draft("coder-pro")
+    };
+    app::save_connection_models(&fixture.0, "one", &expected, &[renamed], &[]).unwrap();
+    assert!(store.model_aliases().unwrap().is_empty());
+    assert_eq!(
+        store
+            .models()
+            .unwrap()
+            .iter()
+            .filter(|model| model.display_name == "legacy name")
+            .count(),
+        1
+    );
+}
+
+#[test]
 fn directory_save_is_atomic_preserves_identity_selection_and_detects_external_edits() {
     let fixture = Fixture::new();
     let store = fixture.store();

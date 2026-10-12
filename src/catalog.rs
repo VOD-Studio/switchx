@@ -162,6 +162,42 @@ pub struct Selection<'a> {
 pub struct Publication {
     pub catalog: Value,
     pub routes: HashMap<String, RouteBinding>,
+    /// Compatibility names resolve to a current catalog slug, without menu entries.
+    pub aliases: HashMap<String, String>,
+}
+
+impl Publication {
+    pub fn route(&self, name: &str) -> Option<&RouteBinding> {
+        self.routes.get(name).or_else(|| {
+            self.aliases
+                .get(name)
+                .and_then(|name| self.routes.get(name))
+        })
+    }
+
+    pub fn model_names(&self) -> impl Iterator<Item = &String> {
+        self.routes.keys().chain(self.aliases.keys())
+    }
+
+    pub fn add_alias(&mut self, alias: &str, name: &str) -> Result<(), String> {
+        if !self.routes.contains_key(name)
+            || (alias != name && self.routes.contains_key(alias))
+            || self.aliases.get(alias).is_some_and(|old| old != name)
+        {
+            return Err(format!("模型名称或兼容名称重复：{alias}"));
+        }
+        if alias != name {
+            self.aliases.insert(alias.into(), name.into());
+        }
+        Ok(())
+    }
+}
+
+pub fn validate_display_name(name: &str) -> Result<(), String> {
+    if name.trim().is_empty() || name.chars().count() > 160 || name.chars().any(char::is_control) {
+        return Err("模型显示名须为 1–160 个字符，且不能包含控制字符".into());
+    }
+    Ok(())
 }
 
 pub fn read_template(path: &Path, model_id: &str) -> Result<Value, String> {
@@ -268,9 +304,18 @@ pub fn validate_metadata(model: &Value) -> Result<(), String> {
 }
 
 pub fn publish_saved(records: &[ModelRecord]) -> Result<Publication, String> {
+    publish_records(records, true)
+}
+
+pub(crate) fn publish_direct(records: &[ModelRecord]) -> Result<Publication, String> {
+    publish_records(records, false)
+}
+
+fn publish_records(records: &[ModelRecord], use_names: bool) -> Result<Publication, String> {
     let mut publication = Publication {
         catalog: json!({"models": []}),
         routes: HashMap::new(),
+        aliases: HashMap::new(),
     };
     for record in records.iter().filter(|record| record.enabled) {
         validate_fallback(record, records)?;
@@ -279,7 +324,11 @@ pub fn publish_saved(records: &[ModelRecord]) -> Result<Publication, String> {
         let selected = publish(
             &json!({"models": [metadata]}),
             &[Selection {
-                public_id: &record.public_id,
+                public_id: if use_names {
+                    record.display_name.trim()
+                } else {
+                    &record.public_id
+                },
                 display_name: &record.display_name,
                 provider_id: &record.provider_id,
                 upstream_model: &record.upstream_model,
@@ -288,7 +337,7 @@ pub fn publish_saved(records: &[ModelRecord]) -> Result<Publication, String> {
         for (id, mut binding) in selected.routes {
             binding.fallback_provider_id = record.fallback_provider_id.clone();
             if publication.routes.insert(id.clone(), binding).is_some() {
-                return Err(format!("公开模型 ID 重复：{id}"));
+                return Err(format!("模型名称重复：{id}"));
             }
         }
         publication.catalog["models"]
@@ -301,6 +350,11 @@ pub fn publish_saved(records: &[ModelRecord]) -> Result<Publication, String> {
                     .iter()
                     .cloned(),
             );
+    }
+    if use_names {
+        for record in records.iter().filter(|record| record.enabled) {
+            publication.add_alias(&record.public_id, record.display_name.trim())?;
+        }
     }
     if publication.routes.is_empty() {
         return Err("请至少选择一个已导入资料的模型".into());
@@ -358,17 +412,10 @@ pub fn publish(templates: &Value, selections: &[Selection<'_>]) -> Result<Public
 
     for selection in selections {
         let id = selection.public_id;
-        if id.is_empty()
-            || id.len() > 64
-            || !id.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'-')
-            || id.starts_with('-')
-            || id.ends_with('-')
-        {
+        if validate_display_name(id).is_err() || id != id.trim() {
             return Err(format!("invalid public model ID: {id}"));
         }
-        if selection.display_name.trim().is_empty()
-            || selection.display_name.len() > 160
-            || selection.display_name.chars().any(char::is_control)
+        if validate_display_name(selection.display_name).is_err()
             || selection.provider_id.is_empty()
             || selection.upstream_model.is_empty()
         {
@@ -409,12 +456,68 @@ pub fn publish(templates: &Value, selections: &[Selection<'_>]) -> Result<Public
     Ok(Publication {
         catalog: json!({ "models": models }),
         routes,
+        aliases: HashMap::new(),
     })
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn names_are_catalog_slugs_and_legacy_ids_are_hidden_aliases() {
+        let name = "通义千问 qwen3.8-max/Podlink";
+        let model = ModelRecord {
+            provider_id: "podlink".into(),
+            public_id: "sx-stable".into(),
+            display_name: name.into(),
+            upstream_model: "deepseek-flash".into(),
+            metadata: templates()["models"][0].to_string(),
+            enabled: true,
+            fallback_provider_id: None,
+        };
+        let mut publication = publish_saved(std::slice::from_ref(&model)).unwrap();
+        assert_eq!(publication.catalog["models"][0]["slug"], name);
+        assert_eq!(publication.catalog["models"].as_array().unwrap().len(), 1);
+        assert_eq!(publication.route(name), publication.route("sx-stable"));
+        publication.add_alias("旧模型 / Podlink", name).unwrap();
+        assert_eq!(
+            publication.route(name),
+            publication.route("旧模型 / Podlink")
+        );
+        assert!(publication.route("deepseek-flash").is_none());
+        let mut second = model.clone();
+        second.public_id = "sx-other".into();
+        assert!(publish_saved(&[model.clone(), second.clone()]).is_err());
+        second.display_name = model.public_id.clone();
+        assert!(publish_saved(&[model, second]).is_err());
+    }
+
+    #[tokio::test]
+    #[ignore = "requires a local Codex CLI; reads only an isolated synthetic catalog"]
+    async fn codex_lists_names_with_slashes_spaces_unicode_and_more_than_64_bytes() {
+        let records: Vec<_> = [
+            "qwen3.8-max/Podlink".to_owned(),
+            "通义千问 / 工作账号".to_owned(),
+            "Long model / ".to_owned() + &"x".repeat(90),
+        ]
+        .into_iter()
+        .enumerate()
+        .map(|(index, name)| ModelRecord {
+            provider_id: "synthetic".into(),
+            public_id: format!("sx-{index}"),
+            display_name: name,
+            upstream_model: "deepseek-flash".into(),
+            metadata: templates()["models"][0].to_string(),
+            enabled: true,
+            fallback_provider_id: None,
+        })
+        .collect();
+        let publication = publish_saved(&records).unwrap();
+        crate::codex::client::check_catalog(&publication.catalog)
+            .await
+            .unwrap();
+    }
 
     #[test]
     fn reasoning_labels_collapse_canonical_runs() {
@@ -528,7 +631,7 @@ mod tests {
         let publication = publish_saved(&[primary.clone(), backup.clone()]).unwrap();
         assert_eq!(publication.routes.len(), 1);
         assert_eq!(
-            publication.routes["sx-primary"]
+            publication.routes["Primary"]
                 .fallback_provider_id
                 .as_deref(),
             Some("backup")
@@ -628,7 +731,7 @@ mod tests {
             publish(
                 &templates(),
                 &[Selection {
-                    public_id: "bad/name",
+                    public_id: "bad\nname",
                     ..selection
                 }]
             )
@@ -665,13 +768,14 @@ mod tests {
         let mut second = ModelRecord {
             provider_id: "second".into(),
             public_id: "sx-second".into(),
+            display_name: "Second".into(),
             metadata: second_template.to_string(),
             ..first.clone()
         };
         let publication = publish_saved(&[first.clone(), second.clone()]).unwrap();
         assert_eq!(publication.catalog["models"][0]["context_window"], 1048576);
         assert_eq!(publication.catalog["models"][1]["context_window"], 64000);
-        assert_eq!(publication.routes["sx-second"].provider_id, "second");
+        assert_eq!(publication.routes["Second"].provider_id, "second");
         second.public_id = first.public_id.clone();
         assert!(
             publish_saved(&[first.clone(), second])

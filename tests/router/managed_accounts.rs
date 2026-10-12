@@ -542,6 +542,10 @@ async fn session_context_survives_restart_and_blocks_account_changes_before_forw
     )
     .unwrap();
     let database = directory.data().join("session-test.sqlite");
+    let mut publication = publication;
+    publication
+        .add_alias("中文模型 / 账号 A", "sx-a-two")
+        .unwrap();
     let state = |address, rebound: bool| {
         let (id, workspace) = if rebound {
             (account_b.id.clone(), workspace("b"))
@@ -633,9 +637,12 @@ async fn session_context_survives_restart_and_blocks_account_changes_before_forw
         );
     }
     let opaque = json!([{"type":"reasoning","encrypted_content":"synthetic-prior-state"}]);
-    let response = request(address, "sx-a-two", Some(A), opaque.clone(), false)
+    let response = request(address, "中文模型 / 账号 A", Some(A), opaque.clone(), false)
         .header("session_id", A)
-        .header("x-codex-routing-hint", "model=sx-a-two;tier=default")
+        .header(
+            "x-codex-routing-hint",
+            "model=中文模型 / 账号 A;tier=default",
+        )
         .send()
         .await
         .unwrap();

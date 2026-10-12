@@ -629,7 +629,7 @@ export component ConnectionModels inherits Rectangle {
                         padding-right: root.card-inset + 66px;
                         spacing: 8px;
                         Text {
-                            text: "菜单显示名";
+                            text: "显示名称（全局唯一）";
                             preferred-width: 180px;
                             min-width: 0px;
                             horizontal-stretch: 1;
@@ -696,7 +696,7 @@ export component ConnectionModels inherits Rectangle {
                                         duration: self.glowing ? 160ms : 1400ms;
                                         easing: ease-out;
                                     }
-                                    height: 82px - 40px * self.removed;
+                                    height: (self.fresh ? 82px : 62px) - (self.fresh ? 40px : 20px) * self.removed;
                                     Timer {
                                         interval: max(1ms, (Motion.on ? 50ms : 0ms) * clamp(index - root.stagger-base, 0, 8));
                                         running: !item.landed;
@@ -759,7 +759,7 @@ export component ConnectionModels inherits Rectangle {
                                             mouse-cursor: default;
                                             if item.removed < 0.98: Rectangle {
                                                 y: 0px;
-                                                height: 82px;
+                                                height: item.fresh ? 82px : 62px;
                                                 opacity: 1 - item.removed;
                                                 VerticalLayout {
                                                     padding-left: 12px;
@@ -788,7 +788,7 @@ export component ConnectionModels inherits Rectangle {
 
                                                         QuietLineEdit {
                                                             text <=> row.display-name;
-                                                            placeholder-text: "菜单显示名";
+                                                            placeholder-text: "显示名称";
                                                             accessible-label: "模型显示名 " + (index + 1);
                                                             enabled: !root.busy && !root.managed;
                                                             edited(value) => { root.edited(); }
@@ -834,25 +834,14 @@ export component ConnectionModels inherits Rectangle {
                                                         }
                                                     }
 
-                                                    HorizontalLayout {
+                                                    if item.fresh: HorizontalLayout {
                                                         padding-left: 30px;
                                                         spacing: 6px;
                                                         Text {
-                                                            text: item.fresh ? "新增 · 保存后可加入工作台" : "公开标识";
-                                                            color: item.fresh ? Theme.brand : Theme.muted-text;
+                                                            text: "新增 · 保存后可加入工作台";
+                                                            color: Theme.brand;
                                                             font-size: 10px;
                                                             vertical-alignment: center;
-                                                        }
-
-                                                        if !item.fresh: Text {
-                                                            text: row.public-id;
-                                                            color: Theme.muted-text;
-                                                            font-family: "Menlo";
-                                                            font-size: 10px;
-                                                            vertical-alignment: center;
-                                                            overflow: elide;
-                                                            horizontal-stretch: 1;
-                                                            min-width: 0px;
                                                         }
                                                     }
                                                 }

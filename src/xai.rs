@@ -709,6 +709,7 @@ pub fn save_provider(
     } else {
         vec![]
     };
+    store.check_model_names(&models)?;
     store
         .put_provider_with_models(&provider, &models)
         .map_err(|_| "无法保存 Grok 上游".into())
