@@ -1,15 +1,11 @@
 import { XaiEditor } from "editors/xai-editor.slint";
 import { ConnectionModels } from "editors/connection-models.slint";
 import { Palette } from "std-widgets.slint";
-import { QuietScrollView as ScrollView } from "scroll-view.slint";
 import { Theme } from "tokens.slint";
 import {
     QuietButton,
     QuietSegmented,
-    QuietCheckBox as CheckBox,
     QuietComboBox as ComboBox,
-    QuietLineEdit as LineEdit,
-    SurfaceCard,
     StatusPill,
     Drawer,
     DropdownViewport,
@@ -45,6 +41,12 @@ import { ActivityPage } from "pages/activity.slint";
 import { ConfigPage } from "pages/config.slint";
 import { ConnectionStatusDialog } from "connection-status.slint";
 import { WorkspaceMenu } from "workspace-menu.slint";
+import { FallbackEditor } from "editors/fallback-editor.slint";
+import {
+    AccountLoginConfirm,
+    AccountRemovalConfirm,
+} from "pages/account-dialogs.slint";
+import { DirectSwitchSheet, RoutePublishSheet } from "config-previews.slint";
 
 export {
     XaiQuotaRow,
@@ -1183,7 +1185,6 @@ export component AppWindow inherits Window {
         details => { root.workspace-open = false; root.drawer-open = true; }
     }
 
-
     connection-drawer := Drawer {
         open: (root.connection-picker-open || root.editor-open || root.subscription-editor-open || root.xai-editor-open || root.connection-models-open) && !root.icon-picker-open && !root.common-config-editor-open;
         title: root.connection-models-open ? root.connection-models-name : root.connection-picker-open || root.new-connection-form ? "添加连接" : root.editor-open ? "API 连接" : root.subscription-editor-open ? "ChatGPT 订阅" : "Grok 订阅连接";
@@ -1487,64 +1488,15 @@ export component AppWindow inherits Window {
         busy: root.busy;
         error-message: root.error-code == "" ? "" : root.error-message + " · " + root.error-action;
         dismissed => { root.fallback-editor-open = false; }
-        SurfaceCard {
-            height: 350px;
-            border-width: 0px;
-            background: transparent;
-            VerticalLayout {
-                padding: 18px;
-                spacing: 10px;
-                Text {
-                    text: "备用上游 · " + root.fallback-primary-label;
-                    color: Theme.primary-text;
-                    font-size: 16px;
-                    font-weight: 600;
-                    overflow: elide;
-                }
-
-                ComboBox {
-                    model: root.fallback-options;
-                    current-index <=> root.fallback-choice;
-                    accessible-label: "选择备用上游";
-                    enabled: !root.busy && !root.config-managed;
-                    selected(value) => { root.fallback-consent = false; }
-                }
-
-                Text {
-                    text: "主上游 → 一个备用上游。仅在连接建立失败且请求尚未发送时尝试一次；超时、HTTP 错误和响应中断均不切换。主备实际模型 ID、能力和指令模板须一致。";
-                    color: Theme.muted-text;
-                    font-size: 12px;
-                    wrap: word-wrap;
-                }
-
-                Text {
-                    text: "选择备用后，请确认该站点的数据区域与隐私要求适用；费用可能变化。备用模型无需单独发布。";
-                    color: Theme.muted-text;
-                    font-size: 12px;
-                    wrap: word-wrap;
-                }
-
-                CheckBox {
-                    text: "允许在上述条件下把完整请求发送到所选备用站点";
-                    checked <=> root.fallback-consent;
-                    enabled: root.fallback-choice > 0 && !root.busy && !root.config-managed;
-                }
-
-                HorizontalLayout {
-                    spacing: 8px;
-                    QuietButton {
-                        text: "保存备用策略";
-                        primary: true;
-                        enabled: !root.busy && !root.config-managed && (root.fallback-choice == 0 || root.fallback-consent);
-                        clicked => { root.save-fallback(); }
-                    }
-
-                    QuietButton {
-                        text: "取消";
-                        clicked => { root.fallback-editor-open = false; }
-                    }
-                }
-            }
+        FallbackEditor {
+            primary-label: root.fallback-primary-label;
+            options: root.fallback-options;
+            choice <=> root.fallback-choice;
+            consent <=> root.fallback-consent;
+            busy: root.busy;
+            config-managed: root.config-managed;
+            save => { root.save-fallback(); }
+            cancel => { root.fallback-editor-open = false; }
         }
     }
 
@@ -1607,40 +1559,16 @@ export component AppWindow inherits Window {
         panel-width: 520px;
         busy: root.busy;
         dismissed => { root.dismiss-account-login(); }
-        VerticalLayout {
-            spacing: 16px;
-            Text {
-                text: "执行时会先恢复受管配置，并停止当前路由。";
-                color: Theme.warning;
-                font-size: 13px;
-                wrap: word-wrap;
-            }
-
-            Text {
-                text: "各上游的账号绑定保持不变。完成后，请在工作台重新发布，并启动新会话。";
-                color: Theme.muted-text;
-                font-size: 13px;
-                wrap: word-wrap;
-            }
-
-            HorizontalLayout {
-                spacing: 10px;
-                QuietButton {
-                    text: "取消";
-                    enabled: root.account-login-confirm-open && !root.busy;
-                    clicked => { root.dismiss-account-login(); }
-                }
-
-                QuietButton {
-                    text: root.account-login-confirm-native ? "继续登录" : "确认写入";
-                    primary: true;
-                    enabled: root.account-login-confirm-open && !root.busy && !root.chatgpt-login-pending && !root.xai-pending && (root.account-login-confirm-native || (!root.recovery-only && root.account-login-confirm-id != ""));
-                    clicked => {
-                        if (root.account-login-confirm-native) { root.subscription-action(1); }
-                        else { root.account-action(3, root.account-login-confirm-id); }
-                        root.dismiss-account-login();
-                    }
-                }
+        AccountLoginConfirm {
+            native: root.account-login-confirm-native;
+            open: root.account-login-confirm-open;
+            busy: root.busy;
+            can-confirm: !root.chatgpt-login-pending && !root.xai-pending && (root.account-login-confirm-native || (!root.recovery-only && root.account-login-confirm-id != ""));
+            cancel => { root.dismiss-account-login(); }
+            confirm => {
+                if (root.account-login-confirm-native) { root.subscription-action(1); }
+                else { root.account-action(3, root.account-login-confirm-id); }
+                root.dismiss-account-login();
             }
         }
     }
@@ -1653,74 +1581,22 @@ export component AppWindow inherits Window {
         busy: root.busy;
         error-message: root.error-code == "" ? "" : root.error-message + " · " + root.error-action;
         dismissed => { root.delete-account-confirm = false; root.delete-account-id = ""; }
-        SurfaceCard {
-            border-width: 0px;
-            background: transparent;
-            height: (root.error-code == "" ? 272px : 332px) + (root.delete-account-references == "" ? 0px : 64px);
-            VerticalLayout {
-                padding: 24px;
-                spacing: 14px;
-                Text {
-                    text: root.delete-account-grok ? "移除 Grok 账号" : "移除 ChatGPT 账号";
-                    color: Theme.primary-text;
-                    font-size: 19px;
-                    font-weight: 600;
-                }
-
-                Text {
-                    text: root.delete-account-label;
-                    color: Theme.primary-text;
-                    font-size: 14px;
-                    overflow: elide;
-                }
-
-                Text {
-                    text: root.delete-account-references == "" ? "将移除此账号在 SwitchX 中保存的登录信息。" : "此账号仍被上游引用。请先重新绑定或删除关联上游，再移除账号。";
-                    color: Theme.muted-text;
-                    font-size: 13px;
-                    wrap: word-wrap;
-                }
-
-                if root.delete-account-references != "": Text {
-                    text: "关联上游：" + root.delete-account-references;
-                    color: Theme.warning;
-                    font-size: 13px;
-                    wrap: word-wrap;
-                }
-
-                if root.error-code != "": Text {
-                    text: root.error-message;
-                    color: Theme.error;
-                    font-size: 13px;
-                    wrap: word-wrap;
-                }
-
-                Rectangle {
-                    vertical-stretch: 1;
-                }
-
-                HorizontalLayout {
-                    spacing: 10px;
-                    QuietButton {
-                        text: "取消";
-                        enabled: !root.busy;
-                        clicked => {
-                            root.delete-account-confirm = false;
-                            root.delete-account-id = "";
-                        }
-                    }
-
-                    QuietButton {
-                        text: "确认移除";
-                        primary: true;
-                        enabled: !root.busy && !root.config-managed && !root.chatgpt-login-pending && !root.xai-pending && root.delete-account-id != "" && root.delete-account-references == "";
-                        clicked => {
-                            root.account-removing-grok = root.delete-account-grok;
-                            root.account-removing-id = root.delete-account-id;
-                            root.delete-account-confirm = false;
-                        }
-                    }
-                }
+        AccountRemovalConfirm {
+            grok: root.delete-account-grok;
+            label: root.delete-account-label;
+            references: root.delete-account-references;
+            has-error: root.error-code != "";
+            error-message: root.error-message;
+            busy: root.busy;
+            can-remove: !root.config-managed && !root.chatgpt-login-pending && !root.xai-pending && root.delete-account-id != "";
+            cancel => {
+                root.delete-account-confirm = false;
+                root.delete-account-id = "";
+            }
+            remove => {
+                root.account-removing-grok = root.delete-account-grok;
+                root.account-removing-id = root.delete-account-id;
+                root.delete-account-confirm = false;
             }
         }
     }
@@ -1740,81 +1616,17 @@ export component AppWindow inherits Window {
             if (!root.config-managed) { root.cancel-route-preview(); }
             app-keyboard.focus();
         }
-        VerticalLayout {
-            spacing: 16px;
-            HorizontalLayout {
-                Text {
-                    text: root.selected-model-count + " 个模型 · 默认 " + root.default-model;
-                    color: Theme.primary-text;
-                    font-size: 13px;
-                    wrap: word-wrap;
-                }
-
-                StatusPill {
-                    label: root.busy ? "正在检查…" : root.route-preview-ready ? "检查通过" : "等待检查";
-                    ink: root.route-preview-ready ? Theme.success : Theme.warning;
-                    fill: root.route-preview-ready ? Theme.brand-surface : Theme.warning-surface;
-                }
-            }
-
-            Text {
-                text: root.config-home;
-                color: Theme.muted-text;
-                font-size: 12px;
-                wrap: word-wrap;
-            }
-
-            SurfaceCard {
-                vertical-stretch: 1;
-                background: Theme.background;
-                ScrollView {
-                    content-width: self.visible-width;
-                    horizontal-scrollbar-policy: always-off;
-                    x: 16px;
-                    y: 16px;
-                    width: parent.width - 32px;
-                    height: parent.height - 32px;
-                    VerticalLayout {
-                        Text {
-                            min-width: 0px;
-                            text: root.route-preview == "" ? (root.busy ? "正在检查模型目录、连接与目标配置…" : "检查完成后，配置差异会显示在这里。") : root.route-preview;
-                            color: Theme.primary-text;
-                            font-size: 12px;
-                            wrap: word-wrap;
-                        }
-                    }
-                }
-            }
-
-            Text {
-                text: root.action-message;
-                color: Theme.muted-text;
-                font-size: 12px;
-                wrap: word-wrap;
-            }
-
-            Text {
-                text: "在新会话中使用发布后的模型菜单；跨上游切换请新建会话。停止时恢复启用前的配置。";
-                color: Theme.muted-text;
-                font-size: 12px;
-                wrap: word-wrap;
-            }
-
-            HorizontalLayout {
-                spacing: 10px;
-                QuietButton {
-                    text: "重新检查";
-                    enabled: !root.busy && !root.config-managed && !root.chatgpt-login-pending && !root.xai-pending;
-                    clicked => { root.inspect-route(); }
-                }
-
-                QuietButton {
-                    text: root.busy ? "正在处理…" : "确认启用  →";
-                    primary: true;
-                    enabled: !root.busy && !root.config-managed && !root.chatgpt-login-pending && !root.xai-pending && root.route-preview-ready;
-                    clicked => { root.apply-route(); }
-                }
-            }
+        RoutePublishSheet {
+            model-count: root.selected-model-count;
+            default-model: root.default-model;
+            config-home: root.config-home;
+            preview: root.route-preview;
+            ready: root.route-preview-ready;
+            action-message: root.action-message;
+            busy: root.busy;
+            can-act: !root.config-managed && !root.chatgpt-login-pending && !root.xai-pending;
+            inspect => { root.inspect-route(); }
+            apply => { root.apply-route(); }
         }
     }
 
@@ -1826,66 +1638,18 @@ export component AppWindow inherits Window {
         busy: root.busy;
         error-message: root.error-code == "" ? "" : root.error-message;
         dismissed => { root.direct-drawer-open = false; app-keyboard.focus(); }
-        VerticalLayout {
-            spacing: 16px;
-            Text {
-                text: root.config-home;
-                color: Theme.muted-text;
-                font-size: 12px;
-                wrap: word-wrap;
-            }
-
-            SurfaceCard {
-                vertical-stretch: 1;
-                background: Theme.background;
-                ScrollView {
-                    content-width: self.visible-width;
-                    horizontal-scrollbar-policy: always-off;
-                    x: 16px;
-                    y: 16px;
-                    width: parent.width - 32px;
-                    height: parent.height - 32px;
-                    VerticalLayout {
-                        Text {
-                            min-width: 0px;
-                            text: root.direct-preview == "" ? (root.direct-active ? root.config-status : "在连接列表选择 API 连接的“直连”，即可查看配置差异。") : root.direct-preview;
-                            color: Theme.primary-text;
-                            font-size: 12px;
-                            wrap: word-wrap;
-                        }
-                    }
-                }
-            }
-
-            Text {
-                text: root.action-message;
-                color: Theme.muted-text;
-                font-size: 12px;
-                wrap: word-wrap;
-            }
-
-            Text {
-                text: "应用前检查模型列表。移动或删除 SwitchX 前，请先恢复原配置。";
-                color: Theme.muted-text;
-                font-size: 12px;
-                wrap: word-wrap;
-            }
-
-            HorizontalLayout {
-                spacing: 10px;
-                QuietButton {
-                    text: "恢复原配置";
-                    enabled: !root.busy && root.config-managed;
-                    clicked => { root.restore-config(root.config-home); }
-                }
-
-                QuietButton {
-                    text: root.busy ? "正在处理…" : "应用直连";
-                    primary: true;
-                    enabled: root.direct-preview-ready && !root.busy && !root.chatgpt-login-pending && !root.xai-pending;
-                    clicked => { root.apply-direct(); }
-                }
-            }
+        DirectSwitchSheet {
+            config-home: root.config-home;
+            config-status: root.config-status;
+            preview: root.direct-preview;
+            ready: root.direct-preview-ready;
+            direct-active: root.direct-active;
+            config-managed: root.config-managed;
+            action-message: root.action-message;
+            busy: root.busy;
+            can-apply: !root.chatgpt-login-pending && !root.xai-pending;
+            restore => { root.restore-config(root.config-home); }
+            apply => { root.apply-direct(); }
         }
     }
 
