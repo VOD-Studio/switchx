@@ -12,6 +12,8 @@ CODEX_HOME="$(mktemp -d)" npx -y @openai/codex@0.156.1 \
   -c 'model_catalog_json="/tmp/switchx-models.json"' debug models
 ```
 
+仓库中的 PNG、GIF、JPEG 等位图（包括编译时嵌入的 `assets/app-icon.png` 与 `assets/logo.png`）由 Git LFS 保存。克隆前先运行一次 `git lfs install`；已克隆但图片是文本指针时运行 `git lfs pull`，否则 UI 无法编译。SVG 仍按文本保存。
+
 开发过程中，改业务库运行 `make check-lib`，改桌面入口运行 `make check-app`，改路由运行 `make test-router`；完成功能点后运行 `make check` 做完整检查。`make` 默认仍然构建应用。
 
 UI 编译隔离、依赖调试信息及业务检查复用的验证见 [开发构建调整记录](docs/acceptance/dev-build-2026-10-08.md)。
