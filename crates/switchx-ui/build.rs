@@ -18,5 +18,9 @@ fn main() {
         );
     }
     let app = project_dir.join("ui/app.slint");
-    slint_build::compile(app).expect("compile Slint UI");
+    // UI tests locate visible controls by accessibility labels and their actual geometry.
+    // Keep this element metadata out of regular desktop and release builds.
+    let config = slint_build::CompilerConfiguration::new()
+        .with_debug_info(std::env::var_os("CARGO_FEATURE_TEST_DEBUG_INFO").is_some());
+    slint_build::compile_with_config(app, config).expect("compile Slint UI");
 }

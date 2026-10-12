@@ -1,3 +1,4 @@
+use i_slint_backend_testing::ElementHandle;
 use slint::platform::Key;
 use slint::platform::software_renderer::MinimalSoftwareWindow;
 use slint::{ComponentHandle, Model, ModelRc, PhysicalSize, SharedPixelBuffer, VecModel};
@@ -11,6 +12,24 @@ fn advance(ms: u64) {
 fn click(window: &MinimalSoftwareWindow, x: f32, y: f32) {
     headless::click(window, x, y);
     slint::platform::update_timers_and_animations();
+}
+fn element(app: &AppWindow, label: &str) -> ElementHandle {
+    let mut matches = ElementHandle::find_by_accessible_label(app, label);
+    let element = matches
+        .next()
+        .unwrap_or_else(|| panic!("visible control missing: {label}"));
+    assert!(matches.next().is_none(), "ambiguous control label: {label}");
+    element
+}
+fn click_control(window: &MinimalSoftwareWindow, app: &AppWindow, label: &str) {
+    let control = element(app, label);
+    let position = control.absolute_position();
+    let size = control.size();
+    click(
+        window,
+        position.x + size.width / 2.0,
+        position.y + size.height / 2.0,
+    );
 }
 fn text(window: &MinimalSoftwareWindow, text: slint::SharedString) {
     headless::key(window, text);
@@ -32,16 +51,6 @@ fn settle(window: &MinimalSoftwareWindow) {
 }
 fn row(app: &AppWindow) -> ConnectionModelRow {
     app.get_connection_models().row_data(0).unwrap()
-}
-// The first catalog row's reasoning trigger spans y 233..269. Its 530px panel
-// opens below the trigger when that fits, otherwise at the 12px top margin.
-const TRIGGER_Y: f32 = 251.0;
-fn panel_dy(height: u32) -> f32 {
-    if 233.0 + 36.0 + 8.0 + 530.0 <= height as f32 - 12.0 {
-        265.0
-    } else {
-        0.0
-    }
 }
 fn reset(app: &AppWindow) {
     app.set_connection_models(ModelRc::new(VecModel::from(vec![ConnectionModelRow {
@@ -99,12 +108,9 @@ fn picker_supports_search_multiselect_defaults_keyboard_motion_and_disabled_stat
             app.invoke_set_appearance(dark);
             reset(&app);
             draw(&window, "closed");
-            let trigger = width as f32 - 140.0;
-            let panel_x = width as f32 - 280.0;
-            let dy = panel_dy(height);
-            click(&window, trigger, TRIGGER_Y);
+            click_control(&window, &app, "思考等级 1");
             draw(&window, "open");
-            click(&window, panel_x, 160.0 + dy);
+            click_control(&window, &app, "minimal，最少");
             assert!(
                 row(&app).reasoning_levels.starts_with("minimal, low"),
                 "click must add a level"
@@ -114,7 +120,7 @@ fn picker_supports_search_multiselect_defaults_keyboard_motion_and_disabled_stat
             // The search keeps focus after each toggle and accepts uppercase queries.
             text(&window, "HIGH".into());
             draw(&window, "search");
-            click(&window, panel_x, 120.0 + dy);
+            click_control(&window, &app, "high，深入");
             assert_eq!(
                 row(&app).reasoning_levels,
                 "minimal, low, medium, xhigh, max"
@@ -125,7 +131,7 @@ fn picker_supports_search_multiselect_defaults_keyboard_motion_and_disabled_stat
             );
             key(&window, Key::Escape);
             draw(&window, "closed-after-search");
-            click(&window, trigger, TRIGGER_Y);
+            click_control(&window, &app, "思考等级 1");
             draw(&window, "reopened");
             key(&window, Key::DownArrow);
             key(&window, Key::Return);
@@ -142,9 +148,9 @@ fn picker_supports_search_multiselect_defaults_keyboard_motion_and_disabled_stat
             draw(&window, "no-results-closed");
             reset(&app);
             draw(&window, "default-reset");
-            click(&window, trigger, TRIGGER_Y);
+            click_control(&window, &app, "思考等级 1");
             draw(&window, "default-open");
-            click(&window, panel_x, 475.0 + dy);
+            click_control(&window, &app, "默认思考等级");
             draw(&window, "default-menu");
             key(&window, Key::UpArrow);
             assert_eq!(
@@ -156,9 +162,9 @@ fn picker_supports_search_multiselect_defaults_keyboard_motion_and_disabled_stat
             draw(&window, "default-selected");
             click(&window, 300.0, 600.0);
             draw(&window, "dismissed");
-            click(&window, trigger, TRIGGER_Y);
+            click_control(&window, &app, "思考等级 1");
             draw(&window, "clear-open");
-            click(&window, width as f32 - 110.0, 447.0 + dy);
+            click_control(&window, &app, "清空选择");
             assert!(row(&app).reasoning_levels.is_empty());
             assert!(row(&app).default_reasoning.is_empty());
             click(&window, 300.0, 600.0);
@@ -166,7 +172,7 @@ fn picker_supports_search_multiselect_defaults_keyboard_motion_and_disabled_stat
             reset(&app);
             app.set_config_managed(true);
             draw(&window, "managed");
-            click(&window, trigger, TRIGGER_Y);
+            click_control(&window, &app, "思考等级 1");
             key(&window, Key::Return);
             assert!(!app.get_connection_models_dirty());
             app.set_config_managed(false);
@@ -177,7 +183,7 @@ fn picker_supports_search_multiselect_defaults_keyboard_motion_and_disabled_stat
     reset(&app);
     draw(&window, "motion-closed");
     app.global::<Theme>().set_animations_enabled(true);
-    click(&window, 1060.0, TRIGGER_Y);
+    click_control(&window, &app, "思考等级 1");
     draw(&window, "motion-start");
     advance(48);
     let entering = draw(&window, "motion-entering");
@@ -198,7 +204,7 @@ fn picker_supports_search_multiselect_defaults_keyboard_motion_and_disabled_stat
         closed.as_bytes(),
         "closing must animate"
     );
-    click(&window, 1060.0, TRIGGER_Y);
+    click_control(&window, &app, "思考等级 1");
     advance(48);
     draw(&window, "reversal-start");
     click(&window, 300.0, 600.0);
@@ -206,27 +212,32 @@ fn picker_supports_search_multiselect_defaults_keyboard_motion_and_disabled_stat
     draw(&window, "reversal-exiting");
     key(&window, Key::Return);
     settle(&window);
-    click(&window, 920.0, 160.0 + panel_dy(820));
+    click_control(&window, &app, "minimal，最少");
     assert!(
         row(&app).reasoning_levels.starts_with("minimal, low"),
         "rapid keyboard reopen must cancel the stale close timer"
     );
     click(&window, 300.0, 600.0);
     settle(&window);
-    click(&window, 1060.0, TRIGGER_Y);
+    click_control(&window, &app, "思考等级 1");
     settle(&window);
-    click(&window, 920.0, 160.0 + panel_dy(820));
+    click_control(&window, &app, "minimal，最少");
     assert_eq!(row(&app).reasoning_levels, "low, medium, high, xhigh, max");
     app.set_busy(true);
     settle(&window);
-    click(&window, 920.0, 160.0 + panel_dy(820));
+    assert_eq!(
+        element(&app, "思考等级 1").accessible_expanded(),
+        Some(false)
+    );
+    click_control(&window, &app, "思考等级 1");
+    key(&window, Key::Return);
     assert_eq!(row(&app).reasoning_levels, "low, medium, high, xhigh, max");
     app.set_busy(false);
     app.global::<Theme>().set_system_reduced_motion(true);
     draw(&window, "reduced-closed");
-    click(&window, 1060.0, TRIGGER_Y);
+    click_control(&window, &app, "思考等级 1");
     draw(&window, "reduced-open");
-    click(&window, 920.0, 160.0 + panel_dy(820));
+    click_control(&window, &app, "minimal，最少");
     assert_eq!(
         row(&app).reasoning_levels,
         "minimal, low, medium, high, xhigh, max"

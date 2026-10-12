@@ -8,6 +8,9 @@ publish = false
 test = false
 doctest = false
 
+[features]
+test-debug-info = []
+
 [dependencies]
 slint.workspace = true
 
