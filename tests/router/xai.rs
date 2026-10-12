@@ -1,7 +1,7 @@
 use super::*;
 use axum::routing::get;
 use base64::{Engine, engine::general_purpose::URL_SAFE_NO_PAD};
-use switchx::{app, xai};
+use switchx::xai;
 
 struct Fixture {
     directory: std::path::PathBuf,
@@ -73,10 +73,12 @@ async fn responses(
 }
 impl Fixture {
     async fn new() -> Self {
-        let directory =
-            std::env::temp_dir().join(format!("switchx-xai-route-{}", app::new_id().unwrap()));
+        let directory = std::env::temp_dir().join(format!(
+            "switchx-xai-route-{}",
+            switchx::id::new_id().unwrap()
+        ));
         std::fs::create_dir(&directory).unwrap();
-        let account = app::new_id().unwrap();
+        let account = switchx::id::new_id().unwrap();
         let jwt = format!(
             "e30.{}.sig",
             URL_SAFE_NO_PAD.encode(br#"{"sub":"fixture-user"}"#)

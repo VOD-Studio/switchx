@@ -19,8 +19,9 @@ use std::{
     time::Duration,
 };
 use switchx::{
-    app, client, config_transaction,
-    routed::RouteSession,
+    codex::client,
+    codex::route_switch,
+    route_session::RouteSession,
     storage::{AccountBinding, Store},
     xai,
 };
@@ -62,7 +63,7 @@ fn auth(mock: &Mock, headers: &HeaderMap) -> std::result::Result<(), StatusCode>
         .get(header::AUTHORIZATION)
         .and_then(|v| v.to_str().ok())
         != Some(format!("Bearer {}", mock.jwt).as_str())
-        || headers.contains_key(switchx::routing::LOCAL_TOKEN_HEADER)
+        || headers.contains_key(switchx::router::LOCAL_TOKEN_HEADER)
         || headers.contains_key("chatgpt-account-id")
     {
         return Err(StatusCode::UNAUTHORIZED);
@@ -136,7 +137,8 @@ fn seed(data: &Path) -> Result<()> {
 }
 #[tokio::main]
 async fn main() -> Result<()> {
-    let temp = Temp(std::env::temp_dir().join(format!("switchx-grok-probe-{}", app::new_id()?)));
+    let temp =
+        Temp(std::env::temp_dir().join(format!("switchx-grok-probe-{}", switchx::id::new_id()?)));
     let data = temp.0.join("data");
     let home = temp.0.join("home");
     std::fs::create_dir_all(&data)?;
@@ -219,7 +221,7 @@ async fn main() -> Result<()> {
     result?;
     if std::fs::read_to_string(home.join("config.toml"))? != ORIGINAL
         || home.join("auth.json").exists()
-        || config_transaction::recovery(&data)?.is_some()
+        || route_switch::recovery(&data)?.is_some()
     {
         let restored = std::fs::read_to_string(home.join("config.toml"))?;
         let config_matches = restored == ORIGINAL;
@@ -230,7 +232,7 @@ async fn main() -> Result<()> {
             ORIGINAL.len()
         );
         let auth_exists = home.join("auth.json").exists();
-        let journal_exists = config_transaction::recovery(&data)?.is_some();
+        let journal_exists = route_switch::recovery(&data)?.is_some();
         eprintln!(
             "Recovery checks: original_config={config_matches}, native_auth_exists={auth_exists}, journal_exists={journal_exists}"
         );

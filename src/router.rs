@@ -55,7 +55,7 @@ enum UpstreamAuth {
         routing_override: Option<HeaderValue>,
     },
     ManagedChatgpt {
-        manager: crate::accounts::AccountManager,
+        manager: crate::chatgpt::accounts::AccountManager,
         id: String,
         home: PathBuf,
         account: Mutex<Option<HeaderValue>>,
@@ -135,7 +135,7 @@ impl Upstream {
     }
 
     pub fn managed_chatgpt(
-        manager: crate::accounts::AccountManager,
+        manager: crate::chatgpt::accounts::AccountManager,
         id: String,
         home: PathBuf,
         workspace: &crate::chatgpt::Workspace,
@@ -161,7 +161,7 @@ impl Upstream {
     /// Synthetic probes only; managed credentials still follow the production account path.
     pub fn managed_chatgpt_mock(
         address: SocketAddr,
-        manager: crate::accounts::AccountManager,
+        manager: crate::chatgpt::accounts::AccountManager,
         id: String,
         home: PathBuf,
         workspace: &crate::chatgpt::Workspace,
@@ -995,7 +995,7 @@ async fn forward(
     let xai = state.upstreams[&binding.provider_id].is_xai();
     let compatibility = if xai {
         object.insert("model".into(), binding.upstream_model.clone().into());
-        match crate::xai_responses::Compatibility::request(&mut request) {
+        match crate::xai::responses::Compatibility::request(&mut request) {
             Ok(compatibility) => Some(compatibility),
             Err(code) => {
                 return request_error(
@@ -1151,7 +1151,7 @@ async fn forward(
             opaque_input(input)
                 && !(xai
                     && state.session_store.is_some()
-                    && crate::xai_responses::replayable_input(input))
+                    && crate::xai::responses::replayable_input(input))
         })
     {
         return request_error(
@@ -1699,7 +1699,7 @@ mod tests {
     struct RefreshFixture {
         directory: PathBuf,
         home: PathBuf,
-        manager: crate::accounts::AccountManager,
+        manager: crate::chatgpt::accounts::AccountManager,
         id: String,
         address: SocketAddr,
         started: mpsc::Receiver<()>,
@@ -1715,7 +1715,7 @@ mod tests {
         async fn new() -> Self {
             let directory = std::env::temp_dir().join(format!(
                 "switchx-refresh-routing-{}",
-                crate::app::new_id().unwrap()
+                crate::id::new_id().unwrap()
             ));
             let home = directory.join("home");
             let data = directory.join("data");
@@ -1771,9 +1771,11 @@ mod tests {
                     }),
                 );
             let server = tokio::spawn(async move { axum::serve(listener, mock).await.unwrap() });
-            let manager =
-                crate::accounts::AccountManager::open_mock(&data, &format!("http://{address}"))
-                    .unwrap();
+            let manager = crate::chatgpt::accounts::AccountManager::open_mock(
+                &data,
+                &format!("http://{address}"),
+            )
+            .unwrap();
             let id = manager.import_current(&home).unwrap().id;
             let original_store = fs::read(data.join("codex_oauth_auth.json")).unwrap();
             Self {

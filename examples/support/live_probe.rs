@@ -3,7 +3,7 @@
 use std::{path::Path, process::Stdio, time::Duration};
 
 use serde_json::Value;
-use switchx::client;
+use switchx::codex::client;
 use tokio::{process::Command, time::timeout};
 
 pub type ProbeResult<T = ()> = Result<T, Box<dyn std::error::Error>>;

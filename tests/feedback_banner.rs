@@ -1,7 +1,6 @@
-use slint::platform::software_renderer::{MinimalSoftwareWindow, RepaintBufferType};
-use slint::platform::{Platform, WindowAdapter};
+use slint::platform::software_renderer::MinimalSoftwareWindow;
 use slint::{ComponentHandle, PhysicalSize, Rgb8Pixel, SharedPixelBuffer};
-use std::{cell::Cell, io::Write, rc::Rc, time::Duration};
+use switchx::headless;
 
 slint::slint! {
     import { FeedbackBanner } from "../ui/feedback-banner.slint";
@@ -23,41 +22,14 @@ slint::slint! {
     }
 }
 
-thread_local! { static PREVIEW_TIME: Cell<Duration> = const { Cell::new(Duration::ZERO) }; }
-
-struct PreviewPlatform(Rc<MinimalSoftwareWindow>);
-
-impl Platform for PreviewPlatform {
-    fn create_window_adapter(&self) -> Result<Rc<dyn WindowAdapter>, slint::PlatformError> {
-        Ok(self.0.clone())
-    }
-
-    fn duration_since_start(&self) -> Duration {
-        PREVIEW_TIME.with(Cell::get)
-    }
-}
-
 fn draw(
     window: &MinimalSoftwareWindow,
     elapsed_ms: u64,
     name: &str,
 ) -> SharedPixelBuffer<Rgb8Pixel> {
-    PREVIEW_TIME.with(|time| time.set(time.get() + Duration::from_millis(elapsed_ms)));
-    slint::platform::update_timers_and_animations();
-    let size = WindowAdapter::size(window);
-    let mut pixels = SharedPixelBuffer::<Rgb8Pixel>::new(size.width, size.height);
-    window.request_redraw();
-    window.draw_if_needed(|renderer| {
-        renderer.render(pixels.make_mut_slice(), size.width as usize);
-    });
-    if let Some(output) = std::env::var_os("SWITCHX_FEEDBACK_SNAPSHOTS") {
-        let output = std::path::PathBuf::from(output);
-        assert!(output.is_absolute());
-        std::fs::create_dir_all(&output).unwrap();
-        let mut file = std::fs::File::create(output.join(format!("{name}.ppm"))).unwrap();
-        write!(file, "P6\n{} {}\n255\n", size.width, size.height).unwrap();
-        file.write_all(pixels.as_bytes()).unwrap();
-    }
+    headless::advance(elapsed_ms);
+    let pixels = headless::render(window);
+    headless::save_snapshot("SWITCHX_FEEDBACK_SNAPSHOTS", name, &pixels);
     pixels
 }
 
@@ -88,8 +60,7 @@ fn assert_still(window: &MinimalSoftwareWindow, name: &str) {
 
 #[test]
 fn dynamically_created_loading_feedback_runs_until_finished_and_respects_motion_preferences() {
-    let window = MinimalSoftwareWindow::new(RepaintBufferType::NewBuffer);
-    slint::platform::set_platform(Box::new(PreviewPlatform(window.clone()))).unwrap();
+    let window = headless::install_with_manual_time();
     let app = FeedbackWindow::new().unwrap();
     app.show().unwrap();
 

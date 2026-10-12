@@ -16,12 +16,12 @@ use axum::{
 };
 use serde_json::{Value, json};
 use switchx::{
-    app,
     catalog::{self, Selection},
-    chatgpt, client,
-    config_transaction::{self, PreparedSwitch},
-    routed::RouteSession,
-    routing::{LOCAL_TOKEN_HEADER, RouterState, RunningRouter, Upstream},
+    chatgpt,
+    codex::client,
+    codex::route_switch::{self, PreparedSwitch},
+    route_session::RouteSession,
+    router::{LOCAL_TOKEN_HEADER, RouterState, RunningRouter, Upstream},
     storage::{ModelRecord, ProviderRecord, RequestStatus, Store},
 };
 use tokio::{
@@ -37,8 +37,10 @@ const ORIGINAL: &str = "# isolated synthetic configuration\ncli_auth_credentials
 struct ProbeHome(PathBuf);
 impl ProbeHome {
     fn new() -> Result<Self, Box<dyn std::error::Error>> {
-        let path =
-            std::env::temp_dir().join(format!("switchx-subscription-probe-{}", app::new_id()?));
+        let path = std::env::temp_dir().join(format!(
+            "switchx-subscription-probe-{}",
+            switchx::id::new_id()?
+        ));
         let mut builder = std::fs::DirBuilder::new();
         #[cfg(unix)]
         {
@@ -321,8 +323,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
     let listener = TcpListener::bind("127.0.0.1:0").await?;
     let address = listener.local_addr()?;
-    let local_token = format!("{}{}", app::new_id()?, app::new_id()?);
-    let reference = format!("router-{}", app::new_id()?);
+    let local_token = format!("{}{}", switchx::id::new_id()?, switchx::id::new_id()?);
+    let reference = format!("router-{}", switchx::id::new_id()?);
     let prepared = PreparedSwitch::inspect(
         &home.join("config.toml"),
         &data,
@@ -350,7 +352,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         println!("Native CLI completed subscription and API file-tool round trips through the production router; both auth paths remained isolated and four requests completed.");
         Ok::<_, Box<dyn std::error::Error>>(())
     }.await;
-    let restored = config_transaction::restore(&home.join("config.toml"), &data)?;
+    let restored = route_switch::restore(&home.join("config.toml"), &data)?;
     check(
         restored.conflicts.is_empty()
             && std::fs::read_to_string(home.join("config.toml"))? == original,
@@ -370,7 +372,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             binary.is_file(),
             "build the macOS bundle before desktop verification",
         )?;
-        let api_id = format!("probe-api-{}", app::new_id()?);
+        let api_id = format!("probe-api-{}", switchx::id::new_id()?);
         store.put_provider(&ProviderRecord {
             kind: switchx::storage::ProviderKind::ApiKey,
             account_binding: None,
@@ -406,7 +408,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             "127.0.0.1:1".parse()?,
             &selected.public_id,
         )?
-        .with_chatgpt_auth(&"a".repeat(64), &format!("router-{}", app::new_id()?))?
+        .with_chatgpt_auth(
+            &"a".repeat(64),
+            &format!("router-{}", switchx::id::new_id()?),
+        )?
         .apply()?;
         println!(
             "Desktop fixture ready at {}; verify recovery and the API-only preview, then quit SwitchX. The synthetic API has no key and cannot be activated.",
@@ -421,7 +426,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             .wait()
             .await?;
         check(
-            status.success() && config_transaction::recovery(&data)?.is_none(),
+            status.success() && route_switch::recovery(&data)?.is_none(),
             "desktop recovery did not complete",
         )?;
         check(

@@ -6,17 +6,17 @@ use std::{
 use serde::{Deserialize, Serialize};
 use toml_edit::{Array, DocumentMut, Item, Value, table, value};
 
+use super::{DIRECT_JOURNAL, ROUTE_JOURNAL};
 use crate::{
-    config_overlay::Overlay,
-    config_transaction::{
+    codex::overlay::Overlay,
+    codex::route_switch::{
         HeaderDecor, RestoreResult, lock_config, read_config, replace, sync_parent,
         write_exclusive_atomic,
     },
-    direct::{helper_is_usable, validate_provider},
     storage::{ModelRecord, ProviderRecord},
+    upstream::{helper_is_usable, validate_provider},
 };
 
-const JOURNAL_NAME: &str = "direct-journal.json";
 const FIELDS: [&str; 3] = ["model", "model_provider", "model_catalog_json"];
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -86,8 +86,8 @@ impl PreparedDirectSwitch {
         if !valid_id(&provider.id) {
             return Err("provider id is invalid".into());
         }
-        let journal_path = state_dir.join(JOURNAL_NAME);
-        if journal_path.exists() || state_dir.join("switch-journal.json").exists() {
+        let journal_path = state_dir.join(DIRECT_JOURNAL);
+        if journal_path.exists() || state_dir.join(ROUTE_JOURNAL).exists() {
             return Err("a SwitchX switch is active; restore it first".into());
         }
         let original = read_config(config_path)?;
@@ -98,7 +98,7 @@ impl PreparedDirectSwitch {
             .map_err(|_| "Codex config is not UTF-8")?
             .unwrap_or("");
         let mut document: DocumentMut = current.parse().map_err(|_| "invalid Codex TOML")?;
-        crate::config::ensure_unmanaged(&document)?;
+        super::route_config::ensure_unmanaged(&document)?;
         let provider_id = format!("switchx_direct_{}", provider.id);
         if document
             .as_table()
@@ -210,17 +210,17 @@ impl PreparedDirectSwitch {
 
     pub fn with_codex_options(
         self,
-        options: &crate::provider_config::CodexOptions,
+        options: &super::provider_config::CodexOptions,
         common: &str,
     ) -> Result<Self, String> {
         self.with_document_update(|document, provider_id| {
-            crate::provider_config::apply_to_document(document, options, common, provider_id)
+            super::provider_config::apply_to_document(document, options, common, provider_id)
         })
     }
 
     pub fn with_common_config(self, common: &str) -> Result<Self, String> {
         self.with_document_update(|document, _| {
-            crate::provider_config::apply_common_to_document(document, common)
+            super::provider_config::apply_common_to_document(document, common)
         })
     }
 
@@ -250,7 +250,7 @@ impl PreparedDirectSwitch {
             .journal_path
             .parent()
             .unwrap()
-            .join(format!("direct-models-{}.json", crate::app::new_id()?));
+            .join(format!("direct-models-{}.json", crate::id::new_id()?));
         let catalog_path = path.to_str().ok_or("模型目录路径不是 UTF-8")?;
         let mut document: DocumentMut = self
             .proposed
@@ -336,7 +336,7 @@ impl PreparedDirectSwitch {
             .journal_path
             .parent()
             .unwrap()
-            .join("switch-journal.json")
+            .join(ROUTE_JOURNAL)
             .exists()
         {
             return Err("a SwitchX route switch is active; restore it first".into());
@@ -375,7 +375,7 @@ impl PreparedDirectSwitch {
 
 pub fn restore(config_path: &Path, state_dir: &Path) -> Result<RestoreResult, String> {
     let _lock = lock_config(config_path)?;
-    let journal_path = state_dir.join(JOURNAL_NAME);
+    let journal_path = state_dir.join(DIRECT_JOURNAL);
     let journal: Journal =
         serde_json::from_slice(&fs::read(&journal_path).map_err(|error| error.to_string())?)
             .map_err(|_| "SwitchX direct journal is invalid; inspect it before recovery")?;
@@ -517,7 +517,7 @@ fn remove_generated_catalog(state_dir: &Path, path: Option<&Path>) -> Result<(),
 }
 
 pub fn active_target(state_dir: &Path) -> Result<Option<PathBuf>, String> {
-    let path = state_dir.join(JOURNAL_NAME);
+    let path = state_dir.join(DIRECT_JOURNAL);
     match fs::read(path) {
         Ok(bytes) => {
             let journal: Journal = serde_json::from_slice(&bytes)
@@ -655,7 +655,7 @@ mod tests {
         assert!(restored.contains("[mcp_servers.example]"));
         assert!(restored.contains("[projects.\"/tmp/new\"]"));
         assert!(!restored.contains("switchx_direct_test-id"));
-        assert!(!home.state().join(JOURNAL_NAME).exists());
+        assert!(!home.state().join(DIRECT_JOURNAL).exists());
     }
 
     #[test]
@@ -668,7 +668,7 @@ mod tests {
                 .unwrap();
         fs::write(home.config(), "model = \"changed before apply\"\n").unwrap();
         assert!(prepared.apply().unwrap_err().contains("changed"));
-        assert!(!home.state().join(JOURNAL_NAME).exists());
+        assert!(!home.state().join(DIRECT_JOURNAL).exists());
         let prepared =
             PreparedDirectSwitch::inspect(&home.config(), &home.state(), &provider(), &helper)
                 .unwrap();
@@ -684,7 +684,7 @@ mod tests {
                 .unwrap()
                 .contains("model = \"external\"")
         );
-        assert!(home.state().join(JOURNAL_NAME).exists());
+        assert!(home.state().join(DIRECT_JOURNAL).exists());
     }
 
     #[test]
@@ -729,7 +729,7 @@ mod tests {
             PreparedDirectSwitch::inspect(&home.config(), &home.state(), &provider(), &helper)
                 .unwrap();
         prepared.apply().unwrap();
-        let journal = fs::read_to_string(home.state().join(JOURNAL_NAME)).unwrap();
+        let journal = fs::read_to_string(home.state().join(DIRECT_JOURNAL)).unwrap();
         assert!(!journal.contains("private-marker"));
         assert!(!journal.contains("private-parent"));
     }
@@ -739,7 +739,7 @@ mod tests {
         let home = Home::new();
         let original = "model = \"old\"\napproval_policy = \"on-request\" # private-preference\nmodel_context_window = 128000 # keep-window-note\nmodel_auto_compact_token_limit = 96000\n\n[features]\nhooks = false\nexternal = true\n\n[mcp_servers.private]\ncommand = \"private-command\"\n";
         fs::write(home.config(), original).unwrap();
-        let options = crate::provider_config::CodexOptions {
+        let options = crate::codex::provider_config::CodexOptions {
             remote_compaction: true,
             use_common_config: true,
             context_1m: true,
@@ -768,7 +768,7 @@ mod tests {
         );
         assert!(prepared.changes.contains(&"features.memories".into()));
         prepared.apply().unwrap();
-        let journal = fs::read_to_string(home.state().join(JOURNAL_NAME)).unwrap();
+        let journal = fs::read_to_string(home.state().join(DIRECT_JOURNAL)).unwrap();
         assert!(!journal.contains("private-preference"));
         assert!(!journal.contains("keep-window-note"));
         assert!(!journal.contains("private-command"));
@@ -799,7 +799,7 @@ mod tests {
         fs::write(home.config(), original).unwrap();
         PreparedDirectSwitch::inspect(&home.config(), &home.state(), &provider(), &helper)
             .unwrap()
-            .with_codex_options(&crate::provider_config::CodexOptions::default(), "")
+            .with_codex_options(&crate::codex::provider_config::CodexOptions::default(), "")
             .unwrap()
             .apply()
             .unwrap();
@@ -824,11 +824,11 @@ mod tests {
         let error =
             PreparedDirectSwitch::inspect(&home.config(), &home.state(), &provider(), &helper)
                 .unwrap()
-                .with_codex_options(&crate::provider_config::CodexOptions::default(), "")
+                .with_codex_options(&crate::codex::provider_config::CodexOptions::default(), "")
                 .err()
                 .unwrap();
         assert!(error.contains("注释"), "{error}");
-        assert!(!home.state().join(JOURNAL_NAME).exists());
+        assert!(!home.state().join(DIRECT_JOURNAL).exists());
     }
 
     #[test]
@@ -845,7 +845,7 @@ mod tests {
         .unwrap()
         .apply()
         .unwrap();
-        let path = home.state().join(JOURNAL_NAME);
+        let path = home.state().join(DIRECT_JOURNAL);
         let mut old: serde_json::Value = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
         old.as_object_mut().unwrap().remove("overlay");
         fs::write(path, serde_json::to_vec(&old).unwrap()).unwrap();

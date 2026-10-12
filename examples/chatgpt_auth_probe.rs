@@ -20,7 +20,7 @@ use serde_json::{Value, json};
 use subtle::ConstantTimeEq;
 use switchx::{
     catalog::{Selection, publish},
-    routing::LOCAL_TOKEN_HEADER,
+    router::LOCAL_TOKEN_HEADER,
 };
 use tokio::{
     net::TcpListener,

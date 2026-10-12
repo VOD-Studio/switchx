@@ -33,7 +33,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .iter()
         .map(|path| read_optional(path))
         .collect::<io::Result<Vec<_>>>()?;
-    let manager = switchx::accounts::AccountManager::open(&data)?;
+    let manager = switchx::chatgpt::accounts::AccountManager::open(&data)?;
     let id = manager
         .default_id()?
         .ok_or("no default managed ChatGPT account")?;

@@ -12,6 +12,10 @@ CODEX_HOME="$(mktemp -d)" npx -y @openai/codex@0.156.1 \
   -c 'model_catalog_json="/tmp/switchx-models.json"' debug models
 ```
 
+仓库中的 PNG、GIF、JPEG 等位图（包括编译时嵌入的 `assets/app-icon.png` 与 `assets/logo.png`）由 Git LFS 保存。克隆前先运行一次 `git lfs install`；已克隆但图片是文本指针时运行 `git lfs pull`，否则 UI 无法编译。SVG 仍按文本保存。
+
+源码按职责分层：`src/desktop/` 是桌面外壳（窗口回调、视图更新与后台命令），`src/` 下其余模块组成业务库，`ui/` 是 Slint 界面；目录说明见 `AGENTS.md`。
+
 开发过程中，改业务库运行 `make check-lib`，改桌面入口运行 `make check-app`，改路由运行 `make test-router`；完成功能点后运行 `make check` 做完整检查。`make` 默认仍然构建应用。
 
 UI 编译隔离、依赖调试信息及业务检查复用的验证见 [开发构建调整记录](docs/acceptance/dev-build-2026-10-08.md)。
@@ -106,7 +110,7 @@ M1 收口检查（2026-09-24，macOS 调试 bundle，隔离的 `SWITCHX_DATA_DIR
 
 `cargo run --example config_probe -- /tmp/switchx-models.json` 只把合成 `config.toml` 差异预览输出到 stdout。预览保留其他 provider、MCP、项目、安全设置和注释；它不写用户配置。生成的 `env_key = "SWITCHX_LOCAL_TOKEN"` 仅在启动 Codex 的环境已提供本地令牌时才可用于请求。
 
-`config_transaction::PreparedSwitch` 检查目标文件未变化，先写不可变目录和恢复 journal，再原子替换 `config.toml`。`restore` 按受管字段做三方比较，保留外部新增设置；同一字段发生冲突时保留外部值和 journal。直连和路由共用目标文件锁，防止 SwitchX 实例并发写入。仅含 API 模型的原生路由通过 `auth.command` 取得本地令牌；含订阅模型的路由使用 `requires_openai_auth` 和独立本地请求头，详见下文。较早的 `config_probe`、`codex_cli_probe` 和 `deepseek_live_probe` 仍使用显式提供 `SWITCHX_LOCAL_TOKEN` 的隔离探针流程。
+`codex::route_switch::PreparedSwitch` 检查目标文件未变化，先写不可变目录和恢复 journal，再原子替换 `config.toml`。`restore` 按受管字段做三方比较，保留外部新增设置；同一字段发生冲突时保留外部值和 journal。直连和路由共用目标文件锁，防止 SwitchX 实例并发写入。仅含 API 模型的原生路由通过 `auth.command` 取得本地令牌；含订阅模型的路由使用 `requires_openai_auth` 和独立本地请求头，详见下文。较早的 `config_probe`、`codex_cli_probe` 和 `deepseek_live_probe` 仍使用显式提供 `SWITCHX_LOCAL_TOKEN` 的隔离探针流程。
 
 `cargo run --example codex_cli_probe` 会通过 npm 执行 Codex CLI 0.156.1，在独立临时 `CODEX_HOME` 中启动同一个 SwitchX 路由入口和两个本地假上游。实测两个别名分别到达对应假上游，且 `sx-ds-flash` 完成一次读取临时文件、回传工具结果、第二轮回答。运行结束会删除该临时目录；无真实 API Key、登录态或模型调用。
 

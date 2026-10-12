@@ -18,8 +18,8 @@ use serde_json::{Value, json};
 use tokio::sync::{Mutex as AsyncMutex, oneshot, watch};
 use zeroize::{Zeroize, Zeroizing};
 
-pub use crate::codex_quota::{Quota, Window as QuotaWindow};
-use crate::{app, config_transaction as files, credentials::Secret, storage::AccountBinding};
+pub use super::quota::{Quota, Window as QuotaWindow};
+use crate::{codex::route_switch as files, credentials::Secret, storage::AccountBinding};
 
 const STORE_NAME: &str = "codex_oauth_auth.json";
 const MARKER_NAME: &str = ".switchx-account.json";
@@ -73,8 +73,8 @@ impl Default for Endpoints {
             poll: "https://auth.openai.com/api/accounts/deviceauth/token".into(),
             token: "https://auth.openai.com/oauth/token".into(),
             verification: "https://auth.openai.com/codex/device".into(),
-            usage: crate::codex_quota::USAGE_ENDPOINT.into(),
-            resets: crate::codex_quota::RESETS_ENDPOINT.into(),
+            usage: super::quota::USAGE_ENDPOINT.into(),
+            resets: super::quota::RESETS_ENDPOINT.into(),
         }
     }
 }
@@ -160,6 +160,18 @@ enum CredentialUse {
     Quota,
 }
 
+impl CredentialUse {
+    /// Refusal while a native login shares this account's credentials and
+    /// needs renewal; refreshing here would rotate them behind that login.
+    fn shared_native_login_error(self) -> String {
+        if self == Self::Quota {
+            "当前 Codex 登录需要续期；请先检查并续期原生登录，再刷新额度".into()
+        } else {
+            "原生登录与绑定账号共用凭据且需要续期或同步；请先检查并续期原生登录，再重新预览".into()
+        }
+    }
+}
+
 struct CancelOnDrop(watch::Sender<bool>);
 
 impl Drop for CancelOnDrop {
@@ -172,7 +184,8 @@ struct PrivateCliHome(PathBuf);
 
 impl PrivateCliHome {
     fn new() -> Result<Self, String> {
-        let path = std::env::temp_dir().join(format!("switchx-account-context-{}", app::new_id()?));
+        let path =
+            std::env::temp_dir().join(format!("switchx-account-context-{}", crate::id::new_id()?));
         let mut builder = fs::DirBuilder::new();
         #[cfg(unix)]
         {
@@ -516,7 +529,7 @@ impl AccountManager {
                 return Err("auth.json 的登录资料早于已保存凭据，请重新获取完整登录资料".into());
             }
         }
-        let id = existing_id.clone().map_or_else(app::new_id, Ok)?;
+        let id = existing_id.clone().map_or_else(crate::id::new_id, Ok)?;
         let now = Utc::now().timestamp_millis();
         let updated_at_ms = existing_id
             .as_deref()
@@ -795,16 +808,8 @@ impl AccountManager {
     pub async fn quota(&self, id: &str, native_home: &Path) -> Result<Quota, String> {
         let credential = self
             .credential_operation(id, native_home, false, CredentialUse::Quota)
-            .await
-            .map_err(|error| {
-                if error.starts_with("原生登录与绑定账号共用凭据且需要续期或同步")
-                {
-                    "当前 Codex 登录需要续期；请先检查并续期原生登录，再刷新额度".into()
-                } else {
-                    error
-                }
-            })?;
-        crate::codex_quota::fetch(
+            .await?;
+        super::quota::fetch(
             &self.0.client,
             &self.0.endpoints.usage,
             &self.0.endpoints.resets,
@@ -883,16 +888,13 @@ impl AccountManager {
                     })
             })
         {
-            return Err(
-                "原生登录与绑定账号共用凭据且需要续期或同步；请先检查并续期原生登录，再重新预览"
-                    .into(),
-            );
+            return Err(usage.shared_native_login_error());
         }
         if snapshot.active_id.as_deref() == Some(id) {
             self.sync_snapshot(&mut session, &snapshot)?;
         }
         if usage != CredentialUse::Native {
-            self.guard_native_preview(&mut session, id, &snapshot)?;
+            self.guard_native_preview(&mut session, id, &snapshot, usage)?;
         }
         let token = self
             .resolve_token(&mut session, id, home, &mut snapshot, force, cancel)
@@ -920,6 +922,7 @@ impl AccountManager {
         session: &mut StoreSession,
         id: &str,
         snapshot: &HomeSnapshot,
+        usage: CredentialUse,
     ) -> Result<(), String> {
         let stored = account(&session.state.store, id)?;
         let Some(live) = snapshot
@@ -936,10 +939,7 @@ impl AccountManager {
             || token_expiry(&live.access_token)
                 .is_none_or(|expiry| expiry <= Utc::now().timestamp_millis() + REFRESH_BUFFER_MS)
         {
-            return Err(
-                "原生登录与绑定账号共用凭据且需要续期或同步；请先检查并续期原生登录，再重新预览"
-                    .into(),
-            );
+            return Err(usage.shared_native_login_error());
         }
         cache_live(&mut session.state, id, live);
         self.publish(&session.state)
@@ -951,7 +951,7 @@ impl AccountManager {
         id: &str,
         native_home: &Path,
         cli_path: &Path,
-    ) -> Result<crate::chatgpt::Workspace, String> {
+    ) -> Result<super::Workspace, String> {
         self.workspace_operation(id, native_home, cli_path, None)
             .await
     }
@@ -964,7 +964,7 @@ impl AccountManager {
         native_home: &Path,
         cli_path: &Path,
         discovery_address: SocketAddr,
-    ) -> Result<crate::chatgpt::Workspace, String> {
+    ) -> Result<super::Workspace, String> {
         if discovery_address.ip() != IpAddr::V4(Ipv4Addr::LOCALHOST) {
             return Err("账号测试发现地址必须是 IPv4 回环地址".into());
         }
@@ -978,7 +978,7 @@ impl AccountManager {
         native_home: &Path,
         cli_path: &Path,
         discovery_address: Option<SocketAddr>,
-    ) -> Result<crate::chatgpt::Workspace, String> {
+    ) -> Result<super::Workspace, String> {
         if !cli_path.is_absolute() || !cli_path.is_file() {
             return Err("Codex CLI 必须是存在的绝对路径文件".into());
         }
@@ -1017,7 +1017,7 @@ impl AccountManager {
             let discovered = tokio::select! {
                 biased;
                 _ = cancel.wait_for(|value| *value) => Err("账号检查已取消".to_owned()),
-                result = crate::chatgpt::workspace_using(&context.0, &cli_path) => result,
+                result = super::workspace_using(&context.0, &cli_path) => result,
             };
             // A CLI can renew during account/read. Adopt only this temporary
             // home's proven identity before its token-bearing files are removed.
@@ -1029,7 +1029,7 @@ impl AccountManager {
                 }
                 manager.sync_snapshot(&mut session, &snapshot)?;
                 let native = read_home(&native_home, &session.state.store)?;
-                manager.guard_native_preview(&mut session, &id, &native)?;
+                manager.guard_native_preview(&mut session, &id, &native, CredentialUse::Preview)?;
             }
             if read_private(&native_home.join("auth.json"))? != native_before {
                 return Err("原生登录在账号检查期间已变化，请重新预览".into());
@@ -1127,7 +1127,7 @@ impl AccountManager {
             return Ok(id);
         }
         let now = Utc::now().timestamp_millis();
-        let id = app::new_id()?;
+        let id = crate::id::new_id()?;
         session.state.store.accounts.insert(
             id.clone(),
             StoredAccount {
@@ -1452,7 +1452,7 @@ impl DeviceLogin {
         validate_secret(refresh)?;
         let id = match &existing {
             Some(stored) => stored.id.clone(),
-            None => app::new_id()?,
+            None => crate::id::new_id()?,
         };
         let now = Utc::now().timestamp_millis();
         let mut stored = StoredAccount {
@@ -2021,8 +2021,10 @@ mod tests {
 
     impl TestHome {
         fn new() -> Self {
-            let path = std::env::temp_dir()
-                .join(format!("switchx-account-test-{}", app::new_id().unwrap()));
+            let path = std::env::temp_dir().join(format!(
+                "switchx-account-test-{}",
+                crate::id::new_id().unwrap()
+            ));
             fs::create_dir_all(path.join("home")).unwrap();
             fs::create_dir_all(path.join("data")).unwrap();
             Self(path)
@@ -2189,12 +2191,9 @@ mod tests {
         let expired = serde_json::to_vec(&expired).unwrap();
         fs::write(home.home().join("auth.json"), &expired).unwrap();
         let store = fs::read(home.data().join(STORE_NAME)).unwrap();
-        assert!(
-            manager
-                .quota(&a.id, &home.home())
-                .await
-                .unwrap_err()
-                .contains("请先检查并续期原生登录")
+        assert_eq!(
+            manager.quota(&a.id, &home.home()).await.unwrap_err(),
+            "当前 Codex 登录需要续期；请先检查并续期原生登录，再刷新额度"
         );
         assert_eq!(fs::read(home.home().join("auth.json")).unwrap(), expired);
         assert_eq!(fs::read(home.data().join(STORE_NAME)).unwrap(), store);
@@ -2745,10 +2744,11 @@ mod tests {
         use std::os::unix::fs::PermissionsExt;
         let path = home
             .0
-            .join(format!("workspace-cli-{}", app::new_id().unwrap()));
-        let capture = home
-            .0
-            .join(format!("workspace-capture-{}", app::new_id().unwrap()));
+            .join(format!("workspace-cli-{}", crate::id::new_id().unwrap()));
+        let capture = home.0.join(format!(
+            "workspace-capture-{}",
+            crate::id::new_id().unwrap()
+        ));
         let script = r#"#!/usr/bin/python3
 import json, os, pathlib, stat, sys
 for line in sys.stdin:

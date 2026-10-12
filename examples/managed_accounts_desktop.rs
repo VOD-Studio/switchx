@@ -10,8 +10,8 @@ use std::{
 use base64::{Engine, engine::general_purpose::URL_SAFE_NO_PAD};
 use serde_json::json;
 use switchx::{
-    accounts::AccountManager,
     app, chatgpt,
+    chatgpt::accounts::AccountManager,
     storage::{AccountBinding, RequestRecord, RequestStatus, Store},
 };
 
@@ -37,7 +37,7 @@ fn fixture_bundle(root: &Path, binary: &Path, data: &Path, home: &Path) -> io::R
     std::fs::copy(binary, contents.join("MacOS/switchx"))?;
     let identifier = format!(
         "dev.switchx.fixture.accounts.{}",
-        app::new_id().map_err(io::Error::other)?
+        switchx::id::new_id().map_err(io::Error::other)?
     );
     let data = xml_text(&data.to_string_lossy());
     let home = xml_text(&home.to_string_lossy());
@@ -80,8 +80,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     if !binary.is_file() {
         return Err("run sh scripts/bundle-macos.sh first".into());
     }
-    let root =
-        Fixture(std::env::temp_dir().join(format!("switchx-accounts-desktop-{}", app::new_id()?)));
+    let root = Fixture(std::env::temp_dir().join(format!(
+        "switchx-accounts-desktop-{}",
+        switchx::id::new_id()?
+    )));
     let home = root.0.join("codex");
     let data = root.0.join("data");
     std::fs::create_dir_all(&home)?;

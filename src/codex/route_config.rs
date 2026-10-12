@@ -129,7 +129,8 @@ mod tests {
 
     fn publication() -> Publication {
         let templates =
-            serde_json::from_str(include_str!("../tests/fixtures/synthetic-models.json")).unwrap();
+            serde_json::from_str(include_str!("../../tests/fixtures/synthetic-models.json"))
+                .unwrap();
         publish(
             &templates,
             &[Selection {
@@ -144,7 +145,7 @@ mod tests {
 
     #[test]
     fn preview_changes_only_owned_codex_fields() {
-        let current = include_str!("../tests/fixtures/codex-user-config.toml");
+        let current = include_str!("../../tests/fixtures/codex-user-config.toml");
         let preview = preview_route(
             current,
             &publication(),
@@ -164,7 +165,7 @@ mod tests {
         );
         assert_eq!(
             preview.proposed,
-            include_str!("../tests/fixtures/routed-user-config.toml")
+            include_str!("../../tests/fixtures/routed-user-config.toml")
         );
         assert!(preview.proposed.contains("# user comment about MCP"));
         assert!(preview.proposed.contains("# chosen by user"));

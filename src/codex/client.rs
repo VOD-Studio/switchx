@@ -17,9 +17,9 @@ use tokio::{
 use toml_edit::{DocumentMut, Item};
 
 use crate::{
-    config_transaction::{self, read_config},
-    direct::validate_provider,
-    direct_config,
+    codex::direct_switch,
+    codex::route_switch::{self, read_config},
+    upstream::validate_provider,
 };
 
 pub struct ConfigStatus {
@@ -84,10 +84,10 @@ pub fn inspect(home: &Path, state_dir: &Path) -> Result<ConfigStatus, String> {
         .and_then(Item::as_str)
         .unwrap_or("openai")
         .to_owned();
-    let active_target = direct_config::active_target(state_dir)?;
+    let active_target = direct_switch::active_target(state_dir)?;
     let journal_for_target = active_target.as_deref() == Some(path.as_path());
     let direct_active = journal_for_target && provider.starts_with("switchx_direct_");
-    let route = config_transaction::recovery(state_dir)?;
+    let route = route_switch::recovery(state_dir)?;
     let route_managed = route.is_some();
     let mode = if direct_active {
         "SwitchX 直连已写入 · 新客户端启动后生效"
@@ -273,7 +273,7 @@ struct CheckHome(PathBuf);
 
 impl CheckHome {
     fn new() -> Result<Self, String> {
-        let path = env::temp_dir().join(format!("switchx-catalog-check-{}", crate::app::new_id()?));
+        let path = env::temp_dir().join(format!("switchx-catalog-check-{}", crate::id::new_id()?));
         let mut builder = fs::DirBuilder::new();
         #[cfg(unix)]
         {
@@ -284,7 +284,7 @@ impl CheckHome {
             .create(&path)
             .map_err(|_| "无法创建隔离目录以检查 Codex 兼容性")?;
         let home = Self(path);
-        config_transaction::write_exclusive_atomic(
+        route_switch::write_exclusive_atomic(
             &home.0.join("config.toml"),
             b"cli_auth_credentials_store = \"file\"\ncheck_for_update_on_startup = false\nopenai_base_url = \"http://127.0.0.1:1/v1\"\nchatgpt_base_url = \"http://127.0.0.1:1\"\n[analytics]\nenabled = false\n",
         )?;
@@ -480,7 +480,7 @@ pub async fn check_catalog_using(catalog: &Value, executable: &Path) -> Result<S
     }
     let home = CheckHome::new()?;
     let catalog_path = home.0.join("catalog.json");
-    config_transaction::write_exclusive_atomic(
+    route_switch::write_exclusive_atomic(
         &catalog_path,
         &serde_json::to_vec(catalog).map_err(|_| "无法生成目录")?,
     )?;
@@ -534,7 +534,7 @@ pub async fn write_codex_launcher(
     };
     #[cfg(not(unix))]
     let permissions = None;
-    config_transaction::replace(&path, script.as_bytes(), permissions, &expected)?;
+    route_switch::replace(&path, script.as_bytes(), permissions, &expected)?;
     Ok(path)
 }
 

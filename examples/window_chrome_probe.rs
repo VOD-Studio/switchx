@@ -3,8 +3,7 @@
 //! Creates only a UI window; reads no provider data, credentials, or Codex files.
 
 #[cfg(target_os = "macos")]
-#[path = "../src/macos.rs"]
-pub mod macos;
+use switchx::macos;
 
 #[cfg(target_os = "macos")]
 fn verify_chrome(phase: &str) {

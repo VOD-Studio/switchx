@@ -10,11 +10,11 @@ use axum::{
 use base64::{Engine, engine::general_purpose::URL_SAFE_NO_PAD};
 use serde_json::{Value, json};
 use switchx::{
-    accounts::AccountManager,
     app,
     catalog::{Selection, publish},
+    chatgpt::accounts::AccountManager,
     chatgpt::{self, Workspace},
-    routing::{LOCAL_TOKEN_HEADER, RouterState, RunningRouter, Upstream},
+    router::{LOCAL_TOKEN_HEADER, RouterState, RunningRouter, Upstream},
     storage::Store,
 };
 use tokio::{net::TcpListener, sync::mpsc, time::timeout};

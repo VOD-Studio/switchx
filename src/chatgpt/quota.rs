@@ -4,7 +4,7 @@ use std::time::Duration;
 use serde::Deserialize;
 use serde_json::Value;
 
-use crate::accounts::ManagedCredential;
+use super::accounts::ManagedCredential;
 
 pub(crate) const USAGE_ENDPOINT: &str = "https://chatgpt.com/backend-api/wham/usage";
 pub(crate) const RESETS_ENDPOINT: &str =
