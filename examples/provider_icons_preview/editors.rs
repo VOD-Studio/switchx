@@ -850,6 +850,28 @@ pub(super) fn render_provider_editor(
             app.set_editor_open(true);
             snapshot(window, output, &format!("provider-editor-{suffix}"))?;
 
+            app.set_fetched_models(ModelRc::new(VecModel::from(vec![
+                "gpt-6-luna".into(),
+                "gpt-6-sol".into(),
+                "gpt-6.1-sol".into(),
+                "DeepSeek-Chat".into(),
+                "DeepSeek-Reasoner".into(),
+                "claude-sonnet".into(),
+                "claude-opus".into(),
+            ])));
+            snapshot(window, output, &format!("provider-models-ready-{suffix}"))?;
+            let model_y = if height < 760 { 418.0 } else { 462.0 };
+            headless::click(window, left + 254.0, model_y);
+            snapshot(window, output, &format!("provider-models-open-{suffix}"))?;
+            headless::key(window, "DEEPSEEK");
+            snapshot(window, output, &format!("provider-models-search-{suffix}"))?;
+            headless::key(window, slint::platform::Key::DownArrow);
+            headless::key(window, slint::platform::Key::Return);
+            assert_eq!(app.get_edit_model(), "DeepSeek-Chat");
+            app.set_edit_model("gpt-6-luna".into());
+            app.set_fetched_models(ModelRc::new(VecModel::from(Vec::new())));
+            render(window);
+
             // Configuration preferences expand without moving the footer.
             headless::click(window, width as f32 - 126.0, 164.0);
             render(window);

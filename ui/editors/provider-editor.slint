@@ -5,13 +5,13 @@ import {
     QuietButton,
     SurfaceCard,
     QuietLineEdit as LineEdit,
-    QuietComboBox as ComboBox,
 } from "../components.slint";
 import { QuietScrollView as ScrollView } from "../scroll-view.slint";
 import { ConnectionOption, ConnectionField } from "connection-controls.slint";
 import { CodeEditor } from "../code-editor.slint";
 import { FeedbackBanner } from "../feedback-banner.slint";
 import { ModelQuickPicker } from "model-quick-picker.slint";
+import { ModelPicker } from "model-picker.slint";
 import { BatchModelRow, BatchSummary } from "../view-models.slint";
 
 export component ProviderEditor inherits SurfaceCard {
@@ -189,19 +189,12 @@ export component ProviderEditor inherits SurfaceCard {
 
                         ConnectionField {
                             label: "默认模型 ID";
-                            LineEdit {
+                            ModelPicker {
                                 text <=> root.edit-model;
+                                model: root.discovery-scope == 0 ? root.fetched-models : [];
                                 placeholder-text: "上游实际模型 ID";
                                 accessible-label: "上游模型 ID";
-                                enabled: !root.busy && !root.config-managed;
-                            }
-
-                            if root.discovery-scope == 0 && root.fetched-models.length > 0 && root.edit-id != "": ComboBox {
-                                model: root.fetched-models;
-                                current-value: root.edit-model;
-                                accessible-label: "选择探测到的默认模型";
-                                enabled: !root.busy && !root.config-managed;
-                                selected(value) => { root.edit-model = value; }
+                                enabled: root.editor-open && !root.busy && !root.config-managed && !root.preview-expanded;
                             }
                         }
 

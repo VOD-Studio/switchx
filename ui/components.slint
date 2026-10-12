@@ -310,6 +310,7 @@ export component QuietLineEdit inherits Rectangle {
     in property <InputType> input-type <=> input.input-type;
     in property <InputMethodHints> input-method-hints <=> input.input-method-hints;
     in property <string> placeholder-text;
+    in property <length> right-padding: 12px;
     in property <image> icon;
     in property <length> font-size <=> input.font-size;
     in property <string> font-family <=> input.font-family;
@@ -388,7 +389,7 @@ export component QuietLineEdit inherits Rectangle {
         ContextMenuArea {
             x: root.icon.width > 0 ? 38px : 12px;
             y: 1px;
-            width: max(0px, parent.width - self.x - 12px);
+            width: max(0px, parent.width - self.x - root.right-padding);
             height: parent.height - 2px;
             Menu {
                 MenuItem {
