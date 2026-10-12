@@ -1,5 +1,7 @@
 # SwitchX
 
+<img src="assets/app-icon.png" alt="SwitchX 应用图标" width="128" height="128">
+
 为 Codex 管理模型上游的桌面应用，使用 Rust 与 Slint 构建。
 
 SwitchX 把 API 供应商、ChatGPT 订阅和 Grok 订阅放进同一个模型目录，通过本地路由同时发布到 Codex 的模型菜单。写入 Codex 配置前先预览，之后可随时恢复原状。
