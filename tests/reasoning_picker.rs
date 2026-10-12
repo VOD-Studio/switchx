@@ -1,60 +1,27 @@
-use slint::platform::software_renderer::{MinimalSoftwareWindow, RepaintBufferType};
-use slint::platform::{Key, Platform, PointerEventButton, WindowAdapter, WindowEvent};
+use slint::platform::Key;
+use slint::platform::software_renderer::MinimalSoftwareWindow;
 use slint::{ComponentHandle, Model, ModelRc, PhysicalSize, SharedPixelBuffer, VecModel};
-use std::{cell::Cell, io::Write, rc::Rc, time::Duration};
+use switchx::headless;
 use switchx::ui::{AppWindow, ConnectionModelRow, ReasoningChoices, Theme};
 
-thread_local! { static TIME: Cell<Duration> = const { Cell::new(Duration::ZERO) }; }
-struct PreviewPlatform(Rc<MinimalSoftwareWindow>);
-impl Platform for PreviewPlatform {
-    fn create_window_adapter(&self) -> Result<Rc<dyn WindowAdapter>, slint::PlatformError> {
-        Ok(self.0.clone())
-    }
-    fn duration_since_start(&self) -> Duration {
-        TIME.with(Cell::get)
-    }
-}
 fn advance(ms: u64) {
-    TIME.with(|time| time.set(time.get() + Duration::from_millis(ms)));
+    headless::advance(ms);
     slint::platform::update_timers_and_animations();
 }
 fn click(window: &MinimalSoftwareWindow, x: f32, y: f32) {
-    let position = slint::LogicalPosition::new(x, y);
-    window.dispatch_event(WindowEvent::PointerMoved { position });
-    window.dispatch_event(WindowEvent::PointerPressed {
-        position,
-        button: PointerEventButton::Left,
-    });
-    window.dispatch_event(WindowEvent::PointerReleased {
-        position,
-        button: PointerEventButton::Left,
-    });
+    headless::click(window, x, y);
     slint::platform::update_timers_and_animations();
 }
 fn text(window: &MinimalSoftwareWindow, text: slint::SharedString) {
-    window.dispatch_event(WindowEvent::KeyPressed { text: text.clone() });
-    window.dispatch_event(WindowEvent::KeyReleased { text });
+    headless::key(window, text);
     slint::platform::update_timers_and_animations();
 }
 fn key(window: &MinimalSoftwareWindow, key: Key) {
     text(window, key.into());
 }
 fn draw(window: &MinimalSoftwareWindow, name: &str) -> SharedPixelBuffer<slint::Rgb8Pixel> {
-    slint::platform::update_timers_and_animations();
-    let size = WindowAdapter::size(window);
-    let mut pixels = SharedPixelBuffer::new(size.width, size.height);
-    window.request_redraw();
-    window.draw_if_needed(|renderer| {
-        renderer.render(pixels.make_mut_slice(), size.width as usize);
-    });
-    if let Some(output) = std::env::var_os("SWITCHX_REASONING_SNAPSHOTS") {
-        let output = std::path::PathBuf::from(output);
-        assert!(output.is_absolute());
-        std::fs::create_dir_all(&output).unwrap();
-        let mut file = std::fs::File::create(output.join(format!("{name}.ppm"))).unwrap();
-        write!(file, "P6\n{} {}\n255\n", size.width, size.height).unwrap();
-        file.write_all(pixels.as_bytes()).unwrap();
-    }
+    let pixels = headless::render(window);
+    headless::save_snapshot("SWITCHX_REASONING_SNAPSHOTS", name, &pixels);
     pixels
 }
 fn settle(window: &MinimalSoftwareWindow) {
@@ -91,8 +58,7 @@ fn reset(app: &AppWindow) {
 
 #[test]
 fn picker_supports_search_multiselect_defaults_keyboard_motion_and_disabled_states() {
-    let window = MinimalSoftwareWindow::new(RepaintBufferType::NewBuffer);
-    slint::platform::set_platform(Box::new(PreviewPlatform(window.clone()))).unwrap();
+    let window = headless::install_with_manual_time();
     let app = AppWindow::new().unwrap();
     switchx::reasoning_picker::connect(&app);
     app.set_loading(false);

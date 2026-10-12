@@ -1,9 +1,9 @@
-use slint::platform::software_renderer::{MinimalSoftwareWindow, RepaintBufferType};
-use slint::platform::{Key, Platform, PointerEventButton, WindowAdapter, WindowEvent};
+use slint::platform::software_renderer::MinimalSoftwareWindow;
+use slint::platform::{Key, PointerEventButton, WindowEvent};
 use slint::{
     ComponentHandle, LogicalPosition, ModelRc, PhysicalSize, Rgb8Pixel, SharedPixelBuffer, VecModel,
 };
-use std::{io::Write, rc::Rc};
+use switchx::headless;
 
 slint::slint! {
     import { QuietScrollView, ListView } from "../ui/scroll-view.slint";
@@ -82,21 +82,8 @@ slint::slint! {
 }
 
 fn draw(window: &MinimalSoftwareWindow, name: &str) -> SharedPixelBuffer<Rgb8Pixel> {
-    slint::platform::update_timers_and_animations();
-    let size = WindowAdapter::size(window);
-    let mut pixels = SharedPixelBuffer::new(size.width, size.height);
-    window.request_redraw();
-    window.draw_if_needed(|renderer| {
-        renderer.render(pixels.make_mut_slice(), size.width as usize);
-    });
-    if let Some(output) = std::env::var_os("SWITCHX_SCROLL_SNAPSHOTS") {
-        let output = std::path::PathBuf::from(output);
-        assert!(output.is_absolute());
-        std::fs::create_dir_all(&output).unwrap();
-        let mut file = std::fs::File::create(output.join(format!("{name}.ppm"))).unwrap();
-        write!(file, "P6\n{} {}\n255\n", size.width, size.height).unwrap();
-        file.write_all(pixels.as_bytes()).unwrap();
-    }
+    let pixels = headless::render(window);
+    headless::save_snapshot("SWITCHX_SCROLL_SNAPSHOTS", name, &pixels);
     pixels
 }
 
@@ -106,31 +93,13 @@ fn pixel(pixels: &SharedPixelBuffer<Rgb8Pixel>, x: usize, y: usize) -> [u8; 3] {
 }
 
 fn click(window: &MinimalSoftwareWindow, x: f32, y: f32) {
-    let position = LogicalPosition::new(x, y);
-    window.dispatch_event(WindowEvent::PointerMoved { position });
-    window.dispatch_event(WindowEvent::PointerPressed {
-        position,
-        button: PointerEventButton::Left,
-    });
-    window.dispatch_event(WindowEvent::PointerReleased {
-        position,
-        button: PointerEventButton::Left,
-    });
+    headless::click(window, x, y);
     slint::platform::update_timers_and_animations();
-}
-
-struct PreviewPlatform(Rc<MinimalSoftwareWindow>);
-
-impl Platform for PreviewPlatform {
-    fn create_window_adapter(&self) -> Result<Rc<dyn WindowAdapter>, slint::PlatformError> {
-        Ok(self.0.clone())
-    }
 }
 
 #[test]
 fn scrollbars_reserve_space_outside_content() {
-    let window = MinimalSoftwareWindow::new(RepaintBufferType::NewBuffer);
-    slint::platform::set_platform(Box::new(PreviewPlatform(window.clone()))).unwrap();
+    let window = headless::install();
     let app = ScrollWindow::new().unwrap();
     app.global::<Theme>().set_animations_enabled(false);
     app.set_rows(ModelRc::new(VecModel::from((0..1000).collect::<Vec<_>>())));
