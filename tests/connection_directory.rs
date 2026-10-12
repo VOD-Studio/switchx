@@ -1,7 +1,6 @@
 use std::{fs, path::PathBuf};
 use switchx::{
     app::{self, ConnectionModel},
-    codex::direct_switch::{self, PreparedDirectSwitch},
     storage::{ProviderKind, ProviderRecord, Store},
 };
 
@@ -210,6 +209,8 @@ fn directory_save_is_atomic_preserves_identity_selection_and_detects_external_ed
 #[test]
 #[cfg(unix)]
 fn direct_mode_publishes_connection_directory_with_actual_ids_and_restores_it() {
+    use switchx::codex::direct_switch::{self, PreparedDirectSwitch};
+
     let fixture = Fixture::new();
     let store = fixture.store();
     let provider = provider("api");
