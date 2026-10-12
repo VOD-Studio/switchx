@@ -26,6 +26,7 @@ export component WorkbenchConnection inherits Rectangle {
     property <float> picked: root.provider.selected-model-count > 0 ? 1 : 0;
     property <float> hover: header-hover.has-hover ? 1 : 0;
     property <color> accent: root.provider.is-grok ? (Theme.dark ? #c5b6e3 : #7e66a0) : root.provider.is-subscription ? Theme.brand : Theme.code-key;
+    private property <length> hover-space: 2px;
     animate reveal {
         duration: Theme.drawer-motion;
         easing: cubic-bezier(0.22, 1, 0.36, 1);
@@ -41,13 +42,14 @@ export component WorkbenchConnection inherits Rectangle {
         triggered => { root.entered = true; }
     }
 
-    height: 104px + model-section.height;
+    // Keep the hover lift inside the clipped row and scroll viewport.
+    height: 104px + model-section.height + root.hover-space;
     preferred-height: root.height;
     opacity: Theme.page-motion == 0ms ? 1 : root.reveal;
     Rectangle {
-        y: (1 - root.reveal) * 12px - root.hover * 1px;
+        y: root.hover-space + (1 - root.reveal) * 12px - root.hover * 1px;
         width: parent.width;
-        height: parent.height;
+        height: parent.height - root.hover-space;
         border-radius: 12px;
         border-width: 1px;
         border-color: root.accent.with-alpha(0.15 + root.picked * 0.2 + root.hover * 0.16);
