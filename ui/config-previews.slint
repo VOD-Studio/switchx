@@ -1,0 +1,157 @@
+import { Theme } from "tokens.slint";
+import { QuietScrollView as ScrollView } from "scroll-view.slint";
+import { QuietButton, StatusPill, SurfaceCard } from "components.slint";
+
+// Scrollable configuration text inside a card.
+component PreviewText inherits SurfaceCard {
+    in property <string> text;
+    vertical-stretch: 1;
+    background: Theme.background;
+    ScrollView {
+        content-width: self.visible-width;
+        horizontal-scrollbar-policy: always-off;
+        x: 16px;
+        y: 16px;
+        width: parent.width - 32px;
+        height: parent.height - 32px;
+        VerticalLayout {
+            Text {
+                min-width: 0px;
+                text: root.text;
+                color: Theme.primary-text;
+                font-size: 12px;
+                wrap: word-wrap;
+            }
+        }
+    }
+}
+
+// Checks a route before it is published to the target Codex configuration.
+export component RoutePublishSheet inherits VerticalLayout {
+    in property <int> model-count;
+    in property <string> default-model;
+    in property <string> config-home;
+    in property <string> preview;
+    in property <bool> ready;
+    in property <string> action-message;
+    in property <bool> busy;
+    // Settled logins and an unmanaged configuration permit checking.
+    in property <bool> can-act;
+    callback inspect();
+    callback apply();
+
+    spacing: 16px;
+    HorizontalLayout {
+        Text {
+            text: root.model-count + " 个模型 · 默认 " + root.default-model;
+            color: Theme.primary-text;
+            font-size: 13px;
+            wrap: word-wrap;
+        }
+
+        StatusPill {
+            label: root.busy ? "正在检查…" : root.ready ? "检查通过" : "等待检查";
+            ink: root.ready ? Theme.success : Theme.warning;
+            fill: root.ready ? Theme.brand-surface : Theme.warning-surface;
+        }
+    }
+
+    Text {
+        text: root.config-home;
+        color: Theme.muted-text;
+        font-size: 12px;
+        wrap: word-wrap;
+    }
+
+    PreviewText {
+        text: root.preview == "" ? (root.busy ? "正在检查模型目录、连接与目标配置…" : "检查完成后，配置差异会显示在这里。") : root.preview;
+    }
+
+    Text {
+        text: root.action-message;
+        color: Theme.muted-text;
+        font-size: 12px;
+        wrap: word-wrap;
+    }
+
+    Text {
+        text: "在新会话中使用发布后的模型菜单；跨上游切换请新建会话。停止时恢复启用前的配置。";
+        color: Theme.muted-text;
+        font-size: 12px;
+        wrap: word-wrap;
+    }
+
+    HorizontalLayout {
+        spacing: 10px;
+        QuietButton {
+            text: "重新检查";
+            enabled: !root.busy && root.can-act;
+            clicked => { root.inspect(); }
+        }
+
+        QuietButton {
+            text: root.busy ? "正在处理…" : "确认启用  →";
+            primary: true;
+            enabled: !root.busy && root.can-act && root.ready;
+            clicked => { root.apply(); }
+        }
+    }
+}
+
+// Shows a direct switch's changes before they are applied.
+export component DirectSwitchSheet inherits VerticalLayout {
+    in property <string> config-home;
+    in property <string> config-status;
+    in property <string> preview;
+    in property <bool> ready;
+    in property <bool> direct-active;
+    in property <bool> config-managed;
+    in property <string> action-message;
+    in property <bool> busy;
+    // Settled logins permit applying.
+    in property <bool> can-apply;
+    callback restore();
+    callback apply();
+
+    spacing: 16px;
+    Text {
+        text: root.config-home;
+        color: Theme.muted-text;
+        font-size: 12px;
+        wrap: word-wrap;
+    }
+
+    PreviewText {
+        text: root.preview == "" ? (root.direct-active ? root.config-status : "在连接列表选择 API 连接的“直连”，即可查看配置差异。") : root.preview;
+    }
+
+    Text {
+        text: root.action-message;
+        color: Theme.muted-text;
+        font-size: 12px;
+        wrap: word-wrap;
+    }
+
+    Text {
+        text: "应用前检查模型列表。移动或删除 SwitchX 前，请先恢复原配置。";
+        color: Theme.muted-text;
+        font-size: 12px;
+        wrap: word-wrap;
+    }
+
+    HorizontalLayout {
+        spacing: 10px;
+        QuietButton {
+            text: "恢复原配置";
+            enabled: !root.busy && root.config-managed;
+            clicked => { root.restore(); }
+        }
+
+        QuietButton {
+            text: root.busy ? "正在处理…" : "应用直连";
+            primary: true;
+            enabled: root.ready && !root.busy && root.can-apply;
+            clicked => { root.apply(); }
+        }
+    }
+}

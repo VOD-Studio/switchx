@@ -1,0 +1,120 @@
+import { Theme } from "../tokens.slint";
+import { QuietButton, SurfaceCard } from "../components.slint";
+
+// Confirms writing a saved account into the Codex entry login, or a native relogin.
+export component AccountLoginConfirm inherits VerticalLayout {
+    in property <bool> native;
+    in property <bool> open;
+    in property <bool> busy;
+    // Logins, recovery, and a selected account permit confirming.
+    in property <bool> can-confirm;
+    callback confirm();
+    callback cancel();
+
+    spacing: 16px;
+    Text {
+        text: "执行时会先恢复受管配置，并停止当前路由。";
+        color: Theme.warning;
+        font-size: 13px;
+        wrap: word-wrap;
+    }
+
+    Text {
+        text: "各上游的账号绑定保持不变。完成后，请在工作台重新发布，并启动新会话。";
+        color: Theme.muted-text;
+        font-size: 13px;
+        wrap: word-wrap;
+    }
+
+    HorizontalLayout {
+        spacing: 10px;
+        QuietButton {
+            text: "取消";
+            enabled: root.open && !root.busy;
+            clicked => { root.cancel(); }
+        }
+
+        QuietButton {
+            text: root.native ? "继续登录" : "确认写入";
+            primary: true;
+            enabled: root.open && !root.busy && root.can-confirm;
+            clicked => { root.confirm(); }
+        }
+    }
+}
+
+// Removes a saved ChatGPT or Grok account once no upstream references it.
+export component AccountRemovalConfirm inherits SurfaceCard {
+    in property <bool> grok;
+    in property <string> label;
+    in property <string> references;
+    in property <bool> has-error;
+    in property <string> error-message;
+    in property <bool> busy;
+    // Settled logins and configuration permit removing.
+    in property <bool> can-remove;
+    callback remove();
+    callback cancel();
+
+    border-width: 0px;
+    background: transparent;
+    height: (root.has-error ? 332px : 272px) + (root.references == "" ? 0px : 64px);
+    VerticalLayout {
+        padding: 24px;
+        spacing: 14px;
+        Text {
+            text: root.grok ? "移除 Grok 账号" : "移除 ChatGPT 账号";
+            color: Theme.primary-text;
+            font-size: 19px;
+            font-weight: 600;
+        }
+
+        Text {
+            text: root.label;
+            color: Theme.primary-text;
+            font-size: 14px;
+            overflow: elide;
+        }
+
+        Text {
+            text: root.references == "" ? "将移除此账号在 SwitchX 中保存的登录信息。" : "此账号仍被上游引用。请先重新绑定或删除关联上游，再移除账号。";
+            color: Theme.muted-text;
+            font-size: 13px;
+            wrap: word-wrap;
+        }
+
+        if root.references != "": Text {
+            text: "关联上游：" + root.references;
+            color: Theme.warning;
+            font-size: 13px;
+            wrap: word-wrap;
+        }
+
+        if root.has-error: Text {
+            text: root.error-message;
+            color: Theme.error;
+            font-size: 13px;
+            wrap: word-wrap;
+        }
+
+        Rectangle {
+            vertical-stretch: 1;
+        }
+
+        HorizontalLayout {
+            spacing: 10px;
+            QuietButton {
+                text: "取消";
+                enabled: !root.busy;
+                clicked => { root.cancel(); }
+            }
+
+            QuietButton {
+                text: "确认移除";
+                primary: true;
+                enabled: !root.busy && root.can-remove && root.references == "";
+                clicked => { root.remove(); }
+            }
+        }
+    }
+}

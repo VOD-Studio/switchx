@@ -1,0 +1,77 @@
+import { Theme } from "../tokens.slint";
+import {
+    QuietButton,
+    QuietCheckBox as CheckBox,
+    QuietComboBox as ComboBox,
+    SurfaceCard,
+} from "../components.slint";
+
+// One fallback upstream for a mapping; sending requests there needs explicit consent.
+export component FallbackEditor inherits SurfaceCard {
+    in property <string> primary-label;
+    in property <[string]> options;
+    in-out property <int> choice;
+    in-out property <bool> consent;
+    in property <bool> busy;
+    in property <bool> config-managed;
+    callback save();
+    callback cancel();
+
+    height: 350px;
+    border-width: 0px;
+    background: transparent;
+    VerticalLayout {
+        padding: 18px;
+        spacing: 10px;
+        Text {
+            text: "备用上游 · " + root.primary-label;
+            color: Theme.primary-text;
+            font-size: 16px;
+            font-weight: 600;
+            overflow: elide;
+        }
+
+        ComboBox {
+            model: root.options;
+            current-index <=> root.choice;
+            accessible-label: "选择备用上游";
+            enabled: !root.busy && !root.config-managed;
+            selected(value) => { root.consent = false; }
+        }
+
+        Text {
+            text: "主上游 → 一个备用上游。仅在连接建立失败且请求尚未发送时尝试一次；超时、HTTP 错误和响应中断均不切换。主备实际模型 ID、能力和指令模板须一致。";
+            color: Theme.muted-text;
+            font-size: 12px;
+            wrap: word-wrap;
+        }
+
+        Text {
+            text: "选择备用后，请确认该站点的数据区域与隐私要求适用；费用可能变化。备用模型无需单独发布。";
+            color: Theme.muted-text;
+            font-size: 12px;
+            wrap: word-wrap;
+        }
+
+        CheckBox {
+            text: "允许在上述条件下把完整请求发送到所选备用站点";
+            checked <=> root.consent;
+            enabled: root.choice > 0 && !root.busy && !root.config-managed;
+        }
+
+        HorizontalLayout {
+            spacing: 8px;
+            QuietButton {
+                text: "保存备用策略";
+                primary: true;
+                enabled: !root.busy && !root.config-managed && (root.choice == 0 || root.consent);
+                clicked => { root.save(); }
+            }
+
+            QuietButton {
+                text: "取消";
+                clicked => { root.cancel(); }
+            }
+        }
+    }
+}
