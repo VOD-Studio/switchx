@@ -426,7 +426,9 @@ pub async fn catalog() -> Result<Vec<Value>, String> {
     }
     let path =
         std::env::temp_dir().join(format!("switchx-chatgpt-catalog-{}", crate::id::new_id()?));
-    let mut builder = std::fs::DirBuilder::new();
+    let builder = std::fs::DirBuilder::new();
+    #[cfg(unix)]
+    let mut builder = builder;
     #[cfg(unix)]
     {
         use std::os::unix::fs::DirBuilderExt;

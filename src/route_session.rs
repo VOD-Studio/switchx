@@ -289,6 +289,26 @@ impl RouteSession {
         default_model: &str,
         helper: &Path,
     ) -> Result<String, String> {
+        self.prepare_using(
+            state_dir,
+            config_home,
+            port,
+            default_model,
+            helper,
+            client::cli_path,
+        )
+        .await
+    }
+
+    async fn prepare_using(
+        &mut self,
+        state_dir: &Path,
+        config_home: &Path,
+        port: u16,
+        default_model: &str,
+        helper: &Path,
+        resolve_cli: impl FnOnce() -> Result<PathBuf, String>,
+    ) -> Result<String, String> {
         self.discard_preview();
         if self.active.is_some() {
             return Err("请先恢复原配置并停止当前路由".into());
@@ -329,7 +349,7 @@ impl RouteSession {
         let uses_chatgpt = providers
             .iter()
             .any(|provider| provider.kind == ProviderKind::Chatgpt);
-        let cli_path = client::cli_path()?;
+        let cli_path = resolve_cli()?;
         let accounts = self
             .resolve_accounts(state_dir, config_home, &cli_path, &providers)
             .await?;
@@ -984,10 +1004,12 @@ mod tests {
         chatgpt::bind_managed_account(&data, Some("0123456789abcdef0123456789abcdef")).unwrap();
         let mut session = RouteSession::default();
         let error = session
-            .prepare(&data, &home, 0, &model, &root.join("must-not-run"))
+            .prepare_using(&data, &home, 0, &model, &root.join("must-not-run"), || {
+                Ok(root.join("must-not-run"))
+            })
             .await
             .unwrap_err();
-        assert!(error.contains("账号"));
+        assert!(error.contains("账号"), "unexpected preview error: {error}");
         assert_eq!(std::fs::read(home.join("config.toml")).unwrap(), config);
         assert_eq!(std::fs::read(home.join("auth.json")).unwrap(), auth);
         assert!(!home.join(".switchx-account.json").exists());

@@ -274,7 +274,9 @@ struct CheckHome(PathBuf);
 impl CheckHome {
     fn new() -> Result<Self, String> {
         let path = env::temp_dir().join(format!("switchx-catalog-check-{}", crate::id::new_id()?));
-        let mut builder = fs::DirBuilder::new();
+        let builder = fs::DirBuilder::new();
+        #[cfg(unix)]
+        let mut builder = builder;
         #[cfg(unix)]
         {
             use std::os::unix::fs::DirBuilderExt;

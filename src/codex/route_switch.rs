@@ -716,11 +716,16 @@ fn temporary_path(path: &Path) -> Result<PathBuf, String> {
     )))
 }
 
+#[cfg(unix)]
 pub(crate) fn sync_parent(path: &Path) -> Result<(), String> {
-    #[cfg(unix)]
     File::open(path.parent().unwrap())
         .and_then(|dir| dir.sync_all())
         .map_err(io_error)?;
+    Ok(())
+}
+
+#[cfg(not(unix))]
+pub(crate) fn sync_parent(_path: &Path) -> Result<(), String> {
     Ok(())
 }
 

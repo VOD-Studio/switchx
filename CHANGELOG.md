@@ -13,3 +13,7 @@
 - 统一应用与 UI crate 的版本号，提供 `switchx --version` 和发版准备命令。
 - 推送与 PR 自动检查并构建 macOS、Windows、Linux 的 x64 与 ARM64 包。
 - 推送版本标签后自动创建 GitHub Release，附上 changelog、六个平台包和 SHA-256 校验文件。
+
+### Fixed
+
+- 修正 Windows 平台分支的 Clippy 警告，以及测试对本机 Codex 和固定 Python 路径的依赖，使六个平台的 CI 可在干净环境中运行。

@@ -186,7 +186,9 @@ impl PrivateCliHome {
     fn new() -> Result<Self, String> {
         let path =
             std::env::temp_dir().join(format!("switchx-account-context-{}", crate::id::new_id()?));
-        let mut builder = fs::DirBuilder::new();
+        let builder = fs::DirBuilder::new();
+        #[cfg(unix)]
+        let mut builder = builder;
         #[cfg(unix)]
         {
             use std::os::unix::fs::DirBuilderExt;
@@ -2749,7 +2751,7 @@ mod tests {
             "workspace-capture-{}",
             crate::id::new_id().unwrap()
         ));
-        let script = r#"#!/usr/bin/python3
+        let script = r#"#!/usr/bin/env python3
 import json, os, pathlib, stat, sys
 for line in sys.stdin:
     request = json.loads(line)
@@ -2850,8 +2852,13 @@ for line in sys.stdin:
             let native_home = home.home();
             async move { manager.workspace_for_route(&a.id, &native_home, &cli).await }
         });
-        tokio::time::timeout(Duration::from_secs(2), async {
+        // Interpreter startup on a cold CI host is separate from cancellation latency.
+        tokio::time::timeout(Duration::from_secs(10), async {
             while !capture.exists() {
+                assert!(
+                    !waiter.is_finished(),
+                    "workspace fixture exited before receiving account/read"
+                );
                 tokio::time::sleep(Duration::from_millis(10)).await;
             }
         })
