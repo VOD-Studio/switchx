@@ -25,7 +25,9 @@ use axum::{
     routing::{get, post},
 };
 use serde_json::{Value, json};
-use switchx::{app, client, config_transaction, routed::RouteSession, storage::Store};
+use switchx::{
+    app, codex::client, codex::route_switch, route_session::RouteSession, storage::Store,
+};
 use tokio::{net::TcpListener, process::Command, sync::mpsc, time::timeout};
 
 const ORIGINAL: &str = "model = \"original-model\" # keep\napproval_policy = \"never\"\n\n[mcp_servers.synthetic]\nenabled = false\ncommand = \"false\"\n";
@@ -51,7 +53,7 @@ fn authorize(state: &Mock, headers: &HeaderMap) -> Result<(), StatusCode> {
         .get(header::AUTHORIZATION)
         .and_then(|value| value.to_str().ok())
         != Some(format!("Bearer {}", state.key).as_str())
-        || headers.contains_key(switchx::routing::LOCAL_TOKEN_HEADER)
+        || headers.contains_key(switchx::router::LOCAL_TOKEN_HEADER)
         || headers.contains_key("chatgpt-account-id")
         || headers.contains_key("x-openai-account-id")
     {
@@ -191,7 +193,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         if desktop {
             if mode.as_deref() == Some("--desktop-recovery") {
                 let publication = switchx::catalog::publish_saved(&Store::open(&data.join("switchx.sqlite"))?.models()?)?;
-                config_transaction::PreparedSwitch::inspect(&home.join("config.toml"), &data, &publication, "127.0.0.1:18731".parse()?, "sx-mock-alpha")?.apply()?;
+                route_switch::PreparedSwitch::inspect(&home.join("config.toml"), &data, &publication, "127.0.0.1:18731".parse()?, "sx-mock-alpha")?.apply()?;
             }
             println!("Desktop fixture: {}", root.display());
             println!("Catalog files: {} and {}", root.join("model-0.json").display(), root.join("model-1.json").display());
@@ -202,7 +204,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 status = child.wait() => { if !status?.success() { return Err("desktop fixture exited unsuccessfully".into()); } }
                 _ = tokio::signal::ctrl_c() => { child.kill().await?; let _ = child.wait().await; }
             }
-            check(config_transaction::recovery(&data)?.is_none(), "desktop exited before restoring its route configuration")?;
+            check(route_switch::recovery(&data)?.is_none(), "desktop exited before restoring its route configuration")?;
             check(std::fs::read_to_string(home.join("config.toml"))? == ORIGINAL, "desktop exit changed the original configuration")?;
             println!("Desktop exit left the original configuration restored and no route journal.");
         } else if live_probe {
@@ -218,7 +220,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         eprintln!("Acceptance failed: {error}");
     }
     let recovery = async {
-        if config_transaction::recovery(&data)?.is_some() {
+        if route_switch::recovery(&data)?.is_some() {
             RouteSession::default().restore(&data, &home).await?;
         }
         Ok::<_, String>(())
@@ -428,7 +430,7 @@ async fn fallback_probe(
     session.restore(data, home).await?;
     check(
         std::fs::read_to_string(home.join("config.toml"))? == ORIGINAL
-            && config_transaction::recovery(data)?.is_none(),
+            && route_switch::recovery(data)?.is_none(),
         "fallback route did not restore original configuration",
     )?;
     println!(
@@ -526,7 +528,7 @@ async fn headless(
     check(
         failed.is_err_and(|error| error == "无法保存本地路由访问令牌")
             && !session.is_running()
-            && config_transaction::recovery(data)?.is_none()
+            && route_switch::recovery(data)?.is_none()
             && std::fs::read_to_string(home.join("config.toml"))? == ORIGINAL
             && token_count == 0,
         "refused SQLite token write published a route, journal, token or configuration",
@@ -559,7 +561,7 @@ async fn headless(
         )?;
         check(
             std::fs::read_to_string(home.join("config.toml"))? == ORIGINAL
-                && config_transaction::recovery(data)?.is_none(),
+                && route_switch::recovery(data)?.is_none(),
             "missing model changed the target configuration",
         )?;
         store.put_model(&extra)?;
@@ -578,7 +580,7 @@ async fn headless(
         "active route allowed model edits",
     )?;
     let active = std::fs::read_to_string(home.join("config.toml"))?;
-    let token_reference = config_transaction::recovery(data)?
+    let token_reference = route_switch::recovery(data)?
         .and_then(|recovery| recovery.local_token_reference)
         .ok_or("synthetic route's local token reference is missing")?;
     let local_token = Store::open_read_only(&data.join("switchx.sqlite"))?
@@ -591,7 +593,8 @@ async fn headless(
     for secret in ["synthetic-alpha-key", "synthetic-beta-key"] {
         check(
             !active.contains(secret)
-                && !std::fs::read_to_string(data.join("switch-journal.json"))?.contains(secret),
+                && !std::fs::read_to_string(data.join(switchx::codex::ROUTE_JOURNAL))?
+                    .contains(secret),
             "provider credential leaked into the generated config or recovery journal",
         )?;
         check(
@@ -712,7 +715,7 @@ async fn headless(
     check(
         session.restore(data, home).await.is_err()
             && session.is_running()
-            && config_transaction::recovery(data)?.is_some(),
+            && route_switch::recovery(data)?.is_some(),
         "recovery conflict did not preserve the running route and journal",
     )?;
     check(
@@ -742,7 +745,7 @@ async fn headless(
             .await
             .is_err_and(|error| error.contains("令牌"))
             && !session.is_running()
-            && config_transaction::recovery(data)?.is_some_and(|recovery| {
+            && route_switch::recovery(data)?.is_some_and(|recovery| {
                 recovery.local_token_reference.as_deref() == Some(token_reference.as_str())
             })
             && Store::open_read_only(&data.join("switchx.sqlite"))?
@@ -757,7 +760,7 @@ async fn headless(
     RouteSession::default().restore(data, home).await?;
     check(
         !session.is_running()
-            && config_transaction::recovery(data)?.is_none()
+            && route_switch::recovery(data)?.is_none()
             && std::fs::read_to_string(home.join("config.toml"))?
                 == format!("{ORIGINAL}\n# external note\n"),
         "route recovery did not restore the config and stop the route",
@@ -779,7 +782,7 @@ async fn http_round_trip(
     session: &RouteSession,
     seen: &mut [mpsc::Receiver<Value>],
 ) -> Result<(), Box<dyn std::error::Error>> {
-    let reference = config_transaction::recovery(data)?
+    let reference = route_switch::recovery(data)?
         .and_then(|recovery| recovery.local_token_reference)
         .ok_or("synthetic route's local token reference is missing")?;
     // This is only the token that this probe created; no user credentials are read.

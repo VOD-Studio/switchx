@@ -1,5 +1,8 @@
 //! Native Codex login and workspace discovery. Managed accounts live in `accounts`.
 
+pub mod accounts;
+mod quota;
+
 use std::{
     path::{Path, PathBuf},
     process::Stdio,
@@ -15,7 +18,8 @@ use tokio::{
 };
 
 use crate::{
-    app, catalog, client,
+    app, catalog,
+    codex::client,
     storage::{AccountBinding, ModelRecord, ProviderKind, ProviderRecord},
 };
 
@@ -28,7 +32,7 @@ const MAX_REPLY_BYTES: usize = 2 * 1024 * 1024;
 
 pub fn managed_account(data_dir: &Path) -> Result<Option<String>, String> {
     match account_binding(data_dir)? {
-        Some(id) if id == "default" => crate::accounts::AccountManager::open(data_dir)?
+        Some(id) if id == "default" => accounts::AccountManager::open(data_dir)?
             .default_id()?
             .map(Some)
             .ok_or_else(|| "尚未保存默认 ChatGPT 账号，请添加或选择账号".into()),
@@ -420,7 +424,8 @@ pub async fn catalog() -> Result<Vec<Value>, String> {
             let _ = std::fs::remove_dir_all(&self.0);
         }
     }
-    let path = std::env::temp_dir().join(format!("switchx-chatgpt-catalog-{}", app::new_id()?));
+    let path =
+        std::env::temp_dir().join(format!("switchx-chatgpt-catalog-{}", crate::id::new_id()?));
     let mut builder = std::fs::DirBuilder::new();
     #[cfg(unix)]
     {
@@ -489,7 +494,7 @@ pub fn save_subscription_with_codex_options(
     name: &str,
     binding: AccountBinding,
     models: &[Value],
-    options: &crate::provider_config::CodexOptions,
+    options: &crate::codex::provider_config::CodexOptions,
     common: &str,
 ) -> Result<String, String> {
     save_subscription_with_codex_options_and_icon(
@@ -512,22 +517,24 @@ pub fn save_subscription_with_codex_options_and_icon(
     name: &str,
     binding: AccountBinding,
     models: &[Value],
-    options: &crate::provider_config::CodexOptions,
+    options: &crate::codex::provider_config::CodexOptions,
     common: &str,
     icon_id: Option<&str>,
 ) -> Result<String, String> {
     let mut options = match &options.config_toml {
-        Some(config) => crate::provider_config::subscription_options_from_config(options, config)?,
+        Some(config) => {
+            crate::codex::provider_config::subscription_options_from_config(options, config)?
+        }
         None => options.clone(),
     };
     options.validate()?;
     if options.use_common_config {
-        let mut shared = crate::provider_config::validate_common(common)?;
+        let mut shared = crate::codex::provider_config::validate_common(common)?;
         // Keep context choices local while other exact shared values remain inherited.
         shared.remove("model_context_window");
         shared.remove("model_auto_compact_token_limit");
         if let Some(config) = &options.config_toml {
-            options.config_toml = Some(crate::provider_config::set_subscription_common(
+            options.config_toml = Some(crate::codex::provider_config::set_subscription_common(
                 config,
                 &shared.to_string(),
                 false,
@@ -557,12 +564,12 @@ pub fn validate_subscription_options(
     data_dir: &Path,
     provider_id: Option<&str>,
     models: &[Value],
-    options: &crate::provider_config::CodexOptions,
+    options: &crate::codex::provider_config::CodexOptions,
     common: &str,
 ) -> Result<(), String> {
     options.validate()?;
     if options.use_common_config {
-        crate::provider_config::validate_common(common)?;
+        crate::codex::provider_config::validate_common(common)?;
     }
     app::ensure_editable(data_dir)?;
     if !data_dir.is_absolute() {
@@ -601,13 +608,13 @@ pub fn validate_subscription_options(
 fn subscription_model_for_options(
     provider_id: Option<&str>,
     models: &[Value],
-    options: Option<&crate::provider_config::CodexOptions>,
+    options: Option<&crate::codex::provider_config::CodexOptions>,
     old: Option<&ProviderRecord>,
     saved: &[ModelRecord],
 ) -> Result<Option<String>, String> {
     let selected = options
         .and_then(|options| options.config_toml.as_deref())
-        .map(crate::provider_config::subscription_model)
+        .map(crate::codex::provider_config::subscription_model)
         .transpose()?
         .flatten();
     if let Some(model) = &selected
@@ -630,14 +637,14 @@ fn save_subscription_inner(
     name: &str,
     binding: AccountBinding,
     models: &[Value],
-    options: Option<&crate::provider_config::CodexOptions>,
+    options: Option<&crate::codex::provider_config::CodexOptions>,
     icon_id: Option<&str>,
 ) -> Result<String, String> {
     app::ensure_editable(data_dir)?;
     validate_subscription_name(name)?;
     binding.encode().map_err(|_| "订阅账号绑定无效")?;
     if let AccountBinding::Fixed(id) = &binding {
-        let manager = crate::accounts::AccountManager::open(data_dir)?;
+        let manager = accounts::AccountManager::open(data_dir)?;
         if !manager.list()?.iter().any(|account| &account.id == id) {
             return Err("绑定账号已不存在，请重新选择".into());
         }
@@ -665,7 +672,7 @@ fn save_subscription_inner(
     }
     let id = match provider_id {
         Some(id) => id.to_owned(),
-        None => app::new_id()?,
+        None => crate::id::new_id()?,
     };
     let selected_model =
         subscription_model_for_options(provider_id, models, options, old.as_ref(), &saved)?;
@@ -839,11 +846,11 @@ mod tests {
         use base64::engine::general_purpose::URL_SAFE_NO_PAD;
         let root = std::env::temp_dir().join(format!(
             "switchx-separate-subscriptions-{}",
-            app::new_id().unwrap()
+            crate::id::new_id().unwrap()
         ));
         let data = root.join("data");
         std::fs::create_dir_all(&data).unwrap();
-        let manager = crate::accounts::AccountManager::open(&data).unwrap();
+        let manager = accounts::AccountManager::open(&data).unwrap();
         let mut ids = Vec::new();
         for suffix in ["a", "b"] {
             let home = root.join(suffix);
@@ -1043,9 +1050,10 @@ mod tests {
     #[cfg(unix)]
     impl MockHome {
         async fn session(mode: &str) -> (Self, Session) {
-            let home = Self(
-                std::env::temp_dir().join(format!("switchx-login-test-{}", app::new_id().unwrap())),
-            );
+            let home = Self(std::env::temp_dir().join(format!(
+                "switchx-login-test-{}",
+                crate::id::new_id().unwrap()
+            )));
             std::fs::create_dir(&home.0).unwrap();
             let script = r#"
 while IFS= read -r message; do
@@ -1164,7 +1172,7 @@ done
     fn adding_subscription_preserves_existing_mappings_and_stores_no_oauth_secrets() {
         let path = std::env::temp_dir().join(format!(
             "switchx-subscription-test-{}",
-            app::new_id().unwrap()
+            crate::id::new_id().unwrap()
         ));
         let fixture: Value =
             serde_json::from_str(include_str!("../tests/fixtures/synthetic-models.json")).unwrap();
@@ -1188,12 +1196,12 @@ done
     fn subscription_icons_preserve_binding_options_and_model_mappings() {
         let path = std::env::temp_dir().join(format!(
             "switchx-subscription-icon-{}",
-            app::new_id().unwrap()
+            crate::id::new_id().unwrap()
         ));
         let fixture: Value =
             serde_json::from_str(include_str!("../tests/fixtures/synthetic-models.json")).unwrap();
         let models = fixture["models"].as_array().unwrap();
-        let options = crate::provider_config::CodexOptions::default();
+        let options = crate::codex::provider_config::CodexOptions::default();
         let id = save_subscription_with_codex_options_and_icon(
             &path,
             None,
@@ -1267,10 +1275,10 @@ done
 
     #[test]
     fn subscription_raw_toml_and_model_metadata_save_atomically_without_changing_selections() {
-        use crate::provider_config::{CodexOptions, subscription_options_from_config};
+        use crate::codex::provider_config::{CodexOptions, subscription_options_from_config};
         let path = std::env::temp_dir().join(format!(
             "switchx-subscription-config-test-{}",
-            app::new_id().unwrap()
+            crate::id::new_id().unwrap()
         ));
         let fixture: Value =
             serde_json::from_str(include_str!("../tests/fixtures/synthetic-models.json")).unwrap();
@@ -1373,12 +1381,12 @@ done
     #[test]
     fn subscription_inherits_updated_common_settings_while_retaining_authored_overrides_and_context()
      {
-        use crate::provider_config::{
+        use crate::codex::provider_config::{
             CodexOptions, subscription_editor_config, subscription_options_from_config,
         };
         let path = std::env::temp_dir().join(format!(
             "switchx-subscription-common-test-{}",
-            app::new_id().unwrap()
+            crate::id::new_id().unwrap()
         ));
         let fixture: Value =
             serde_json::from_str(include_str!("../tests/fixtures/synthetic-models.json")).unwrap();
@@ -1420,8 +1428,13 @@ done
             "model = 'sx-managed'\n[model_providers.router]\nname = 'Router'\n"
                 .parse()
                 .unwrap();
-        crate::provider_config::apply_to_document(&mut applied, &options, updated_common, "router")
-            .unwrap();
+        crate::codex::provider_config::apply_to_document(
+            &mut applied,
+            &options,
+            updated_common,
+            "router",
+        )
+        .unwrap();
         assert_eq!(applied["features"]["hooks"].as_bool(), Some(true));
         assert_eq!(applied["features"]["chronicle"].as_bool(), Some(true));
         assert_eq!(applied["approval_policy"].as_str(), Some("never"));
@@ -1436,7 +1449,8 @@ done
                 .get("model_context_window")
                 .is_none()
         );
-        crate::provider_config::apply_to_document(&mut applied, &off, common, "router").unwrap();
+        crate::codex::provider_config::apply_to_document(&mut applied, &off, common, "router")
+            .unwrap();
         assert!(applied.get("model_context_window").is_none());
         assert!(applied.get("model_auto_compact_token_limit").is_none());
         drop(store);
@@ -1447,7 +1461,7 @@ done
     fn adding_official_models_cannot_overwrite_a_user_renamed_mapping() {
         let path = std::env::temp_dir().join(format!(
             "switchx-subscription-collision-test-{}",
-            app::new_id().unwrap()
+            crate::id::new_id().unwrap()
         ));
         let fixture: Value =
             serde_json::from_str(include_str!("../tests/fixtures/synthetic-models.json")).unwrap();
@@ -1489,7 +1503,7 @@ done
     fn normalized_official_model_ids_cannot_collide_within_one_addition() {
         let path = std::env::temp_dir().join(format!(
             "switchx-subscription-normalization-test-{}",
-            app::new_id().unwrap()
+            crate::id::new_id().unwrap()
         ));
         let fixture: Value =
             serde_json::from_str(include_str!("../tests/fixtures/synthetic-models.json")).unwrap();
@@ -1510,7 +1524,7 @@ done
     fn api_return_deselects_all_subscription_models_and_preserves_api_mappings() {
         let path = std::env::temp_dir().join(format!(
             "switchx-subscription-selection-test-{}",
-            app::new_id().unwrap()
+            crate::id::new_id().unwrap()
         ));
         let fixture: Value =
             serde_json::from_str(include_str!("../tests/fixtures/synthetic-models.json")).unwrap();

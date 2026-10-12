@@ -3,8 +3,8 @@ use std::{collections::HashMap, time::Duration};
 use serde_json::json;
 use switchx::{
     catalog::{Selection, publish},
-    direct,
-    routing::{RouterState, RunningRouter, Upstream},
+    router::{RouterState, RunningRouter, Upstream},
+    upstream,
 };
 use tokio::{
     io::{AsyncReadExt, AsyncWriteExt},
@@ -21,7 +21,7 @@ const API_KEY: &str = "synthetic-upstream-api-key";
 async fn probe_checks_and_routes() {
     // This reserved domain must only reach the local proxy, never a real upstream.
     let base_url = "https://switchx-proxy.test/v1";
-    assert!(direct::fetch_models(base_url, API_KEY).await.is_err());
+    assert!(upstream::fetch_models(base_url, API_KEY).await.is_err());
 
     let templates = serde_json::from_str(include_str!("fixtures/synthetic-models.json")).unwrap();
     let publication = publish(

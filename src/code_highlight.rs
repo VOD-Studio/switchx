@@ -1,5 +1,9 @@
 //! Best-effort syntax colors for editable text, without parsing or changing it.
 
+use slint::{ComponentHandle, ModelRc, VecModel};
+
+use crate::ui::{AppWindow, CodeSpan, SyntaxHighlighting};
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum TokenKind {
     Plain,
@@ -18,6 +22,41 @@ pub struct HighlightSpan<'a> {
     pub line_text: &'a str,
     pub line: i32,
     pub kind: TokenKind,
+}
+
+/// Serves the `SyntaxHighlighting` global used by the app's code editors.
+pub fn connect(app: &AppWindow) {
+    let highlighting = app.global::<SyntaxHighlighting>();
+    highlighting.on_line_count(|source| {
+        source
+            .as_str()
+            .split('\n')
+            .count()
+            .try_into()
+            .unwrap_or(i32::MAX)
+    });
+    highlighting.on_spans(|source, language| {
+        let spans = spans(source.as_str(), language.as_str())
+            .into_iter()
+            .map(|span| CodeSpan {
+                text: span.text.into(),
+                prefix: span.prefix.into(),
+                line_text: span.line_text.into(),
+                line: span.line,
+                // Kind codes match `ui/code-editor.slint`.
+                kind: match span.kind {
+                    TokenKind::Plain => 0,
+                    TokenKind::Key => 1,
+                    TokenKind::String => 2,
+                    TokenKind::Number => 3,
+                    TokenKind::Literal => 4,
+                    TokenKind::Comment => 5,
+                    TokenKind::Section => 6,
+                },
+            })
+            .collect::<Vec<_>>();
+        ModelRc::new(VecModel::from(spans))
+    });
 }
 
 /// Colored fragments positioned over the original, unmodified editor text.

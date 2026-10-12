@@ -11,10 +11,7 @@ use std::{
 use serde_json::Value;
 use tokio::sync::watch;
 
-use crate::{
-    app,
-    storage::{RequestRecord, RequestStatus, Store},
-};
+use crate::storage::{RequestRecord, RequestStatus, Store};
 
 pub const REQUEST_ID_HEADER: &str = "x-switchx-request-id";
 pub(crate) const MAX_EVENT_BYTES: usize = 2 * 1024 * 1024;
@@ -50,7 +47,7 @@ impl RequestTracker {
     ) -> Result<Self, String> {
         Ok(Self {
             record: RequestRecord {
-                id: app::new_id()?,
+                id: crate::id::new_id()?,
                 started_at_ms: SystemTime::now()
                     .duration_since(UNIX_EPOCH)
                     .unwrap_or_default()

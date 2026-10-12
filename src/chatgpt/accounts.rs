@@ -18,8 +18,8 @@ use serde_json::{Value, json};
 use tokio::sync::{Mutex as AsyncMutex, oneshot, watch};
 use zeroize::{Zeroize, Zeroizing};
 
-pub use crate::codex_quota::{Quota, Window as QuotaWindow};
-use crate::{app, config_transaction as files, credentials::Secret, storage::AccountBinding};
+pub use super::quota::{Quota, Window as QuotaWindow};
+use crate::{codex::route_switch as files, credentials::Secret, storage::AccountBinding};
 
 const STORE_NAME: &str = "codex_oauth_auth.json";
 const MARKER_NAME: &str = ".switchx-account.json";
@@ -73,8 +73,8 @@ impl Default for Endpoints {
             poll: "https://auth.openai.com/api/accounts/deviceauth/token".into(),
             token: "https://auth.openai.com/oauth/token".into(),
             verification: "https://auth.openai.com/codex/device".into(),
-            usage: crate::codex_quota::USAGE_ENDPOINT.into(),
-            resets: crate::codex_quota::RESETS_ENDPOINT.into(),
+            usage: super::quota::USAGE_ENDPOINT.into(),
+            resets: super::quota::RESETS_ENDPOINT.into(),
         }
     }
 }
@@ -172,7 +172,8 @@ struct PrivateCliHome(PathBuf);
 
 impl PrivateCliHome {
     fn new() -> Result<Self, String> {
-        let path = std::env::temp_dir().join(format!("switchx-account-context-{}", app::new_id()?));
+        let path =
+            std::env::temp_dir().join(format!("switchx-account-context-{}", crate::id::new_id()?));
         let mut builder = fs::DirBuilder::new();
         #[cfg(unix)]
         {
@@ -516,7 +517,7 @@ impl AccountManager {
                 return Err("auth.json 的登录资料早于已保存凭据，请重新获取完整登录资料".into());
             }
         }
-        let id = existing_id.clone().map_or_else(app::new_id, Ok)?;
+        let id = existing_id.clone().map_or_else(crate::id::new_id, Ok)?;
         let now = Utc::now().timestamp_millis();
         let updated_at_ms = existing_id
             .as_deref()
@@ -804,7 +805,7 @@ impl AccountManager {
                     error
                 }
             })?;
-        crate::codex_quota::fetch(
+        super::quota::fetch(
             &self.0.client,
             &self.0.endpoints.usage,
             &self.0.endpoints.resets,
@@ -951,7 +952,7 @@ impl AccountManager {
         id: &str,
         native_home: &Path,
         cli_path: &Path,
-    ) -> Result<crate::chatgpt::Workspace, String> {
+    ) -> Result<super::Workspace, String> {
         self.workspace_operation(id, native_home, cli_path, None)
             .await
     }
@@ -964,7 +965,7 @@ impl AccountManager {
         native_home: &Path,
         cli_path: &Path,
         discovery_address: SocketAddr,
-    ) -> Result<crate::chatgpt::Workspace, String> {
+    ) -> Result<super::Workspace, String> {
         if discovery_address.ip() != IpAddr::V4(Ipv4Addr::LOCALHOST) {
             return Err("账号测试发现地址必须是 IPv4 回环地址".into());
         }
@@ -978,7 +979,7 @@ impl AccountManager {
         native_home: &Path,
         cli_path: &Path,
         discovery_address: Option<SocketAddr>,
-    ) -> Result<crate::chatgpt::Workspace, String> {
+    ) -> Result<super::Workspace, String> {
         if !cli_path.is_absolute() || !cli_path.is_file() {
             return Err("Codex CLI 必须是存在的绝对路径文件".into());
         }
@@ -1017,7 +1018,7 @@ impl AccountManager {
             let discovered = tokio::select! {
                 biased;
                 _ = cancel.wait_for(|value| *value) => Err("账号检查已取消".to_owned()),
-                result = crate::chatgpt::workspace_using(&context.0, &cli_path) => result,
+                result = super::workspace_using(&context.0, &cli_path) => result,
             };
             // A CLI can renew during account/read. Adopt only this temporary
             // home's proven identity before its token-bearing files are removed.
@@ -1127,7 +1128,7 @@ impl AccountManager {
             return Ok(id);
         }
         let now = Utc::now().timestamp_millis();
-        let id = app::new_id()?;
+        let id = crate::id::new_id()?;
         session.state.store.accounts.insert(
             id.clone(),
             StoredAccount {
@@ -1452,7 +1453,7 @@ impl DeviceLogin {
         validate_secret(refresh)?;
         let id = match &existing {
             Some(stored) => stored.id.clone(),
-            None => app::new_id()?,
+            None => crate::id::new_id()?,
         };
         let now = Utc::now().timestamp_millis();
         let mut stored = StoredAccount {
@@ -2021,8 +2022,10 @@ mod tests {
 
     impl TestHome {
         fn new() -> Self {
-            let path = std::env::temp_dir()
-                .join(format!("switchx-account-test-{}", app::new_id().unwrap()));
+            let path = std::env::temp_dir().join(format!(
+                "switchx-account-test-{}",
+                crate::id::new_id().unwrap()
+            ));
             fs::create_dir_all(path.join("home")).unwrap();
             fs::create_dir_all(path.join("data")).unwrap();
             Self(path)
@@ -2745,10 +2748,11 @@ mod tests {
         use std::os::unix::fs::PermissionsExt;
         let path = home
             .0
-            .join(format!("workspace-cli-{}", app::new_id().unwrap()));
-        let capture = home
-            .0
-            .join(format!("workspace-capture-{}", app::new_id().unwrap()));
+            .join(format!("workspace-cli-{}", crate::id::new_id().unwrap()));
+        let capture = home.0.join(format!(
+            "workspace-capture-{}",
+            crate::id::new_id().unwrap()
+        ));
         let script = r#"#!/usr/bin/python3
 import json, os, pathlib, stat, sys
 for line in sys.stdin:

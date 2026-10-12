@@ -12,12 +12,13 @@ use tokio::net::TcpListener;
 use crate::{
     app,
     catalog::{self, Publication},
-    chatgpt, client,
-    config_transaction::{self, PreparedSwitch},
+    chatgpt,
+    codex::client,
+    codex::route_switch::{self, PreparedSwitch},
     credentials::Secret,
-    direct,
-    routing::{RouterState, RunningRouter, Upstream},
+    router::{RouterState, RunningRouter, Upstream},
     storage::{AccountBinding, ModelRecord, ProviderKind, ProviderRecord, Store},
+    upstream,
 };
 
 struct PreparedRoute {
@@ -69,7 +70,7 @@ struct ActiveRoute {
 pub struct RouteSession {
     prepared: Option<PreparedRoute>,
     active: Option<ActiveRoute>,
-    account_manager: Option<(PathBuf, crate::accounts::AccountManager)>,
+    account_manager: Option<(PathBuf, crate::chatgpt::accounts::AccountManager)>,
     local_probe: Option<LocalProbe>,
     xai_manager: Option<(PathBuf, crate::xai::AccountManager)>,
     xai_probe: Option<SocketAddr>,
@@ -91,7 +92,7 @@ impl RouteSession {
         {
             return Err("测试端点必须是 IPv4 回环地址".into());
         }
-        let manager = crate::accounts::AccountManager::open_mock(data_dir, oauth_origin)?;
+        let manager = crate::chatgpt::accounts::AccountManager::open_mock(data_dir, oauth_origin)?;
         Ok(Self {
             account_manager: Some((data_dir.into(), manager)),
             local_probe: Some(LocalProbe {
@@ -102,14 +103,17 @@ impl RouteSession {
         })
     }
 
-    fn manager(&mut self, data_dir: &Path) -> Result<crate::accounts::AccountManager, String> {
+    fn manager(
+        &mut self,
+        data_dir: &Path,
+    ) -> Result<crate::chatgpt::accounts::AccountManager, String> {
         if let Some((directory, manager)) = &self.account_manager {
             if directory != data_dir {
                 return Err("账号数据目录已变化，请重新打开路由".into());
             }
             return Ok(manager.clone());
         }
-        let manager = crate::accounts::AccountManager::open(data_dir)?;
+        let manager = crate::chatgpt::accounts::AccountManager::open(data_dir)?;
         self.account_manager = Some((data_dir.into(), manager.clone()));
         Ok(manager)
     }
@@ -306,8 +310,8 @@ impl RouteSession {
             .await
             .map_err(|_| "本地端口无法使用；请检查端口占用或选择其他端口")?;
         let address = listener.local_addr().map_err(|_| "无法读取本地路由地址")?;
-        let token_reference = format!("router-{}", app::new_id()?);
-        let local_token = Secret::new(format!("{}{}", app::new_id()?, app::new_id()?));
+        let token_reference = format!("router-{}", crate::id::new_id()?);
+        let local_token = Secret::new(format!("{}{}", crate::id::new_id()?, crate::id::new_id()?));
         let uses_chatgpt = providers
             .iter()
             .any(|provider| provider.kind == ProviderKind::Chatgpt);
@@ -560,7 +564,7 @@ impl RouteSession {
                     .xai_probe
                     .map(|address| format!("http://{address}"))
                     .unwrap_or(crate::xai::BASE_URL.into());
-                let available = direct::fetch_models(&base_url, token.expose()).await?;
+                let available = upstream::fetch_models(&base_url, token.expose()).await?;
                 for model in models
                     .iter()
                     .filter(|model| model.provider_id == provider.id)
@@ -627,7 +631,7 @@ impl RouteSession {
                 continue;
             }
             let token = app::provider_credential(state_dir, provider)?;
-            let available = direct::fetch_models(&provider.base_url, token.expose())
+            let available = upstream::fetch_models(&provider.base_url, token.expose())
                 .await
                 .map_err(|error| format!("{}：{error}", provider.name))?;
             for model in models
@@ -686,8 +690,9 @@ impl RouteSession {
             .proposed
             .parse()
             .map_err(|_| "待发布的 Codex 配置无效")?;
-        let provider_config =
-            Secret::new(document["model_providers"][crate::config::PROVIDER_ID].to_string());
+        let provider_config = Secret::new(
+            document["model_providers"][crate::codex::route_config::PROVIDER_ID].to_string(),
+        );
         let state = RouterState::new(
             prepared.address,
             local_token.expose().into(),
@@ -708,7 +713,7 @@ impl RouteSession {
             .map_err(|_| "无法创建本地检查客户端")?;
         let health = client
             .get(format!("http://{}/v1/models", prepared.address))
-            .header(crate::routing::LOCAL_TOKEN_HEADER, local_token.expose())
+            .header(crate::router::LOCAL_TOKEN_HEADER, local_token.expose())
             .send()
             .await
             .map_err(|_| "本地路由验证失败")?;
@@ -741,7 +746,7 @@ impl RouteSession {
         if let Err(error) = prepared.switch.apply() {
             // An error after journal publication may follow a successful rename.
             // Keep the route usable until its journal has been recovered.
-            if !state_dir.join("switch-journal.json").exists() {
+            if !state_dir.join(crate::codex::ROUTE_JOURNAL).exists() {
                 self.stop().await?;
             }
             return Err(format!(
@@ -765,12 +770,12 @@ impl RouteSession {
             return Err("路由数据目录已变化，请使用当前路由的数据目录启动 Codex".into());
         }
         let target = client::config_path(config_home)?;
-        let recovery = config_transaction::recovery(state_dir)?
-            .ok_or("路由恢复记录已变化，请检查配置后重新发布")?;
+        let recovery =
+            route_switch::recovery(state_dir)?.ok_or("路由恢复记录已变化，请检查配置后重新发布")?;
         if target != active.target || recovery.config_path != active.target {
             return Err("目标配置目录已变化，请使用当前路由的配置目录启动 Codex".into());
         }
-        let bytes = config_transaction::read_config(&target)?.ok_or("路由配置文件已不存在")?;
+        let bytes = route_switch::read_config(&target)?.ok_or("路由配置文件已不存在")?;
         let document: toml_edit::DocumentMut = std::str::from_utf8(&bytes)
             .map_err(|_| "Codex 配置不是 UTF-8")?
             .parse()
@@ -778,8 +783,8 @@ impl RouteSession {
         let field = |name: &str| document.get(name).and_then(toml_edit::Item::as_str);
         let provider = document
             .get("model_providers")
-            .and_then(|providers| providers.get(crate::config::PROVIDER_ID));
-        if field("model_provider") != Some(crate::config::PROVIDER_ID)
+            .and_then(|providers| providers.get(crate::codex::route_config::PROVIDER_ID));
+        if field("model_provider") != Some(crate::codex::route_config::PROVIDER_ID)
             || field("model_catalog_json") != active.catalog_path.to_str()
             || !provider
                 .is_some_and(|provider| provider.to_string() == active.provider_config.expose())
@@ -808,7 +813,7 @@ impl RouteSession {
         {
             return Err("路由恢复数据目录不匹配，请使用当前路由的数据目录".into());
         }
-        let recovery = config_transaction::recovery(state_dir)?.ok_or("没有待恢复的路由配置")?;
+        let recovery = route_switch::recovery(state_dir)?.ok_or("没有待恢复的路由配置")?;
         if self.active.as_ref().is_some_and(|active| {
             recovery.local_token_reference.as_deref() != Some(active.token_reference.as_str())
         }) {
@@ -829,7 +834,7 @@ impl RouteSession {
         if let Some(active) = &self.active {
             active.server.pause();
         }
-        let without_conflicts = |result: config_transaction::RestoreResult| {
+        let without_conflicts = |result: route_switch::RestoreResult| {
             if result.conflicts.is_empty() {
                 Ok(())
             } else {
@@ -841,7 +846,7 @@ impl RouteSession {
         };
         // Keep the recovery reference until SQLite cleanup succeeds, so a
         // locked or unavailable database can be retried after the route stops.
-        let result = config_transaction::restore_preserving_journal(&target, state_dir)
+        let result = route_switch::restore_preserving_journal(&target, state_dir)
             .and_then(without_conflicts);
         if let Err(error) = result {
             if let Some(active) = &self.active {
@@ -853,7 +858,7 @@ impl RouteSession {
         if let Some(reference) = recovery.local_token_reference {
             delete_local_token(state_dir, &reference)?;
         }
-        config_transaction::restore(&target, state_dir).and_then(without_conflicts)
+        route_switch::restore(&target, state_dir).and_then(without_conflicts)
     }
 
     async fn stop(&mut self) -> Result<(), String> {
@@ -905,7 +910,7 @@ fn selected_inputs(state_dir: &Path) -> Result<(Vec<ModelRecord>, Vec<ProviderRe
             .iter()
             .find(|provider| provider.id == model.provider_id)
             .ok_or("所选模型的上游已不存在")?;
-        direct::validate_provider(&provider.name, &provider.base_url, &model.upstream_model)?;
+        upstream::validate_provider(&provider.name, &provider.base_url, &model.upstream_model)?;
         if provider.kind != ProviderKind::ApiKey {
             if provider.kind == ProviderKind::Chatgpt {
                 chatgpt::validate_provider(provider)?;
@@ -937,7 +942,7 @@ mod tests {
     async fn missing_bound_account_preserves_native_files() {
         let root = std::env::temp_dir().join(format!(
             "switchx-account-preview-{}",
-            app::new_id().unwrap()
+            crate::id::new_id().unwrap()
         ));
         let home = root.join("codex");
         let data = root.join("data");
@@ -969,15 +974,17 @@ mod tests {
         assert_eq!(std::fs::read(home.join("auth.json")).unwrap(), auth);
         assert!(!home.join(".switchx-account.json").exists());
         assert!(!data.join("codex_oauth_auth.json").exists());
-        assert!(!data.join("switch-journal.json").exists());
+        assert!(!data.join(crate::codex::ROUTE_JOURNAL).exists());
         assert!(session.prepared.is_none());
         std::fs::remove_dir_all(root).unwrap();
     }
 
     #[tokio::test]
     async fn launcher_requires_the_running_routes_unchanged_target_and_catalog() {
-        let root =
-            std::env::temp_dir().join(format!("switchx-launch-guard-{}", app::new_id().unwrap()));
+        let root = std::env::temp_dir().join(format!(
+            "switchx-launch-guard-{}",
+            crate::id::new_id().unwrap()
+        ));
         let home = root.join("codex");
         let data = root.join("data");
         std::fs::create_dir_all(&home).unwrap();
@@ -1041,7 +1048,7 @@ mod tests {
                 std::fs::read_to_string(home.join("config.toml"))
                     .unwrap()
                     .parse::<toml_edit::DocumentMut>()
-                    .unwrap()["model_providers"][crate::config::PROVIDER_ID]
+                    .unwrap()["model_providers"][crate::codex::route_config::PROVIDER_ID]
                     .to_string(),
             ),
             token_reference: String::new(),
@@ -1062,7 +1069,7 @@ mod tests {
                 .contains("数据目录")
         );
         assert!(session.is_running());
-        assert!(config_transaction::recovery(&data).unwrap().is_some());
+        assert!(route_switch::recovery(&data).unwrap().is_some());
         assert!(
             session
                 .codex_launcher(&data, &root.join("another-home"))
@@ -1095,7 +1102,7 @@ mod tests {
         }
         std::fs::write(home.join("config.toml"), original).unwrap();
         // Exit must close admission even when the journal disappeared externally.
-        let journal_path = data.join("switch-journal.json");
+        let journal_path = data.join(crate::codex::ROUTE_JOURNAL);
         let journal = std::fs::read(&journal_path).unwrap();
         std::fs::remove_file(&journal_path).unwrap();
         let client = reqwest::Client::builder().no_proxy().build().unwrap();
@@ -1103,7 +1110,7 @@ mod tests {
         assert!(
             client
                 .get(&endpoint)
-                .header(crate::routing::LOCAL_TOKEN_HEADER, "s".repeat(32))
+                .header(crate::router::LOCAL_TOKEN_HEADER, "s".repeat(32))
                 .send()
                 .await
                 .unwrap()
@@ -1114,7 +1121,7 @@ mod tests {
         assert_eq!(
             client
                 .get(&endpoint)
-                .header(crate::routing::LOCAL_TOKEN_HEADER, "s".repeat(32))
+                .header(crate::router::LOCAL_TOKEN_HEADER, "s".repeat(32))
                 .send()
                 .await
                 .unwrap()
@@ -1124,22 +1131,24 @@ mod tests {
         assert!(!journal_path.exists());
         std::fs::write(journal_path, journal).unwrap();
         session.active.take().unwrap().server.stop().await;
-        config_transaction::restore(&home.join("config.toml"), &data).unwrap();
+        route_switch::restore(&home.join("config.toml"), &data).unwrap();
         std::fs::remove_dir_all(root).unwrap();
     }
 
     #[tokio::test]
     async fn recovery_retains_local_token_until_conflicts_and_cleanup_failures_are_resolved() {
-        let root =
-            std::env::temp_dir().join(format!("switchx-token-recovery-{}", app::new_id().unwrap()));
+        let root = std::env::temp_dir().join(format!(
+            "switchx-token-recovery-{}",
+            crate::id::new_id().unwrap()
+        ));
         let home = root.join("codex");
         let data = root.join("data");
         std::fs::create_dir_all(&home).unwrap();
         let original = "model = \"original\"\n";
         let config_path = home.join("config.toml");
         std::fs::write(&config_path, original).unwrap();
-        let reference = format!("router-{}", app::new_id().unwrap());
-        let other_reference = format!("router-{}", app::new_id().unwrap());
+        let reference = format!("router-{}", crate::id::new_id().unwrap());
+        let other_reference = format!("router-{}", crate::id::new_id().unwrap());
         let token = Secret::new("a".repeat(64));
         let store = app::open_store(&data).unwrap();
         store.put_local_token(&reference, &token).unwrap();
@@ -1173,7 +1182,7 @@ mod tests {
         let applied = std::fs::read_to_string(&config_path).unwrap();
         assert!(!applied.contains(token.expose()));
         assert!(
-            !std::fs::read_to_string(data.join("switch-journal.json"))
+            !std::fs::read_to_string(data.join(crate::codex::ROUTE_JOURNAL))
                 .unwrap()
                 .contains(token.expose())
         );
@@ -1210,7 +1219,7 @@ mod tests {
         .unwrap();
         let mut session = RouteSession::default();
         assert!(session.restore(&data, &home).await.is_err());
-        assert!(config_transaction::recovery(&data).unwrap().is_some());
+        assert!(route_switch::recovery(&data).unwrap().is_some());
         assert_eq!(
             legacy
                 .query_row("PRAGMA user_version", [], |row| row.get::<_, i64>(0))
@@ -1238,7 +1247,7 @@ mod tests {
         let error = session.restore(&data, &home).await.unwrap_err();
         assert!(error.contains("令牌清理失败"));
         assert_eq!(std::fs::read_to_string(&config_path).unwrap(), original);
-        assert!(config_transaction::recovery(&data).unwrap().is_some());
+        assert!(route_switch::recovery(&data).unwrap().is_some());
         assert!(store.local_token(&reference).unwrap().is_some());
         connection
             .execute_batch("DROP TRIGGER refuse_synthetic_token_delete")
@@ -1246,7 +1255,7 @@ mod tests {
         drop(connection);
         session.restore(&data, &home).await.unwrap();
         assert_eq!(std::fs::read_to_string(&config_path).unwrap(), original);
-        assert!(config_transaction::recovery(&data).unwrap().is_none());
+        assert!(route_switch::recovery(&data).unwrap().is_none());
         assert!(store.local_token(&reference).unwrap().is_none());
         assert_eq!(
             legacy
@@ -1273,7 +1282,7 @@ mod tests {
     fn selects_each_provider_once_and_only_the_matching_backup_model() {
         let path = std::env::temp_dir().join(format!(
             "switchx-selected-models-{}",
-            app::new_id().unwrap()
+            crate::id::new_id().unwrap()
         ));
         let store = app::open_store(&path).unwrap();
         for id in ["primary", "backup"] {

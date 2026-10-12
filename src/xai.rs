@@ -1,7 +1,11 @@
 //! Grok Build-compatible device OAuth. Credentials never enter SQLite or Codex auth.json.
+
+mod quota;
+pub mod responses;
+
 use crate::{
-    accounts::{ensure_directory, private_replace, read_private},
     app,
+    chatgpt::accounts::{ensure_directory, private_replace, read_private},
     credentials::Secret,
     storage::{AccountBinding, ModelRecord, ProviderKind, ProviderRecord},
 };
@@ -24,7 +28,7 @@ const ISSUER: &str = "https://auth.x.ai";
 const CLIENT_ID: &str = "b1a00492-073a-47ea-816f-4c329264a828";
 const SCOPE: &str = "openid profile email offline_access grok-cli:access api:access";
 const MAX_RESPONSE: usize = 64 * 1024;
-pub use crate::xai_quota::Quota;
+pub use quota::Quota;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct AccountInfo {
@@ -360,7 +364,7 @@ impl AccountManager {
     }
     pub async fn quota(&self, id: &str) -> Result<Quota, String> {
         let token = self.credential(id).await?;
-        crate::xai_quota::fetch(&self.0.client, crate::xai_quota::ENDPOINT, &token).await
+        quota::fetch(&self.0.client, quota::ENDPOINT, &token).await
     }
     async fn refresh(&self, id: &str) -> Result<Secret, String> {
         let _lock = self.lock()?;
@@ -459,7 +463,7 @@ impl AccountManager {
             .values()
             .find(|a| a.subject == subject)
             .map(|a| a.id.clone())
-            .unwrap_or(app::new_id()?);
+            .unwrap_or(crate::id::new_id()?);
         if store.accounts.len() >= 256 && !store.accounts.contains_key(&id) {
             return Err("Grok 保存账号已达上限".into());
         }
@@ -650,7 +654,7 @@ pub fn save_provider(
     binding: AccountBinding,
 ) -> Result<(), String> {
     app::ensure_editable(data_dir)?;
-    crate::direct::validate_provider(name, BASE_URL, "grok-4.5")?;
+    crate::upstream::validate_provider(name, BASE_URL, "grok-4.5")?;
     AccountManager::open(data_dir)?.resolve_binding(&binding)?;
     let store = app::open_store(data_dir).map_err(|_| "无法读取 Grok 上游资料")?;
     let existing = id
@@ -668,7 +672,7 @@ pub fn save_provider(
         id: existing
             .as_ref()
             .map(|p| p.id.clone())
-            .unwrap_or(app::new_id()?),
+            .unwrap_or(crate::id::new_id()?),
         name: name.trim().into(),
         base_url: BASE_URL.into(),
         model_id: existing
@@ -725,7 +729,8 @@ mod tests {
     struct Temp(PathBuf);
     impl Temp {
         fn new() -> Self {
-            let path = std::env::temp_dir().join(format!("switchx-xai-{}", app::new_id().unwrap()));
+            let path =
+                std::env::temp_dir().join(format!("switchx-xai-{}", crate::id::new_id().unwrap()));
             std::fs::create_dir(&path).unwrap();
             Self(path)
         }

@@ -18,7 +18,7 @@ use serde_json::{Value, json};
 use switchx::{
     catalog::{Selection, publish},
     requests::REQUEST_ID_HEADER,
-    routing::{LOCAL_TOKEN_HEADER, RouterState, RunningRouter, Upstream, serve},
+    router::{LOCAL_TOKEN_HEADER, RouterState, RunningRouter, Upstream, serve},
     storage::{RequestRecord, RequestStatus, Store},
 };
 use tokio::{

@@ -4,7 +4,7 @@
 use std::{env, fs, path::PathBuf};
 
 use serde_json::{Value, json};
-use switchx::{app, client};
+use switchx::codex::client;
 
 struct ProbeDirectory(PathBuf);
 
@@ -19,7 +19,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     if env::args().skip(1).any(|argument| argument != "--desktop") {
         return Err("Usage: cargo run --example model_menu_probe -- --desktop".into());
     }
-    let path = env::temp_dir().join(format!("switchx-model-menu-probe-{}", app::new_id()?));
+    let path = env::temp_dir().join(format!(
+        "switchx-model-menu-probe-{}",
+        switchx::id::new_id()?
+    ));
     let mut builder = fs::DirBuilder::new();
     #[cfg(unix)]
     {

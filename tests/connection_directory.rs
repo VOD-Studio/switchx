@@ -1,15 +1,17 @@
 use std::{fs, path::PathBuf};
 use switchx::{
     app::{self, ConnectionModel},
-    direct_config::{self, PreparedDirectSwitch},
+    codex::direct_switch::{self, PreparedDirectSwitch},
     storage::{ProviderKind, ProviderRecord, Store},
 };
 
 struct Fixture(PathBuf);
 impl Fixture {
     fn new() -> Self {
-        let path =
-            std::env::temp_dir().join(format!("switchx-directory-{}", app::new_id().unwrap()));
+        let path = std::env::temp_dir().join(format!(
+            "switchx-directory-{}",
+            switchx::id::new_id().unwrap()
+        ));
         fs::create_dir_all(&path).unwrap();
         Self(path)
     }
@@ -163,18 +165,18 @@ fn direct_mode_publishes_connection_directory_with_actual_ids_and_restores_it() 
     let mut external = applied.clone();
     external["model"] = toml_edit::value("externally-chosen-model");
     fs::write(&config, external.to_string()).unwrap();
-    let conflict = direct_config::restore(&config, &fixture.0).unwrap();
+    let conflict = direct_switch::restore(&config, &fixture.0).unwrap();
     assert_eq!(conflict.conflicts, ["model"]);
     assert!(
         catalog_path.exists(),
         "recovery conflicts must retain the generated directory"
     );
-    assert!(fixture.0.join("direct-journal.json").exists());
+    assert!(fixture.0.join(switchx::codex::DIRECT_JOURNAL).exists());
     let mut resolved: toml_edit::DocumentMut =
         fs::read_to_string(&config).unwrap().parse().unwrap();
     resolved["model"] = toml_edit::value("native-model");
     fs::write(&config, resolved.to_string()).unwrap();
-    let restored = direct_config::restore(&config, &fixture.0).unwrap();
+    let restored = direct_switch::restore(&config, &fixture.0).unwrap();
     assert!(restored.conflicts.is_empty());
     assert_eq!(fs::read_to_string(&config).unwrap(), original);
     assert!(!catalog_path.exists());
