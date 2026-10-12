@@ -12,14 +12,14 @@ use std::{
 use serde::{Deserialize, Serialize};
 use toml_edit::{Array, DocumentMut, Item, Table, Value, table, value};
 
+use super::{DIRECT_JOURNAL, ROUTE_JOURNAL};
 use crate::{
     catalog::Publication,
-    config::{PROVIDER_ID, Preview, preview_route},
-    config_overlay::Overlay,
-    direct::helper_is_usable,
+    codex::overlay::Overlay,
+    codex::route_config::{PROVIDER_ID, Preview, preview_route},
+    upstream::helper_is_usable,
 };
 
-const JOURNAL_NAME: &str = "switch-journal.json";
 const FIELDS: [&str; 3] = ["model", "model_provider", "model_catalog_json"];
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -155,8 +155,8 @@ impl PreparedSwitch {
         {
             return Err("config target must be config.toml".into());
         }
-        let journal_path = state_dir.join(JOURNAL_NAME);
-        if state_dir.join("direct-journal.json").exists() {
+        let journal_path = state_dir.join(ROUTE_JOURNAL);
+        if state_dir.join(DIRECT_JOURNAL).exists() {
             return Err("a SwitchX direct switch is active; restore it first".into());
         }
         if journal_path.exists() {
@@ -234,17 +234,17 @@ impl PreparedSwitch {
 
     pub fn with_codex_options(
         self,
-        options: &crate::provider_config::CodexOptions,
+        options: &super::provider_config::CodexOptions,
         common: &str,
     ) -> Result<Self, String> {
         self.with_document_update(|document| {
-            crate::provider_config::apply_to_document(document, options, common, PROVIDER_ID)
+            super::provider_config::apply_to_document(document, options, common, PROVIDER_ID)
         })
     }
 
     pub fn with_common_config(self, common: &str) -> Result<Self, String> {
         self.with_document_update(|document| {
-            crate::provider_config::apply_common_to_document(document, common)
+            super::provider_config::apply_common_to_document(document, common)
         })
     }
 
@@ -312,7 +312,7 @@ impl PreparedSwitch {
         provider.remove("auth");
         provider.insert("requires_openai_auth", value(true));
         provider.insert("http_headers", table());
-        provider["http_headers"][crate::routing::LOCAL_TOKEN_HEADER] = value(token);
+        provider["http_headers"][crate::router::LOCAL_TOKEN_HEADER] = value(token);
         self.preview.proposed = document.to_string();
         self.preview.required_environment_variable = None;
         let serialized: DocumentMut = self
@@ -385,7 +385,7 @@ impl PreparedSwitch {
             .journal_path
             .parent()
             .unwrap()
-            .join("direct-journal.json")
+            .join(DIRECT_JOURNAL)
             .exists()
         {
             return Err("a SwitchX direct switch is active; restore it first".into());
@@ -436,7 +436,7 @@ impl PreparedSwitch {
 }
 
 pub fn recovery(state_dir: &Path) -> Result<Option<Recovery>, String> {
-    let Some(bytes) = read_config(&state_dir.join(JOURNAL_NAME))? else {
+    let Some(bytes) = read_config(&state_dir.join(ROUTE_JOURNAL))? else {
         return Ok(None);
     };
     let journal: Journal =
@@ -483,7 +483,7 @@ fn restore_impl(
     keep_journal: bool,
 ) -> Result<RestoreResult, String> {
     let _lock = lock_config(config_path)?;
-    let journal_path = state_dir.join(JOURNAL_NAME);
+    let journal_path = state_dir.join(ROUTE_JOURNAL);
     let journal: Journal = serde_json::from_slice(&fs::read(&journal_path).map_err(io_error)?)
         .map_err(|_| "SwitchX journal is invalid; inspect it before recovery")?;
     if journal.version != 1 || journal.config_path != config_path {
@@ -765,7 +765,8 @@ mod tests {
 
     fn publication() -> Publication {
         let templates =
-            serde_json::from_str(include_str!("../tests/fixtures/synthetic-models.json")).unwrap();
+            serde_json::from_str(include_str!("../../tests/fixtures/synthetic-models.json"))
+                .unwrap();
         publish(
             &templates,
             &[Selection {
@@ -792,7 +793,7 @@ mod tests {
     #[test]
     fn applies_and_restores_only_managed_fields() {
         let home = TestHome::new();
-        let original = include_str!("../tests/fixtures/codex-user-config.toml");
+        let original = include_str!("../../tests/fixtures/codex-user-config.toml");
         fs::write(home.config(), original).unwrap();
         let prepared = inspect(&home);
         assert_eq!(fs::read_to_string(home.config()).unwrap(), original);
@@ -802,7 +803,7 @@ mod tests {
         let active = fs::read_to_string(home.config()).unwrap();
         assert!(active.contains("model = \"sx-ds-flash\" # chosen by user"));
         assert!(active.contains("[model_providers.switchx_router]"));
-        assert!(home.state().join(JOURNAL_NAME).exists());
+        assert!(home.state().join(ROUTE_JOURNAL).exists());
 
         // Another writer may add unrelated Codex settings while the route is active.
         fs::write(home.config(), format!("{active}\nnotify = true\n")).unwrap();
@@ -814,14 +815,14 @@ mod tests {
         assert!(result.contains("[mcp_servers.sample]"));
         assert!(result.contains("notify = true"));
         assert!(!result.contains("[model_providers.switchx_router]"));
-        assert!(!home.state().join(JOURNAL_NAME).exists());
+        assert!(!home.state().join(ROUTE_JOURNAL).exists());
         assert!(catalog_path.is_file());
     }
 
     #[test]
     fn subscription_config_uses_independent_local_auth_and_preserves_renewed_native_auth() {
         let home = TestHome::new();
-        let original = include_str!("../tests/fixtures/codex-user-config.toml");
+        let original = include_str!("../../tests/fixtures/codex-user-config.toml");
         fs::write(home.config(), original).unwrap();
         let auth_path = home.0.join("auth.json");
         fs::write(&auth_path, r#"{"synthetic_generation":"before"}"#).unwrap();
@@ -837,14 +838,14 @@ mod tests {
         assert!(provider.as_table().unwrap().get("auth").is_none());
         assert!(provider.as_table().unwrap().get("env_key").is_none());
         assert_eq!(
-            provider["http_headers"][crate::routing::LOCAL_TOKEN_HEADER].as_str(),
+            provider["http_headers"][crate::router::LOCAL_TOKEN_HEADER].as_str(),
             Some(local_token.as_str())
         );
         prepared.apply().unwrap();
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;
-            for path in [home.config(), home.state().join(JOURNAL_NAME)] {
+            for path in [home.config(), home.state().join(ROUTE_JOURNAL)] {
                 assert_eq!(path.metadata().unwrap().permissions().mode() & 0o777, 0o600);
             }
         }
@@ -858,7 +859,7 @@ mod tests {
         );
         assert_eq!(fs::read_to_string(home.config()).unwrap(), original);
         assert_eq!(fs::read_to_string(auth_path).unwrap(), renewed);
-        assert!(!home.state().join(JOURNAL_NAME).exists());
+        assert!(!home.state().join(ROUTE_JOURNAL).exists());
         assert!(
             inspect(&home)
                 .with_chatgpt_auth("PROXY_MANAGED", &reference)
@@ -868,7 +869,8 @@ mod tests {
 
     fn publication_with_model_choices() -> Publication {
         let templates =
-            serde_json::from_str(include_str!("../tests/fixtures/synthetic-models.json")).unwrap();
+            serde_json::from_str(include_str!("../../tests/fixtures/synthetic-models.json"))
+                .unwrap();
         publish(
             &templates,
             &[
@@ -928,7 +930,7 @@ mod tests {
                 for name in ["model_provider", "model_catalog_json", "model_providers"] {
                     assert!(restored.get(name).is_none());
                 }
-                assert!(!home.state().join(JOURNAL_NAME).exists());
+                assert!(!home.state().join(ROUTE_JOURNAL).exists());
             }
         }
     }
@@ -970,7 +972,7 @@ mod tests {
                     }
                     fs::write(home.config(), selected.to_string()).unwrap();
                     if legacy {
-                        let path = home.state().join(JOURNAL_NAME);
+                        let path = home.state().join(ROUTE_JOURNAL);
                         let mut journal: serde_json::Value =
                             serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
                         journal.as_object_mut().unwrap().remove("published_models");
@@ -1000,7 +1002,7 @@ mod tests {
                     for name in ["model_provider", "model_catalog_json", "model_providers"] {
                         assert!(!restored.as_table().contains_key(name));
                     }
-                    assert!(!home.state().join(JOURNAL_NAME).exists());
+                    assert!(!home.state().join(ROUTE_JOURNAL).exists());
                 }
             }
         }
@@ -1043,7 +1045,7 @@ mod tests {
                     "sx-selected"
                 })
             );
-            assert!(home.state().join(JOURNAL_NAME).exists());
+            assert!(home.state().join(ROUTE_JOURNAL).exists());
         }
     }
 
@@ -1063,11 +1065,11 @@ mod tests {
         let current = fs::read_to_string(home.config()).unwrap();
         assert!(current.contains("model = \"external-choice\""));
         assert!(!current.contains("switchx_router"));
-        assert!(home.state().join(JOURNAL_NAME).exists());
+        assert!(home.state().join(ROUTE_JOURNAL).exists());
         fs::write(home.config(), current.replace("external-choice", "first")).unwrap();
         let result = restore(&home.config(), &home.state()).unwrap();
         assert!(result.conflicts.is_empty());
-        assert!(!home.state().join(JOURNAL_NAME).exists());
+        assert!(!home.state().join(ROUTE_JOURNAL).exists());
     }
 
     #[test]
@@ -1079,7 +1081,7 @@ mod tests {
         fs::write(home.config(), "model = \"changed\"\n").unwrap();
         assert!(prepared.apply().unwrap_err().contains("changed"));
         assert!(!catalog_path.exists());
-        assert!(!home.state().join(JOURNAL_NAME).exists());
+        assert!(!home.state().join(ROUTE_JOURNAL).exists());
     }
 
     #[test]
@@ -1108,7 +1110,7 @@ mod tests {
                 .unwrap()
                 .apply()
                 .unwrap();
-            let journal_path = home.state().join(JOURNAL_NAME);
+            let journal_path = home.state().join(ROUTE_JOURNAL);
             let journal = fs::read(&journal_path).unwrap();
             let restored = restore_preserving_journal(&home.config(), &home.state()).unwrap();
             assert!(restored.conflicts.is_empty());
@@ -1145,7 +1147,7 @@ mod tests {
         let prepared = inspect(&home);
         fs::create_dir_all(home.state()).unwrap();
         write_exclusive_atomic(
-            &home.state().join(JOURNAL_NAME),
+            &home.state().join(ROUTE_JOURNAL),
             &serde_json::to_vec(&prepared.journal).unwrap(),
         )
         .unwrap();
@@ -1153,7 +1155,7 @@ mod tests {
         assert!(!result.changed);
         assert!(result.conflicts.is_empty());
         assert_eq!(fs::read_to_string(home.config()).unwrap(), original);
-        assert!(!home.state().join(JOURNAL_NAME).exists());
+        assert!(!home.state().join(ROUTE_JOURNAL).exists());
     }
 
     #[test]
@@ -1190,7 +1192,7 @@ mod tests {
                 .unwrap()
                 .contains("[model_providers.switchx_router] # user note")
         );
-        assert!(home.state().join(JOURNAL_NAME).exists());
+        assert!(home.state().join(ROUTE_JOURNAL).exists());
     }
 
     #[test]
@@ -1198,7 +1200,7 @@ mod tests {
         let home = TestHome::new();
         let original = "model = \"old\" # private field comment\n\n[model_providers] # private parent comment\n";
         fs::write(home.config(), original).unwrap();
-        let reference = format!("router-{}", crate::app::new_id().unwrap());
+        let reference = format!("router-{}", crate::id::new_id().unwrap());
         let helper = std::env::current_exe().unwrap();
         let prepared = inspect(&home)
             .with_credential_helper(&helper, &reference)
@@ -1221,7 +1223,7 @@ mod tests {
             recovery.local_token_reference.as_deref(),
             Some(reference.as_str())
         );
-        let journal = fs::read_to_string(home.state().join(JOURNAL_NAME)).unwrap();
+        let journal = fs::read_to_string(home.state().join(ROUTE_JOURNAL)).unwrap();
         assert!(!journal.contains("private"));
         assert!(!journal.contains("api_key"));
         assert!(
@@ -1239,7 +1241,7 @@ mod tests {
         let prepared = inspect(&home);
         fs::create_dir_all(home.state()).unwrap();
         write_exclusive_atomic(
-            &home.state().join(JOURNAL_NAME),
+            &home.state().join(ROUTE_JOURNAL),
             &serde_json::to_vec(&prepared.journal).unwrap(),
         )
         .unwrap();
@@ -1310,7 +1312,7 @@ mod tests {
         let prepared = inspect(&home);
         let lock = lock_config(&home.config()).unwrap();
         assert!(prepared.apply().unwrap_err().contains("另一个"));
-        assert!(!home.state().join(JOURNAL_NAME).exists());
+        assert!(!home.state().join(ROUTE_JOURNAL).exists());
         drop(lock);
         let other_state = home.0.join("other-state");
         let other = PreparedSwitch::inspect(
@@ -1323,7 +1325,7 @@ mod tests {
         .unwrap();
         inspect(&home).apply().unwrap();
         assert!(other.apply().unwrap_err().contains("changed"));
-        assert!(!other_state.join(JOURNAL_NAME).exists());
+        assert!(!other_state.join(ROUTE_JOURNAL).exists());
         let provider = crate::storage::ProviderRecord {
             kind: crate::storage::ProviderKind::ApiKey,
             account_binding: None,
@@ -1335,7 +1337,7 @@ mod tests {
             credential_ref: Some("fixture".into()),
         };
         assert!(
-            crate::direct_config::PreparedDirectSwitch::inspect(
+            crate::codex::direct_switch::PreparedDirectSwitch::inspect(
                 &home.config(),
                 &other_state,
                 &provider,
@@ -1356,7 +1358,7 @@ mod tests {
         let home = TestHome::new();
         let original = "model = \"old\"\napproval_policy = \"on-request\" # keep-preference\n\n[features]\nhooks = false\n";
         fs::write(home.config(), original).unwrap();
-        let options = crate::provider_config::CodexOptions {
+        let options = crate::codex::provider_config::CodexOptions {
             remote_compaction: true,
             use_common_config: true,
             context_1m: true,
@@ -1399,7 +1401,7 @@ mod tests {
         assert_eq!(restored["features"]["external"].as_bool(), Some(true));
         assert!(restored.as_table().get("tui").is_none());
         assert!(!text.contains("switchx_router"));
-        assert!(home.state().join(JOURNAL_NAME).exists());
+        assert!(home.state().join(ROUTE_JOURNAL).exists());
         restored["features"]
             .as_table_mut()
             .unwrap()
@@ -1412,7 +1414,7 @@ mod tests {
                 .conflicts
                 .is_empty()
         );
-        assert!(!home.state().join(JOURNAL_NAME).exists());
+        assert!(!home.state().join(ROUTE_JOURNAL).exists());
     }
 
     #[test]
@@ -1420,8 +1422,8 @@ mod tests {
         let home = TestHome::new();
         let original = "model = 'old'\napproval_policy = 'on-request' # keep preference\n[features]\nhooks = false\n[mcp_servers.local]\ncommand = 'old-command' # keep MCP note\n[mcp_servers.local.env]\nSERVICE_API_KEY = 'synthetic-existing-secret'\n";
         fs::write(home.config(), original).unwrap();
-        let options = crate::provider_config::subscription_options_from_config(
-            &crate::provider_config::CodexOptions::default(),
+        let options = crate::codex::provider_config::subscription_options_from_config(
+            &crate::codex::provider_config::CodexOptions::default(),
             "model = 'upstream-model-metadata'\napproval_policy = 'never'\nmodel_context_window = 128000\nmodel_auto_compact_token_limit = 96000\nmodel_reasoning_effort = 'max'\n[features]\nhooks = true\n[mcp_servers.local]\ncommand = 'new-command'\n[mcp_servers.local.env]\nLANG = 'en_US'\n",
         ).unwrap();
         let prepared = inspect(&home);
@@ -1447,7 +1449,7 @@ mod tests {
             Some("new-command")
         );
         prepared.apply().unwrap();
-        let journal = fs::read_to_string(home.state().join(JOURNAL_NAME)).unwrap();
+        let journal = fs::read_to_string(home.state().join(ROUTE_JOURNAL)).unwrap();
         assert!(!journal.contains("synthetic-existing-secret"));
         assert!(!journal.contains("keep preference"));
         assert!(!journal.contains("keep MCP note"));
@@ -1479,7 +1481,7 @@ mod tests {
     #[test]
     fn routed_options_restore_absent_config_and_legacy_journals() {
         let home = TestHome::new();
-        let options = crate::provider_config::CodexOptions {
+        let options = crate::codex::provider_config::CodexOptions {
             use_common_config: true,
             context_1m: true,
             ..Default::default()
@@ -1500,7 +1502,7 @@ mod tests {
         let original = "model = \"old\"\n";
         fs::write(home.config(), original).unwrap();
         inspect(&home).apply().unwrap();
-        let path = home.state().join(JOURNAL_NAME);
+        let path = home.state().join(ROUTE_JOURNAL);
         let mut old: serde_json::Value = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
         old.as_object_mut().unwrap().remove("overlay");
         fs::write(path, serde_json::to_vec(&old).unwrap()).unwrap();

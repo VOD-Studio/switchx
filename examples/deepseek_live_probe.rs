@@ -10,8 +10,8 @@ use reqwest::Client;
 use serde_json::{Value, json};
 use switchx::{
     catalog::{Selection, publish},
-    config::preview_route,
-    routing::{RouterState, Upstream, serve},
+    codex::route_config::preview_route,
+    router::{RouterState, Upstream, serve},
 };
 use tokio::{net::TcpListener, process::Command, time::timeout};
 use zeroize::Zeroize;

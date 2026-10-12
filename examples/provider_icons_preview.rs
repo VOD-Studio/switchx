@@ -18,13 +18,12 @@
 //! or --model-editor-native (window; add --light for the light theme).
 
 #[cfg(target_os = "macos")]
-#[path = "../src/macos.rs"]
-pub mod macos;
+use switchx::macos;
 
 use switchx::ui::{
-    AccountRow, AppWindow, BatchModelRow, BatchSummary, CodeSpan, CodexQuotaRow,
-    ConnectionModelRow, ModelRow, ProviderIconRow, ProviderPresetRow, ProviderRow, RequestBar,
-    RequestRow, RequestStats, SyntaxHighlighting, Theme, XaiQuotaRow,
+    AccountRow, AppWindow, BatchModelRow, BatchSummary, CodexQuotaRow, ConnectionModelRow,
+    ModelRow, ProviderIconRow, ProviderPresetRow, ProviderRow, RequestBar, RequestRow,
+    RequestStats, Theme, XaiQuotaRow,
 };
 
 use slint::platform::software_renderer::{MinimalSoftwareWindow, RepaintBufferType};
@@ -1636,31 +1635,6 @@ fn render_activity_design(
     Ok(())
 }
 
-fn connect_code_highlighting(app: &AppWindow) {
-    app.global::<SyntaxHighlighting>().on_line_count(|source| {
-        source
-            .as_str()
-            .split('\n')
-            .count()
-            .try_into()
-            .unwrap_or(i32::MAX)
-    });
-    app.global::<SyntaxHighlighting>()
-        .on_spans(|source, language| {
-            let spans = switchx::code_highlight::spans(source.as_str(), language.as_str())
-                .into_iter()
-                .map(|span| CodeSpan {
-                    text: span.text.into(),
-                    prefix: span.prefix.into(),
-                    line_text: span.line_text.into(),
-                    line: span.line,
-                    kind: span.kind as i32,
-                })
-                .collect::<Vec<_>>();
-            ModelRc::new(VecModel::from(spans))
-        });
-}
-
 fn render_xai_editor(
     app: &AppWindow,
     window: &MinimalSoftwareWindow,
@@ -1831,7 +1805,7 @@ fn render_subscription_editor(
     window: &MinimalSoftwareWindow,
     output: &Path,
 ) -> Result<(), Box<dyn Error>> {
-    connect_code_highlighting(app);
+    switchx::code_highlight::connect(app);
     app.set_active_page(1);
     app.set_subscription_id("preview-subscription".into());
     app.set_subscription_name("ChatGPT · 工作账号".into());
@@ -2157,7 +2131,7 @@ fn render_common_config(
     window: &MinimalSoftwareWindow,
     output: &Path,
 ) -> Result<(), Box<dyn Error>> {
-    connect_code_highlighting(app);
+    switchx::code_highlight::connect(app);
     app.set_active_page(1);
     app.set_common_config_saved(
         concat!(
@@ -2438,7 +2412,7 @@ fn render_provider_editor(
     window: &MinimalSoftwareWindow,
     output: &Path,
 ) -> Result<(), Box<dyn Error>> {
-    connect_code_highlighting(app);
+    switchx::code_highlight::connect(app);
     app.set_active_page(1);
     app.set_edit_id("preview-api".into());
     app.set_edit_name("Podlink".into());

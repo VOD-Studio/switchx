@@ -8,9 +8,11 @@ use axum::{
 };
 use serde_json::{Value, json};
 use switchx::{
-    app, client, direct,
-    direct_config::{self, PreparedDirectSwitch},
+    app,
+    codex::client,
+    codex::direct_switch::{self, PreparedDirectSwitch},
     storage::Store,
+    upstream,
 };
 use tokio::{net::TcpListener, process::Command, sync::mpsc, time::timeout};
 
@@ -110,7 +112,7 @@ async fn run(root: &Path) -> Result<(), Box<dyn std::error::Error>> {
                 "build the switchx binary before running this probe".into(),
             );
         }
-        direct::check_models(&provider, "synthetic-direct-key").await?;
+        upstream::check_models(&provider, "synthetic-direct-key").await?;
         let prepared =
             PreparedDirectSwitch::inspect(&home.join("config.toml"), &data, &provider, &helper)?;
         prepared.apply()?;
@@ -150,7 +152,7 @@ async fn run(root: &Path) -> Result<(), Box<dyn std::error::Error>> {
             eprintln!("{}", String::from_utf8_lossy(&output.stderr));
             return Err("Codex did not finish the direct mock request".into());
         }
-        let restored = direct_config::restore(&home.join("config.toml"), &data)?;
+        let restored = direct_switch::restore(&home.join("config.toml"), &data)?;
         if !restored.conflicts.is_empty()
             || std::fs::read_to_string(home.join("config.toml"))?
                 != "# keep\napproval_policy = \"never\"\n"

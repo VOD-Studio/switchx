@@ -2,7 +2,7 @@ use std::{env, path::PathBuf};
 
 use switchx::{
     catalog::{Selection, publish},
-    config::preview_route,
+    codex::route_config::preview_route,
 };
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {

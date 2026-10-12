@@ -157,7 +157,7 @@ impl Store {
         let version: i64 = connection.query_row("PRAGMA user_version", [], |row| row.get(0))?;
         let parent = path.parent().ok_or(rusqlite::Error::InvalidQuery)?;
         Ok(version < SCHEMA_VERSION
-            && ["direct-journal.json", "switch-journal.json"]
+            && crate::codex::JOURNALS
                 .iter()
                 .any(|name| parent.join(name).exists()))
     }
@@ -1143,7 +1143,7 @@ mod tests {
     fn v10_migration_preserves_credentials_mappings_fallbacks_and_session_contexts() {
         let path = std::env::temp_dir().join(format!(
             "switchx-v10-xai-{}.sqlite",
-            crate::app::new_id().unwrap()
+            crate::id::new_id().unwrap()
         ));
         let store = Store::open(&path).unwrap();
         let primary = ProviderRecord {
@@ -1235,7 +1235,7 @@ mod tests {
     fn v9_icon_migration_and_credentials_readers_preserve_saved_data() {
         let path = std::env::temp_dir().join(format!(
             "switchx-icon-migration-{}.sqlite",
-            crate::app::new_id().unwrap()
+            crate::id::new_id().unwrap()
         ));
         let provider = ProviderRecord {
             credential_ref: None,
@@ -1346,7 +1346,7 @@ mod tests {
         ] {
             let path = std::env::temp_dir().join(format!(
                 "switchx-binding-migration-{}.sqlite",
-                crate::app::new_id().unwrap()
+                crate::id::new_id().unwrap()
             ));
             let store = Store::open(&path).unwrap();
             let provider = ProviderRecord {
@@ -1468,10 +1468,10 @@ mod tests {
 
     #[test]
     fn v8_journals_defer_migration_but_credentials_and_recovery_remain_usable() {
-        for journal in ["direct-journal.json", "switch-journal.json"] {
+        for journal in crate::codex::JOURNALS {
             let directory = std::env::temp_dir().join(format!(
                 "switchx-legacy-recovery-{}",
-                crate::app::new_id().unwrap()
+                crate::id::new_id().unwrap()
             ));
             std::fs::create_dir(&directory).unwrap();
             let path = directory.join("switchx.sqlite");
@@ -1527,7 +1527,7 @@ mod tests {
         }
         let missing = std::env::temp_dir().join(format!(
             "switchx-missing-db-{}",
-            crate::app::new_id().unwrap()
+            crate::id::new_id().unwrap()
         ));
         assert!(Store::open_credentials_read_only(&missing).is_err());
         assert!(Store::open_recovery(&missing).is_err());
@@ -1553,7 +1553,7 @@ mod tests {
     fn persistent_session_context_is_atomic_and_survives_provider_deletion() {
         let path = std::env::temp_dir().join(format!(
             "switchx-session-store-{}.sqlite",
-            crate::app::new_id().unwrap()
+            crate::id::new_id().unwrap()
         ));
         let store = Store::open(&path).unwrap();
         let a = SessionAuthContext {
@@ -1603,7 +1603,7 @@ mod tests {
     fn local_tokens_persist_and_delete_only_the_selected_reference() {
         let path = std::env::temp_dir().join(format!(
             "switchx-local-token-{}.sqlite",
-            crate::app::new_id().unwrap()
+            crate::id::new_id().unwrap()
         ));
         let first = format!("router-{}", "a".repeat(32));
         let second = format!("router-{}", "b".repeat(32));
@@ -1711,7 +1711,7 @@ mod tests {
     fn api_keys_persist_as_json_while_metadata_writes_preserve_them() {
         let path = std::env::temp_dir().join(format!(
             "switchx-api-key-{}.sqlite",
-            crate::app::new_id().unwrap()
+            crate::id::new_id().unwrap()
         ));
         let provider = api_provider();
         let key = Secret::new("synthetic-plaintext-key".into());
@@ -1876,7 +1876,7 @@ mod tests {
     fn provider_edits_preserve_keys_changed_by_another_connection() {
         let path = std::env::temp_dir().join(format!(
             "switchx-api-key-preserve-{}.sqlite",
-            crate::app::new_id().unwrap()
+            crate::id::new_id().unwrap()
         ));
         let store = Store::open(&path).unwrap();
         let provider = api_provider();
@@ -2027,7 +2027,7 @@ mod tests {
     fn v7_migration_keeps_legacy_references_and_initializes_empty_key_json() {
         let path = std::env::temp_dir().join(format!(
             "switchx-v8-migration-{}.sqlite",
-            crate::app::new_id().unwrap()
+            crate::id::new_id().unwrap()
         ));
         let provider = api_provider();
         let store = Store::open(&path).unwrap();
@@ -2179,7 +2179,7 @@ mod tests {
     fn provider_options_and_common_config_persist_without_changing_provider_metadata() {
         let path = std::env::temp_dir().join(format!(
             "switchx-codex-options-{}.sqlite",
-            crate::app::new_id().unwrap()
+            crate::id::new_id().unwrap()
         ));
         let provider = ProviderRecord {
             kind: crate::storage::ProviderKind::ApiKey,
@@ -2230,7 +2230,7 @@ mod tests {
     fn v6_migration_preserves_provider_model_and_request_data_with_empty_options() {
         let path = std::env::temp_dir().join(format!(
             "switchx-options-migration-{}.sqlite",
-            crate::app::new_id().unwrap()
+            crate::id::new_id().unwrap()
         ));
         let store = Store::open(&path).unwrap();
         let provider = ProviderRecord {
@@ -2288,7 +2288,7 @@ mod tests {
     fn v5_migration_preserves_data_and_supports_atomic_independent_mappings() {
         let path = std::env::temp_dir().join(format!(
             "switchx-multi-model-{}.sqlite",
-            crate::app::new_id().unwrap()
+            crate::id::new_id().unwrap()
         ));
         let store = Store::open(&path).unwrap();
         for id in ["primary", "backup"] {
@@ -2384,7 +2384,7 @@ mod tests {
     fn read_only_inspection_cannot_write_create_or_migrate() {
         let path = std::env::temp_dir().join(format!(
             "switchx-read-only-{}.sqlite",
-            crate::app::new_id().unwrap()
+            crate::id::new_id().unwrap()
         ));
         assert!(Store::open_read_only(&path).is_err());
         assert!(!path.exists());
@@ -2422,7 +2422,7 @@ mod tests {
     fn v4_migration_preserves_rows_and_fallback_references_clear_on_deletion() {
         let path = std::env::temp_dir().join(format!(
             "switchx-fallback-{}.sqlite",
-            crate::app::new_id().unwrap()
+            crate::id::new_id().unwrap()
         ));
         let store = Store::open(&path).unwrap();
         for id in ["primary", "backup"] {
@@ -2489,7 +2489,7 @@ mod tests {
     fn v3_migration_keeps_history_after_reopen_and_provider_deletion() {
         let path = std::env::temp_dir().join(format!(
             "switchx-requests-{}.sqlite",
-            crate::app::new_id().unwrap()
+            crate::id::new_id().unwrap()
         ));
         let store = Store::open(&path).unwrap();
         store
@@ -2627,7 +2627,7 @@ mod tests {
     fn v2_migration_persists_unique_model_bindings_and_cascades_provider_deletion() {
         let path = std::env::temp_dir().join(format!(
             "switchx-models-{}.sqlite",
-            crate::app::new_id().unwrap()
+            crate::id::new_id().unwrap()
         ));
         let connection = Connection::open(&path).unwrap();
         connection.execute_batch(

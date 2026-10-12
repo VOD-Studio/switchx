@@ -5,8 +5,7 @@
 use switchx::ui::{AppWindow, SwitchXTray};
 
 #[cfg(target_os = "macos")]
-#[path = "../src/macos.rs"]
-pub mod macos;
+use switchx::macos;
 
 use std::{error::Error, time::Duration};
 

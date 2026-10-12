@@ -108,7 +108,7 @@ M1 收口检查（2026-09-24，macOS 调试 bundle，隔离的 `SWITCHX_DATA_DIR
 
 `cargo run --example config_probe -- /tmp/switchx-models.json` 只把合成 `config.toml` 差异预览输出到 stdout。预览保留其他 provider、MCP、项目、安全设置和注释；它不写用户配置。生成的 `env_key = "SWITCHX_LOCAL_TOKEN"` 仅在启动 Codex 的环境已提供本地令牌时才可用于请求。
 
-`config_transaction::PreparedSwitch` 检查目标文件未变化，先写不可变目录和恢复 journal，再原子替换 `config.toml`。`restore` 按受管字段做三方比较，保留外部新增设置；同一字段发生冲突时保留外部值和 journal。直连和路由共用目标文件锁，防止 SwitchX 实例并发写入。仅含 API 模型的原生路由通过 `auth.command` 取得本地令牌；含订阅模型的路由使用 `requires_openai_auth` 和独立本地请求头，详见下文。较早的 `config_probe`、`codex_cli_probe` 和 `deepseek_live_probe` 仍使用显式提供 `SWITCHX_LOCAL_TOKEN` 的隔离探针流程。
+`codex::route_switch::PreparedSwitch` 检查目标文件未变化，先写不可变目录和恢复 journal，再原子替换 `config.toml`。`restore` 按受管字段做三方比较，保留外部新增设置；同一字段发生冲突时保留外部值和 journal。直连和路由共用目标文件锁，防止 SwitchX 实例并发写入。仅含 API 模型的原生路由通过 `auth.command` 取得本地令牌；含订阅模型的路由使用 `requires_openai_auth` 和独立本地请求头，详见下文。较早的 `config_probe`、`codex_cli_probe` 和 `deepseek_live_probe` 仍使用显式提供 `SWITCHX_LOCAL_TOKEN` 的隔离探针流程。
 
 `cargo run --example codex_cli_probe` 会通过 npm 执行 Codex CLI 0.156.1，在独立临时 `CODEX_HOME` 中启动同一个 SwitchX 路由入口和两个本地假上游。实测两个别名分别到达对应假上游，且 `sx-ds-flash` 完成一次读取临时文件、回传工具结果、第二轮回答。运行结束会删除该临时目录；无真实 API Key、登录态或模型调用。
 

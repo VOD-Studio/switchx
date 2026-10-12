@@ -12,9 +12,10 @@ use std::{
 
 use live_probe::ProbeResult;
 use switchx::{
-    config_transaction, direct,
-    routed::RouteSession,
+    codex::route_switch,
+    route_session::RouteSession,
     storage::{ModelRecord, ProviderRecord, RequestRecord, RequestStatus, Store},
+    upstream,
 };
 use tokio::{net::TcpListener, time::timeout};
 
@@ -51,7 +52,7 @@ async fn main() -> ProbeResult {
         .parent()
         .unwrap()
         .join("switchx");
-    if !direct::helper_is_usable(&helper) {
+    if !upstream::helper_is_usable(&helper) {
         return Err("run cargo build --locked --bin switchx first".into());
     }
 
@@ -232,7 +233,7 @@ fn valid_records(records: &[RequestRecord], model: &ModelRecord, minimum: usize)
 
 async fn cleanup(session: &mut RouteSession, home: &Path, state: &Path) -> ProbeResult {
     let address = session.address();
-    let recovery = config_transaction::recovery(state)?;
+    let recovery = route_switch::recovery(state)?;
     let reference = recovery
         .as_ref()
         .and_then(|recovery| recovery.local_token_reference.clone());
@@ -240,7 +241,7 @@ async fn cleanup(session: &mut RouteSession, home: &Path, state: &Path) -> Probe
         session.restore(state, home).await?;
     }
     session.discard_preview();
-    if session.is_running() || config_transaction::recovery(state)?.is_some() {
+    if session.is_running() || route_switch::recovery(state)?.is_some() {
         return Err("route or recovery journal remained after restore".into());
     }
     if home.join("config.toml").exists()

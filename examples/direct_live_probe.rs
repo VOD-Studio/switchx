@@ -3,10 +3,10 @@ mod live_probe;
 
 use std::path::{Path, PathBuf};
 use switchx::{
+    codex::direct_switch::{self, PreparedDirectSwitch},
     credentials::Secret,
-    direct,
-    direct_config::{self, PreparedDirectSwitch},
     storage::{ProviderRecord, Store},
+    upstream,
 };
 
 const ORIGINAL_CONFIG: &str = "# isolated real direct acceptance\nmodel = \"gpt-5.5\" # preserve comment\napproval_policy = \"never\"\n\n[mcp_servers.acceptance_disabled]\ncommand = \"false\"\nenabled = false\n";
@@ -37,7 +37,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .parent()
         .unwrap()
         .join("switchx");
-    if !direct::helper_is_usable(&helper) {
+    if !upstream::helper_is_usable(&helper) {
         return Err("run cargo build --bin switchx first".into());
     }
     let mut nonce = [0_u8; 8];
@@ -57,8 +57,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let config = home.join("config.toml");
     std::fs::write(&config, ORIGINAL_CONFIG)?;
     let result = run(&home, &state, &provider, &key, &helper, &suffix).await;
-    if state.join("direct-journal.json").exists() {
-        let restored = direct_config::restore(&config, &state).map_err(|_| {
+    if state.join(switchx::codex::DIRECT_JOURNAL).exists() {
+        let restored = direct_switch::restore(&config, &state).map_err(|_| {
             format!(
                 "restore failed; isolated files retained at {}",
                 root.display()
@@ -91,7 +91,7 @@ async fn run(
     let store = Store::open(&state.join("switchx.sqlite"))?;
     store.put_provider_with_models_options_and_key(provider, &[], None, key)?;
     drop(store);
-    direct::check_models(provider, key.expose()).await?;
+    upstream::check_models(provider, key.expose()).await?;
     println!("Real upstream /models contains the selected model");
     PreparedDirectSwitch::inspect(&home.join("config.toml"), state, provider, helper)?.apply()?;
     let greeting = format!("SWITCHX_DIRECT_{suffix}");

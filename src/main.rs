@@ -1,14 +1,14 @@
 use switchx::ui::{
-    AccountRow, AppWindow, BatchModelRow, BatchSummary, CodeSpan, CodexQuotaRow,
-    ConnectionModelRow, ModelRow, ProviderIconRow, ProviderPresetRow, ProviderRow, RequestBar,
-    RequestRow, RequestStats, SwitchXTray, SyntaxHighlighting, XaiQuotaRow,
+    AccountRow, AppWindow, BatchModelRow, BatchSummary, CodexQuotaRow, ConnectionModelRow,
+    ModelRow, ProviderIconRow, ProviderPresetRow, ProviderRow, RequestBar, RequestRow,
+    RequestStats, SwitchXTray, XaiQuotaRow,
 };
 
 #[cfg(target_os = "macos")]
 use switchx::ui::Theme;
 
 #[cfg(target_os = "macos")]
-mod macos;
+use switchx::macos;
 
 use std::{
     collections::{HashMap, HashSet},
@@ -17,16 +17,19 @@ use std::{
 
 use slint::{ComponentHandle, Model, ModelRc, VecModel};
 use switchx::{
-    accounts::AccountManager,
     app::{self, AppError, Snapshot, data_directory, load_snapshot},
-    catalog, chatgpt, client, code_highlight, config_transaction,
+    catalog, chatgpt,
+    chatgpt::accounts::AccountManager,
+    code_highlight,
+    codex::client,
+    codex::direct_switch::{self, PreparedDirectSwitch},
+    codex::provider_config::{self, CodexOptions},
+    codex::route_switch,
     credentials::Secret,
-    direct,
-    direct_config::{self, PreparedDirectSwitch},
-    provider_config::{self, CodexOptions},
     provider_icons,
-    routed::RouteSession,
+    route_session::RouteSession,
     storage::{AccountBinding, ModelRecord, ProviderKind, ProviderRecord, RequestStatus, Store},
+    upstream,
 };
 use tokio::sync::{
     mpsc::{self, error::TrySendError},
@@ -914,7 +917,7 @@ fn update_codex_quota(
     app: &AppWindow,
     id: &str,
     request_id: &str,
-    result: Result<switchx::accounts::Quota, String>,
+    result: Result<switchx::chatgpt::accounts::Quota, String>,
 ) {
     let mut rows = app.get_accounts().iter().collect::<Vec<_>>();
     let Some(row) = rows
@@ -967,7 +970,7 @@ fn refresh_codex_quota(app: &AppWindow, sender: &mpsc::Sender<Command>, id: &str
     let mut requests = Vec::new();
     for row in &mut rows {
         if (id.is_empty() || row.id == id) && !row.codex_quota.loading {
-            let Ok(request_id) = app::new_id() else {
+            let Ok(request_id) = switchx::id::new_id() else {
                 continue;
             };
             row.codex_quota.request_id = request_id.clone().into();
@@ -1059,7 +1062,7 @@ fn refresh_xai_quota(app: &AppWindow, sender: &mpsc::Sender<Command>, id: &str) 
     let mut requests = Vec::new();
     for row in &mut rows {
         if (id.is_empty() || row.id == id) && !row.quota.loading && !row.requires_reauth {
-            let Ok(request_id) = app::new_id() else {
+            let Ok(request_id) = switchx::id::new_id() else {
                 continue;
             };
             row.quota.request_id = request_id.clone().into();
@@ -1528,7 +1531,7 @@ fn close_subscription_editor(app: &AppWindow) {
 fn show_subscription_editor(
     app: &AppWindow,
     provider: Option<ProviderRecord>,
-    accounts: Vec<switchx::accounts::AccountInfo>,
+    accounts: Vec<switchx::chatgpt::accounts::AccountInfo>,
     config: String,
     options: CodexOptions,
     common: String,
@@ -1681,7 +1684,7 @@ fn connect_provider_checks(app: &AppWindow, sender: &mpsc::Sender<Command>) {
         {
             return;
         }
-        let check_id = match app::new_id() {
+        let check_id = match switchx::id::new_id() {
             Ok(id) => id,
             Err(error) => {
                 show_action_feedback(&app, Err(error));
@@ -1844,10 +1847,10 @@ async fn restore_connections(
     data_dir: &Path,
     target: &Path,
 ) -> Result<(), String> {
-    if config_transaction::recovery(data_dir)?.is_some() {
+    if route_switch::recovery(data_dir)?.is_some() {
         session.restore(data_dir, target).await?;
-    } else if direct_config::active_target(data_dir)?.is_some() {
-        let result = direct_config::restore(&client::config_path(target)?, data_dir)?;
+    } else if direct_switch::active_target(data_dir)?.is_some() {
+        let result = direct_switch::restore(&client::config_path(target)?, data_dir)?;
         if !result.conflicts.is_empty() {
             return Err(format!(
                 "配置恢复有冲突：{}；登录操作未开始",
@@ -1922,7 +1925,7 @@ fn open_model_editor(app: &AppWindow, provider_id: &str, original_id: &str) -> R
     );
     app.set_model_public_id(match &model {
         Some(model) => model.public_id.clone(),
-        None => format!("sx-{}", app::new_id()?).into(),
+        None => format!("sx-{}", switchx::id::new_id()?).into(),
     });
     app.set_model_display_name(
         model
@@ -2543,7 +2546,7 @@ async fn check_provider(
             progress("读取账号凭据");
             let token = manager.credential(&account.id).await?;
             progress("读取模型目录");
-            direct::check_models(&provider, token.expose()).await?;
+            upstream::check_models(&provider, token.expose()).await?;
             Ok(ProviderCheckResult {
                 message: "模型目录已连通".into(),
                 detail: "尚未验证实际推理权限".into(),
@@ -2582,7 +2585,7 @@ async fn check_provider(
             progress("读取 API 凭据");
             let token = app::provider_credential(&data_dir, &provider)?;
             progress("读取模型目录");
-            direct::check_models(&provider, token.expose()).await?;
+            upstream::check_models(&provider, token.expose()).await?;
             Ok(ProviderCheckResult {
                 message: "模型目录已连通".into(),
                 detail: format!("已找到 {}；尚未验证推理与工具调用", provider.model_id),
@@ -2868,7 +2871,7 @@ async fn worker(
                             app::ensure_editable(data_dir)?;
                             let login = manager.start_login().await?;
                             open_provider_link(&login.verification_url)?;
-                            let login_id = app::new_id()?;
+                            let login_id = switchx::id::new_id()?;
                             let ui_id = login_id.clone();
                             let url = login.verification_url.clone();
                             let code = login.user_code.clone();
@@ -3462,7 +3465,7 @@ async fn worker(
                             let account = manager
                                 .resolve_binding(selected.account_binding.as_ref().unwrap())?;
                             let token = manager.credential(&account.id).await?;
-                            return direct::fetch_models(switchx::xai::BASE_URL, token.expose())
+                            return upstream::fetch_models(switchx::xai::BASE_URL, token.expose())
                                 .await
                                 .map(|models| (models, false, Vec::new()));
                         }
@@ -3493,7 +3496,7 @@ async fn worker(
                     } else {
                         key
                     };
-                    direct::fetch_models(&url, token.expose())
+                    upstream::fetch_models(&url, token.expose())
                         .await
                         .map(|models| (models, false, Vec::new()))
                 }
@@ -3653,7 +3656,7 @@ async fn worker(
                         })();
                         match checked {
                             Ok((data_dir, provider, token)) => {
-                                match direct::check_models(&provider, token.expose()).await {
+                                match upstream::check_models(&provider, token.expose()).await {
                                     Ok(()) => switch.apply().map(|()| {
                                         let status =
                                             client::inspect(Path::new(&target), &data_dir).ok();
@@ -3689,12 +3692,12 @@ async fn worker(
                 let result = async {
                     let data_dir = directory.as_ref().map_err(|error| error.message())?;
                     let target_home = home(&target)?;
-                    if config_transaction::recovery(data_dir)?.is_some() {
+                    if route_switch::recovery(data_dir)?.is_some() {
                         route_session.restore(data_dir, &target_home).await?;
                     } else {
                         route_session.discard_preview();
                         let result =
-                            direct_config::restore(&client::config_path(&target_home)?, data_dir)?;
+                            direct_switch::restore(&client::config_path(&target_home)?, data_dir)?;
                         if !result.conflicts.is_empty() {
                             return Err(format!(
                                 "已保留外部改动，以下字段有冲突：{}；恢复记录已保留",
@@ -3741,8 +3744,8 @@ async fn worker(
             Command::InspectConfig(target) => {
                 let result = (|| {
                     let data_dir = directory.as_ref().map_err(|error| error.message())?;
-                    let managed = direct_config::active_target(data_dir)?
-                        .or(config_transaction::recovery(data_dir)?.map(|route| route.config_path));
+                    let managed = direct_switch::active_target(data_dir)?
+                        .or(route_switch::recovery(data_dir)?.map(|route| route.config_path));
                     let target = managed
                         .and_then(|path| path.parent().map(Path::to_path_buf))
                         .unwrap_or(home(&target)?);
@@ -3855,7 +3858,7 @@ async fn worker(
                     match action {
                         0 => Ok("已刷新保存的账号列表".into()),
                         1 => {
-                            let login_id = app::new_id()?;
+                            let login_id = switchx::id::new_id()?;
                             let login = manager.start_login().await?;
                             open_provider_link(&login.verification_url)?;
                             let code = login.user_code.clone();
@@ -4044,7 +4047,7 @@ async fn worker(
                                 chatgpt::Session::start(&target_home).await?.login().await?;
                             open_provider_link(&login.url)?;
                             let (cancel, receiver) = watch::channel(false);
-                            let id = app::new_id()?;
+                            let id = switchx::id::new_id()?;
                             let login_id = id.clone();
                             let _ = weak.upgrade_in_event_loop(move |app| {
                                 app.set_chatgpt_login_id(id.into());
@@ -4572,7 +4575,7 @@ async fn worker(
                 }
                 let result = async {
                     if let Ok(directory) = &directory
-                        && let Some(recovery) = config_transaction::recovery(directory)?
+                        && let Some(recovery) = route_switch::recovery(directory)?
                     {
                         route_session
                             .restore(directory, recovery.config_path.parent().unwrap())
@@ -4707,7 +4710,7 @@ async fn worker(
         .unwrap_or(false);
     // Also recover when the platform exits the event loop without using our tray.
     if let Ok(directory) = &directory
-        && let Some(recovery) = config_transaction::recovery(directory)?
+        && let Some(recovery) = route_switch::recovery(directory)?
     {
         route_session
             .restore(directory, recovery.config_path.parent().unwrap())
@@ -4785,43 +4788,6 @@ fn credential_from_args(
     Ok(Some(secret))
 }
 
-fn connect_syntax_highlighting(app: &AppWindow) {
-    app.global::<SyntaxHighlighting>().on_line_count(|source| {
-        source
-            .as_str()
-            .split('\n')
-            .count()
-            .try_into()
-            .unwrap_or(i32::MAX)
-    });
-    app.global::<SyntaxHighlighting>()
-        .on_spans(|source, language| {
-            let spans = code_highlight::spans(source.as_str(), language.as_str())
-                .into_iter()
-                .map(|span| {
-                    use code_highlight::TokenKind;
-                    let kind = match span.kind {
-                        TokenKind::Plain => 0,
-                        TokenKind::Key => 1,
-                        TokenKind::String => 2,
-                        TokenKind::Number => 3,
-                        TokenKind::Literal => 4,
-                        TokenKind::Comment => 5,
-                        TokenKind::Section => 6,
-                    };
-                    CodeSpan {
-                        text: span.text.into(),
-                        prefix: span.prefix.into(),
-                        line_text: span.line_text.into(),
-                        line: span.line,
-                        kind,
-                    }
-                })
-                .collect::<Vec<_>>();
-            ModelRc::new(VecModel::from(spans))
-        });
-}
-
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     if credential_command()? {
         return Ok(());
@@ -4846,7 +4812,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             }
         });
     }
-    connect_syntax_highlighting(&app);
+    code_highlight::connect(&app);
     let presets = app::PROVIDER_PRESETS
         .iter()
         .map(|preset| {
@@ -6007,14 +5973,14 @@ mod tests {
         assert_eq!(second.len(), 1);
         assert_eq!(second[0].0, "b");
         let now = chrono::Utc::now().timestamp();
-        let value = switchx::accounts::Quota {
+        let value = switchx::chatgpt::accounts::Quota {
             windows: vec![
-                switchx::accounts::QuotaWindow {
+                switchx::chatgpt::accounts::QuotaWindow {
                     remaining_percent: 75.0,
                     period_label: "5 小时额度".into(),
                     resets_at: Some(now + 3600),
                 },
-                switchx::accounts::QuotaWindow {
+                switchx::chatgpt::accounts::QuotaWindow {
                     remaining_percent: 62.0,
                     period_label: "每周额度".into(),
                     resets_at: None,
@@ -6857,8 +6823,10 @@ mod tests {
             )
             .into_future(),
         );
-        let data =
-            std::env::temp_dir().join(format!("switchx-check-progress-{}", app::new_id().unwrap()));
+        let data = std::env::temp_dir().join(format!(
+            "switchx-check-progress-{}",
+            switchx::id::new_id().unwrap()
+        ));
         std::fs::create_dir_all(&data).unwrap();
         let store = Store::open(&data.join("switchx.sqlite")).unwrap();
         for id in ["ok", "denied"] {
@@ -6946,7 +6914,8 @@ mod tests {
             )
             .into_future(),
         );
-        let data = std::env::temp_dir().join(format!("switchx-checks-{}", app::new_id().unwrap()));
+        let data =
+            std::env::temp_dir().join(format!("switchx-checks-{}", switchx::id::new_id().unwrap()));
         std::fs::create_dir_all(&data).unwrap();
         let store = Store::open(&data.join("switchx.sqlite")).unwrap();
         for id in ["slow", "fast"] {
@@ -7019,7 +6988,7 @@ mod tests {
         use base64::Engine;
         let root = std::env::temp_dir().join(format!(
             "switchx-account-removal-{}",
-            app::new_id().unwrap()
+            switchx::id::new_id().unwrap()
         ));
         let data = root.join("data");
         let home = root.join("codex");
@@ -7085,8 +7054,10 @@ mod tests {
 
     #[test]
     fn credential_helper_reads_api_key_without_migrating_v8_v9_or_v10() {
-        let root =
-            std::env::temp_dir().join(format!("switchx-key-helper-{}", app::new_id().unwrap()));
+        let root = std::env::temp_dir().join(format!(
+            "switchx-key-helper-{}",
+            switchx::id::new_id().unwrap()
+        ));
         for version in [8, 9, 10] {
             let data = root.join(format!("v{version}"));
             std::fs::create_dir_all(&data).unwrap();
@@ -7145,8 +7116,10 @@ mod tests {
 
     #[test]
     fn local_token_helper_reads_only_its_explicit_database() {
-        let root =
-            std::env::temp_dir().join(format!("switchx-local-helper-{}", app::new_id().unwrap()));
+        let root = std::env::temp_dir().join(format!(
+            "switchx-local-helper-{}",
+            switchx::id::new_id().unwrap()
+        ));
         let reference = format!("router-{}", "a".repeat(32));
         for (directory, value) in [(root.join("first"), "a"), (root.join("second"), "b")] {
             std::fs::create_dir_all(&directory).unwrap();
@@ -7171,7 +7144,7 @@ mod tests {
     fn local_token_helper_rejects_bad_args_before_opening_a_database() {
         let missing = std::env::temp_dir().join(format!(
             "switchx-local-helper-missing-{}",
-            app::new_id().unwrap()
+            switchx::id::new_id().unwrap()
         ));
         let reference = format!("router-{}", "a".repeat(32));
         let valid = local_token_helper_args(&reference, &missing);
@@ -7204,7 +7177,7 @@ mod tests {
     fn local_token_helper_does_not_create_or_upgrade_databases() {
         let directory = std::env::temp_dir().join(format!(
             "switchx-local-helper-read-only-{}",
-            app::new_id().unwrap()
+            switchx::id::new_id().unwrap()
         ));
         std::fs::create_dir(&directory).unwrap();
         let database = directory.join("switchx.sqlite");
@@ -7236,7 +7209,7 @@ mod tests {
     fn local_token_helper_rejects_symlinked_storage() {
         let root = std::env::temp_dir().join(format!(
             "switchx-local-helper-symlink-{}",
-            app::new_id().unwrap()
+            switchx::id::new_id().unwrap()
         ));
         let data = root.join("data");
         std::fs::create_dir_all(&data).unwrap();
@@ -7754,7 +7727,7 @@ mod tests {
         }];
         let data = std::env::temp_dir().join(format!(
             "switchx-discovery-directory-{}",
-            app::new_id().unwrap()
+            switchx::id::new_id().unwrap()
         ));
         std::fs::create_dir_all(&data).unwrap();
         let store = Store::open(&data.join("switchx.sqlite")).unwrap();

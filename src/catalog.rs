@@ -66,7 +66,7 @@ pub fn mapping_metadata(
     settings: &MappingSettings<'_>,
     source: Option<Value>,
 ) -> Result<Value, String> {
-    crate::direct::validate_model_id(model_id)?;
+    crate::upstream::validate_model_id(model_id)?;
     // This is a neutral, user-configured Responses profile, not inferred vendor capabilities.
     // Imported catalogs keep their instructions, tools, modalities and unknown fields.
     let mut model = source.unwrap_or_else(|| json!({

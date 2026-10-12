@@ -293,7 +293,7 @@ pub fn set_subscription_common(
     if enabled {
         merge(document.as_table_mut(), common.as_table())?;
     } else {
-        crate::config_overlay::Overlay::between(&DocumentMut::new(), &common)?
+        super::overlay::Overlay::between(&DocumentMut::new(), &common)?
             .restore(&mut document, &mut Vec::new())?;
     }
     validate_subscription(&document.to_string())?;
@@ -406,9 +406,8 @@ pub fn extract_common(current: &str) -> Result<String, String> {
 }
 
 pub fn extract_from_home(home: &Path) -> Result<String, String> {
-    let path = crate::client::config_path(home)?;
-    let contents =
-        crate::config_transaction::read_config(&path)?.ok_or("当前 Codex 配置尚不存在")?;
+    let path = super::client::config_path(home)?;
+    let contents = super::route_switch::read_config(&path)?.ok_or("当前 Codex 配置尚不存在")?;
     let contents = std::str::from_utf8(&contents).map_err(|_| "当前 Codex 配置不是 UTF-8")?;
     extract_common(contents)
 }

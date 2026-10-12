@@ -18,10 +18,12 @@ use axum::{
 use base64::{Engine, engine::general_purpose::URL_SAFE_NO_PAD};
 use serde_json::{Value, json};
 use switchx::{
-    accounts::AccountManager,
-    app, chatgpt, client, config_transaction,
-    routed::RouteSession,
-    routing::LOCAL_TOKEN_HEADER,
+    app, chatgpt,
+    chatgpt::accounts::AccountManager,
+    codex::client,
+    codex::route_switch,
+    route_session::RouteSession,
+    router::LOCAL_TOKEN_HEADER,
     storage::{AccountBinding, Store},
 };
 use tokio::{net::TcpListener, process::Command, sync::mpsc, task::JoinHandle, time::timeout};
@@ -31,8 +33,10 @@ type ProbeResult<T> = Result<T, Box<dyn std::error::Error>>;
 struct TemporaryHome(PathBuf);
 impl TemporaryHome {
     fn new() -> ProbeResult<Self> {
-        let path =
-            std::env::temp_dir().join(format!("switchx-managed-route-probe-{}", app::new_id()?));
+        let path = std::env::temp_dir().join(format!(
+            "switchx-managed-route-probe-{}",
+            switchx::id::new_id()?
+        ));
         for directory in ["home", "imports", "data"] {
             std::fs::create_dir_all(path.join(directory))?;
         }
@@ -297,7 +301,7 @@ fn check_tool_round(
 }
 
 fn local_token(data: &Path) -> ProbeResult<switchx::credentials::Secret> {
-    let reference = config_transaction::recovery(data)?
+    let reference = route_switch::recovery(data)?
         .and_then(|recovery| recovery.local_token_reference)
         .ok_or("route recovery has no local credential reference")?;
     Store::open(&data.join("switchx.sqlite"))?
