@@ -1,7 +1,7 @@
 use std::{cell::Cell, error::Error, path::Path, rc::Rc};
 
 use slint::platform::{WindowEvent, software_renderer::MinimalSoftwareWindow};
-use slint::{ComponentHandle, ModelRc, PhysicalSize, VecModel};
+use slint::{ComponentHandle, Model, ModelRc, PhysicalSize, VecModel};
 use switchx::{
     headless,
     ui::{AccountRow, AppWindow, CodexQuotaRow, Theme, XaiQuotaRow},
@@ -9,7 +9,7 @@ use switchx::{
 
 use crate::{
     connections::render_connections_motion,
-    support::{render, set_theme, snapshot},
+    support::{every, frame, play, render, set_theme, snapshot},
 };
 
 /// Account cards, details, native login, and the login confirmation.
@@ -141,6 +141,180 @@ pub(super) fn render_design(
     assert_eq!(removals.get(), 1, "Confirmed removal must dispatch once");
     app.set_account_removing_id("".into());
     println!("Synthetic account design previews: {}", output.display());
+    Ok(())
+}
+
+/// Already-loading accounts, result arrival, refresh, failure, and motion settings.
+/// Updating the same row mirrors the desktop worker instead of replacing cards.
+pub(super) fn render_quota_loading_motion(
+    app: &AppWindow,
+    window: &MinimalSoftwareWindow,
+    output: &Path,
+) -> Result<(), Box<dyn Error>> {
+    app.set_active_page(1);
+    app.set_connections_tab(1);
+    app.set_native_login_expanded(false);
+    app.show()?;
+    for grok in [true, false] {
+        for (width, height) in [(1200, 820), (1000, 680)] {
+            app.window().set_size(PhysicalSize::new(width, height));
+            for dark in [false, true] {
+                app.global::<Theme>().set_animations_enabled(false);
+                set_theme(app, window, dark);
+                let name = format!(
+                    "quota-motion-{}-{}-{width}x{height}",
+                    if grok { "grok" } else { "codex" },
+                    if dark { "dark" } else { "light" },
+                );
+                let mut row = AccountRow {
+                    id: "synthetic-quota-motion".into(),
+                    label: "personal@example.invalid".into(),
+                    initial: "P".into(),
+                    is_default: true,
+                    bound_provider_count: 1,
+                    ..Default::default()
+                };
+                row.quota.loading = true;
+                row.codex_quota.loading = true;
+                let model = Rc::new(VecModel::from(vec![row.clone()]));
+                app.set_accounts(if grok {
+                    ModelRc::default()
+                } else {
+                    model.clone().into()
+                });
+                app.set_xai_accounts(if grok {
+                    model.clone().into()
+                } else {
+                    ModelRc::default()
+                });
+                render(window);
+                app.global::<Theme>().set_animations_enabled(true);
+                let initial = headless::render(window);
+                let loading_frames = if grok && dark && width == 1200 {
+                    every(80, 2400)
+                } else {
+                    vec![0, 320, 640, 960, 1280, 1600, 1920, 2240]
+                };
+                play(window, output, &format!("{name}-loading"), &loading_frames)?;
+                assert_ne!(
+                    initial.as_bytes(),
+                    headless::render(window).as_bytes(),
+                    "an already-loading account must animate"
+                );
+
+                row.quota = XaiQuotaRow {
+                    has_value: true,
+                    remaining_percent: 78.0,
+                    period_label: "每周额度".into(),
+                    reset_label: "4 天 19 小时后重置".into(),
+                    updated_label: "刚刚更新".into(),
+                    ..Default::default()
+                };
+                row.codex_quota = CodexQuotaRow {
+                    has_value: true,
+                    primary_window: row.quota.clone(),
+                    updated_label: "刚刚更新".into(),
+                    ..Default::default()
+                };
+                model.set_row_data(0, row.clone());
+                let arrival = headless::render(window);
+                play(
+                    window,
+                    output,
+                    &format!("{name}-arrival"),
+                    &[0, 80, 160, 240, 480, 960],
+                )?;
+                let ready = headless::render(window);
+                assert_ne!(
+                    arrival.as_bytes(),
+                    ready.as_bytes(),
+                    "results must transition in"
+                );
+                frame(320);
+                assert_eq!(
+                    ready.as_bytes(),
+                    headless::render(window).as_bytes(),
+                    "completed requests must stop animating"
+                );
+
+                row.quota.loading = true;
+                row.codex_quota.loading = true;
+                model.set_row_data(0, row.clone());
+                play(window, output, &format!("{name}-refresh"), &[0, 320, 640])?;
+                let refresh = headless::render(window);
+                frame(320);
+                assert_ne!(
+                    refresh.as_bytes(),
+                    headless::render(window).as_bytes(),
+                    "refreshing existing values must animate"
+                );
+
+                // Both motion preferences must stop an in-flight refresh.
+                for reduced in [true, false] {
+                    app.global::<Theme>().set_system_reduced_motion(reduced);
+                    app.global::<Theme>().set_animations_enabled(reduced);
+                    render(window);
+                    let still = headless::render(window);
+                    frame(400);
+                    assert_eq!(
+                        still.as_bytes(),
+                        headless::render(window).as_bytes(),
+                        "disabled motion must stay still"
+                    );
+                    snapshot(
+                        window,
+                        output,
+                        &format!(
+                            "{name}-refresh-{}",
+                            if reduced { "reduced" } else { "disabled" }
+                        ),
+                    )?;
+                }
+                app.global::<Theme>().set_system_reduced_motion(false);
+                app.global::<Theme>().set_animations_enabled(true);
+                row.quota = XaiQuotaRow {
+                    loading: true,
+                    ..Default::default()
+                };
+                row.codex_quota = CodexQuotaRow {
+                    loading: true,
+                    ..Default::default()
+                };
+                model.set_row_data(0, row.clone());
+                render(window);
+                // Reduced motion also stops skeletons during an initial query.
+                app.global::<Theme>().set_system_reduced_motion(true);
+                render(window);
+                let still = headless::render(window);
+                frame(400);
+                assert_eq!(still.as_bytes(), headless::render(window).as_bytes());
+                snapshot(window, output, &format!("{name}-loading-reduced"))?;
+                app.global::<Theme>().set_system_reduced_motion(false);
+                row.quota.loading = false;
+                row.codex_quota.loading = false;
+                row.quota.error = "额度查询连接失败，请稍后刷新".into();
+                row.codex_quota.error = row.quota.error.clone();
+                model.set_row_data(0, row);
+                play(
+                    window,
+                    output,
+                    &format!("{name}-failure"),
+                    &[0, 80, 240, 480],
+                )?;
+                let failed = headless::render(window);
+                frame(400);
+                assert_eq!(
+                    failed.as_bytes(),
+                    headless::render(window).as_bytes(),
+                    "failed requests must stop animating"
+                );
+            }
+        }
+    }
+    println!(
+        "Synthetic quota loading and motion previews: {}",
+        output.display()
+    );
     Ok(())
 }
 

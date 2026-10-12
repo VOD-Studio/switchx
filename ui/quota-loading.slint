@@ -1,0 +1,142 @@
+import { Theme } from "tokens.slint";
+
+// Waiting indicators use the frame clock so an already-loading row animates
+// immediately, and stop reading it when motion or the request is disabled.
+export component QuotaSpinner inherits Rectangle {
+    in property <bool> active: true;
+    private property <bool> motion: root.active && Theme.fast > 0ms;
+    width: 14px;
+    height: 14px;
+    horizontal-stretch: 0;
+    vertical-stretch: 0;
+    accessible-role: none;
+    Rectangle {
+        x: parent.width * 0.146;
+        y: parent.height * 0.146;
+        width: parent.width * 0.708;
+        height: parent.height * 0.708;
+        border-radius: self.width / 2;
+        border-width: 1px;
+        border-color: Theme.brand.with-alpha(0.18);
+    }
+
+    Image {
+        width: parent.width;
+        height: parent.height;
+        source: @image-url("../assets/ui/loader.svg");
+        colorize: Theme.brand;
+        transform-rotation: root.motion ? 360deg * mod(animation-tick(), 1100ms) / 1100ms : 0deg;
+    }
+}
+
+component QuotaSkeleton inherits Rectangle {
+    in property <bool> active;
+    in property <float> phase;
+    height: 6px;
+    vertical-stretch: 0;
+    border-radius: 3px;
+    background: Theme.brand.with-alpha(Theme.dark ? 0.12 : 0.1);
+    clip: true;
+    accessible-role: none;
+    if root.active && Theme.fast > 0ms: Rectangle {
+        width: max(24px, parent.width * 0.3);
+        height: parent.height;
+        x: -self.width + (parent.width + self.width) * root.phase;
+        background: @linear-gradient(90deg, Theme.brand.with-alpha(0) 0%, Theme.brand.with-alpha(0.2) 50%, Theme.brand.with-alpha(0) 100%);
+    }
+}
+
+export component QuotaLoadingPlaceholder inherits Rectangle {
+    in property <bool> active: true;
+    private property <bool> motion: root.active && Theme.fast > 0ms;
+    // A short rest between sweeps keeps the compact card calm.
+    private property <float> phase: root.motion ? min(1.4, mod(animation-tick(), 2400ms) / 1800ms) : 0;
+    private property <angle> beat: root.motion ? 360deg * mod(animation-tick(), 1500ms) / 1500ms : 0deg;
+    height: 36px;
+    preferred-height: root.height;
+    vertical-stretch: 0;
+    accessible-role: progress-indicator;
+    accessible-label: "正在查询官方额度";
+    HorizontalLayout {
+        x: 0px;
+        y: 0px;
+        width: root.width;
+        height: 18px;
+        spacing: 8px;
+        cross-axis-alignment: center;
+        Text {
+            text: "正在查询官方额度";
+            color: Theme.muted-text;
+            font-size: 12px;
+            horizontal-stretch: 0;
+            accessible-role: none;
+        }
+
+        HorizontalLayout {
+            width: 20px;
+            height: 4px;
+            horizontal-stretch: 0;
+            spacing: 4px;
+            for index in 3: Rectangle {
+                width: 4px;
+                height: 4px;
+                border-radius: 2px;
+                background: Theme.brand;
+                opacity: root.motion ? 0.35 + 0.65 * (1 + sin(root.beat - index * 60deg)) / 2 : 0.6;
+            }
+        }
+
+        Rectangle {
+            horizontal-stretch: 1;
+        }
+    }
+
+    HorizontalLayout {
+        x: 0px;
+        y: 28px;
+        width: root.width;
+        height: 6px;
+        spacing: 12px;
+        Rectangle {
+            width: 74px;
+            horizontal-stretch: 0;
+            QuotaSkeleton {
+                x: 0px;
+                y: 0px;
+                width: 48px;
+                active: root.active;
+                phase: root.phase;
+            }
+        }
+
+        QuotaSkeleton {
+            horizontal-stretch: 1;
+            active: root.active;
+            phase: root.phase;
+        }
+
+        Rectangle {
+            width: 68px;
+            horizontal-stretch: 0;
+            QuotaSkeleton {
+                x: 0px;
+                y: 0px;
+                width: 44px;
+                active: root.active;
+                phase: root.phase;
+            }
+        }
+
+        Rectangle {
+            width: 112px;
+            horizontal-stretch: 0;
+            QuotaSkeleton {
+                x: parent.width - self.width;
+                y: 0px;
+                width: 82px;
+                active: root.active;
+                phase: root.phase;
+            }
+        }
+    }
+}
