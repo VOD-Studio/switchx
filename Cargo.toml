@@ -1,13 +1,17 @@
 [package]
 name = "switchx"
-version = "0.1.0"
-edition = "2024"
+version.workspace = true
+edition.workspace = true
 publish = false
 
 [workspace]
 members = ["crates/switchx-ui"]
 default-members = ["."]
 resolver = "3"
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
 
 [workspace.dependencies]
 slint = "=1.18.1"

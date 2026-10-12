@@ -1,5 +1,8 @@
 # SwitchX
 
+[![CI](https://github.com/VOD-Studio/switchx/actions/workflows/ci.yml/badge.svg)](https://github.com/VOD-Studio/switchx/actions/workflows/ci.yml)
+[![Release](https://img.shields.io/github/v/release/VOD-Studio/switchx?include_prereleases)](https://github.com/VOD-Studio/switchx/releases)
+
 <img src="assets/app-icon.png" alt="SwitchX 应用图标" width="128" height="128">
 
 为 Codex 管理模型上游的桌面应用，使用 Rust 与 Slint 构建。
@@ -21,7 +24,11 @@ SwitchX 把 API 供应商、ChatGPT 订阅和 Grok 订阅放进同一个模型�
 
 ## 安装
 
-需要最新稳定版 Rust 与 Git LFS。发布路由前，SwitchX 会调用本机的 Codex CLI 检查模型目录。
+在 [GitHub Releases](https://github.com/VOD-Studio/switchx/releases) 下载对应平台与架构的包；macOS 解压后将 `SwitchX.app` 移入「应用程序」，Windows 运行 `switchx.exe`，Linux 运行 `./switchx`。每个版本提供 macOS、Windows、Linux 的 x64 与 ARM64 包，以及 `SHA256SUMS` 校验文件。Linux 包在 Ubuntu 24.04 构建，需要兼容的 glibc、Fontconfig、XKB 和 OpenGL 库，以及 X11 或 Wayland 桌面。
+
+macOS 包采用 ad-hoc 签名，尚未使用 Developer ID 签名或 Apple 公证；Windows 包尚未进行代码签名。首次打开时请按系统提示允许运行。应用内「启动 Codex」目前仅支持 macOS；其他平台请自行在终端启动新的 Codex 会话。
+
+从源码运行需要 [rust-toolchain.toml](rust-toolchain.toml) 中指定的 Rust（rustup 会自动安装）与 Git LFS。发布路由前，SwitchX 会调用本机的 Codex CLI 检查模型目录。
 
 ```sh
 git lfs install
@@ -39,7 +46,7 @@ sh scripts/bundle-macos.sh            # target/debug/SwitchX.app
 sh scripts/bundle-macos.sh --release  # target/release/SwitchX.app
 ```
 
-生成的应用未签名、未公证，仅供本机使用。
+生成的应用采用 ad-hoc 签名，未使用 Developer ID 签名或公证。打包脚本也支持 `--target TRIPLE` 和 `CARGO_TARGET_DIR`。
 
 ## 使用
 
@@ -78,8 +85,13 @@ sh scripts/bundle-macos.sh --release  # target/release/SwitchX.app
 | `make check-app`   | 检查桌面程序                                 |
 | `make test-router` | 运行路由集成测试                             |
 | `make check`       | 检查格式（含 Slint）、运行 Clippy 和全部测试 |
+| `make release-check` | 检查 workspace、lockfile 和 changelog 版本 |
+| `make prepare-release VERSION=0.1.0` | 更新版本并整理待发布 changelog |
 
 `make format` 与 `make check` 需要 `slint-lsp` 1.18.1：`cargo install slint-lsp --version 1.18.1 --locked`。
+版本与发布脚本需要 Python 3.11 以上；如果系统默认 Python 较旧，可使用 `make check PYTHON=python3.12`，其他 Make 命令也接受 `PYTHON`。
+
+每次分支推送、PR 和手动运行 CI 都会检查版本、Rust/Slint 格式，运行六个平台上的 Clippy 与测试，构建 release 包并上传 Actions artifacts。推送 `vX.Y.Z` 标签会运行相同检查，再自动创建包含全部构建的 GitHub Release。版本规则、changelog 与发版步骤见 [发布指南](docs/releasing.md)。
 
 测试只使用本地 mock 和合成数据，不需要账号或 API Key。手动试验配置流程时，请使用隔离的 `SWITCHX_DATA_DIR` 和 `CODEX_HOME`。`deepseek_live_probe`、`direct_live_probe` 和 `routed_live_probe` 会发起真实模型请求，可能产生费用。
 
@@ -90,7 +102,8 @@ crates/switchx-ui/  独立编译的 Slint 界面
 ui/                 页面、编辑器、组件与主题
 tests/              集成测试与合成夹具
 examples/           探针与界面预览
-scripts/            macOS 打包脚本
+scripts/            版本管理、多平台发布与 macOS 打包脚本
+.github/            推送 CI 与标签发布工作流
 ```
 
 ## 致谢

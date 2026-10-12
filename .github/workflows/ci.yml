@@ -1,0 +1,20 @@
+name: CI
+
+on:
+  push:
+    branches: ['**']
+    # Version tags run the same checks through release.yml.
+    tags: ['**', '!v*']
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    uses: ./.github/workflows/build.yml

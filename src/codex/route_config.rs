@@ -151,10 +151,15 @@ mod tests {
     #[test]
     fn preview_changes_only_owned_codex_fields() {
         let current = include_str!("../../tests/fixtures/codex-user-config.toml");
+        let catalog_path = if cfg!(windows) {
+            Path::new(r"C:\tmp\switchx-test\catalog-v1.json")
+        } else {
+            Path::new("/tmp/switchx-test/catalog-v1.json")
+        };
         let preview = preview_route(
             current,
             &publication(),
-            Path::new("/tmp/switchx-test/catalog-v1.json"),
+            catalog_path,
             "127.0.0.1:18731".parse().unwrap(),
             "sx-ds-flash",
         )
@@ -170,7 +175,10 @@ mod tests {
         );
         assert_eq!(
             preview.proposed,
-            include_str!("../../tests/fixtures/routed-user-config.toml")
+            include_str!("../../tests/fixtures/routed-user-config.toml").replace(
+                "\"/tmp/switchx-test/catalog-v1.json\"",
+                &Value::from(catalog_path.to_str().unwrap()).to_string(),
+            )
         );
         assert!(preview.proposed.contains("# user comment about MCP"));
         assert!(preview.proposed.contains("# chosen by user"));
@@ -205,7 +213,7 @@ mod tests {
             preview_route(
                 source,
                 &publication(),
-                Path::new("/tmp/c.json"),
+                &std::env::temp_dir().join("c.json"),
                 "127.0.0.1:18731".parse().unwrap(),
                 "sx-ds-flash"
             )

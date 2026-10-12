@@ -1,0 +1,69 @@
+name: Release
+
+on:
+  push:
+    tags: ['v*']
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  build:
+    uses: ./.github/workflows/build.yml
+    with:
+      release-tag: ${{ github.ref_name }}
+
+  publish:
+    name: Publish complete GitHub Release
+    needs: build
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    permissions:
+      contents: write
+    env:
+      GH_TOKEN: ${{ github.token }}
+      GH_REPO: ${{ github.repository }}
+      RELEASE_TAG: ${{ github.ref_name }}
+      PRERELEASE: ${{ needs.build.outputs.prerelease }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: '3.12'
+      - name: Download all native packages
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          pattern: package-*
+          merge-multiple: true
+          path: dist
+      - name: Download changelog release notes
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: release-notes
+          path: target/release-notes
+      - name: Verify artifact set, build metadata and checksums
+        run: python scripts/package-release.py --verify-dir dist --tag "$RELEASE_TAG"
+      - name: Stage a draft, upload assets, then publish
+        run: |
+          if gh release view "$RELEASE_TAG" --json isDraft --jq '.isDraft' > target/release-is-draft; then
+            if [[ "$(cat target/release-is-draft)" != true ]]; then
+              echo 'This version is already published. Create a new version instead of overwriting it.' >&2
+              exit 1
+            fi
+          else
+            gh release create "$RELEASE_TAG" --verify-tag --draft \
+              --target "$(git rev-parse HEAD)" --title "SwitchX $RELEASE_TAG" \
+              --notes-file target/release-notes/release-notes.md
+          fi
+          gh release upload "$RELEASE_TAG" dist/* --clobber
+          latest=true
+          if [[ "$PRERELEASE" == true ]]; then latest=false; fi
+          gh release edit "$RELEASE_TAG" --draft=false --prerelease="$PRERELEASE" \
+            --latest="$latest" --title "SwitchX $RELEASE_TAG" \
+            --notes-file target/release-notes/release-notes.md

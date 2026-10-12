@@ -1,0 +1,137 @@
+name: Verify and build
+
+on:
+  workflow_call:
+    inputs:
+      release-tag:
+        description: Require this tag to match the workspace version and changelog
+        type: string
+        default: ''
+    outputs:
+      version:
+        description: Validated workspace version
+        value: ${{ jobs.metadata.outputs.version }}
+      prerelease:
+        description: Whether the version is a prerelease
+        value: ${{ jobs.metadata.outputs.prerelease }}
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  metadata:
+    name: Version and release tooling
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+      prerelease: ${{ steps.version.outputs.prerelease }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: '3.12'
+      - name: Test version and artifact validation
+        run: python -m unittest discover -s scripts/tests -v
+      - name: Validate version, lockfile and changelog
+        id: version
+        env:
+          RELEASE_TAG: ${{ inputs.release-tag }}
+        run: |
+          args=()
+          if [[ -n "$RELEASE_TAG" ]]; then
+            args+=(--tag "$RELEASE_TAG" --notes-output target/release-notes.md)
+          fi
+          version=$(python scripts/release.py check "${args[@]}")
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          if [[ "$version" == *-* ]]; then
+            echo 'prerelease=true' >> "$GITHUB_OUTPUT"
+          else
+            echo 'prerelease=false' >> "$GITHUB_OUTPUT"
+          fi
+      - name: Upload release notes
+        if: inputs.release-tag != ''
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: release-notes
+          path: target/release-notes.md
+          if-no-files-found: error
+          retention-days: 7
+
+  format:
+    name: Rust and Slint formatting
+    needs: metadata
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          lfs: true
+          persist-credentials: false
+      - uses: ./.github/actions/setup
+        with:
+          cache-key: format
+      - name: Install the pinned Slint formatter
+        run: |
+          if ! command -v slint-lsp >/dev/null; then
+            cargo install slint-lsp --version 1.18.1 --locked
+          fi
+      - run: make format-check
+
+  native:
+    name: ${{ matrix.target }}
+    needs: metadata
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 90
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: macos-15
+            target: aarch64-apple-darwin
+          - os: macos-15-intel
+            target: x86_64-apple-darwin
+          - os: windows-2025
+            target: x86_64-pc-windows-msvc
+          - os: windows-11-arm
+            target: aarch64-pc-windows-msvc
+          - os: ubuntu-24.04
+            target: x86_64-unknown-linux-gnu
+          - os: ubuntu-24.04-arm
+            target: aarch64-unknown-linux-gnu
+    defaults:
+      run:
+        shell: bash
+    env:
+      # Windows portable packages must not require a separate VC++ runtime install.
+      RUSTFLAGS: ${{ contains(matrix.target, 'windows') && '-C target-feature=+crt-static' || '' }}
+      RUST_TARGET: ${{ matrix.target }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          lfs: true
+          persist-credentials: false
+      - uses: ./.github/actions/setup
+        with:
+          cache-key: native-${{ matrix.target }}
+      - name: Lint all targets
+        run: cargo clippy --locked --workspace --all-targets --target "$RUST_TARGET" -- -D warnings
+      - name: Run unit and integration tests
+        run: cargo test --locked --workspace --target "$RUST_TARGET"
+      - name: Build and package the native release binary
+        env:
+          RUST_TARGET: ${{ matrix.target }}
+        run: python scripts/package-release.py --target "$RUST_TARGET"
+      - name: Upload native package and checksum
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: package-${{ matrix.target }}
+          path: dist/*
+          if-no-files-found: error
+          compression-level: 0
+          retention-days: 7

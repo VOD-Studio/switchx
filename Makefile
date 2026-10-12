@@ -1,9 +1,10 @@
 .DEFAULT_GOAL := build
 
 SLINT_LSP ?= slint-lsp
+PYTHON ?= python3
 SLINT_FILES := $(shell find ui -type f -name '*.slint' | sort)
 
-.PHONY: build clean lint format format-check test check check-lib check-app test-router require-slint-lsp
+.PHONY: build clean release lint format format-check test check check-lib check-app test-router require-slint-lsp release-check test-release prepare-release
 
 build:
 	cargo build --locked
@@ -35,7 +36,17 @@ require-slint-lsp:
 test:
 	cargo test --locked --workspace
 
-check: format-check lint test
+check: release-check test-release format-check lint test
+
+release-check:
+	$(PYTHON) scripts/release.py check
+
+test-release:
+	$(PYTHON) -m unittest discover -s scripts/tests -v
+
+prepare-release:
+	@test -n "$(VERSION)" || { echo 'Usage: make prepare-release VERSION=0.1.0 (Python 3.11+ required)' >&2; exit 2; }
+	$(PYTHON) scripts/release.py prepare "$(VERSION)"
 
 check-lib:
 	cargo check --locked --lib

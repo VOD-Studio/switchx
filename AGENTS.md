@@ -32,6 +32,10 @@ Add focused `#[test]` or `#[tokio::test]` cases near the changed module; put cro
 
 Commit each completed feature point separately after verification. Follow the history's `feat: ...` and `test: ...` prefix style. In pull requests, describe the behavior, affected modules, and verification commands. Link a related issue when one exists; include screenshots for Slint UI changes. Call out any changes to Codex configuration, credential handling, or live-provider behavior.
 
+## Versioning & Releases
+
+Use `Cargo.toml` `[workspace.package].version` as the single version source; workspace crates inherit it. Record user-visible changes under `CHANGELOG.md` `Unreleased`. Run `make prepare-release VERSION=X.Y.Z` (Python 3.11+) to update the workspace, local lockfile entries, and dated changelog section, then run `make check`. See `docs/releasing.md` for the delivery steps. Branch pushes and PRs run CI; pushing `vX.Y.Z` runs all six native builds and publishes their packages to GitHub Release only after every check succeeds. Creating or pushing a release tag is separate from implementing or committing a feature, and requires a release request. Never move a published tag or overwrite a published release.
+
 ## Security & Configuration
 
 Provider API keys are stored in plaintext in SQLite `providers.settings_config.auth.OPENAI_API_KEY`, following the user's selected CC Switch storage model. Random local router tokens are also stored in plaintext in SQLite `app_settings`, under `local_token:router-<32hex>` keys. Grok OAuth refresh credentials are stored separately in private `xai_oauth_auth.json` (mode 0600 on Unix); access tokens stay in memory. Grok routes pin the managed account and actual model per session, inject credentials only into the fixed xAI endpoint, and never write Codex native login. ChatGPT OAuth credentials are stored separately in the private `codex_oauth_auth.json` file; its optional complete `auth.json` snapshot may include access tokens, and legacy records without that field remain readable.
