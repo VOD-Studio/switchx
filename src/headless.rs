@@ -1,25 +1,40 @@
 //! Headless Slint rendering for tests, probes, and synthetic previews.
 //! The desktop app never installs it.
 
-use std::{cell::Cell, io::Write, path::PathBuf, rc::Rc, time::Duration};
+use std::{
+    cell::{Cell, RefCell},
+    io::Write,
+    path::PathBuf,
+    rc::Rc,
+    time::Duration,
+};
 
 use slint::{
     LogicalPosition, Rgb8Pixel, SharedPixelBuffer,
     platform::{
-        Key, Platform, PointerEventButton, WindowAdapter, WindowEvent,
+        Clipboard, Platform, PointerEventButton, WindowAdapter, WindowEvent,
         software_renderer::MinimalSoftwareWindow,
     },
 };
 
-/// Animation time that only moves when advanced, for deterministic frames.
-#[derive(Clone, Default)]
-pub struct Clock(Rc<Cell<Duration>>);
+thread_local! {
+    static MANUAL_TIME: Cell<Duration> = const { Cell::new(Duration::ZERO) };
+    static CLIPBOARD: RefCell<String> = const { RefCell::new(String::new()) };
+}
 
-impl Clock {
-    pub fn advance(&self, milliseconds: u64) {
-        self.0
-            .set(self.0.get() + Duration::from_millis(milliseconds));
+fn set_clipboard(text: &str, clipboard: Clipboard) {
+    if clipboard == Clipboard::DefaultClipboard {
+        CLIPBOARD.with(|value| *value.borrow_mut() = text.into());
     }
+}
+
+/// The text last copied to the in-memory clipboard on this thread.
+pub fn clipboard() -> String {
+    CLIPBOARD.with(|value| value.borrow().clone())
+}
+
+pub fn clear_clipboard() {
+    CLIPBOARD.with(|value| value.borrow_mut().clear());
 }
 
 struct RealTime(Rc<MinimalSoftwareWindow>);
@@ -28,17 +43,33 @@ impl Platform for RealTime {
     fn create_window_adapter(&self) -> Result<Rc<dyn WindowAdapter>, slint::PlatformError> {
         Ok(self.0.clone())
     }
+
+    fn set_clipboard_text(&self, text: &str, clipboard: Clipboard) {
+        set_clipboard(text, clipboard);
+    }
+
+    fn clipboard_text(&self, _: Clipboard) -> Option<String> {
+        Some(clipboard())
+    }
 }
 
-struct ManualTime(Rc<MinimalSoftwareWindow>, Clock);
+struct ManualTime(Rc<MinimalSoftwareWindow>);
 
 impl Platform for ManualTime {
     fn create_window_adapter(&self) -> Result<Rc<dyn WindowAdapter>, slint::PlatformError> {
         Ok(self.0.clone())
     }
 
+    fn set_clipboard_text(&self, text: &str, clipboard: Clipboard) {
+        set_clipboard(text, clipboard);
+    }
+
+    fn clipboard_text(&self, _: Clipboard) -> Option<String> {
+        Some(clipboard())
+    }
+
     fn duration_since_start(&self) -> Duration {
-        self.1.0.get()
+        MANUAL_TIME.with(Cell::get)
     }
 }
 
@@ -50,13 +81,19 @@ pub fn install() -> Rc<MinimalSoftwareWindow> {
     window
 }
 
-/// Installs a headless platform whose animation time moves only through the clock.
-pub fn install_with_clock() -> (Rc<MinimalSoftwareWindow>, Clock) {
+/// Installs a headless platform whose animation time moves only through
+/// [`advance`], so every frame is deterministic.
+pub fn install_with_manual_time() -> Rc<MinimalSoftwareWindow> {
     let window = MinimalSoftwareWindow::new(Default::default());
-    let clock = Clock::default();
-    slint::platform::set_platform(Box::new(ManualTime(window.clone(), clock.clone())))
+    slint::platform::set_platform(Box::new(ManualTime(window.clone())))
         .expect("a Slint platform is already installed on this thread");
-    (window, clock)
+    window
+}
+
+/// Moves manual time forward. Timers and animations see it on the next
+/// [`render`] or `update_timers_and_animations` call.
+pub fn advance(milliseconds: u64) {
+    MANUAL_TIME.with(|time| time.set(time.get() + Duration::from_millis(milliseconds)));
 }
 
 /// Runs due timers and animations, then renders the whole window.
@@ -98,9 +135,11 @@ pub fn click(window: &MinimalSoftwareWindow, x: f32, y: f32) {
     });
 }
 
-pub fn key(window: &MinimalSoftwareWindow, key: Key) {
-    window.dispatch_event(WindowEvent::KeyPressed { text: key.into() });
-    window.dispatch_event(WindowEvent::KeyReleased { text: key.into() });
+/// Presses and releases a key, or types text.
+pub fn key(window: &MinimalSoftwareWindow, text: impl Into<slint::SharedString>) {
+    let text = text.into();
+    window.dispatch_event(WindowEvent::KeyPressed { text: text.clone() });
+    window.dispatch_event(WindowEvent::KeyReleased { text });
 }
 
 pub fn scroll(window: &MinimalSoftwareWindow, x: f32, y: f32, delta_y: f32) {

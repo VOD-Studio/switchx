@@ -297,7 +297,7 @@ mod tests {
     fn provider_checks_preserve_workbench_animation_and_expanded_models() {
         use slint::platform::{PointerEventButton, WindowEvent};
 
-        let (window, clock) = headless::install_with_clock();
+        let window = headless::install_with_manual_time();
         let app = AppWindow::new().unwrap();
         app.global::<Theme>().set_animations_enabled(true);
         app.global::<Theme>().set_system_reduced_motion(false);
@@ -321,12 +321,11 @@ mod tests {
             }
             pixels
         };
-        let advance = |millis| clock.advance(millis);
         let settle = || {
             draw("");
-            advance(200);
+            headless::advance(200);
             draw("");
-            advance(500);
+            headless::advance(500);
             draw("");
         };
 
@@ -411,7 +410,7 @@ mod tests {
                     assert_eq!(app.get_providers(), providers);
                     assert_eq!(app.get_filtered_providers(), filtered);
                     assert_eq!(app.get_model_scroll_y(), scroll_y);
-                    advance(100);
+                    headless::advance(100);
                     let frame = draw("");
                     assert!(
                         frame.as_bytes() == expanded.as_bytes(),
@@ -423,7 +422,7 @@ mod tests {
                     unchanged("started");
                 }
                 for elapsed_ms in [1000, 2000, 10000, 14000] {
-                    advance(1000);
+                    headless::advance(1000);
                     for id in ["chatgpt", "grok", "api"] {
                         update_provider_check(&app, id, id, |row| {
                             row.check_stage = if id == "chatgpt" {

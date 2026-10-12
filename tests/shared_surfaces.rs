@@ -1,7 +1,7 @@
-use slint::platform::software_renderer::{MinimalSoftwareWindow, RepaintBufferType};
-use slint::platform::{Key, Platform, PointerEventButton, WindowAdapter, WindowEvent};
+use slint::platform::software_renderer::MinimalSoftwareWindow;
+use slint::platform::{Key, WindowEvent};
 use slint::{ComponentHandle, LogicalPosition, PhysicalSize, Rgb8Pixel, SharedPixelBuffer};
-use std::{cell::Cell, io::Write, rc::Rc, time::Duration};
+use switchx::headless;
 
 slint::slint! {
     import { QuietButton, SurfaceCard } from "../ui/components.slint";
@@ -102,66 +102,28 @@ slint::slint! {
     }
 }
 
-thread_local! { static PREVIEW_TIME: Cell<Duration> = const { Cell::new(Duration::ZERO) }; }
-
-struct PreviewPlatform(Rc<MinimalSoftwareWindow>);
-
-impl Platform for PreviewPlatform {
-    fn create_window_adapter(&self) -> Result<Rc<dyn WindowAdapter>, slint::PlatformError> {
-        Ok(self.0.clone())
-    }
-
-    fn duration_since_start(&self) -> Duration {
-        PREVIEW_TIME.with(Cell::get)
-    }
-}
-
 fn advance(milliseconds: u64) {
-    PREVIEW_TIME.with(|time| time.set(time.get() + Duration::from_millis(milliseconds)));
+    headless::advance(milliseconds);
     slint::platform::update_timers_and_animations();
 }
 
 fn draw(window: &MinimalSoftwareWindow, name: &str) -> SharedPixelBuffer<Rgb8Pixel> {
-    slint::platform::update_timers_and_animations();
-    let size = WindowAdapter::size(window);
-    let mut pixels = SharedPixelBuffer::<Rgb8Pixel>::new(size.width, size.height);
-    window.request_redraw();
-    window.draw_if_needed(|renderer| {
-        renderer.render(pixels.make_mut_slice(), size.width as usize);
-    });
-    if let Some(output) = std::env::var_os("SWITCHX_SURFACE_SNAPSHOTS") {
-        let output = std::path::PathBuf::from(output);
-        assert!(output.is_absolute());
-        std::fs::create_dir_all(&output).unwrap();
-        let mut file = std::fs::File::create(output.join(format!("{name}.ppm"))).unwrap();
-        write!(file, "P6\n{} {}\n255\n", size.width, size.height).unwrap();
-        file.write_all(pixels.as_bytes()).unwrap();
-    }
+    let pixels = headless::render(window);
+    headless::save_snapshot("SWITCHX_SURFACE_SNAPSHOTS", name, &pixels);
     pixels
 }
 
 fn key(window: &MinimalSoftwareWindow, key: Key) {
-    window.dispatch_event(WindowEvent::KeyPressed { text: key.into() });
-    window.dispatch_event(WindowEvent::KeyReleased { text: key.into() });
+    headless::key(window, key);
 }
 
 fn click(window: &MinimalSoftwareWindow, x: f32, y: f32) {
-    let position = LogicalPosition::new(x, y);
-    window.dispatch_event(WindowEvent::PointerMoved { position });
-    window.dispatch_event(WindowEvent::PointerPressed {
-        position,
-        button: PointerEventButton::Left,
-    });
-    window.dispatch_event(WindowEvent::PointerReleased {
-        position,
-        button: PointerEventButton::Left,
-    });
+    headless::click(window, x, y);
 }
 
 #[test]
 fn account_card_reverses_disclosure_and_removal_without_losing_quota_details() {
-    let window = MinimalSoftwareWindow::new(RepaintBufferType::NewBuffer);
-    slint::platform::set_platform(Box::new(PreviewPlatform(window.clone()))).unwrap();
+    let window = headless::install_with_manual_time();
     let app = AccountCardWindow::new().unwrap();
     let mut account = AccountRow {
         id: "synthetic-account".into(),
@@ -241,8 +203,7 @@ fn account_card_reverses_disclosure_and_removal_without_losing_quota_details() {
 
 #[test]
 fn account_card_quota_fill_grows_on_entry_and_pulses_only_while_refreshing() {
-    let window = MinimalSoftwareWindow::new(RepaintBufferType::NewBuffer);
-    slint::platform::set_platform(Box::new(PreviewPlatform(window.clone()))).unwrap();
+    let window = headless::install_with_manual_time();
     let app = AccountCardWindow::new().unwrap();
     let mut account = AccountRow {
         id: "synthetic-account".into(),
@@ -340,8 +301,7 @@ fn account_card_quota_fill_grows_on_entry_and_pulses_only_while_refreshing() {
 
 #[test]
 fn shared_surfaces_preserve_styling_motion_and_accessible_button_actions() {
-    let window = MinimalSoftwareWindow::new(RepaintBufferType::NewBuffer);
-    slint::platform::set_platform(Box::new(PreviewPlatform(window.clone()))).unwrap();
+    let window = headless::install_with_manual_time();
     let app = SurfaceWindow::new().unwrap();
     app.window().set_size(PhysicalSize::new(400, 240));
     app.show().unwrap();
@@ -426,8 +386,7 @@ fn shared_surfaces_preserve_styling_motion_and_accessible_button_actions() {
 
 #[test]
 fn provider_card_motion_keeps_actions_reachable_and_respects_reduced_motion() {
-    let window = MinimalSoftwareWindow::new(RepaintBufferType::NewBuffer);
-    slint::platform::set_platform(Box::new(PreviewPlatform(window.clone()))).unwrap();
+    let window = headless::install_with_manual_time();
     let app = ProviderCardWindow::new().unwrap();
     let mut provider = ProviderRow {
         name: "Synthetic API".into(),

@@ -26,8 +26,8 @@ use switchx::ui::{
     RequestStats, Theme, XaiQuotaRow,
 };
 
+use slint::platform::WindowEvent;
 use slint::platform::software_renderer::{MinimalSoftwareWindow, RepaintBufferType};
-use slint::platform::{Clipboard, Platform, PointerEventButton, WindowAdapter, WindowEvent};
 use slint::{
     ComponentHandle, Model, ModelRc, PhysicalSize, Rgb8Pixel, SharedPixelBuffer, VecModel,
 };
@@ -40,60 +40,12 @@ use std::{
     rc::Rc,
     time::Duration,
 };
-use switchx::provider_icons;
-
-thread_local! {
-    static PREVIEW_TIME: Cell<Duration> = const { Cell::new(Duration::ZERO) };
-    static CLIPBOARD: RefCell<String> = const { RefCell::new(String::new()) };
-}
-
-struct PreviewPlatform(Rc<MinimalSoftwareWindow>);
-
-impl Platform for PreviewPlatform {
-    fn create_window_adapter(&self) -> Result<Rc<dyn WindowAdapter>, slint::PlatformError> {
-        Ok(self.0.clone())
-    }
-    fn duration_since_start(&self) -> Duration {
-        PREVIEW_TIME.with(Cell::get)
-    }
-    fn set_clipboard_text(&self, text: &str, clipboard: Clipboard) {
-        if clipboard == Clipboard::DefaultClipboard {
-            CLIPBOARD.with(|value| *value.borrow_mut() = text.into());
-        }
-    }
-    fn clipboard_text(&self, _: Clipboard) -> Option<String> {
-        Some(CLIPBOARD.with(|value| value.borrow().clone()))
-    }
-}
-
-fn click(window: &MinimalSoftwareWindow, x: f32, y: f32) {
-    let position = slint::LogicalPosition::new(x, y);
-    window.dispatch_event(WindowEvent::PointerMoved { position });
-    window.dispatch_event(WindowEvent::PointerPressed {
-        position,
-        button: PointerEventButton::Left,
-    });
-    window.dispatch_event(WindowEvent::PointerReleased {
-        position,
-        button: PointerEventButton::Left,
-    });
-}
+use switchx::{headless, provider_icons};
 
 fn render(window: &MinimalSoftwareWindow) -> SharedPixelBuffer<Rgb8Pixel> {
-    slint::platform::update_timers_and_animations();
-    let size = WindowAdapter::size(window);
-    let mut pixels = SharedPixelBuffer::<Rgb8Pixel>::new(size.width, size.height);
-    window.request_redraw();
-    window.draw_if_needed(|renderer| {
-        renderer.render(pixels.make_mut_slice(), size.width as usize);
-    });
-    PREVIEW_TIME.with(|clock| clock.set(clock.get() + Duration::from_millis(250)));
-    slint::platform::update_timers_and_animations();
-    window.request_redraw();
-    window.draw_if_needed(|renderer| {
-        renderer.render(pixels.make_mut_slice(), size.width as usize);
-    });
-    pixels
+    headless::render(window);
+    headless::advance(250);
+    headless::render(window)
 }
 
 fn snapshot(
@@ -226,9 +178,9 @@ fn render_batch_models(
             show(batch_rows(""));
             snapshot(window, output, &format!("batch-list-{suffix}"))?;
             // The parameter chip of the first row expands its inline editor.
-            click(window, width as f32 - 160.0, 309.0);
+            headless::click(window, width as f32 - 160.0, 309.0);
             snapshot(window, output, &format!("batch-expanded-{suffix}"))?;
-            click(window, width as f32 - 160.0, 309.0);
+            headless::click(window, width as f32 - 160.0, 309.0);
 
             app.set_batch_query("coder".into());
             show(batch_rows("coder"));
@@ -337,7 +289,7 @@ fn render_batch_models(
 }
 
 fn frame(step_ms: u64) {
-    PREVIEW_TIME.with(|clock| clock.set(clock.get() + Duration::from_millis(step_ms)));
+    headless::advance(step_ms);
     slint::platform::update_timers_and_animations();
 }
 
@@ -347,23 +299,12 @@ fn snapshot_now(
     output: &Path,
     name: &str,
 ) -> Result<(), Box<dyn Error>> {
-    let pixels = render_now(window);
+    let pixels = headless::render(window);
     let mut file = std::io::BufWriter::new(fs::File::create(output.join(format!("{name}.ppm")))?);
     write!(file, "P6\n{} {}\n255\n", pixels.width(), pixels.height())?;
     file.write_all(pixels.as_bytes())?;
     file.flush()?;
     Ok(())
-}
-
-fn render_now(window: &MinimalSoftwareWindow) -> SharedPixelBuffer<Rgb8Pixel> {
-    slint::platform::update_timers_and_animations();
-    let size = WindowAdapter::size(window);
-    let mut pixels = SharedPixelBuffer::<Rgb8Pixel>::new(size.width, size.height);
-    window.request_redraw();
-    window.draw_if_needed(|renderer| {
-        renderer.render(pixels.make_mut_slice(), size.width as usize);
-    });
-    pixels
 }
 
 fn render_connections_motion(
@@ -386,11 +327,11 @@ fn render_connections_motion(
             // Settle the existing provider cards before measuring a tab switch.
             for _ in 0..24 {
                 frame(32);
-                render_now(window);
+                headless::render(window);
             }
-            let initial = render_now(window);
+            let initial = headless::render(window);
             for (target, name) in [(1, "accounts"), (0, "upstreams")] {
-                click(window, if target == 1 { 360.0 } else { 260.0 }, 182.0);
+                headless::click(window, if target == 1 { 360.0 } else { 260.0 }, 182.0);
                 assert_eq!(app.get_connections_tab(), target);
                 let mut elapsed = 0;
                 for at in [
@@ -398,7 +339,7 @@ fn render_connections_motion(
                 ] {
                     frame(at - elapsed);
                     elapsed = at;
-                    let pixels = render_now(window);
+                    let pixels = headless::render(window);
                     // Tab changes keep the title/subtitle still throughout the transition.
                     for y in 20..154 {
                         let start = (y * width as usize + 208) * 3;
@@ -411,21 +352,21 @@ fn render_connections_motion(
                     snapshot_now(window, output, &format!("tabs-{name}-{suffix}-{at:03}ms"))?;
                     if target == 1 && at == 32 {
                         // The still-visible outgoing toolbar must not dispatch actions.
-                        click(window, width as f32 - 208.0, 244.0);
+                        headless::click(window, width as f32 - 208.0, 244.0);
                         assert_eq!(checks.get(), 0);
                     }
                 }
             }
             // Reverse twice while both pages are still mounted, then resize mid-flight.
             app.set_connections_tab(1);
-            render_now(window);
+            headless::render(window);
             frame(96);
             snapshot_now(window, output, &format!("tabs-interrupt-before-{suffix}"))?;
             app.set_connections_tab(0);
-            render_now(window);
+            headless::render(window);
             frame(48);
             app.set_connections_tab(1);
-            render_now(window);
+            headless::render(window);
             app.window().set_size(PhysicalSize::new(width - 20, height));
             frame(920);
             snapshot_now(window, output, &format!("tabs-interrupt-settled-{suffix}"))?;
@@ -436,12 +377,12 @@ fn render_connections_motion(
                 app.global::<Theme>().set_animations_enabled(reduced);
                 app.global::<Theme>().set_system_reduced_motion(reduced);
                 app.set_connections_tab(0);
-                let upstreams = render_now(window);
+                let upstreams = headless::render(window);
                 app.set_connections_tab(1);
-                let accounts = render_now(window);
+                let accounts = headless::render(window);
                 assert_ne!(upstreams.as_bytes(), accounts.as_bytes());
                 frame(1000);
-                let settled = render_now(window);
+                let settled = headless::render(window);
                 assert_eq!(
                     accounts.as_bytes(),
                     settled.as_bytes(),
@@ -550,21 +491,21 @@ fn render_model_editor(
             snapshot(window, output, &format!("mapping-edit-{suffix}"))?;
 
             // Typing a name makes it custom; restoring derives it again.
-            click(window, w - 400.0, 364.0);
+            headless::click(window, w - 400.0, 364.0);
             type_text(window, "!");
             assert!(app.get_model_display_name_custom());
             snapshot(window, output, &format!("mapping-custom-name-{suffix}"))?;
-            click(window, w - 104.0, 364.0);
+            headless::click(window, w - 104.0, 364.0);
             assert!(!app.get_model_display_name_custom());
             assert_eq!(app.get_model_display_name(), "synthetic-sol/ChatGPT 订阅");
 
-            CLIPBOARD.with(|value| value.borrow_mut().clear());
-            click(window, w - 75.0, 410.0);
-            assert_eq!(CLIPBOARD.with(|value| value.borrow().clone()), SAVED_ID);
+            headless::clear_clipboard();
+            headless::click(window, w - 75.0, 410.0);
+            assert_eq!(headless::clipboard(), SAVED_ID);
             snapshot(window, output, &format!("mapping-copied-{suffix}"))?;
 
             let count = fetches.get();
-            click(window, w - 120.0, 535.0);
+            headless::click(window, w - 120.0, 535.0);
             assert_eq!(fetches.get(), count + 1, "the fetch button requests models");
             app.set_discovery_scope(1);
             app.set_discovery_tone(1);
@@ -583,7 +524,7 @@ fn render_model_editor(
             // Scrolled to the end, the presets sit 486px above the window's bottom.
             scroll(window, w - 350.0, 400.0, -4000.0);
             snapshot(window, output, &format!("mapping-bottom-{suffix}"))?;
-            click(window, w - 119.0, h - 486.0);
+            headless::click(window, w - 119.0, h - 486.0);
             assert_eq!(app.get_model_context_window(), "1000000");
             snapshot(window, output, &format!("mapping-context-1m-{suffix}"))?;
             app.set_model_context_window("0".into());
@@ -592,13 +533,13 @@ fn render_model_editor(
             snapshot(window, output, &format!("mapping-context-default-{suffix}"))?;
             app.set_model_context_window("272000".into());
 
-            click(window, ladder_x(0), h - 290.0);
+            headless::click(window, ladder_x(0), h - 290.0);
             assert_eq!(
                 app.get_model_reasoning_levels(),
                 "none, low, medium, high, xhigh, max, ultra"
             );
             // Removing the default level clears the default.
-            click(window, ladder_x(2), h - 290.0);
+            headless::click(window, ladder_x(2), h - 290.0);
             assert_eq!(
                 app.get_model_reasoning_levels(),
                 "none, medium, high, xhigh, max, ultra"
@@ -608,23 +549,23 @@ fn render_model_editor(
             app.set_model_reasoning_levels("low, medium, high, xhigh, max, ultra".into());
             app.set_model_default_reasoning("low".into());
 
-            click(window, w - 360.0, h - 131.0);
+            headless::click(window, w - 360.0, h - 131.0);
             snapshot(window, output, &format!("mapping-advanced-{suffix}"))?;
 
             let count = deletes.get();
-            click(window, w - 624.0, h - 44.0);
+            headless::click(window, w - 624.0, h - 44.0);
             assert!(app.get_model_delete_confirm());
             assert_eq!(deletes.get(), count, "delete needs confirmation");
             snapshot(window, output, &format!("mapping-delete-armed-{suffix}"))?;
-            click(window, w - 624.0, h - 44.0);
+            headless::click(window, w - 624.0, h - 44.0);
             assert_eq!(deletes.get(), count + 1);
             app.set_model_delete_confirm(false);
 
             let count = saves.get();
-            click(window, w - 92.0, h - 44.0);
+            headless::click(window, w - 92.0, h - 44.0);
             assert_eq!(saves.get(), count + 1, "save is reachable at every size");
             app.set_config_managed(true);
-            click(window, w - 92.0, h - 44.0);
+            headless::click(window, w - 92.0, h - 44.0);
             assert_eq!(
                 saves.get(),
                 count + 1,
@@ -634,7 +575,7 @@ fn render_model_editor(
             snapshot(window, output, &format!("mapping-locked-{suffix}"))?;
             app.set_config_managed(false);
 
-            click(window, w - 210.0, h - 44.0);
+            headless::click(window, w - 210.0, h - 44.0);
             assert!(!app.get_model_editor_open(), "cancel closes the editor");
             render(window);
 
@@ -675,21 +616,21 @@ fn render_model_editor(
             &format!("mapping-motion-route-{theme}"),
             &every(32, 3392),
         )?;
-        click(window, 1081.0, 708.0);
+        headless::click(window, 1081.0, 708.0);
         play(
             window,
             output,
             &format!("mapping-motion-context-{theme}"),
             &every(32, 800),
         )?;
-        click(window, 1125.0, 410.0);
+        headless::click(window, 1125.0, 410.0);
         play(
             window,
             output,
             &format!("mapping-motion-copy-{theme}"),
             &every(32, 480),
         )?;
-        click(window, 576.0, 776.0);
+        headless::click(window, 576.0, 776.0);
         play(
             window,
             output,
@@ -699,7 +640,7 @@ fn render_model_editor(
         app.set_model_delete_confirm(false);
         scroll(window, 850.0, 400.0, -4000.0);
         play(window, output, "unused", &[400])?;
-        click(window, 577.0, 530.0);
+        headless::click(window, 577.0, 530.0);
         play(
             window,
             output,
@@ -707,7 +648,7 @@ fn render_model_editor(
             &every(32, 480),
         )?;
         // The view eases after the last section as it expands.
-        click(window, 840.0, 689.0);
+        headless::click(window, 840.0, 689.0);
         play(
             window,
             output,
@@ -769,7 +710,7 @@ fn render_reasoning_picker(
             let suffix = format!("{}-{width}x{height}", if dark { "dark" } else { "light" });
             snapshot(window, output, &format!("reasoning-directory-{suffix}"))?;
             app.global::<Theme>().set_animations_enabled(true);
-            click(window, width as f32 - 140.0, 338.0);
+            headless::click(window, width as f32 - 140.0, 338.0);
             play(
                 window,
                 output,
@@ -777,7 +718,7 @@ fn render_reasoning_picker(
                 &(0..=20).map(|frame| frame * 16).collect::<Vec<_>>(),
             )?;
             snapshot(window, output, &format!("reasoning-picker-{suffix}"))?;
-            click(window, 300.0, 600.0);
+            headless::click(window, 300.0, 600.0);
             play(
                 window,
                 output,
@@ -892,7 +833,7 @@ fn render_connection_workbench(
             app.set_active_page(0);
             snapshot(window, output, &format!("workbench-connections-{suffix}"))?;
             if width == 1200 && !dark {
-                click(window, 1090.0, 290.0);
+                headless::click(window, 1090.0, 290.0);
                 render(window);
                 assert_eq!(
                     toggles.get(),
@@ -901,7 +842,7 @@ fn render_connection_workbench(
                 );
             }
             let expand_x = width as f32 - 100.0;
-            click(window, expand_x, 350.0);
+            headless::click(window, expand_x, 350.0);
             snapshot(window, output, &format!("workbench-expanded-{suffix}"))?;
             let pixels = render(window);
             let sample_x = width as usize - 430;
@@ -922,11 +863,11 @@ fn render_connection_workbench(
                     "row boundary separator is missing at {suffix}"
                 );
             }
-            click(window, expand_x, 350.0);
+            headless::click(window, expand_x, 350.0);
             if width == 1200 && dark {
-                click(window, 860.0, 186.0);
+                headless::click(window, 860.0, 186.0);
                 snapshot(window, output, &format!("workbench-direct-{suffix}"))?;
-                click(window, 785.0, 186.0);
+                headless::click(window, 785.0, 186.0);
             }
             app.set_active_page(1);
             app.set_connection_models_id("podlink".into());
@@ -988,7 +929,7 @@ fn render_connection_workbench(
             app.set_busy(false);
             render(window);
             if width == 1200 && dark {
-                click(window, 1132.0, 338.0);
+                headless::click(window, 1132.0, 338.0);
                 render(window);
                 assert!(
                     app.get_connection_models().row_data(0).unwrap().removing,
@@ -996,13 +937,13 @@ fn render_connection_workbench(
                 );
                 assert!(app.get_connection_models_dirty());
                 snapshot(window, output, "connection-directory-remove-dark")?;
-                click(window, 1110.0, 325.0);
+                headless::click(window, 1110.0, 325.0);
                 render(window);
                 assert!(
                     !app.get_connection_models().row_data(0).unwrap().removing,
                     "removal must be undoable before save"
                 );
-                click(window, 1095.0, 775.0);
+                headless::click(window, 1095.0, 775.0);
                 render(window);
                 assert_eq!(saves.get(), 1, "directory save must remain reachable");
             }
@@ -1023,11 +964,11 @@ fn render_connection_workbench(
             app.set_connection_models_subscription(true);
             let left = width as f32 - 820.0 + 26.0;
             for directory in [true, false, true, false] {
-                click(window, left + if directory { 240.0 } else { 80.0 }, 106.0);
+                headless::click(window, left + if directory { 240.0 } else { 80.0 }, 106.0);
                 // Match the asynchronous editor load: focus moves while controls
                 // are disabled, then the new editor becomes ready.
                 render(window);
-                click(window, left + if directory { 80.0 } else { 240.0 }, 106.0);
+                headless::click(window, left + if directory { 80.0 } else { 240.0 }, 106.0);
                 assert_eq!(app.get_connection_models_open(), directory);
                 app.set_busy(false);
                 render(window);
@@ -1047,7 +988,7 @@ fn render_connection_workbench(
                 (false, slint::platform::Key::LeftArrow),
             ] {
                 // Focus the current segment, then select its neighbor by keyboard.
-                click(window, left + if directory { 80.0 } else { 240.0 }, 106.0);
+                headless::click(window, left + if directory { 80.0 } else { 240.0 }, 106.0);
                 window.dispatch_event(WindowEvent::KeyPressed { text: key.into() });
                 window.dispatch_event(WindowEvent::KeyReleased { text: key.into() });
                 render(window);
@@ -1057,7 +998,7 @@ fn render_connection_workbench(
                 assert_eq!(app.get_subscription_editor_open(), !directory);
             }
             app.set_config_managed(true);
-            click(window, left + 240.0, 106.0);
+            headless::click(window, left + 240.0, 106.0);
             render(window);
             assert!(app.get_subscription_editor_open());
             assert!(!app.get_connection_models_open());
@@ -1071,7 +1012,7 @@ fn render_connection_workbench(
     app.set_active_page(0);
     app.global::<Theme>().set_animations_enabled(true);
     render(window);
-    click(window, 1100.0, 418.0);
+    headless::click(window, 1100.0, 418.0);
     for index in 0..12 {
         frame(30);
         snapshot_now(window, output, &format!("workbench-motion-{index:02}"))?;
@@ -1113,13 +1054,13 @@ fn render_workspace_feedback(
             app.set_workspace_open(true);
             assert!(app.get_workspace_open());
             snapshot(window, output, &format!("workspace-menu-{suffix}"))?;
-            click(window, 490.0, 270.0);
+            headless::click(window, 490.0, 270.0);
             render(window);
             assert_eq!(app.get_active_page(), 5);
             assert!(!app.get_workspace_open());
             app.set_workspace_open(true);
             render(window);
-            click(window, 490.0, 314.0);
+            headless::click(window, 490.0, 314.0);
             render(window);
             assert!(!app.get_workspace_open());
             app.set_active_page(0);
@@ -1138,7 +1079,7 @@ fn render_workspace_feedback(
         app.set_xai_pending(pending == 2);
         app.set_workspace_open(true);
         render(window);
-        click(window, 490.0, 314.0);
+        headless::click(window, 490.0, 314.0);
         render(window);
         assert_eq!(switches.get(), 4);
         assert!(app.get_workspace_open());
@@ -1175,7 +1116,7 @@ fn render_workspace_feedback(
     app.global::<Theme>().set_system_reduced_motion(true);
     app.set_workspace_open(true);
     snapshot(window, output, "workspace-reduced-motion")?;
-    click(window, 760.0, 400.0);
+    headless::click(window, 760.0, 400.0);
     assert!(
         !app.get_workspace_open(),
         "outside click must dismiss the menu"
@@ -1242,7 +1183,7 @@ fn render_sidebar_motion(
         let brand = app.global::<Theme>().get_brand();
         let mut settled = std::collections::HashMap::new();
         for page in path {
-            click(window, 90.0, center(page));
+            headless::click(window, 90.0, center(page));
             assert_eq!(app.get_active_page(), page);
             settled.insert(page, render(window));
         }
@@ -1251,11 +1192,11 @@ fn render_sidebar_motion(
         app.global::<Theme>().set_animations_enabled(true);
         for _ in 0..24 {
             frame(32);
-            render_now(window);
+            headless::render(window);
         }
         let mut from = 0;
         for page in path {
-            click(window, 90.0, center(page));
+            headless::click(window, 90.0, center(page));
             assert_eq!(app.get_active_page(), page);
             let (mut elapsed, mut stretch) = (0, 0);
             for at in [
@@ -1263,7 +1204,7 @@ fn render_sidebar_motion(
             ] {
                 frame(at - elapsed);
                 elapsed = at;
-                let pixels = render_now(window);
+                let pixels = headless::render(window);
                 let sidebar = sidebar_pixels(&pixels);
                 if at == 64 {
                     assert_ne!(sidebar, sidebar_pixels(&settled[&from]));
@@ -1285,7 +1226,7 @@ fn render_sidebar_motion(
                 "the marker must stretch toward page {page}: {stretch} vs {rest}"
             );
             assert_eq!(
-                sidebar_pixels(&render_now(window)),
+                sidebar_pixels(&headless::render(window)),
                 sidebar_pixels(&settled[&page]),
                 "the selection must settle exactly on page {page}"
             );
@@ -1293,22 +1234,22 @@ fn render_sidebar_motion(
         }
 
         // Retargeting mid-flight still settles on the latest page.
-        click(window, 90.0, center(5));
+        headless::click(window, 90.0, center(5));
         frame(64);
-        render_now(window);
-        click(window, 90.0, center(1));
+        headless::render(window);
+        headless::click(window, 90.0, center(1));
         frame(600);
         assert_eq!(
-            sidebar_pixels(&render_now(window)),
+            sidebar_pixels(&headless::render(window)),
             sidebar_pixels(&settled[&1])
         );
 
         // Reduced motion lands on the first frame, without a timer tick.
         app.global::<Theme>().set_system_reduced_motion(true);
         for page in [5, 3] {
-            click(window, 90.0, center(page));
+            headless::click(window, 90.0, center(page));
             assert_eq!(
-                sidebar_pixels(&render_now(window)),
+                sidebar_pixels(&headless::render(window)),
                 sidebar_pixels(&settled[&page]),
                 "reduced motion must move the selection immediately"
             );
@@ -1443,7 +1384,7 @@ fn play(
         if moments.contains(&at) {
             snapshot_now(window, output, &format!("{name}-{at:04}ms"))?;
         } else {
-            render_now(window);
+            headless::render(window);
         }
         if at >= end {
             return Ok(());
@@ -1508,10 +1449,10 @@ fn render_activity_design(
 
             app.global::<Theme>().set_animations_enabled(true);
             frame(600);
-            render_now(window);
+            headless::render(window);
             let before = polls.get();
             app.set_active_page(3);
-            render_now(window);
+            headless::render(window);
             assert_eq!(
                 polls.get(),
                 before + 1,
@@ -1574,7 +1515,7 @@ fn render_activity_design(
                 180.0 + (width as f32 - 180.0) / 2.0 - 8.0,
                 height as f32 - 16.0 - 14.0 - 14.0 - 17.0 - 14.0,
             );
-            click(window, pill.0, pill.1);
+            headless::click(window, pill.0, pill.1);
             frame(16);
             assert!(app.get_request_following(), "the pill resumes following");
             assert_eq!(app.get_request_unseen(), 0);
@@ -1587,7 +1528,7 @@ fn render_activity_design(
 
             // Expand the newest entry; it stays in view while following.
             let last_row = height as f32 - 16.0 - 14.0 - 14.0 - 34.0;
-            click(window, width as f32 * 0.6, last_row);
+            headless::click(window, width as f32 * 0.6, last_row);
             play(
                 window,
                 output,
@@ -1624,7 +1565,7 @@ fn render_activity_design(
 
             // Leaving the page stops polling.
             app.set_active_page(0);
-            render_now(window);
+            headless::render(window);
             let left = polls.get();
             frame(6_000);
             assert_eq!(polls.get(), left, "polling stops once the page is left");
@@ -1684,7 +1625,7 @@ fn render_xai_editor(
             app.set_xai_account_choice(1);
             app.set_xai_editor_open(true);
             snapshot(window, output, &format!("xai-editor-{suffix}"))?;
-            click(
+            headless::click(
                 window,
                 left + 245.0,
                 if height < 760 { 354.0 } else { 386.0 },
@@ -1703,20 +1644,20 @@ fn render_xai_editor(
             app.set_xai_account_choice(1);
             render(window);
             let count = models.get();
-            click(
+            headless::click(
                 window,
                 right + 90.0,
                 height as f32 - if height < 760 { 133.0 } else { 137.0 },
             );
             assert_eq!(models.get(), count + 1, "the model directory is reachable");
             let count = saves.get();
-            click(window, width as f32 - 90.0, height as f32 - 46.0);
+            headless::click(window, width as f32 - 90.0, height as f32 - 46.0);
             assert_eq!(saves.get(), count + 1, "save remains in the fixed footer");
             let model_count = models.get();
             app.set_config_managed(true);
             snapshot(window, output, &format!("xai-managed-{suffix}"))?;
-            click(window, width as f32 - 90.0, height as f32 - 46.0);
-            click(
+            headless::click(window, width as f32 - 90.0, height as f32 - 46.0);
+            headless::click(
                 window,
                 right + 90.0,
                 height as f32 - if height < 760 { 133.0 } else { 137.0 },
@@ -1726,20 +1667,20 @@ fn render_xai_editor(
             app.set_config_managed(false);
             app.set_busy(true);
             snapshot(window, output, &format!("xai-saving-{suffix}"))?;
-            click(window, width as f32 - 202.0, height as f32 - 46.0);
+            headless::click(window, width as f32 - 202.0, height as f32 - 46.0);
             assert!(app.get_xai_editor_open(), "saving prevents cancellation");
             app.set_busy(false);
             let count = deletes.get();
-            click(window, left + 56.0, height as f32 - 46.0);
+            headless::click(window, left + 56.0, height as f32 - 46.0);
             assert!(app.get_delete_confirm());
             assert_eq!(deletes.get(), count, "deletion requires confirmation");
-            click(window, left + 56.0, height as f32 - 46.0);
+            headless::click(window, left + 56.0, height as f32 - 46.0);
             assert_eq!(deletes.get(), count + 1);
             app.set_delete_confirm(false);
             app.set_xai_account_choice(0);
             snapshot(window, output, &format!("xai-default-{suffix}"))?;
             let count = accounts.get();
-            click(
+            headless::click(
                 window,
                 left + 140.0,
                 if height < 760 { 492.0 } else { 538.0 },
@@ -1761,9 +1702,9 @@ fn render_xai_editor(
             app.set_xai_editor_open(true);
             snapshot(window, output, &format!("xai-new-{suffix}"))?;
             let count = saves.get();
-            click(window, width as f32 - 90.0, height as f32 - 46.0);
+            headless::click(window, width as f32 - 90.0, height as f32 - 46.0);
             assert_eq!(saves.get(), count + 1, "new connections can be saved");
-            click(window, width as f32 - 220.0, height as f32 - 46.0);
+            headless::click(window, width as f32 - 220.0, height as f32 - 46.0);
             assert!(!app.get_xai_editor_open(), "cancel remains reachable");
         }
     }
@@ -1784,12 +1725,12 @@ fn render_xai_editor(
         app.global::<Theme>().set_animations_enabled(reduced);
         app.global::<Theme>().set_system_reduced_motion(reduced);
         app.set_xai_editor_open(false);
-        render_now(window);
+        headless::render(window);
         app.set_xai_editor_open(true);
-        let immediate = render_now(window);
+        let immediate = headless::render(window);
         frame(960);
         assert!(
-            immediate.as_bytes() == render_now(window).as_bytes(),
+            immediate.as_bytes() == headless::render(window).as_bytes(),
             "disabled entry motion settles immediately"
         );
     }
@@ -1904,34 +1845,34 @@ fn render_subscription_editor(
             snapshot(window, output, &format!("subscription-editor-{suffix}"))?;
 
             // A credential draft cannot change the public configuration view.
-            let public = render_now(window);
+            let public = headless::render(window);
             app.set_subscription_auth_json("synthetic-hidden-credential".into());
             assert!(
-                public.as_bytes() == render_now(window).as_bytes(),
+                public.as_bytes() == headless::render(window).as_bytes(),
                 "credentials stay out of the configuration view"
             );
             app.set_subscription_auth_json(SYNTHETIC_AUTH.into());
 
             let count = icons.get();
-            click(window, left + 40.0, 180.0);
+            headless::click(window, left + 40.0, 180.0);
             assert_eq!(icons.get(), count + 1, "the avatar opens the icon picker");
             window.dispatch_event(WindowEvent::PointerMoved {
                 position: slint::LogicalPosition::new(10.0, 10.0),
             });
-            click(window, width as f32 - 126.0, 164.0);
+            headless::click(window, width as f32 - 126.0, 164.0);
             snapshot(window, output, &format!("subscription-options-{suffix}"))?;
             let count = commons.get();
-            click(window, right + 70.0, 273.0);
+            headless::click(window, right + 70.0, 273.0);
             assert!(!app.get_edit_use_common_config());
             assert_eq!(
                 commons.get(),
                 count + 1,
                 "the switch updates the configuration"
             );
-            click(window, right + 70.0, 273.0);
+            headless::click(window, right + 70.0, 273.0);
             let count = contexts.get();
             let context_x = right + (width as f32 - 26.0 - right) / 2.0 + 70.0;
-            click(window, context_x, 273.0);
+            headless::click(window, context_x, 273.0);
             assert!(!app.get_edit_context_1m());
             assert_eq!(contexts.get(), count + 1);
             snapshot(
@@ -1939,27 +1880,27 @@ fn render_subscription_editor(
                 output,
                 &format!("subscription-context-off-{suffix}"),
             )?;
-            click(window, context_x, 273.0);
-            click(window, width as f32 - 126.0, 164.0);
+            headless::click(window, context_x, 273.0);
+            headless::click(window, width as f32 - 126.0, 164.0);
             render(window);
 
-            click(window, right + 195.0, 215.0);
+            headless::click(window, right + 195.0, 215.0);
             snapshot(window, output, &format!("subscription-auth-{suffix}"))?;
             let count = formats.get();
-            click(window, width as f32 - 110.0, 164.0);
+            headless::click(window, width as f32 - 110.0, 164.0);
             assert_eq!(formats.get(), count + 1, "JSON formatting stays reachable");
             app.set_subscription_auth_error("合成 JSON 错误：请检查格式。".into());
             snapshot(window, output, &format!("subscription-auth-error-{suffix}"))?;
             let count = saves.get();
-            click(window, width as f32 - 90.0, height as f32 - 46.0);
+            headless::click(window, width as f32 - 90.0, height as f32 - 46.0);
             assert_eq!(saves.get(), count, "invalid JSON cannot be saved");
             app.set_subscription_auth_error("".into());
-            click(window, right + 65.0, 215.0);
+            headless::click(window, right + 65.0, 215.0);
             render(window);
 
-            click(window, width as f32 - 44.0, 164.0);
+            headless::click(window, width as f32 - 44.0, 164.0);
             snapshot(window, output, &format!("subscription-expanded-{suffix}"))?;
-            click(window, width as f32 - 44.0, 164.0);
+            headless::click(window, width as f32 - 44.0, 164.0);
             render(window);
             app.set_subscription_account_choice(1);
             app.set_subscription_binding_label(
@@ -1967,14 +1908,14 @@ fn render_subscription_editor(
             );
             snapshot(window, output, &format!("subscription-bound-{suffix}"))?;
             let count = saves.get();
-            click(window, width as f32 - 90.0, height as f32 - 46.0);
+            headless::click(window, width as f32 - 90.0, height as f32 - 46.0);
             assert_eq!(
                 saves.get(),
                 count + 1,
                 "save uses the selected account at every size"
             );
             app.set_config_managed(true);
-            click(window, width as f32 - 90.0, height as f32 - 46.0);
+            headless::click(window, width as f32 - 90.0, height as f32 - 46.0);
             assert_eq!(
                 saves.get(),
                 count + 1,
@@ -1982,28 +1923,28 @@ fn render_subscription_editor(
             );
             app.set_config_managed(false);
             app.set_edit_config_error("合成配置错误：压缩阈值需要修正。".into());
-            click(window, width as f32 - 126.0, 164.0);
+            headless::click(window, width as f32 - 126.0, 164.0);
             snapshot(
                 window,
                 output,
                 &format!("subscription-config-error-{suffix}"),
             )?;
-            click(window, width as f32 - 90.0, height as f32 - 46.0);
+            headless::click(window, width as f32 - 90.0, height as f32 - 46.0);
             assert_eq!(saves.get(), count + 1, "invalid TOML cannot be saved");
             app.set_edit_config_error("".into());
             app.set_subscription_name("".into());
-            click(window, width as f32 - 90.0, height as f32 - 46.0);
+            headless::click(window, width as f32 - 90.0, height as f32 - 46.0);
             assert_eq!(saves.get(), count + 1, "a connection needs a name");
             app.set_subscription_name("ChatGPT · 工作账号".into());
             let count = deletes.get();
-            click(window, left + 56.0, height as f32 - 46.0);
+            headless::click(window, left + 56.0, height as f32 - 46.0);
             assert!(app.get_delete_confirm());
             assert_eq!(deletes.get(), count, "delete requires confirmation");
-            click(window, left + 56.0, height as f32 - 46.0);
+            headless::click(window, left + 56.0, height as f32 - 46.0);
             assert_eq!(deletes.get(), count + 1);
             if height >= 820 {
                 let count = models.get();
-                click(window, left + 115.0, 646.0);
+                headless::click(window, left + 115.0, 646.0);
                 assert_eq!(
                     models.get(),
                     count + 1,
@@ -2011,7 +1952,7 @@ fn render_subscription_editor(
                 );
             }
             app.set_subscription_auth_json("synthetic-unsaved-credential".into());
-            click(window, width as f32 - 202.0, height as f32 - 46.0);
+            headless::click(window, width as f32 - 202.0, height as f32 - 46.0);
             assert!(
                 !app.get_subscription_editor_open(),
                 "cancel stays reachable"
@@ -2035,70 +1976,70 @@ fn render_subscription_editor(
         position: slint::LogicalPosition::new(150.0, 180.0),
     });
     play(window, output, "subscription-avatar", &[0, 80, 160, 320])?;
-    click(window, 590.0, 215.0);
+    headless::click(window, 590.0, 215.0);
     play(window, output, "subscription-tabs", &[0, 64, 144, 256, 416])?;
-    click(window, 460.0, 215.0);
+    headless::click(window, 460.0, 215.0);
     play(
         window,
         output,
         "subscription-tabs-return",
         &[0, 64, 144, 416],
     )?;
-    click(window, 1074.0, 164.0);
+    headless::click(window, 1074.0, 164.0);
     play(
         window,
         output,
         "subscription-options",
         &[0, 64, 144, 256, 416],
     )?;
-    click(window, 1074.0, 164.0);
+    headless::click(window, 1074.0, 164.0);
     play(
         window,
         output,
         "subscription-options-close",
         &[0, 64, 144, 416],
     )?;
-    click(window, 1156.0, 164.0);
-    let first = render_now(window);
+    headless::click(window, 1156.0, 164.0);
+    let first = headless::render(window);
     play(
         window,
         output,
         "subscription-expand",
         &[0, 64, 144, 256, 416, 640],
     )?;
-    let last = render_now(window);
+    let last = headless::render(window);
     assert!(
         first.as_bytes() != last.as_bytes(),
         "the editor width animates"
     );
     // Reverse twice during the transition and compare with a clean settle.
-    click(window, 1156.0, 164.0);
-    render_now(window);
+    headless::click(window, 1156.0, 164.0);
+    headless::render(window);
     frame(96);
-    click(window, 1156.0, 164.0);
-    render_now(window);
+    headless::click(window, 1156.0, 164.0);
+    headless::render(window);
     frame(640);
     assert!(
-        last.as_bytes() == render_now(window).as_bytes(),
+        last.as_bytes() == headless::render(window).as_bytes(),
         "an interrupted transition settles to the same layout"
     );
     for reduced in [false, true] {
         app.global::<Theme>().set_animations_enabled(reduced);
         app.global::<Theme>().set_system_reduced_motion(reduced);
-        click(window, 1156.0, 164.0);
-        let immediate = render_now(window);
+        headless::click(window, 1156.0, 164.0);
+        let immediate = headless::render(window);
         frame(640);
         assert!(
-            immediate.as_bytes() == render_now(window).as_bytes(),
+            immediate.as_bytes() == headless::render(window).as_bytes(),
             "disabled motion settles immediately"
         );
         app.set_subscription_editor_open(false);
-        render_now(window);
+        headless::render(window);
         app.set_subscription_editor_open(true);
-        let immediate = render_now(window);
+        let immediate = headless::render(window);
         frame(960);
         assert!(
-            immediate.as_bytes() == render_now(window).as_bytes(),
+            immediate.as_bytes() == headless::render(window).as_bytes(),
             "disabled entry motion settles immediately"
         );
     }
@@ -2221,20 +2162,20 @@ fn render_common_config(
             snapshot(window, output, &format!("common-config-{suffix}"))?;
             let left = width as f32 - 920.0 + 26.0;
             let help_y = if height < 760 { 230.0 } else { 258.0 };
-            click(window, width as f32 - 80.0, help_y);
+            headless::click(window, width as f32 - 80.0, help_y);
             snapshot(window, output, &format!("common-help-{suffix}"))?;
-            click(window, width as f32 - 80.0, help_y);
+            headless::click(window, width as f32 - 80.0, help_y);
             render(window);
-            click(window, width as f32 - 56.0, help_y + 60.0);
+            headless::click(window, width as f32 - 56.0, help_y + 60.0);
             snapshot(window, output, &format!("common-focus-{suffix}"))?;
-            click(
+            headless::click(
                 window,
                 width as f32 - 56.0,
                 help_y + 60.0 - if height < 760 { 124.0 } else { 148.0 },
             );
             render(window);
             // Exercise native input focus and the text binding, then save.
-            click(window, left + 140.0, help_y + 110.0);
+            headless::click(window, left + 140.0, help_y + 110.0);
             window.dispatch_event(WindowEvent::KeyPressed { text: " ".into() });
             window.dispatch_event(WindowEvent::KeyReleased { text: " ".into() });
             assert_ne!(
@@ -2244,7 +2185,7 @@ fn render_common_config(
             );
             snapshot(window, output, &format!("common-dirty-{suffix}"))?;
             let count = saves.get();
-            click(window, width as f32 - 89.0, height as f32 - 47.0);
+            headless::click(window, width as f32 - 89.0, height as f32 - 47.0);
             assert_eq!(
                 saves.get(),
                 count + 1,
@@ -2252,8 +2193,8 @@ fn render_common_config(
             );
             assert!(app.get_busy());
             snapshot(window, output, &format!("common-saving-{suffix}"))?;
-            click(window, width as f32 - 89.0, height as f32 - 47.0);
-            click(window, left + 93.0, height as f32 - 47.0);
+            headless::click(window, width as f32 - 89.0, height as f32 - 47.0);
+            headless::click(window, left + 93.0, height as f32 - 47.0);
             window.dispatch_event(WindowEvent::KeyPressed {
                 text: slint::platform::Key::Escape.into(),
             });
@@ -2269,7 +2210,7 @@ fn render_common_config(
             app.set_busy(false);
 
             let count = extracts.get();
-            click(window, left + 93.0, height as f32 - 47.0);
+            headless::click(window, left + 93.0, height as f32 - 47.0);
             assert_eq!(
                 extracts.get(),
                 count + 1,
@@ -2288,8 +2229,8 @@ fn render_common_config(
             snapshot(window, output, &format!("common-managed-{suffix}"))?;
             let saved = saves.get();
             let extracted = extracts.get();
-            click(window, width as f32 - 89.0, height as f32 - 47.0);
-            click(window, left + 93.0, height as f32 - 47.0);
+            headless::click(window, width as f32 - 89.0, height as f32 - 47.0);
+            headless::click(window, left + 93.0, height as f32 - 47.0);
             assert_eq!(saves.get(), saved, "managed configuration cannot be saved");
             assert_eq!(
                 extracts.get(),
@@ -2299,7 +2240,7 @@ fn render_common_config(
             app.set_config_managed(false);
             app.set_common_config_draft("".into());
             snapshot(window, output, &format!("common-empty-{suffix}"))?;
-            click(window, width as f32 - 205.0, height as f32 - 47.0);
+            headless::click(window, width as f32 - 205.0, height as f32 - 47.0);
             assert!(!app.get_common_config_editor_open());
             assert_eq!(
                 app.get_common_config_draft(),
@@ -2314,9 +2255,9 @@ fn render_common_config(
     app.window().set_size(PhysicalSize::new(1200, 820));
     set_theme(app, window, true);
     app.global::<Theme>().set_animations_enabled(true);
-    render_now(window);
+    headless::render(window);
     app.set_common_config_editor_open(true);
-    let first = render_now(window);
+    let first = headless::render(window);
     let mut elapsed = 0;
     for at in [0, 16, 48, 96, 160, 240, 340, 480, 640] {
         frame(at - elapsed);
@@ -2325,27 +2266,27 @@ fn render_common_config(
     }
     assert_ne!(
         first.as_bytes(),
-        render_now(window).as_bytes(),
+        headless::render(window).as_bytes(),
         "the drawer and its sections must animate in"
     );
-    click(window, 1120.0, 258.0);
-    render_now(window);
+    headless::click(window, 1120.0, 258.0);
+    headless::render(window);
     frame(96);
     snapshot_now(window, output, "common-help-opening-096ms")?;
     // Reverse twice before settling; controls must stay reachable.
-    click(window, 1120.0, 258.0);
-    render_now(window);
+    headless::click(window, 1120.0, 258.0);
+    headless::render(window);
     frame(48);
-    click(window, 1120.0, 258.0);
-    render_now(window);
+    headless::click(window, 1120.0, 258.0);
+    headless::render(window);
     frame(480);
     snapshot_now(window, output, "common-help-interrupted-settled")?;
     app.set_common_config_editor_open(false);
-    render_now(window);
+    headless::render(window);
     frame(96);
     snapshot_now(window, output, "common-exit-096ms")?;
     app.set_common_config_editor_open(true);
-    render_now(window);
+    headless::render(window);
     frame(640);
     snapshot_now(window, output, "common-reopened")?;
 
@@ -2355,11 +2296,11 @@ fn render_common_config(
         app.global::<Theme>().set_animations_enabled(reduced);
         app.global::<Theme>().set_system_reduced_motion(reduced);
         app.set_common_config_editor_open(true);
-        let still = render_now(window);
+        let still = headless::render(window);
         frame(1500);
         assert_eq!(
             still.as_bytes(),
-            render_now(window).as_bytes(),
+            headless::render(window).as_bytes(),
             "disabled or reduced motion settles immediately, including the floating artwork"
         );
         snapshot_now(
@@ -2372,17 +2313,17 @@ fn render_common_config(
             },
         )?;
         app.set_common_config_editor_open(false);
-        render_now(window);
+        headless::render(window);
     }
     app.global::<Theme>().set_system_reduced_motion(false);
     app.global::<Theme>().set_animations_enabled(true);
-    render_now(window);
+    headless::render(window);
     // A deterministic animation reel for visual review, using only fixtures.
     for index in 0..120 {
         match index {
             1 => app.set_common_config_editor_open(true),
-            24 | 44 => click(window, 1120.0, 258.0),
-            60 => click(window, 1144.0, 318.0),
+            24 | 44 => headless::click(window, 1120.0, 258.0),
+            60 => headless::click(window, 1144.0, 318.0),
             80 => app.set_common_config_draft(
                 format!(
                     "{}\n# A fresh shared preference\n",
@@ -2390,7 +2331,7 @@ fn render_common_config(
                 )
                 .into(),
             ),
-            90 => click(window, 1111.0, 773.0),
+            90 => headless::click(window, 1111.0, 773.0),
             105 => {
                 app.set_busy(false);
                 app.set_common_config_editor_open(false);
@@ -2474,32 +2415,32 @@ fn render_provider_editor(
             snapshot(window, output, &format!("provider-editor-{suffix}"))?;
 
             // Configuration preferences expand without moving the footer.
-            click(window, width as f32 - 126.0, 164.0);
+            headless::click(window, width as f32 - 126.0, 164.0);
             render(window);
-            click(window, right + 72.0, 239.0);
+            headless::click(window, right + 72.0, 239.0);
             assert!(
                 !app.get_edit_use_common_config(),
                 "whole-row switch must toggle"
             );
-            click(window, right + 72.0, 239.0);
+            headless::click(window, right + 72.0, 239.0);
             assert!(app.get_edit_use_common_config());
-            click(window, right + 70.0, 292.0);
+            headless::click(window, right + 70.0, 292.0);
             assert!(!app.get_edit_context_1m(), "context control must toggle");
             snapshot(window, output, &format!("provider-context-off-{suffix}"))?;
-            click(window, right + 70.0, 292.0);
+            headless::click(window, right + 70.0, 292.0);
             assert!(app.get_edit_context_1m());
             snapshot(window, output, &format!("provider-options-{suffix}"))?;
-            click(window, width as f32 - 126.0, 164.0);
+            headless::click(window, width as f32 - 126.0, 164.0);
             render(window);
 
-            click(window, width as f32 - 44.0, 164.0);
+            headless::click(window, width as f32 - 44.0, 164.0);
             snapshot(window, output, &format!("provider-expanded-{suffix}"))?;
-            click(window, width as f32 - 44.0, 164.0);
+            headless::click(window, width as f32 - 44.0, 164.0);
             render(window);
 
             if width == 1200 {
                 let count = fetches.get();
-                click(window, left + 136.0, 588.0);
+                headless::click(window, left + 136.0, 588.0);
                 assert_eq!(
                     fetches.get(),
                     count + 1,
@@ -2508,7 +2449,7 @@ fn render_provider_editor(
             }
             app.set_edit_key("synthetic-clear-check".into());
             let count = saves.get();
-            click(window, width as f32 - 90.0, height as f32 - 46.0);
+            headless::click(window, width as f32 - 90.0, height as f32 - 46.0);
             assert_eq!(
                 saves.get(),
                 count + 1,
@@ -2520,13 +2461,13 @@ fn render_provider_editor(
             );
             app.set_delete_confirm(false);
             let count = deletes.get();
-            click(window, left + 56.0, height as f32 - 46.0);
+            headless::click(window, left + 56.0, height as f32 - 46.0);
             assert!(app.get_delete_confirm());
             assert_eq!(deletes.get(), count, "delete still requires a second click");
-            click(window, left + 56.0, height as f32 - 46.0);
+            headless::click(window, left + 56.0, height as f32 - 46.0);
             assert_eq!(deletes.get(), count + 1);
             app.set_edit_key("synthetic-clear-check".into());
-            click(window, width as f32 - 202.0, height as f32 - 46.0);
+            headless::click(window, width as f32 - 202.0, height as f32 - 46.0);
             assert!(!app.get_editor_open(), "cancel must remain reachable");
             assert!(
                 app.get_edit_key().is_empty(),
@@ -2543,47 +2484,47 @@ fn render_provider_editor(
     app.set_editor_open(true);
     render(window);
     app.global::<Theme>().set_animations_enabled(true);
-    click(window, 1156.0, 164.0);
-    let first = render_now(window);
+    headless::click(window, 1156.0, 164.0);
+    let first = headless::render(window);
     let mut elapsed = 0;
     for at in [0, 16, 48, 96, 160, 240, 340, 480] {
         frame(at - elapsed);
         elapsed = at;
         snapshot_now(window, output, &format!("provider-expand-{at:03}ms"))?;
     }
-    let last = render_now(window);
+    let last = headless::render(window);
     assert_ne!(first.as_bytes(), last.as_bytes(), "expansion must animate");
-    click(window, 1156.0, 164.0);
-    render_now(window);
+    headless::click(window, 1156.0, 164.0);
+    headless::render(window);
     frame(96);
-    click(window, 1156.0, 164.0);
-    render_now(window);
+    headless::click(window, 1156.0, 164.0);
+    headless::render(window);
     frame(480);
     assert_eq!(
         last.as_bytes(),
-        render_now(window).as_bytes(),
+        headless::render(window).as_bytes(),
         "interrupted expansion settles to the same layout"
     );
     for reduced in [false, true] {
         app.global::<Theme>().set_animations_enabled(reduced);
         app.global::<Theme>().set_system_reduced_motion(reduced);
-        click(window, 1156.0, 164.0);
-        let immediate = render_now(window);
+        headless::click(window, 1156.0, 164.0);
+        let immediate = headless::render(window);
         frame(600);
         assert_eq!(
             immediate.as_bytes(),
-            render_now(window).as_bytes(),
+            headless::render(window).as_bytes(),
             "disabled motion settles immediately"
         );
     }
     app.global::<Theme>().set_system_reduced_motion(false);
     app.global::<Theme>().set_animations_enabled(false);
-    click(window, 1156.0, 164.0);
+    headless::click(window, 1156.0, 164.0);
     render(window);
     app.set_edit_config_error("合成配置错误：请检查压缩阈值。".into());
     snapshot(window, output, "provider-config-error-dark")?;
     let count = saves.get();
-    click(window, 1110.0, 774.0);
+    headless::click(window, 1110.0, 774.0);
     assert_eq!(saves.get(), count, "invalid configuration cannot be saved");
     app.set_edit_config_error("".into());
     app.set_editor_open(false);
@@ -2684,7 +2625,7 @@ fn render_connection_picker_motion(
             let suffix = format!("{}-{width}x{height}", if dark { "dark" } else { "light" });
             snapshot(window, output, &format!("connection-picker-{suffix}"))?;
             app.global::<Theme>().set_animations_enabled(true);
-            click(window, picker_left + 90.0, 280.0);
+            headless::click(window, picker_left + 90.0, 280.0);
             assert!(app.get_editor_open());
             let mut elapsed = 0;
             for at in [0, 16, 48, 96, 160, 240, 340, 480] {
@@ -2697,8 +2638,8 @@ fn render_connection_picker_motion(
                 )?;
             }
             app.set_edit_key("synthetic-unsaved-key".into());
-            render_now(window);
-            click(window, api_left + 50.0, 108.0);
+            headless::render(window);
+            headless::click(window, api_left + 50.0, 108.0);
             assert!(
                 app.get_connection_picker_open(),
                 "back returns one level to the picker"
@@ -2709,7 +2650,7 @@ fn render_connection_picker_motion(
                 "back clears the draft immediately"
             );
             let before = saves.get();
-            click(window, width as f32 - 90.0, height as f32 - 46.0);
+            headless::click(window, width as f32 - 90.0, height as f32 - 46.0);
             assert_eq!(saves.get(), before, "outgoing save is inert");
             let mut elapsed = 0;
             for at in [0, 16, 48, 96, 160, 240, 340, 480] {
@@ -2728,67 +2669,67 @@ fn render_connection_picker_motion(
             );
 
             // Rapid retargeting and resize settle on a usable picker.
-            click(window, picker_left + 90.0, 280.0);
-            render_now(window);
+            headless::click(window, picker_left + 90.0, 280.0);
+            headless::render(window);
             frame(96);
             app.invoke_return_to_connection_picker();
-            render_now(window);
+            headless::render(window);
             frame(48);
             app.invoke_begin_provider_editor("".into());
-            render_now(window);
+            headless::render(window);
             frame(48);
             app.invoke_return_to_connection_picker();
             app.window().set_size(PhysicalSize::new(width + 40, height));
-            render_now(window);
+            headless::render(window);
             frame(600);
             app.window().set_size(PhysicalSize::new(width, height));
-            render_now(window);
+            headless::render(window);
             frame(600);
             let count = selections.get();
-            click(window, picker_left + 90.0, 280.0);
+            headless::click(window, picker_left + 90.0, 280.0);
             assert_eq!(
                 selections.get(),
                 count + 1,
                 "picker works after rapid reversal and resize"
             );
-            render_now(window);
+            headless::render(window);
             frame(600);
             app.invoke_return_to_connection_picker();
-            render_now(window);
+            headless::render(window);
             frame(600);
 
             // The same back affordance applies to both subscription forms.
             for (x, chatgpt) in [(picker_left + 90.0, true), (picker_left + 440.0, false)] {
-                click(window, x, 160.0);
-                render_now(window);
+                headless::click(window, x, 160.0);
+                headless::render(window);
                 frame(600);
                 assert_eq!(app.get_subscription_editor_open(), chatgpt);
                 assert_eq!(app.get_xai_editor_open(), !chatgpt);
                 app.set_subscription_auth_json("synthetic-unsaved-credential".into());
-                click(window, api_left + 50.0, 108.0);
+                headless::click(window, api_left + 50.0, 108.0);
                 assert!(app.get_connection_picker_open());
                 assert!(app.get_subscription_auth_json().is_empty());
                 assert!(!app.get_subscription_editor_open());
                 assert!(!app.get_xai_editor_open());
-                render_now(window);
+                headless::render(window);
                 frame(600);
             }
 
             for reduced in [false, true] {
                 app.global::<Theme>().set_animations_enabled(reduced);
                 app.global::<Theme>().set_system_reduced_motion(reduced);
-                click(window, picker_left + 90.0, 280.0);
-                render_now(window);
-                click(window, api_left + 50.0, 108.0);
+                headless::click(window, picker_left + 90.0, 280.0);
+                headless::render(window);
+                headless::click(window, api_left + 50.0, 108.0);
                 assert!(app.get_connection_picker_open());
                 window.dispatch_event(WindowEvent::PointerMoved {
                     position: slint::LogicalPosition::new(5.0, 5.0),
                 });
-                let immediate = render_now(window);
+                let immediate = headless::render(window);
                 frame(1000);
                 assert_eq!(
                     immediate.as_bytes(),
-                    render_now(window).as_bytes(),
+                    headless::render(window).as_bytes(),
                     "disabled/reduced motion returns immediately"
                 );
             }
@@ -2811,17 +2752,17 @@ fn main() -> Result<(), Box<dyn Error>> {
         return Err("output directory must be absolute".into());
     }
     fs::create_dir_all(output)?;
-    let window = MinimalSoftwareWindow::new(RepaintBufferType::NewBuffer);
     let native_connections = std::env::args().any(|arg| arg == "--connections-native");
     let native_provider = std::env::args().any(|arg| arg == "--provider-editor-native");
     let native_common = std::env::args().any(|arg| arg == "--common-config-native");
     let native_model = std::env::args().any(|arg| arg == "--model-editor-native");
-    if native_connections || native_provider || native_common || native_model {
+    let window = if native_connections || native_provider || native_common || native_model {
         #[cfg(target_os = "macos")]
         macos::configure_window()?;
+        MinimalSoftwareWindow::new(RepaintBufferType::NewBuffer)
     } else {
-        slint::platform::set_platform(Box::new(PreviewPlatform(window.clone())))?;
-    }
+        headless::install_with_manual_time()
+    };
     let app = AppWindow::new()?;
     app.set_native_titlebar_overlay(std::env::args().any(|arg| arg == "--native-titlebar-overlay"));
     switchx::reasoning_picker::connect(&app);
@@ -2929,25 +2870,19 @@ fn main() -> Result<(), Box<dyn Error>> {
         render(&window);
         app.set_drawer_open(true);
         render(&window);
-        click(&window, 500.0, 548.0);
+        headless::click(&window, 500.0, 548.0);
         render(&window);
         assert!(
             app.get_status_directories_expanded(),
             "directory disclosure must expand"
         );
-        click(&window, 816.0, 526.0);
+        headless::click(&window, 816.0, 526.0);
         render(&window);
-        assert_eq!(
-            CLIPBOARD.with(|value| value.borrow().clone()),
-            app.get_config_home().as_str()
-        );
-        click(&window, 816.0, 580.0);
+        assert_eq!(headless::clipboard(), app.get_config_home().as_str());
+        headless::click(&window, 816.0, 580.0);
         render(&window);
-        assert_eq!(
-            CLIPBOARD.with(|value| value.borrow().clone()),
-            app.get_data_path().as_str()
-        );
-        click(&window, 760.0, 684.0);
+        assert_eq!(headless::clipboard(), app.get_data_path().as_str());
+        headless::click(&window, 760.0, 684.0);
         render(&window);
         assert!(!app.get_drawer_open());
         assert_eq!(
@@ -2972,19 +2907,19 @@ fn main() -> Result<(), Box<dyn Error>> {
         );
         app.set_busy(true);
         render(&window);
-        click(&window, 550.0, 625.0);
-        click(&window, 20.0, 200.0);
+        headless::click(&window, 550.0, 625.0);
+        headless::click(&window, 20.0, 200.0);
         assert_eq!(restored.get(), 0, "busy restore must not run");
         assert!(app.get_drawer_open(), "busy outside click must not dismiss");
         app.set_busy(false);
         render(&window);
-        click(&window, 550.0, 625.0);
+        headless::click(&window, 550.0, 625.0);
         assert_eq!(
             restored.get(),
             1,
             "restore must target the current Codex home"
         );
-        click(&window, 20.0, 200.0);
+        headless::click(&window, 20.0, 200.0);
         render(&window);
         assert!(
             !app.get_drawer_open(),
@@ -3308,13 +3243,13 @@ fn main() -> Result<(), Box<dyn Error>> {
         app.global::<Theme>().set_animations_enabled(false);
         app.set_native_login_expanded(false);
         render(&window);
-        click(&window, 1126.0, 308.0);
+        headless::click(&window, 1126.0, 308.0);
         snapshot(&window, output, "accounts-menu-dark-1200x820")?;
-        click(&window, 1000.0, 434.0);
+        headless::click(&window, 1000.0, 434.0);
         render(&window);
         assert!(app.get_account_login_confirm_open());
         assert_eq!(writes.get(), 0, "Selecting login must only open its review");
-        click(&window, 720.0, 468.0);
+        headless::click(&window, 720.0, 468.0);
         render(&window);
         assert_eq!(writes.get(), 1);
         assert!(!app.get_account_login_confirm_open());
