@@ -5,7 +5,7 @@
 //! Sidebar navigation: add --sidebar-motion (frames and settle checks).
 //! macOS titlebar spacing: add --native-titlebar-overlay to software previews.
 //! Batch model picker: add --batch-models.
-//! Connection directory/workbench: add --connection-workbench.
+//! Connection directory/workbench: add --connection-workbench; hover cards: --workbench-hover.
 //! Shared workspace menu and operation feedback: add --workspace-feedback.
 //! Activity timeline: add --activity-design (entry, arrivals, pause, details, filter).
 //! API connection editor: add --provider-editor-design.
@@ -98,9 +98,14 @@ fn main() -> Result<(), Box<dyn Error>> {
         app.show()?;
         return models::render_model_editor(&app, &window, output);
     }
-    if flag("--connection-workbench") {
+    if flag("--connection-workbench") || flag("--workbench-hover") {
         app.show()?;
-        return connections::render_connection_workbench(&app, &window, output);
+        return connections::render_connection_workbench(
+            &app,
+            &window,
+            output,
+            flag("--workbench-hover"),
+        );
     }
     if flag("--connection-status") {
         return status::render_connection_status(&app, &window, output);

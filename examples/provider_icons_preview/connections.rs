@@ -191,6 +191,7 @@ pub(super) fn render_connection_workbench(
     app: &AppWindow,
     window: &MinimalSoftwareWindow,
     output: &Path,
+    hover_only: bool,
 ) -> Result<(), Box<dyn Error>> {
     let make_provider =
         |id: &str, name: &str, icon_id: &str, subscription: bool, grok: bool, selected: bool| {
@@ -288,6 +289,13 @@ pub(super) fn render_connection_workbench(
             set_theme(app, window, dark);
             app.set_active_page(0);
             snapshot(window, output, &format!("workbench-connections-{suffix}"))?;
+            app.global::<Theme>().set_animations_enabled(true);
+            window.dispatch_event(WindowEvent::PointerMoved {
+                position: slint::LogicalPosition::new(500.0, 290.0),
+            });
+            snapshot(window, output, &format!("workbench-hover-{suffix}"))?;
+            window.dispatch_event(WindowEvent::PointerExited);
+            app.global::<Theme>().set_animations_enabled(false);
             if width == 1200 && !dark {
                 headless::click(window, 1090.0, 290.0);
                 render(window);
@@ -296,6 +304,9 @@ pub(super) fn render_connection_workbench(
                     1,
                     "whole-connection selection must be reachable"
                 );
+            }
+            if hover_only {
+                continue;
             }
             let expand_x = width as f32 - 100.0;
             headless::click(window, expand_x, 350.0);
@@ -314,7 +325,7 @@ pub(super) fn render_connection_workbench(
             }
             if height == 820 {
                 assert_ne!(
-                    pixel(437),
+                    pixel(439),
                     pixel(399),
                     "row boundary separator is missing at {suffix}"
                 );
@@ -462,6 +473,10 @@ pub(super) fn render_connection_workbench(
             app.set_config_managed(false);
             app.set_subscription_editor_open(false);
         }
+    }
+    if hover_only {
+        println!("Synthetic workbench hover previews: {}", output.display());
+        return Ok(());
     }
     app.window().set_size(PhysicalSize::new(1200, 820));
     set_theme(app, window, true);
