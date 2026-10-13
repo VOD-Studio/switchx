@@ -20,7 +20,8 @@ jobs:
   publish:
     name: Publish complete GitHub Release
     needs: build
-    runs-on: ubuntu-24.04
+    # Verification mounts the macOS disk images with hdiutil to read their build metadata.
+    runs-on: macos-15
     timeout-minutes: 15
     permissions:
       contents: write
