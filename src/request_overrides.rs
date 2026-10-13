@@ -175,6 +175,7 @@ fn protected_header(name: &str) -> bool {
                 | "content-encoding"
                 | "content-type"
                 | "authorization"
+                | "api-key"
                 | "x-api-key"
                 | "x-goog-api-key"
                 | "cookie"
@@ -272,6 +273,23 @@ mod tests {
         assert_eq!(
             serde_json::to_string(&RequestOverrides::default()).unwrap(),
             "{}"
+        );
+    }
+
+    #[test]
+    fn rejects_azure_api_key_in_editor_input_and_saved_configuration() {
+        for name in ["api-key", "Api-Key", "API-KEY"] {
+            let headers = json!({name: "synthetic-azure-secret"});
+            let error = RequestOverrides::parse("", &headers.to_string(), "").unwrap_err();
+            assert_eq!(error, "Header 不能覆盖认证、会话、网络转发或 HTTP 传输字段");
+            assert!(!error.contains("synthetic-azure-secret"));
+
+            let saved: RequestOverrides =
+                serde_json::from_value(json!({"headers": headers})).unwrap();
+            assert_eq!(saved.validate(), Err(error));
+        }
+        assert!(
+            RequestOverrides::parse("", r#"{" api-key ":"synthetic-azure-secret"}"#, "").is_err()
         );
     }
 }
