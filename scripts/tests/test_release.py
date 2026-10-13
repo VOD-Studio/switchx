@@ -1,12 +1,15 @@
+import contextlib
 import importlib.util
 import io
 import json
+import shutil
 import sys
 import tarfile
 import tempfile
 import unittest
 import zipfile
 from pathlib import Path
+from unittest import mock
 
 SCRIPTS = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(SCRIPTS))
@@ -121,11 +124,22 @@ class ReleaseMetadataTests(unittest.TestCase):
         self.assertEqual(sorted(reversed(ordered), key=release.parse_version), ordered)
 
 
+@contextlib.contextmanager
+def synthetic_mount(image):
+    """Stand in for hdiutil: a synthetic image holds only its BUILD-INFO.json bytes."""
+    with tempfile.TemporaryDirectory() as volume:
+        (Path(volume) / "BUILD-INFO.json").write_bytes(Path(image).read_bytes())
+        yield Path(volume)
+
+
 class ReleaseAssetsTests(unittest.TestCase):
     def setUp(self):
         self.temporary = tempfile.TemporaryDirectory()
         self.addCleanup(self.temporary.cleanup)
         self.root = Path(self.temporary.name)
+        patcher = mock.patch.object(packaging, "mounted", synthetic_mount)
+        patcher.start()
+        self.addCleanup(patcher.stop)
         for target in packaging.TARGETS:
             self.write_archive(target)
 
@@ -135,7 +149,9 @@ class ReleaseAssetsTests(unittest.TestCase):
         info_path = f"SwitchX-0.1.0-{archive_target}/BUILD-INFO.json"
         payload = json.dumps({"version": "0.1.0", "target": archive_target, "commit": "synthetic",
                               "dirty": False, **overrides}).encode()
-        if name.endswith(".zip"):
+        if name.endswith(".dmg"):
+            archive.write_bytes(payload)
+        elif name.endswith(".zip"):
             with zipfile.ZipFile(archive, "w") as destination:
                 destination.writestr(info_path, payload)
         else:
@@ -175,16 +191,39 @@ class ReleaseAssetsTests(unittest.TestCase):
             packaging.verify_assets(self.root, "0.1.0", "other-commit")
 
     def test_wrong_version_or_target_blocks_release_even_with_a_valid_checksum(self):
-        target = next(iter(packaging.TARGETS))
-        for metadata in [{"version": "0.2.0"}, {"target": "wrong-target"}]:
-            self.write_archive(target, **metadata)
-            with self.subTest(metadata=metadata), self.assertRaisesRegex(ValueError, "Build metadata mismatch"):
-                packaging.verify_assets(self.root, "0.1.0", "synthetic")
+        for target in ["aarch64-apple-darwin", "x86_64-pc-windows-msvc"]:
+            for metadata in [{"version": "0.2.0"}, {"target": "wrong-target"}]:
+                self.write_archive(target, **metadata)
+                with self.subTest(target=target, metadata=metadata), \
+                        self.assertRaisesRegex(ValueError, "Build metadata mismatch"):
+                    packaging.verify_assets(self.root, "0.1.0", "synthetic")
+            self.write_archive(target)
 
     def test_dirty_working_tree_blocks_release(self):
         self.write_archive(next(iter(packaging.TARGETS)), dirty=True)
         with self.assertRaisesRegex(ValueError, "uncommitted working tree"):
             packaging.verify_assets(self.root, "0.1.0", "synthetic")
+
+    def test_macos_packages_are_disk_images(self):
+        for target in ["aarch64-apple-darwin", "x86_64-apple-darwin"]:
+            self.assertEqual(packaging.archive_name("0.1.0", target), f"SwitchX-0.1.0-{target}.dmg")
+
+
+@unittest.skipUnless(shutil.which("hdiutil"), "requires macOS hdiutil")
+class DiskImageTests(unittest.TestCase):
+    def test_image_keeps_package_files_and_applications_link(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            source = Path(temporary) / "SwitchX-0.1.0-aarch64-apple-darwin"
+            source.mkdir()
+            (source / "BUILD-INFO.json").write_text('{"version": "0.1.0"}\n', encoding="utf-8")
+            (source / "Applications").symlink_to("/Applications")
+            image = Path(temporary) / "SwitchX.dmg"
+            packaging.create_dmg(source, image, "SwitchX 0.1.0")
+            with packaging.mounted(image) as volume:
+                self.assertEqual(json.loads((volume / "BUILD-INFO.json").read_text(encoding="utf-8")),
+                                 {"version": "0.1.0"})
+                self.assertEqual((volume / "Applications").readlink(), Path("/Applications"))
+            self.assertFalse(volume.exists())
 
 
 if __name__ == "__main__":

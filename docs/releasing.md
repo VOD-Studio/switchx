@@ -51,16 +51,16 @@ git push origin v0.1.0
 
 | 平台 | 架构 | Rust target | 发布文件 |
 | --- | --- | --- | --- |
-| macOS | Apple Silicon | `aarch64-apple-darwin` | `.zip`，包含 `SwitchX.app` |
-| macOS | Intel | `x86_64-apple-darwin` | `.zip`，包含 `SwitchX.app` |
+| macOS | Apple Silicon | `aarch64-apple-darwin` | `.dmg`，包含 `SwitchX.app` |
+| macOS | Intel | `x86_64-apple-darwin` | `.dmg`，包含 `SwitchX.app` |
 | Windows | x64 | `x86_64-pc-windows-msvc` | `.zip`，包含 `switchx.exe` |
 | Windows | ARM64 | `aarch64-pc-windows-msvc` | `.zip`，包含 `switchx.exe` |
 | Linux | x64 | `x86_64-unknown-linux-gnu` | `.tar.gz`，包含 `switchx` |
 | Linux | ARM64 | `aarch64-unknown-linux-gnu` | `.tar.gz`，包含 `switchx` |
 
-版本标签通过 GitHub 托管 runner 的检查后，每个平台使用 [GitHub 提供的对应架构原生 runner](https://docs.github.com/en/actions/reference/runners/github-hosted-runners)，先跑 Clippy、单元和集成测试，再构建 release 二进制。包名为 `SwitchX-<version>-<target>.<extension>`，包内包含 changelog、README、供应商图标许可和记录版本/target/源提交/工作区是否有改动/Rust 工具链的 `BUILD-INFO.json`。Windows 构建静态链接 CRT；Linux 包在 Ubuntu 24.04 构建，不承诺兼容更旧的 glibc。
+版本标签通过 GitHub 托管 runner 的检查后，每个平台使用 [GitHub 提供的对应架构原生 runner](https://docs.github.com/en/actions/reference/runners/github-hosted-runners)，先跑 Clippy、单元和集成测试，再构建 release 二进制。包名为 `SwitchX-<version>-<target>.<extension>`，包内包含 changelog、README、供应商图标许可和记录版本/target/源提交/工作区是否有改动/Rust 工具链的 `BUILD-INFO.json`。macOS 包是 HFS+ 格式的 UDZO 压缩磁盘映像，以上文件位于卷根目录，另有指向「应用程序」的快捷方式供拖拽安装；打包后会挂载映像，确认其中的 `SwitchX.app` 签名完整。Windows 构建静态链接 CRT；Linux 包在 Ubuntu 24.04 构建，不承诺兼容更旧的 glibc。
 
-Release 发布前会校验标签、workspace 版本、lockfile 和 changelog，要求六个平台包与各自 `.sha256` 文件齐全，核对包内版本与源提交、拒绝从有未提交改动的工作区构建的包，并生成 `SHA256SUMS`。任一检查失败都会阻止发布。全部完成后先创建 draft、上传附件，再公开 Release；上传失败时 draft 可以在重跑工作流后继续。已经公开的 Release 不会被覆盖。预发布版本自动标为 prerelease，且不会成为 latest。
+Release 发布前会校验标签、workspace 版本、lockfile 和 changelog，要求六个平台包与各自 `.sha256` 文件齐全，核对包内版本与源提交、拒绝从有未提交改动的工作区构建的包，并生成 `SHA256SUMS`。发布 job 需要用 `hdiutil` 挂载 DMG 读取 `BUILD-INFO.json`，因此运行在 GitHub 托管的 `macos-15` runner。任一检查失败都会阻止发布。全部完成后先创建 draft、上传附件，再公开 Release；上传失败时 draft 可以在重跑工作流后继续。已经公开的 Release 不会被覆盖。预发布版本自动标为 prerelease，且不会成为 latest。
 
 下载后可在 Linux 使用 `sha256sum -c SHA256SUMS`，macOS 使用 `shasum -a 256 -c SHA256SUMS`；如果只下载一个平台包，使用对应 `.sha256` 文件。Windows 可使用 PowerShell 的 `Get-FileHash <文件名> -Algorithm SHA256` 与校验文件比对。
 
@@ -68,9 +68,9 @@ Release 发布前会校验标签、workspace 版本、lockfile 和 changelog，�
 
 工作流使用 GitHub 自动提供的 `GITHUB_TOKEN`；只有发布 job 请求 `contents: write`，其他 job 为只读。无需个人访问令牌或发布密钥。仓库需启用 GitHub Actions，并允许发布 job 的写权限。actions 固定到完整提交 SHA；更新时一起核对版本注释与 SHA。
 
-macOS 当前使用 ad-hoc 签名，未做 Developer ID 签名与公证，Windows 未做 Authenticode 签名。正式签名需要另行配置相应证书与账号；当前工作流提供可下载的原生包。
+macOS 当前使用 ad-hoc 签名，未做 Developer ID 签名与公证，DMG 本身不签名；用户首次打开需在「系统设置 → 隐私与安全性」中允许。Windows 未做 Authenticode 签名。正式签名需要另行配置相应证书与账号；当前工作流提供可下载的原生包。
 
-本地打包可运行以下命令（target 必须匹配本机 Rust host），结果写入 `dist/`：
+本地打包可运行以下命令（target 必须匹配本机 Rust host），结果写入 `dist/`；macOS 上生成 `.dmg`：
 
 ```sh
 python3 scripts/package-release.py --target aarch64-apple-darwin
