@@ -420,6 +420,8 @@ export component ConnectionModels inherits Rectangle {
     in property <bool> managed;
     in property <bool> subscription;
     in property <bool> dirty;
+    in property <bool> draft;
+    in property <bool> fetch-enabled: true;
     in-out property <[ConnectionModelRow]> rows;
     in property <string> message;
     in property <int> message-tone;
@@ -580,7 +582,7 @@ export component ConnectionModels inherits Rectangle {
                         icon-height: 14px;
                         icon-color: Theme.brand;
                         loading: root.fetching;
-                        enabled: !root.busy && !root.managed;
+                        enabled: root.fetch-enabled && !root.busy && !root.managed;
                         clicked => { root.fetch(); }
                     }
 
@@ -1119,7 +1121,7 @@ export component ConnectionModels inherits Rectangle {
                     }
 
                     Text {
-                        text: root.dirty ? "有未保存修改" : "目录已保存在此连接 · 保存后在工作台选择连接";
+                        text: root.draft ? "连接与模型目录将在保存时一并保存" : root.dirty ? "有未保存修改" : "目录已保存在此连接 · 保存后在工作台选择连接";
                         color: root.dirty ? Theme.warning : Theme.muted-text;
                         font-size: 11px;
                         vertical-alignment: center;
@@ -1132,7 +1134,7 @@ export component ConnectionModels inherits Rectangle {
                     QuietButton {
                         width: 100px;
                         horizontal-stretch: 0;
-                        text: "关闭";
+                        text: root.draft ? "取消" : "关闭";
                         enabled: !root.busy;
                         clicked => { root.cancel(); }
                     }
@@ -1143,14 +1145,14 @@ export component ConnectionModels inherits Rectangle {
                         QuietButton {
                             y: (parent.height - self.height) / 2;
                             width: parent.width;
-                            text: root.saving ? "正在保存…" : "保存模型目录";
+                            text: (root.busy && root.draft) || root.saving ? "正在保存…" : root.draft ? "保存连接与目录" : "保存模型目录";
                             primary: true;
                             icon: root.saving ? @image-url("../../assets/ui/loader.svg") : @image-url("../../assets/ui/check.svg");
                             icon-width: 14px;
                             icon-height: 14px;
                             icon-color: Theme.on-brand;
                             loading: root.saving;
-                            enabled: root.dirty && !root.busy && !root.managed;
+                            enabled: (root.draft || root.dirty) && !root.busy && !root.managed;
                             clicked => { root.save(); }
                         }
 

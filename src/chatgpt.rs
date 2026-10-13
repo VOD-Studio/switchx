@@ -487,7 +487,16 @@ pub fn save_subscription(
     binding: AccountBinding,
     models: &[Value],
 ) -> Result<String, String> {
-    save_subscription_inner(data_dir, provider_id, name, binding, models, None, None)
+    save_subscription_inner(
+        data_dir,
+        provider_id,
+        name,
+        binding,
+        models,
+        None,
+        None,
+        None,
+    )
 }
 
 pub fn save_subscription_with_codex_options(
@@ -523,6 +532,35 @@ pub fn save_subscription_with_codex_options_and_icon(
     common: &str,
     icon_id: Option<&str>,
 ) -> Result<String, String> {
+    save_subscription_with_directory(
+        data_dir,
+        provider_id,
+        name,
+        binding,
+        models,
+        options,
+        common,
+        icon_id,
+        None,
+    )
+}
+
+/// A new connection's edited directory replaces automatic catalog imports.
+#[allow(clippy::too_many_arguments)]
+pub fn save_subscription_with_directory(
+    data_dir: &Path,
+    provider_id: Option<&str>,
+    name: &str,
+    binding: AccountBinding,
+    models: &[Value],
+    options: &crate::codex::provider_config::CodexOptions,
+    common: &str,
+    icon_id: Option<&str>,
+    directory: Option<&[app::ConnectionModel]>,
+) -> Result<String, String> {
+    if directory.is_some() && provider_id.is_some() {
+        return Err("已保存连接请使用模型目录编辑器".into());
+    }
     let mut options = match &options.config_toml {
         Some(config) => {
             crate::codex::provider_config::subscription_options_from_config(options, config)?
@@ -551,6 +589,7 @@ pub fn save_subscription_with_codex_options_and_icon(
         models,
         Some(&options),
         icon_id,
+        directory,
     )
 }
 
@@ -633,6 +672,7 @@ fn subscription_model_for_options(
     Ok(selected)
 }
 
+#[allow(clippy::too_many_arguments)]
 fn save_subscription_inner(
     data_dir: &Path,
     provider_id: Option<&str>,
@@ -641,6 +681,7 @@ fn save_subscription_inner(
     models: &[Value],
     options: Option<&crate::codex::provider_config::CodexOptions>,
     icon_id: Option<&str>,
+    directory: Option<&[app::ConnectionModel]>,
 ) -> Result<String, String> {
     app::ensure_editable(data_dir)?;
     validate_subscription_name(name)?;
@@ -693,7 +734,7 @@ fn save_subscription_inner(
         icon_id,
     };
     let mut additions: Vec<ModelRecord> = Vec::new();
-    for metadata in models {
+    for metadata in models.iter().filter(|_| directory.is_none()) {
         let upstream_model = metadata["slug"].as_str().unwrap();
         if saved
             .iter()
@@ -758,6 +799,9 @@ fn save_subscription_inner(
             ..model.clone()
         }])?;
         additions.push(model);
+    }
+    if let Some(directory) = directory {
+        additions = app::connection_model_records(&provider, &[], directory, models)?;
     }
     store.check_model_names(&additions)?;
     match options {

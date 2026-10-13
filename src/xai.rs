@@ -653,6 +653,35 @@ pub fn save_provider(
     name: &str,
     binding: AccountBinding,
 ) -> Result<(), String> {
+    save_provider_with_directory(data_dir, id, name, binding, None)
+}
+
+pub(crate) fn default_model_metadata() -> Result<Value, String> {
+    let mut metadata = crate::catalog::mapping_metadata(
+        "grok-4.5",
+        "Grok 4.5",
+        &crate::catalog::MappingSettings {
+            context_window: "500000",
+            reasoning_levels: Some("low, medium, high, xhigh"),
+            default_reasoning: Some("high"),
+        },
+        None,
+    )?;
+    metadata["supports_parallel_tool_calls"] = true.into();
+    metadata["input_modalities"] = serde_json::json!(["text", "image"]);
+    Ok(metadata)
+}
+
+pub fn save_provider_with_directory(
+    data_dir: &Path,
+    id: Option<&str>,
+    name: &str,
+    binding: AccountBinding,
+    directory: Option<&[app::ConnectionModel]>,
+) -> Result<(), String> {
+    if directory.is_some() && id.is_some() {
+        return Err("已保存连接请使用模型目录编辑器".into());
+    }
     app::ensure_editable(data_dir)?;
     crate::upstream::validate_provider(name, BASE_URL, "grok-4.5")?;
     AccountManager::open(data_dir)?.resolve_binding(&binding)?;
@@ -684,19 +713,10 @@ pub fn save_provider(
         account_binding: Some(binding),
         icon_id: Some("grok".into()),
     };
-    let models = if existing.is_none() {
-        let mut metadata = crate::catalog::mapping_metadata(
-            "grok-4.5",
-            "Grok 4.5",
-            &crate::catalog::MappingSettings {
-                context_window: "500000",
-                reasoning_levels: Some("low, medium, high, xhigh"),
-                default_reasoning: Some("high"),
-            },
-            None,
-        )?;
-        metadata["supports_parallel_tool_calls"] = true.into();
-        metadata["input_modalities"] = serde_json::json!(["text", "image"]);
+    let models = if let Some(directory) = directory {
+        app::connection_model_records(&provider, &[], directory, &[])?
+    } else if existing.is_none() {
+        let metadata = default_model_metadata()?;
         vec![ModelRecord {
             provider_id: provider.id.clone(),
             public_id: format!("sx-grok-{}", provider.id),
@@ -1028,5 +1048,51 @@ mod tests {
         );
         assert!(!home.join("auth.json").exists());
         server.manager.set_default(&account.id).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn new_grok_directory_saves_custom_fields_and_preserves_capabilities() {
+        let server = Server::new().await;
+        let account = server.seed();
+        let mut directory = app::ConnectionModel {
+            public_id: String::new(),
+            display_name: "Grok 主力".into(),
+            upstream_model: "grok-4.5".into(),
+            context_window: "256000".into(),
+            reasoning_levels: "low, high".into(),
+            default_reasoning: "low".into(),
+        };
+        let binding = AccountBinding::Fixed(account.id);
+        save_provider_with_directory(
+            &server._temp.0,
+            None,
+            "Custom Grok",
+            binding.clone(),
+            Some(&[directory.clone()]),
+        )
+        .unwrap();
+        let store = app::open_store(&server._temp.0).unwrap();
+        let models = store.models().unwrap();
+        assert_eq!(models.len(), 1);
+        assert_eq!(models[0].display_name, "Grok 主力");
+        assert!(!models[0].enabled);
+        let metadata: Value = serde_json::from_str(&models[0].metadata).unwrap();
+        assert_eq!(metadata["context_window"], 256000);
+        assert_eq!(metadata["default_reasoning_level"], "low");
+        assert_eq!(metadata["supports_parallel_tool_calls"], true);
+        assert_eq!(metadata["input_modalities"], json!(["text", "image"]));
+        directory.default_reasoning = "max".into();
+        assert!(
+            save_provider_with_directory(
+                &server._temp.0,
+                None,
+                "Invalid",
+                binding,
+                Some(&[directory])
+            )
+            .is_err()
+        );
+        assert_eq!(store.providers().unwrap().len(), 1);
+        assert_eq!(store.models().unwrap(), models);
     }
 }

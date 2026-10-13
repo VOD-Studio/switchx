@@ -16,6 +16,7 @@ use super::{
     accounts::account_initial,
     codex_config::clear_previews,
     command::{Command, XaiAccountAction, queue, queue_on},
+    connection_models::directory_draft,
     feedback::show_action,
     open_url,
     provider_checks::set_provider_check_id,
@@ -111,6 +112,7 @@ pub(super) fn show_xai_editor(
     provider: Option<ProviderRecord>,
     accounts: Vec<xai::AccountInfo>,
 ) {
+    app.invoke_reset_connection_draft();
     let mut ids = vec![slint::SharedString::from("@default")];
     let mut options = vec![slint::SharedString::from(
         "跟随默认 Grok 账号（发布时固定）",
@@ -179,6 +181,7 @@ pub(super) fn connect(app: &AppWindow, sender: &mpsc::Sender<Command>) {
             id: app.get_xai_provider_id().into(),
             name: app.get_xai_provider_name().into(),
             account_id,
+            directory: directory_draft(app),
         }
     }));
     let callback_sender = sender.clone();
@@ -227,18 +230,25 @@ impl Worker {
         });
     }
 
-    pub(super) fn save_xai(&mut self, id: String, name: String, account_id: String) {
+    pub(super) fn save_xai(
+        &mut self,
+        id: String,
+        name: String,
+        account_id: String,
+        directory: Option<Vec<app::ConnectionModel>>,
+    ) {
         let result = self.data_dir.path().and_then(|data_dir| {
             let binding = if account_id == "@default" {
                 AccountBinding::Default
             } else {
                 AccountBinding::Fixed(account_id)
             };
-            xai::save_provider(
+            xai::save_provider_with_directory(
                 data_dir,
                 (!id.is_empty()).then_some(id.as_str()),
                 &name,
                 binding,
+                directory.as_deref(),
             )
         });
         let snapshot = self.snapshot_after(&result);
@@ -257,6 +267,7 @@ impl Worker {
                 set_provider_check_id(&app, &id, "");
                 show_result(&app, snapshot);
                 app.set_xai_editor_open(false);
+                app.invoke_reset_connection_draft();
                 clear_previews(&app);
             }
             show_action(

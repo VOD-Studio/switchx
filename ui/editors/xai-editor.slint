@@ -312,8 +312,8 @@ export component XaiEditor inherits SurfaceCard {
                                     alignment: start;
                                     SetupStep {
                                         number: "01";
-                                        title: "保存连接";
-                                        detail: "保存连接名称与账号绑定。";
+                                        title: "连接设置";
+                                        detail: "填写连接名称并选择绑定账号。";
                                         current: root.provider-id == "";
                                     }
 
@@ -332,7 +332,7 @@ export component XaiEditor inherits SurfaceCard {
                                 }
                             }
 
-                            if root.provider-id != "": QuietButton {
+                            QuietButton {
                                 width: 144px;
                                 text: "查看模型目录";
                                 ghost: true;
@@ -342,8 +342,9 @@ export component XaiEditor inherits SurfaceCard {
                                 enabled: !root.busy && !root.config-managed;
                                 clicked => { root.configure-models(); }
                             }
+
                             if root.provider-id == "": Text {
-                                text: "保存后，继续配置这条连接的模型目录。";
+                                text: "在模型目录中获取和编辑模型，与连接一并保存。";
                                 font-size: 11px;
                                 color: Theme.muted-text;
                                 wrap: word-wrap;
@@ -389,7 +390,7 @@ export component XaiEditor inherits SurfaceCard {
             }
 
             QuietButton {
-                text: root.busy ? "正在保存…" : root.provider-id == "" ? "保存并配置模型" : "保存连接";
+                text: root.busy ? "正在保存…" : root.provider-id == "" ? "保存连接与目录" : "保存连接";
                 width: root.provider-id == "" ? 152px : 128px;
                 primary: true;
                 loading: root.busy;

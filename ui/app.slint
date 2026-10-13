@@ -106,6 +106,7 @@ export component AppWindow inherits Window {
     in-out property <string> provider-query: "";
     in-out property <bool> connection-picker-open: false;
     in-out property <bool> connection-models-open: false;
+    in-out property <bool> connection-models-draft: false;
     in-out property <string> connection-models-id;
     in-out property <string> connection-models-name;
     in-out property <bool> connection-models-subscription;
@@ -119,6 +120,7 @@ export component AppWindow inherits Window {
         else { root.reset-model-discovery(); }
     }
     callback begin-connection-models(string);
+    callback switch-connection-tab(int);
     callback edit-connection(string);
     callback add-connection-model();
     callback append-discovered-models();
@@ -357,6 +359,16 @@ export component AppWindow inherits Window {
         root.xai-editor-open = false;
         root.edit-key = "";
         root.delete-confirm = false;
+        root.reset-connection-draft();
+    }
+    public function reset-connection-draft() {
+        root.connection-models-open = false;
+        root.connection-models-draft = false;
+        root.connection-models = [];
+        root.connection-models-dirty = false;
+        root.connection-models-message = "";
+        root.connection-models-tone = 0;
+        root.reset-model-discovery();
     }
     public function open-connection-picker() {
         if (!root.busy && !root.config-managed) {
@@ -380,6 +392,7 @@ export component AppWindow inherits Window {
             root.edit-key = "";
             root.subscription-auth-json = "";
             root.delete-confirm = false;
+            root.reset-connection-draft();
             root.error-code = "";
             root.error-message = "";
             connection-drawer.focus();
@@ -1189,8 +1202,8 @@ export component AppWindow inherits Window {
 
     connection-drawer := Drawer {
         open: (root.connection-picker-open || root.editor-open || root.subscription-editor-open || root.xai-editor-open || root.connection-models-open) && !root.icon-picker-open && !root.common-config-editor-open;
-        title: root.connection-models-open ? root.connection-models-name : root.connection-picker-open || root.new-connection-form ? "添加连接" : root.editor-open ? "API 连接" : root.subscription-editor-open ? "ChatGPT 订阅" : "Grok 订阅连接";
-        subtitle: root.connection-picker-open ? "选择订阅账号或 API 服务，继续配置连接。" : "连接设置与模型目录分别保存，完成后在工作台启用。";
+        title: root.connection-picker-open || root.new-connection-form ? "添加连接" : root.connection-models-open ? root.connection-models-name : root.editor-open ? "API 连接" : root.subscription-editor-open ? "ChatGPT 订阅" : "Grok 订阅连接";
+        subtitle: root.connection-picker-open ? "选择订阅账号或 API 服务，继续配置连接。" : root.new-connection-form ? "配置连接与模型目录，保存后在工作台启用。" : "连接设置与模型目录分别保存，完成后在工作台启用。";
         panel-width: root.editor-open || root.subscription-editor-open || root.xai-editor-open ? min(1120px, root.width - 60px) : 820px;
         animate panel-width {
             duration: Theme.drawer-motion;
@@ -1254,7 +1267,7 @@ export component AppWindow inherits Window {
                                 overflow: elide;
                             }
                         }
-                        if !root.new-connection-form && root.departing-connection-form == 0: HorizontalLayout {
+                        if root.departing-connection-form == 0: HorizontalLayout {
                             height: 44px;
                             spacing: 16px;
                             cross-axis-alignment: center;
@@ -1268,11 +1281,9 @@ export component AppWindow inherits Window {
                                 selection-background: Theme.brand-surface;
                                 property <string> connection-id: root.connection-models-open ? root.connection-models-id : root.editor-open ? root.edit-id : root.subscription-editor-open ? root.subscription-id : root.xai-provider-id;
                                 selected(index) => {
-                                    if index == 0 {
-                                        root.edit-connection(self.connection-id);
-                                    } else {
-                                        root.begin-connection-models(self.connection-id);
-                                    }
+                                    if root.new-connection-form { root.switch-connection-tab(index); }
+                                    else if index == 0 { root.edit-connection(self.connection-id); }
+                                    else { root.begin-connection-models(self.connection-id); }
                                 }
                             }
 
@@ -1281,7 +1292,7 @@ export component AppWindow inherits Window {
                             }
 
                             Text {
-                                text: root.editor-open ? "API 连接 / 设置" : root.connection-models-open ? "连接 / 模型目录" : "订阅连接 / 设置";
+                                text: root.connection-models-open ? "连接 / 模型目录" : root.editor-open ? "API 连接 / 设置" : "订阅连接 / 设置";
                                 color: Theme.muted-text;
                                 font-size: 11px;
                             }
@@ -1292,6 +1303,8 @@ export component AppWindow inherits Window {
                             managed: root.config-managed;
                             subscription: root.connection-models-subscription;
                             dirty: root.connection-models-dirty;
+                            draft: root.new-connection-form;
+                            fetch-enabled: !root.new-connection-form || !root.editor-open || (root.edit-url != "" && root.edit-key != "");
                             rows <=> root.connection-models;
                             message: root.connection-models-message;
                             message-tone: root.connection-models-tone;
@@ -1309,9 +1322,9 @@ export component AppWindow inherits Window {
                             filter(query) => { root.batch-filter(query); }
                             append => { root.append-discovered-models(); }
                             save => { root.save-connection-models(); }
-                            cancel => { root.connection-models-open = false; }
+                            cancel => { if root.new-connection-form { root.close-connection-editor(); } else { root.connection-models-open = false; } }
                         }
-                        if root.editor-open || root.departing-connection-form == 1: ProviderEditor {
+                        if (root.editor-open && !root.connection-models-open) || root.departing-connection-form == 1: ProviderEditor {
                             busy: root.busy;
                             compact: root.height < 760px;
                             editor-open <=> root.editor-open;
@@ -1354,7 +1367,7 @@ export component AppWindow inherits Window {
                             dismiss-discovery => { root.reset-model-discovery(); }
                         }
 
-                        if root.subscription-editor-open || root.departing-connection-form == 2: SubscriptionEditor {
+                        if (root.subscription-editor-open && !root.connection-models-open) || root.departing-connection-form == 2: SubscriptionEditor {
                             busy: root.busy;
                             compact: root.height < 760px;
                             border-width: 0px;
@@ -1391,7 +1404,7 @@ export component AppWindow inherits Window {
                             navigate(page) => { root.cancel-subscription-editor(); root.connections-tab = 1; root.active-page = 1; }
                         }
 
-                        if root.xai-editor-open || root.departing-connection-form == 3: XaiEditor {
+                        if (root.xai-editor-open && !root.connection-models-open) || root.departing-connection-form == 3: XaiEditor {
                             busy: root.busy;
                             compact: root.height < 760px;
                             border-width: 0px;

@@ -27,11 +27,16 @@ pub(super) enum Command {
         generation: i32,
     },
     CancelSubscriptionEditor,
+    SubscriptionDirectoryAuth {
+        auth: Option<Secret>,
+        generation: i32,
+    },
     BeginXaiEditor(String),
     SaveXai {
         id: String,
         name: String,
         account_id: String,
+        directory: Option<Vec<app::ConnectionModel>>,
     },
     XaiAccount {
         action: XaiAccountAction,
@@ -57,6 +62,7 @@ pub(super) enum Command {
         scope: i32,
         generation: i32,
         provider: String,
+        draft: Option<switchx::storage::ProviderRecord>,
         url: String,
         key: Secret,
         home: String,
@@ -151,15 +157,17 @@ pub(super) struct ProviderForm {
     pub options: CodexOptions,
     pub icon_id: String,
     pub picked: Vec<String>,
+    pub directory: Option<Vec<app::ConnectionModel>>,
 }
 
 pub(super) struct SubscriptionForm {
     pub id: String,
     pub name: String,
     pub account_id: String,
-    pub auth: Secret,
+    pub auth: Option<Secret>,
     pub options: CodexOptions,
     pub icon_id: String,
+    pub directory: Option<Vec<app::ConnectionModel>>,
 }
 
 /// The single model mapping editor.

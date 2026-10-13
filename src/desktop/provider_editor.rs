@@ -17,6 +17,7 @@ use super::{
     codex_config::codex_home,
     command::{Command, ProviderForm, queue},
     common_config::common_config_for_home,
+    connection_models::directory_draft,
     feedback::show_action,
     grok::{show_xai_accounts, xai_account_view},
     icon_picker::set_editor_provider_icon,
@@ -111,6 +112,7 @@ pub(super) fn show_provider_editor(
     options: CodexOptions,
     common: String,
 ) {
+    app.invoke_reset_connection_draft();
     let selected_preset = (provider.is_none() && app.get_connection_picker_open())
         .then(|| app.get_connection_preset_id());
     app.set_editor_open(false);
@@ -234,7 +236,8 @@ pub(super) fn connect(app: &AppWindow, sender: &mpsc::Sender<Command>) {
             let options = match editor_codex_options(&app) {
                 Ok(options) => options,
                 Err(error) => {
-                    app.set_edit_config_error(error.into());
+                    app.set_edit_config_error(error.clone().into());
+                    show_action(&app, Err(error));
                     return;
                 }
             };
@@ -250,6 +253,7 @@ pub(super) fn connect(app: &AppWindow, sender: &mpsc::Sender<Command>) {
                     options,
                     icon_id: app.get_edit_icon_id().into(),
                     picked: picked_provider_models(&app),
+                    directory: directory_draft(&app),
                 }),
             );
         }
@@ -309,8 +313,24 @@ impl Worker {
             options,
             icon_id,
             picked,
+            directory,
         } = form;
         let result = self.data_dir.path().and_then(|path| {
+            if let Some(directory) = &directory {
+                if !id.is_empty() {
+                    return Err("已保存连接请使用模型目录编辑器".into());
+                }
+                return app::save_provider_with_directory(
+                    path,
+                    &name,
+                    &url,
+                    &model,
+                    key,
+                    &options,
+                    Some(&icon_id),
+                    directory,
+                );
+            }
             app::save_provider_with_mappings(
                 path,
                 (!id.is_empty()).then_some(id.as_str()),
@@ -345,6 +365,8 @@ impl Worker {
                 mark_fresh_models(&app, &created);
                 app.set_editor_open(false);
                 app.set_subscription_editor_open(false);
+                app.set_edit_key("".into());
+                app.invoke_reset_connection_draft();
                 app.set_direct_preview_ready(false);
                 app.set_route_preview_ready(false);
             }

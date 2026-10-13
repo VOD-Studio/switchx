@@ -199,6 +199,11 @@ fn model_template(
             })
             .map(ModelPreset::metadata)
             .transpose(),
+        ProviderKind::XaiOAuth
+            if provider.base_url == crate::xai::BASE_URL && model_id == "grok-4.5" =>
+        {
+            crate::xai::default_model_metadata().map(Some)
+        }
         _ => Ok(None),
     }
 }
@@ -233,6 +238,15 @@ pub fn draft_candidates(base_url: &str, model_ids: &[String]) -> Vec<BatchCandid
     };
     // Preset templates are static and valid, so this cannot fail.
     candidates_for(&provider, &[], model_ids, &[]).unwrap_or_default()
+}
+
+/// Discovery for a connection draft, without requiring a saved provider.
+pub fn connection_draft_candidates(
+    provider: &ProviderRecord,
+    model_ids: &[String],
+    templates: &[serde_json::Value],
+) -> Result<Vec<BatchCandidate>, String> {
+    candidates_for(provider, &[], model_ids, templates)
 }
 
 fn candidates_for(
@@ -411,6 +425,44 @@ pub fn save_connection_models(
         .map_err(|_| "无法读取连接")?
         .ok_or("连接不存在")?;
     let all = store.models().map_err(|_| "无法读取模型目录")?;
+    let records = connection_model_records(&provider, expected, drafts, templates)?;
+    let updated: Vec<_> = all
+        .into_iter()
+        .filter(|model| model.provider_id != provider_id)
+        .chain(records.clone())
+        .collect();
+    for model in &updated {
+        catalog::validate_fallback(model, &updated)?;
+    }
+    store
+        .replace_provider_models(provider_id, expected, &records)
+        .map_err(|error| match error {
+            rusqlite::Error::InvalidParameterName(message) => message,
+            _ => "模型目录在编辑期间已变化，或保存失败；原目录未修改，请重新打开后重试".into(),
+        })
+}
+
+/// Validate a new directory before saving any account credentials.
+pub fn validate_connection_draft(
+    data_dir: &Path,
+    provider: &ProviderRecord,
+    drafts: &[ConnectionModel],
+    templates: &[serde_json::Value],
+) -> Result<(), String> {
+    ensure_editable(data_dir)?;
+    let records = connection_model_records(provider, &[], drafts, templates)?;
+    open_store(data_dir)
+        .map_err(|error| error.message())?
+        .check_model_names(&records)
+}
+
+pub(crate) fn connection_model_records(
+    provider: &ProviderRecord,
+    expected: &[ModelRecord],
+    drafts: &[ConnectionModel],
+    templates: &[serde_json::Value],
+) -> Result<Vec<ModelRecord>, String> {
+    let provider_id = &provider.id;
     let mut records: Vec<ModelRecord> = Vec::new();
     for draft in drafts {
         let model_id = draft.upstream_model.trim();
@@ -424,7 +476,7 @@ pub fn save_connection_models(
                 expected
                     .iter()
                     .find(|model| {
-                        model.public_id == draft.public_id && model.provider_id == provider_id
+                        model.public_id == draft.public_id && model.provider_id == *provider_id
                     })
                     .ok_or("模型目录已变化，请关闭后重新打开")?,
             )
@@ -441,7 +493,7 @@ pub fn save_connection_models(
         let source = if let Some(old) = old.filter(|model| model.upstream_model == model_id) {
             Some(serde_json::from_str(&old.metadata).map_err(|_| "已保存的模型资料损坏")?)
         } else {
-            model_template(&provider, model_id, templates)?
+            model_template(provider, model_id, templates)?
         };
         if provider.kind == ProviderKind::Chatgpt && source.is_none() {
             return Err(format!("官方目录没有 {model_id}，请获取模型列表后选择"));
@@ -458,7 +510,7 @@ pub fn save_connection_models(
         )
         .map_err(|error| format!("{model_id}：{error}"))?;
         let mut record = ModelRecord {
-            provider_id: provider_id.into(),
+            provider_id: provider_id.clone(),
             public_id: match old {
                 Some(model) => model.public_id.clone(),
                 None => format!("sx-{}", new_id()?),
@@ -476,20 +528,7 @@ pub fn save_connection_models(
             .and_then(|model| model.fallback_provider_id.clone());
         records.push(record);
     }
-    let updated: Vec<_> = all
-        .into_iter()
-        .filter(|model| model.provider_id != provider_id)
-        .chain(records.clone())
-        .collect();
-    for model in &updated {
-        catalog::validate_fallback(model, &updated)?;
-    }
-    store
-        .replace_provider_models(provider_id, expected, &records)
-        .map_err(|error| match error {
-            rusqlite::Error::InvalidParameterName(message) => message,
-            _ => "模型目录在编辑期间已变化，或保存失败；原目录未修改，请重新打开后重试".into(),
-        })
+    Ok(records)
 }
 
 pub fn select_model(data_dir: &Path, public_id: &str, enabled: bool) -> Result<(), String> {

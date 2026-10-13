@@ -21,6 +21,7 @@ use super::{
     codex_config::{clear_previews, codex_home},
     command::{Command, SubscriptionForm, queue},
     common_config::common_config_for_home,
+    connection_models::directory_draft,
     feedback::show_action,
     icon_picker::set_editor_provider_icon,
     provider_checks::set_provider_check_id,
@@ -35,6 +36,7 @@ pub(super) struct SubscriptionAuthDraft {
     account_id: Option<String>,
     contents: Secret,
     home: PathBuf,
+    edited: Option<Secret>,
 }
 
 pub(super) fn subscription_binding(account_id: &str) -> AccountBinding {
@@ -64,6 +66,7 @@ pub(super) fn subscription_auth_draft(
         account_id,
         contents,
         home: home.into(),
+        edited: None,
     })
 }
 
@@ -147,6 +150,7 @@ pub(super) fn show_subscription_editor(
     common: String,
     auth: Secret,
 ) {
+    app.invoke_reset_connection_draft();
     app.set_subscription_editor_open(false);
     app.set_icon_picker_open(false);
     app.set_config_editor_updating(true);
@@ -263,7 +267,8 @@ pub(super) fn connect(app: &AppWindow, sender: &mpsc::Sender<Command>) {
             let options = match editor_codex_options(&app) {
                 Ok(options) => options,
                 Err(error) => {
-                    app.set_edit_config_error(error.into());
+                    app.set_edit_config_error(error.clone().into());
+                    show_action(&app, Err(error));
                     return;
                 }
             };
@@ -274,9 +279,11 @@ pub(super) fn connect(app: &AppWindow, sender: &mpsc::Sender<Command>) {
                     id: id.into(),
                     name: name.into(),
                     account_id: account_id.into(),
-                    auth: Secret::new(app.get_subscription_auth_json().to_string()),
+                    auth: (!app.get_connection_models_open())
+                        .then(|| Secret::new(app.get_subscription_auth_json().to_string())),
                     options,
                     icon_id: app.get_edit_icon_id().into(),
+                    directory: directory_draft(&app),
                 }),
             );
         }
@@ -472,6 +479,34 @@ impl Worker {
         let _ = self.weak.upgrade_in_event_loop(|app| app.set_busy(false));
     }
 
+    pub(super) fn subscription_directory_auth(&mut self, auth: Option<Secret>, generation: i32) {
+        let contents = self.subscription_auth.as_mut().map(|draft| {
+            if let Some(auth) = auth {
+                draft.edited = Some(auth);
+            }
+            Secret::new(
+                draft
+                    .edited
+                    .as_ref()
+                    .unwrap_or(&draft.contents)
+                    .expose()
+                    .to_owned(),
+            )
+        });
+        let _ = self.weak.upgrade_in_event_loop(move |app| {
+            app.set_busy(false);
+            if generation != app.get_subscription_editor_generation()
+                || !app.get_subscription_editor_open()
+                || app.get_connection_models_open()
+            {
+                return;
+            }
+            if let Some(contents) = contents {
+                app.set_subscription_auth_json(contents.expose().into());
+            }
+        });
+    }
+
     pub(super) async fn save_subscription(&mut self, form: SubscriptionForm) {
         let SubscriptionForm {
             id,
@@ -480,6 +515,7 @@ impl Worker {
             auth,
             options,
             icon_id,
+            directory,
         } = form;
         let result = async {
             let data_dir = self.data_dir.path()?;
@@ -496,6 +532,19 @@ impl Worker {
             } else {
                 Vec::new()
             };
+            if let Some(directory) = &directory {
+                let provider = ProviderRecord {
+                    id: "draft".into(),
+                    name: name.clone(),
+                    base_url: chatgpt::BASE_URL.into(),
+                    model_id: String::new(),
+                    kind: ProviderKind::Chatgpt,
+                    account_binding: Some(binding.clone()),
+                    credential_ref: None,
+                    icon_id: None,
+                };
+                app::validate_connection_draft(data_dir, &provider, directory, &models)?;
+            }
             let common = app::load_common_config(data_dir)?;
             chatgpt::validate_subscription_options(
                 data_dir,
@@ -504,6 +553,10 @@ impl Worker {
                 &options,
                 &common,
             )?;
+            let auth = auth
+                .as_ref()
+                .or(draft.edited.as_ref())
+                .unwrap_or(&draft.contents);
             let changed = serde_json::from_str::<serde_json::Value>(auth.expose()).ok()
                 != serde_json::from_str::<serde_json::Value>(draft.contents.expose()).ok();
             if changed {
@@ -520,7 +573,7 @@ impl Worker {
                 )?;
                 binding = AccountBinding::Fixed(account.id);
             }
-            let saved = chatgpt::save_subscription_with_codex_options_and_icon(
+            let saved = chatgpt::save_subscription_with_directory(
                 data_dir,
                 (!id.is_empty()).then_some(id.as_str()),
                 &name,
@@ -529,6 +582,7 @@ impl Worker {
                 &options,
                 &common,
                 Some(&icon_id),
+                directory.as_deref(),
             );
             if changed {
                 saved.map_err(|error| format!("账号凭据已保存，订阅连接尚未保存：{error}"))
@@ -555,6 +609,7 @@ impl Worker {
                 set_provider_check_id(&app, &id, "");
                 show_result(&app, snapshot);
                 app.set_subscription_editor_open(false);
+                app.invoke_reset_connection_draft();
                 clear_previews(&app);
             }
             if let Some(accounts) = accounts {

@@ -194,7 +194,7 @@ export component SubscriptionEditor inherits SurfaceCard {
                                         }
 
                                         Text {
-                                            text: "下一步 · 准备模型";
+                                            text: "模型目录";
                                             color: Theme.primary-text;
                                             font-size: 12px;
                                             font-weight: 600;
@@ -202,13 +202,13 @@ export component SubscriptionEditor inherits SurfaceCard {
                                     }
 
                                     Text {
-                                        text: root.subscription-id == "" ? "保存连接后，继续添加常用模型。" : "在模型目录中添加和编辑常用模型，准备好后在工作台启用。";
+                                        text: root.subscription-id == "" ? "在模型目录中获取和编辑常用模型，与连接一并保存。" : "在模型目录中添加和编辑常用模型，准备好后在工作台启用。";
                                         color: Theme.muted-text;
                                         font-size: 11px;
                                         wrap: word-wrap;
                                     }
 
-                                    if root.subscription-id != "": QuietButton {
+                                    QuietButton {
                                         text: "查看模型目录";
                                         height: 30px;
                                         ghost: true;
@@ -554,7 +554,7 @@ export component SubscriptionEditor inherits SurfaceCard {
             }
 
             QuietButton {
-                text: root.busy ? "正在保存…" : root.subscription-id == "" ? "保存并配置模型" : "保存连接";
+                text: root.busy ? "正在保存…" : root.subscription-id == "" ? "保存连接与目录" : "保存连接";
                 width: root.subscription-id == "" ? 152px : 128px;
                 primary: true;
                 loading: root.busy;

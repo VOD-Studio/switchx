@@ -238,7 +238,7 @@ export component ProviderEditor inherits SurfaceCard {
                             }
                         }
                         Text {
-                            text: root.edit-id == "" ? "保存连接后，继续准备模型目录。" : "连接与模型目录分别保存。";
+                            text: root.edit-id == "" ? "在模型目录中获取、添加和编辑模型，与连接一并保存。" : "连接与模型目录分别保存。";
                             color: Theme.muted-text;
                             font-size: 11px;
                             wrap: word-wrap;
@@ -569,7 +569,7 @@ export component ProviderEditor inherits SurfaceCard {
             }
 
             QuietButton {
-                text: root.busy ? "正在保存…" : root.edit-id == "" ? "保存并配置模型" : "保存连接";
+                text: root.busy ? "正在保存…" : root.edit-id == "" ? "保存连接与目录" : "保存连接";
                 width: root.edit-id == "" ? 152px : 128px;
                 primary: true;
                 icon: @image-url("../../assets/ui/check.svg");

@@ -47,6 +47,149 @@ fn draft(id: &str) -> ConnectionModel {
 }
 
 #[test]
+fn new_api_connection_saves_the_edited_directory_atomically_without_readding_presets() {
+    use switchx::codex::provider_config::CodexOptions;
+    let fixture = Fixture::new();
+    let mut edited = draft("deepseek-flash");
+    edited.display_name = " 自定义显示名称 / DeepSeek ".into();
+    edited.context_window = "256000".into();
+    edited.default_reasoning = "low".into();
+    let saved = app::save_provider_with_directory(
+        &fixture.0,
+        "DeepSeek",
+        "https://api.deepseek.com",
+        "deepseek-flash",
+        "synthetic-key".into(),
+        &CodexOptions::default(),
+        None,
+        &[edited.clone()],
+    )
+    .unwrap();
+    let store = fixture.store();
+    let provider = store.providers().unwrap().remove(0);
+    let models = store.models().unwrap();
+    assert_eq!(models.len(), 1, "removed preset entries must stay removed");
+    assert_eq!(models[0].public_id, saved[0]);
+    assert_eq!(models[0].provider_id, provider.id);
+    assert_eq!(models[0].display_name, edited.display_name.trim());
+    assert!(!models[0].enabled, "saving must not join the active route");
+    let metadata: serde_json::Value = serde_json::from_str(&models[0].metadata).unwrap();
+    assert_eq!(metadata["context_window"], 256000);
+    assert_eq!(metadata["default_reasoning_level"], "low");
+    assert_eq!(
+        metadata["input_modalities"],
+        serde_json::json!(["text", "image"])
+    );
+    assert!(store.provider_api_key(&provider.id).unwrap().is_some());
+
+    edited.display_name = "new name".into();
+    edited.default_reasoning = "medium".into();
+    assert!(
+        app::save_provider_with_directory(
+            &fixture.0,
+            "Invalid",
+            "https://example.invalid/v1",
+            "deepseek-flash",
+            "synthetic-key".into(),
+            &CodexOptions::default(),
+            None,
+            &[edited.clone()],
+        )
+        .is_err()
+    );
+    assert_eq!(store.providers().unwrap(), vec![provider.clone()]);
+    assert_eq!(store.models().unwrap(), models);
+
+    edited.default_reasoning = "high".into();
+    edited.display_name = models[0].display_name.clone();
+    assert!(
+        app::save_provider_with_directory(
+            &fixture.0,
+            "Duplicate",
+            "https://example.invalid/v1",
+            "deepseek-flash",
+            "synthetic-key".into(),
+            &CodexOptions::default(),
+            None,
+            &[edited],
+        )
+        .is_err()
+    );
+    assert_eq!(store.providers().unwrap(), vec![provider]);
+    assert_eq!(store.models().unwrap(), models);
+}
+
+#[test]
+fn new_subscription_directory_keeps_only_edited_models_and_official_capabilities() {
+    use switchx::{
+        catalog, chatgpt, codex::provider_config::CodexOptions, storage::AccountBinding,
+    };
+    let fixture = Fixture::new();
+    let mut template = catalog::mapping_metadata(
+        "official-pro",
+        "Official",
+        &catalog::MappingSettings {
+            context_window: "1000000",
+            reasoning_levels: Some("low, high"),
+            default_reasoning: Some("high"),
+        },
+        None,
+    )
+    .unwrap();
+    template["custom_capability"] = serde_json::json!({"preserve": true});
+    let other = catalog::mapping_metadata(
+        "official-mini",
+        "Mini",
+        &catalog::MappingSettings {
+            context_window: "128000",
+            reasoning_levels: None,
+            default_reasoning: None,
+        },
+        None,
+    )
+    .unwrap();
+    let templates = [template, other];
+    let id = chatgpt::save_subscription_with_directory(
+        &fixture.0,
+        None,
+        "Subscription draft",
+        AccountBinding::Native,
+        &templates,
+        &CodexOptions::default(),
+        "",
+        None,
+        Some(&[draft("official-pro")]),
+    )
+    .unwrap();
+    let store = fixture.store();
+    let models = store.models().unwrap();
+    assert_eq!(models.len(), 1);
+    assert_eq!(models[0].provider_id, id);
+    assert_eq!(models[0].display_name, "official-pro · 示例");
+    let metadata: serde_json::Value = serde_json::from_str(&models[0].metadata).unwrap();
+    assert_eq!(metadata["custom_capability"]["preserve"], true);
+    assert_eq!(metadata["context_window"], 128000);
+    assert!(!models[0].enabled);
+    assert!(
+        chatgpt::save_subscription_with_directory(
+            &fixture.0,
+            None,
+            "Invalid",
+            AccountBinding::Native,
+            &templates,
+            &CodexOptions::default(),
+            "",
+            None,
+            Some(&[draft("unknown")]),
+        )
+        .is_err()
+    );
+    assert_eq!(store.providers().unwrap().len(), 1);
+    assert_eq!(store.models().unwrap(), models);
+    assert!(!fixture.0.join("auth.json").exists());
+}
+
+#[test]
 fn names_are_global_trimmed_and_renames_keep_identity_and_compatibility() {
     let fixture = Fixture::new();
     let store = fixture.store();

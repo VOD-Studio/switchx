@@ -22,16 +22,17 @@ pub use common_config::{
 };
 pub use models::{
     BatchCandidate, BatchInput, BatchModel, ConnectionModel, ModelInput, batch_candidates,
-    delete_model, draft_candidates, save_connection_models, save_fallback, save_mapping,
-    save_mappings, save_model, select_model, select_models,
+    connection_draft_candidates, delete_model, draft_candidates, save_connection_models,
+    save_fallback, save_mapping, save_mappings, save_model, select_model, select_models,
+    validate_connection_draft,
 };
-pub(crate) use models::{save_mapping_from, save_mappings_from};
+pub(crate) use models::{connection_model_records, save_mapping_from, save_mappings_from};
 pub use presets::{ModelPreset, PROVIDER_PRESETS, ProviderPreset, provider_preset};
 pub(crate) use providers::resolve_provider_icon_id;
 pub use providers::{
     ProviderConfigState, delete_provider, load_provider, load_provider_config, provider_credential,
     save_provider, save_provider_with_codex_options, save_provider_with_codex_options_and_icon,
-    save_provider_with_mappings,
+    save_provider_with_directory, save_provider_with_mappings,
 };
 pub use snapshot::{ModelView, ProviderView, Snapshot, load_snapshot};
 

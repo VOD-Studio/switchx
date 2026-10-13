@@ -167,7 +167,8 @@ impl Worker {
                 id,
                 name,
                 account_id,
-            } => self.save_xai(id, name, account_id),
+                directory,
+            } => self.save_xai(id, name, account_id, directory),
             Command::CodexQuota { requests, home } => self.query_codex_quota(requests, home),
             Command::XaiQuota(requests) => self.query_xai_quota(requests),
             Command::XaiAccount { action, id } => self.xai_account(action, id).await,
@@ -184,6 +185,9 @@ impl Worker {
                 generation,
             } => self.load_subscription_auth(provider_id, account_id, home, generation),
             Command::CancelSubscriptionEditor => self.cancel_subscription_editor(),
+            Command::SubscriptionDirectoryAuth { auth, generation } => {
+                self.subscription_directory_auth(auth, generation)
+            }
             Command::SaveSubscription(form) => self.save_subscription(form).await,
             Command::OpenCommonConfig(home) => self.open_common_config(home),
             Command::ExtractCommonConfig(form_toml) => self.extract_common_config(form_toml),
@@ -200,11 +204,12 @@ impl Worker {
                 scope,
                 generation,
                 provider,
+                draft,
                 url,
                 key,
                 home: _,
             } => {
-                self.fetch_models(scope, generation, provider, url, key)
+                self.fetch_models(scope, generation, provider, draft, url, key)
                     .await
             }
             Command::InspectDirect { id, home } => self.inspect_direct(id, home),

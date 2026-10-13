@@ -20,7 +20,19 @@ pub fn save_provider(
     model_id: &str,
     key: String,
 ) -> Result<(), String> {
-    save_provider_inner(data_dir, id, name, base_url, model_id, key, None, None, &[]).map(drop)
+    save_provider_inner(
+        data_dir,
+        id,
+        name,
+        base_url,
+        model_id,
+        key,
+        None,
+        None,
+        &[],
+        None,
+    )
+    .map(drop)
 }
 
 pub fn save_provider_with_codex_options(
@@ -88,6 +100,34 @@ pub fn save_provider_with_mappings(
         Some(options),
         icon_id,
         picked,
+        None,
+    )
+}
+
+/// Saves a new API connection and its edited directory in one transaction.
+#[allow(clippy::too_many_arguments)]
+pub fn save_provider_with_directory(
+    data_dir: &Path,
+    name: &str,
+    base_url: &str,
+    model_id: &str,
+    key: String,
+    options: &CodexOptions,
+    icon_id: Option<&str>,
+    directory: &[super::ConnectionModel],
+) -> Result<Vec<String>, String> {
+    options.validate()?;
+    save_provider_inner(
+        data_dir,
+        None,
+        name,
+        base_url,
+        model_id,
+        key,
+        Some(options),
+        icon_id,
+        &[],
+        Some(directory),
     )
 }
 
@@ -115,6 +155,7 @@ fn save_provider_inner(
     options: Option<&CodexOptions>,
     icon_id: Option<&str>,
     picked: &[String],
+    directory: Option<&[super::ConnectionModel]>,
 ) -> Result<Vec<String>, String> {
     ensure_editable(data_dir)?;
     let url = validate_provider(name, base_url, model_id)?;
@@ -156,7 +197,9 @@ fn save_provider_inner(
         icon_id,
     };
     let models = store.models().map_err(|_| "无法读取模型资料")?;
-    let mut defaults = if old.is_none() {
+    let mut defaults = if let Some(directory) = directory {
+        super::models::connection_model_records(&record, &[], directory, &[])?
+    } else if old.is_none() {
         new_preset_models(&record, &models)?
     } else {
         Vec::new()

@@ -6,7 +6,7 @@ use slint::{ComponentHandle, Model, ModelRc, VecModel};
 use switchx::{
     app, catalog, chatgpt,
     credentials::Secret,
-    storage::{ModelRecord, ProviderKind, ProviderRecord},
+    storage::{AccountBinding, ModelRecord, ProviderKind, ProviderRecord},
     ui::{AppWindow, ConnectionModelRow},
     upstream, xai,
 };
@@ -94,6 +94,134 @@ pub(super) fn show_connection_directory(
     }
 }
 
+pub(super) fn draft_provider(app: &AppWindow) -> Option<ProviderRecord> {
+    let (kind, name, base_url, model_id, account_binding) =
+        if app.get_editor_open() && app.get_edit_id().is_empty() {
+            (
+                ProviderKind::ApiKey,
+                app.get_edit_name().to_string(),
+                app.get_edit_url().to_string(),
+                app.get_edit_model().to_string(),
+                None,
+            )
+        } else if app.get_subscription_editor_open() && app.get_subscription_id().is_empty() {
+            (
+                ProviderKind::Chatgpt,
+                app.get_subscription_name().to_string(),
+                chatgpt::BASE_URL.into(),
+                String::new(),
+                None,
+            )
+        } else if app.get_xai_editor_open() && app.get_xai_provider_id().is_empty() {
+            let account = app
+                .get_xai_account_ids()
+                .row_data(app.get_xai_account_choice().max(0) as usize)
+                .unwrap_or_default();
+            let binding = if account == "@default" {
+                AccountBinding::Default
+            } else {
+                AccountBinding::Fixed(account.into())
+            };
+            (
+                ProviderKind::XaiOAuth,
+                app.get_xai_provider_name().to_string(),
+                xai::BASE_URL.into(),
+                "grok-4.5".into(),
+                Some(binding),
+            )
+        } else {
+            return None;
+        };
+    Some(ProviderRecord {
+        id: String::new(),
+        kind,
+        name,
+        base_url,
+        model_id,
+        account_binding,
+        credential_ref: None,
+        icon_id: None,
+    })
+}
+
+pub(super) fn directory_draft(app: &AppWindow) -> Option<Vec<app::ConnectionModel>> {
+    (app.get_connection_models_draft() && draft_provider(app).is_some())
+        .then(|| edited_directory(app))
+}
+
+fn edited_directory(app: &AppWindow) -> Vec<app::ConnectionModel> {
+    app.get_connection_models()
+        .iter()
+        .filter(|row| !row.removing)
+        .map(|row| app::ConnectionModel {
+            public_id: row.public_id.into(),
+            display_name: row.display_name.into(),
+            upstream_model: row.upstream_model.into(),
+            context_window: row.context_window.into(),
+            reasoning_levels: row.reasoning_levels.into(),
+            default_reasoning: row.default_reasoning.into(),
+        })
+        .collect()
+}
+
+fn show_draft_directory(app: &AppWindow, provider: &ProviderRecord) {
+    let name = if provider.name.trim().is_empty() {
+        "新连接"
+    } else {
+        provider.name.trim()
+    };
+    if !app.get_connection_models_draft() {
+        let mut ids: Vec<String> = app::provider_preset(&provider.base_url)
+            .map(|preset| {
+                preset
+                    .models
+                    .iter()
+                    .map(|model| model.model_id.to_owned())
+                    .collect()
+            })
+            .unwrap_or_default();
+        if !provider.model_id.is_empty() && !ids.contains(&provider.model_id) {
+            ids.push(provider.model_id.clone());
+        }
+        let rows = app::connection_draft_candidates(provider, &ids, &[])
+            .unwrap_or_default()
+            .into_iter()
+            .map(|model| ConnectionModelRow {
+                display_name: format!("{}/{name}", model.model_id).into(),
+                upstream_model: model.model_id.into(),
+                context_window: model.context_window.into(),
+                reasoning_levels: model.reasoning_levels.into(),
+                default_reasoning: model.default_reasoning.into(),
+                ..Default::default()
+            })
+            .collect::<Vec<_>>();
+        app.set_connection_models(ModelRc::new(VecModel::from(rows)));
+        app.set_connection_models_draft(true);
+        app.set_connection_models_dirty(false);
+        app.set_connection_models_message("".into());
+        app.set_connection_models_tone(0);
+    }
+    app.set_connection_models_id("".into());
+    app.set_connection_models_name(name.into());
+    app.set_connection_models_subscription(provider.kind == ProviderKind::Chatgpt);
+    app.set_discovery_scope(2);
+    app.set_connection_models_open(true);
+    mark_draft_candidates(app);
+}
+
+fn mark_draft_candidates(app: &AppWindow) {
+    let rows = app.get_connection_models();
+    update_batch_rows(app, |_, row| {
+        row.added = rows
+            .iter()
+            .any(|model| model.upstream_model == row.id && !model.removing);
+        if row.added {
+            row.checked = false;
+        }
+        true
+    });
+}
+
 pub(super) fn connect(app: &AppWindow, sender: &mpsc::Sender<Command>) {
     let callback_sender = sender.clone();
     let weak = app.as_weak();
@@ -102,6 +230,27 @@ pub(super) fn connect(app: &AppWindow, sender: &mpsc::Sender<Command>) {
             return;
         };
         if app.get_busy() || app.get_config_managed() {
+            return;
+        }
+        if id.is_empty()
+            && let Some(provider) = draft_provider(&app)
+        {
+            if provider.kind == ProviderKind::Chatgpt && !app.get_connection_models_open() {
+                queue(
+                    &app,
+                    &callback_sender,
+                    Command::SubscriptionDirectoryAuth {
+                        auth: Some(Secret::new(app.get_subscription_auth_json().into())),
+                        generation: app.get_subscription_editor_generation(),
+                    },
+                );
+                if !app.get_busy() {
+                    return;
+                }
+                app.set_subscription_auth_json("".into());
+                app.set_subscription_auth_error("".into());
+            }
+            show_draft_directory(&app, &provider);
             return;
         }
         let Some(provider) = app
@@ -155,12 +304,29 @@ pub(super) fn connect(app: &AppWindow, sender: &mpsc::Sender<Command>) {
             },
         );
     });
+    let callback_sender = sender.clone();
     let weak = app.as_weak();
     app.on_edit_connection(move |id| {
         let Some(app) = weak.upgrade() else {
             return;
         };
         if app.get_busy() || app.get_config_managed() {
+            return;
+        }
+        if id.is_empty()
+            && let Some(provider) = draft_provider(&app)
+        {
+            app.set_connection_models_open(false);
+            if provider.kind == ProviderKind::Chatgpt {
+                queue(
+                    &app,
+                    &callback_sender,
+                    Command::SubscriptionDirectoryAuth {
+                        auth: None,
+                        generation: app.get_subscription_editor_generation(),
+                    },
+                );
+            }
             return;
         }
         let Some(provider) = app
@@ -181,10 +347,24 @@ pub(super) fn connect(app: &AppWindow, sender: &mpsc::Sender<Command>) {
         }
     });
     let weak = app.as_weak();
+    app.on_switch_connection_tab(move |index| {
+        let Some(app) = weak.upgrade() else {
+            return;
+        };
+        if index == 0 {
+            app.invoke_edit_connection("".into());
+        } else {
+            app.invoke_begin_connection_models("".into());
+        }
+    });
+    let weak = app.as_weak();
     app.on_connection_model_edited(move || {
         if let Some(app) = weak.upgrade() {
             app.set_connection_models_dirty(true);
             app.set_connection_models_message("".into());
+            if app.get_connection_models_draft() {
+                mark_draft_candidates(&app);
+            }
         }
     });
     let weak = app.as_weak();
@@ -264,19 +444,27 @@ pub(super) fn connect(app: &AppWindow, sender: &mpsc::Sender<Command>) {
         let Some(app) = weak.upgrade() else {
             return;
         };
-        let models = app
-            .get_connection_models()
-            .iter()
-            .filter(|row| !row.removing)
-            .map(|row| app::ConnectionModel {
-                public_id: row.public_id.into(),
-                display_name: row.display_name.into(),
-                upstream_model: row.upstream_model.into(),
-                context_window: row.context_window.into(),
-                reasoning_levels: row.reasoning_levels.into(),
-                default_reasoning: row.default_reasoning.into(),
-            })
-            .collect();
+        if let Some(provider) = draft_provider(&app) {
+            match provider.kind {
+                ProviderKind::ApiKey => app.invoke_save_provider(
+                    "".into(),
+                    app.get_edit_name(),
+                    app.get_edit_url(),
+                    app.get_edit_model(),
+                    app.get_edit_key(),
+                ),
+                ProviderKind::Chatgpt => {
+                    let account = app
+                        .get_subscription_account_ids()
+                        .row_data(app.get_subscription_account_choice().max(0) as usize)
+                        .unwrap_or_default();
+                    app.invoke_save_subscription("".into(), app.get_subscription_name(), account);
+                }
+                ProviderKind::XaiOAuth => app.invoke_save_xai(),
+            }
+            return;
+        }
+        let models = edited_directory(&app);
         queue(
             &app,
             &callback_sender,
@@ -313,7 +501,20 @@ pub(super) fn connect_discovery(app: &AppWindow, sender: &mpsc::Sender<Command>)
         if app.get_busy() || app.get_config_managed() {
             return;
         }
-        let (provider, url, key) = if scope == 0 {
+        let draft = (scope == 0 || scope == 2)
+            .then(|| draft_provider(&app))
+            .flatten();
+        let (provider, url, key) = if let Some(draft) = &draft {
+            (
+                String::new(),
+                draft.base_url.clone(),
+                Secret::new(if draft.kind == ProviderKind::ApiKey {
+                    app.get_edit_key().into()
+                } else {
+                    String::new()
+                }),
+            )
+        } else if scope == 0 {
             (
                 app.get_edit_id().to_string(),
                 app.get_edit_url().to_string(),
@@ -348,6 +549,7 @@ pub(super) fn connect_discovery(app: &AppWindow, sender: &mpsc::Sender<Command>)
                 scope,
                 generation: app.get_discovery_generation(),
                 provider,
+                draft,
                 url,
                 key,
                 home: app.get_config_home().into(),
@@ -448,26 +650,34 @@ impl Worker {
         scope: i32,
         generation: i32,
         provider: String,
+        draft: Option<ProviderRecord>,
         url: String,
         key: Secret,
     ) {
         let result = async {
             let data_dir = self.data_dir.path()?;
-            if !provider.is_empty() {
-                let selected = app::load_provider(data_dir, &provider)?;
-                if selected.kind == ProviderKind::XaiOAuth {
-                    xai::validate_provider(&selected)?;
-                    let manager = xai::AccountManager::open(data_dir)?;
-                    let account =
-                        manager.resolve_binding(selected.account_binding.as_ref().unwrap())?;
-                    let token = manager.credential(&account.id).await?;
-                    return upstream::fetch_models(xai::BASE_URL, token.expose())
-                        .await
-                        .map(|models| (models, false, Vec::new()));
-                }
+            let selected = if let Some(draft) = &draft {
+                Some(draft.clone())
+            } else if !provider.is_empty() {
+                Some(app::load_provider(data_dir, &provider)?)
+            } else {
+                None
+            };
+            if let Some(selected) = &selected
+                && selected.kind == ProviderKind::XaiOAuth
+            {
+                xai::validate_provider(selected)?;
+                let manager = xai::AccountManager::open(data_dir)?;
+                let account =
+                    manager.resolve_binding(selected.account_binding.as_ref().unwrap())?;
+                let token = manager.credential(&account.id).await?;
+                return upstream::fetch_models(xai::BASE_URL, token.expose())
+                    .await
+                    .map(|models| (models, false, Vec::new()));
             }
-            let is_subscription = !provider.is_empty()
-                && app::load_provider(data_dir, &provider)?.kind == ProviderKind::Chatgpt;
+            let is_subscription = selected
+                .as_ref()
+                .is_some_and(|p| p.kind == ProviderKind::Chatgpt);
             if is_subscription {
                 // The official templates also seed the batch picker's parameters.
                 let templates = chatgpt::catalog().await?;
@@ -494,7 +704,9 @@ impl Worker {
         }
         .await
         .and_then(|(models, is_subscription, templates)| {
-            let candidates = if scope == 0 {
+            let candidates = if let Some(draft) = &draft {
+                app::connection_draft_candidates(draft, &models, &templates)?
+            } else if scope == 0 {
                 app::draft_candidates(&url, &models)
             } else if !provider.is_empty() {
                 app::batch_candidates(self.data_dir.path()?, &provider, &models, &templates)?
@@ -543,6 +755,12 @@ impl Worker {
                     });
                     show_batch_candidates(&app, candidates);
                     lock_batch_rows(&app);
+                    if draft.is_some() {
+                        if scope == 0 {
+                            app.invoke_begin_connection_models("".into());
+                        }
+                        mark_draft_candidates(&app);
+                    }
                     app.set_fetched_models(ModelRc::new(VecModel::from(
                         models
                             .into_iter()
@@ -571,6 +789,361 @@ mod tests {
     };
 
     use crate::desktop::provider_editor::show_provider_editor;
+
+    fn click_control(
+        window: &slint::platform::software_renderer::MinimalSoftwareWindow,
+        app: &AppWindow,
+        label: &str,
+    ) {
+        let mut controls = i_slint_backend_testing::ElementHandle::find_by_accessible_label(
+            app, label,
+        )
+        .filter(|control| {
+            control.accessible_role() != Some(i_slint_backend_testing::AccessibleRole::Text)
+        });
+        let control = controls
+            .next()
+            .unwrap_or_else(|| panic!("missing control: {label}"));
+        assert!(controls.next().is_none(), "ambiguous control: {label}");
+        let pos = control.absolute_position();
+        let size = control.size();
+        headless::click(window, pos.x + size.width / 2.0, pos.y + size.height / 2.0);
+        slint::platform::update_timers_and_animations();
+    }
+
+    #[test]
+    fn new_connection_directory_can_fetch_edit_switch_save_and_cancel_before_creation() {
+        let window = headless::install();
+        let app = AppWindow::new().unwrap();
+        app.global::<Theme>().set_animations_enabled(false);
+        app.set_loading(false);
+        app.set_active_page(1);
+        let (sender, mut receiver) = mpsc::channel(8);
+        connect(&app, &sender);
+        connect_discovery(&app, &sender);
+        crate::desktop::provider_editor::connect(&app, &sender);
+        super::super::batch_picker::connect(&app, &sender);
+        switchx::reasoning_picker::connect(&app);
+        app.show().unwrap();
+        for (width, height) in [(1200, 820), (1000, 680)] {
+            app.window()
+                .set_size(slint::PhysicalSize::new(width, height));
+            for dark in [false, true] {
+                app.invoke_set_appearance(dark);
+                show_provider_editor(&app, None, CodexOptions::default(), String::new());
+                app.set_edit_name("Podlink".into());
+                app.set_edit_url("https://example.invalid/v1".into());
+                app.set_edit_model("coder-pro".into());
+                app.set_edit_key("synthetic-key".into());
+                let draw = |stage: &str| {
+                    headless::save_snapshot(
+                        "SWITCHX_CONNECTION_DRAFT_SNAPSHOTS",
+                        &format!(
+                            "new-connection-{stage}-{}-{width}x{height}",
+                            if dark { "dark" } else { "light" }
+                        ),
+                        &headless::render(&window),
+                    )
+                };
+                draw("settings");
+                click_control(&window, &app, "模型目录");
+                assert!(app.get_editor_open() && app.get_connection_models_open());
+                assert!(
+                    receiver.try_recv().is_err(),
+                    "opening a draft must not save or load a provider"
+                );
+                draw("directory");
+                click_control(&window, &app, "获取模型列表");
+                let Command::FetchModels {
+                    scope,
+                    draft,
+                    provider,
+                    key,
+                    url,
+                    ..
+                } = receiver.try_recv().unwrap()
+                else {
+                    panic!("expected draft discovery");
+                };
+                assert_eq!(scope, 2);
+                assert!(provider.is_empty());
+                assert_eq!(draft.unwrap().kind, ProviderKind::ApiKey);
+                assert_eq!(key.expose(), "synthetic-key");
+                assert_eq!(url, "https://example.invalid/v1");
+                app.set_busy(false);
+                app.set_fetching_models(false);
+                show_batch_candidates(
+                    &app,
+                    app::draft_candidates(&url, &["coder-pro".into(), "coder-mini".into()]),
+                );
+                mark_draft_candidates(&app);
+                app.invoke_batch_toggle(1);
+                draw("results");
+                click_control(&window, &app, "加入目录 · 1");
+                assert_eq!(app.get_connection_models().row_count(), 2);
+                headless::render(&window);
+                click_control(&window, &app, "上下文窗口 1");
+                headless::key(&window, "256000");
+                slint::platform::update_timers_and_animations();
+                assert_eq!(
+                    app.get_connection_models()
+                        .row_data(0)
+                        .unwrap()
+                        .context_window,
+                    "256000"
+                );
+                let mut edited = app.get_connection_models().row_data(0).unwrap();
+                edited.display_name = "主力模型 / Podlink".into();
+                edited.reasoning_levels = "low, high".into();
+                edited.default_reasoning = "high".into();
+                app.get_connection_models().set_row_data(0, edited.clone());
+                app.invoke_connection_model_edited();
+                draw("edited");
+                click_control(&window, &app, "连接设置");
+                assert!(!app.get_connection_models_open());
+                assert_eq!(app.get_edit_key(), "synthetic-key");
+                assert_eq!(app.get_connection_models().row_data(0).unwrap(), edited);
+                headless::render(&window);
+                click_control(&window, &app, "模型目录");
+                assert_eq!(app.get_connection_models().row_data(0).unwrap(), edited);
+                headless::render(&window);
+                click_control(&window, &app, "保存连接与目录");
+                let Command::Save(form) = receiver.try_recv().unwrap() else {
+                    panic!("expected combined save");
+                };
+                assert!(form.id.is_empty());
+                let models = form.directory.unwrap();
+                assert_eq!(models.len(), 2);
+                assert_eq!(models[0].display_name, edited.display_name.as_str());
+                assert_eq!(models[0].context_window, "256000");
+                assert_eq!(models[0].default_reasoning, "high");
+                app.set_busy(false);
+                headless::render(&window);
+                click_control(&window, &app, "取消");
+                assert!(!app.get_editor_open() && !app.get_connection_models_open());
+                assert!(app.get_edit_key().is_empty());
+                assert!(app.get_connection_models().row_count() == 0);
+                assert!(!app.get_connection_models_draft());
+            }
+        }
+    }
+
+    #[test]
+    fn new_subscription_directories_use_draft_bindings_and_clear_the_auth_editor_on_navigation() {
+        use crate::desktop::{grok, subscription_editor};
+        let window = headless::install();
+        let app = AppWindow::new().unwrap();
+        app.global::<Theme>().set_animations_enabled(false);
+        app.set_loading(false);
+        app.set_active_page(1);
+        app.window().set_size(slint::PhysicalSize::new(1000, 680));
+        app.show().unwrap();
+        let (sender, mut receiver) = mpsc::channel(8);
+        connect(&app, &sender);
+        connect_discovery(&app, &sender);
+        subscription_editor::connect(&app, &sender);
+        grok::connect(&app, &sender);
+        for kind in [ProviderKind::Chatgpt, ProviderKind::XaiOAuth] {
+            if kind == ProviderKind::Chatgpt {
+                subscription_editor::show_subscription_editor(
+                    &app,
+                    None,
+                    Vec::new(),
+                    String::new(),
+                    CodexOptions::default(),
+                    String::new(),
+                    Secret::new("synthetic-private-auth".into()),
+                );
+            } else {
+                grok::show_xai_editor(&app, None, Vec::new());
+            }
+            headless::render(&window);
+            click_control(&window, &app, "模型目录");
+            assert!(app.get_connection_models_draft() && app.get_connection_models_open());
+            assert_eq!(
+                app.get_connection_models_subscription(),
+                kind == ProviderKind::Chatgpt
+            );
+            if kind == ProviderKind::Chatgpt {
+                let Command::SubscriptionDirectoryAuth {
+                    auth: Some(auth), ..
+                } = receiver.try_recv().unwrap()
+                else {
+                    panic!("auth draft must move to the worker");
+                };
+                assert_eq!(auth.expose(), "synthetic-private-auth");
+                assert!(app.get_subscription_auth_json().is_empty());
+                app.set_busy(false);
+            }
+            headless::render(&window);
+            click_control(&window, &app, "获取模型列表");
+            let Command::FetchModels {
+                draft: Some(provider),
+                provider: saved_id,
+                key,
+                ..
+            } = receiver.try_recv().unwrap()
+            else {
+                panic!("expected subscription draft discovery");
+            };
+            assert!(saved_id.is_empty() && key.expose().is_empty());
+            assert_eq!(provider.kind, kind);
+            if kind == ProviderKind::XaiOAuth {
+                assert_eq!(provider.account_binding, Some(AccountBinding::Default));
+            }
+            app.set_busy(false);
+            app.set_fetching_models(false);
+            headless::render(&window);
+            click_control(&window, &app, "保存连接与目录");
+            if kind == ProviderKind::Chatgpt {
+                let Command::SaveSubscription(form) = receiver.try_recv().unwrap() else {
+                    panic!("expected subscription save");
+                };
+                assert!(form.directory.is_some() && form.auth.is_none());
+            } else {
+                let Command::SaveXai {
+                    directory: Some(directory),
+                    ..
+                } = receiver.try_recv().unwrap()
+                else {
+                    panic!("expected Grok save");
+                };
+                assert_eq!(directory.len(), 1);
+            }
+            app.set_busy(false);
+            headless::render(&window);
+            click_control(&window, &app, "取消");
+            assert!(!app.get_connection_models_open());
+            assert!(app.get_subscription_auth_json().is_empty());
+            if kind == ProviderKind::Chatgpt {
+                assert!(matches!(
+                    receiver.try_recv().unwrap(),
+                    Command::CancelSubscriptionEditor
+                ));
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn new_connection_worker_fetches_without_saving_then_saves_the_edited_directory() {
+        use crate::desktop::{command::ProviderForm, worker};
+        use axum::{Json, Router, http::HeaderMap, routing::get};
+        use std::{future::IntoFuture, time::Duration};
+        use tokio::{net::TcpListener, time::timeout};
+        let data =
+            std::env::temp_dir().join(format!("switchx-new-directory-{}", new_id().unwrap()));
+        let home = data.join("codex");
+        std::fs::create_dir_all(&home).unwrap();
+        std::fs::write(home.join("config.toml"), "model = 'original'\n").unwrap();
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("http://{}/v1", listener.local_addr().unwrap());
+        let (queried, mut requests) = mpsc::unbounded_channel();
+        let server = tokio::spawn(axum::serve(listener, Router::new().route("/v1/models", get(
+            move |headers: HeaderMap| {
+                let queried = queried.clone();
+                async move {
+                    queried.send(headers.get("authorization").unwrap().to_str().unwrap().to_owned()).unwrap();
+                    Json(serde_json::json!({"data": [{"id":"coder-pro"}, {"id":"coder-mini"}]}))
+                }
+            }
+        ))).into_future());
+        let (sender, receiver) = mpsc::channel(8);
+        let background = tokio::spawn(worker::run(
+            receiver,
+            slint::Weak::default(),
+            Ok(data.clone()),
+        ));
+        let provider = ProviderRecord {
+            id: String::new(),
+            name: "Draft".into(),
+            base_url: url.clone(),
+            model_id: "coder-pro".into(),
+            kind: ProviderKind::ApiKey,
+            credential_ref: None,
+            account_binding: None,
+            icon_id: None,
+        };
+        sender
+            .send(Command::FetchModels {
+                scope: 2,
+                generation: 0,
+                provider: String::new(),
+                draft: Some(provider),
+                url: url.clone(),
+                key: Secret::new("synthetic-key".into()),
+                home: home.to_string_lossy().into_owned(),
+            })
+            .await
+            .unwrap();
+        let authorization = timeout(Duration::from_secs(5), requests.recv())
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(authorization, "Bearer synthetic-key");
+        assert!(
+            !data.join("switchx.sqlite").exists(),
+            "discovery must not create a connection or database"
+        );
+        let directory = ["coder-pro", "coder-mini"].map(|id| app::ConnectionModel {
+            public_id: String::new(),
+            display_name: format!("Edited {id}"),
+            upstream_model: id.into(),
+            context_window: "256000".into(),
+            reasoning_levels: "low, high".into(),
+            default_reasoning: "high".into(),
+        });
+        sender
+            .send(Command::Save(ProviderForm {
+                id: String::new(),
+                name: "Draft".into(),
+                url,
+                model: "coder-pro".into(),
+                key: "synthetic-key".into(),
+                options: CodexOptions::default(),
+                icon_id: String::new(),
+                picked: Vec::new(),
+                directory: Some(directory.to_vec()),
+            }))
+            .await
+            .unwrap();
+        timeout(Duration::from_secs(5), async {
+            loop {
+                if let Ok(store) = Store::open_read_only(&data.join("switchx.sqlite"))
+                    && store.providers().unwrap().len() == 1
+                    && store.models().unwrap().len() == 2
+                {
+                    break;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
+        drop(sender);
+        timeout(Duration::from_secs(5), background)
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap();
+        let store = Store::open_read_only(&data.join("switchx.sqlite")).unwrap();
+        let models = store.models().unwrap();
+        assert!(
+            models
+                .iter()
+                .all(|model| model.display_name.starts_with("Edited ") && !model.enabled)
+        );
+        let metadata: serde_json::Value = serde_json::from_str(&models[0].metadata).unwrap();
+        assert_eq!(metadata["context_window"], 256000);
+        assert_eq!(metadata["default_reasoning_level"], "high");
+        assert_eq!(
+            std::fs::read_to_string(home.join("config.toml")).unwrap(),
+            "model = 'original'\n"
+        );
+        assert!(!home.join("auth.json").exists());
+        server.abort();
+        drop(store);
+        std::fs::remove_dir_all(data).unwrap();
+    }
 
     #[test]
     fn settings_model_discovery_populates_directory_drafts_and_preserves_saved_models() {
@@ -808,6 +1381,7 @@ mod tests {
                 scope: 2,
                 generation: 0,
                 provider: "api".into(),
+                draft: None,
                 url: "https://example.invalid/v1".into(),
                 key: Secret::new(String::new()),
                 home: "/isolated/codex".into(),
