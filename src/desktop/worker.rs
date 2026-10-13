@@ -195,11 +195,14 @@ impl Worker {
             Command::Save(form) => self.save_provider(form),
             Command::Delete(id) => self.delete_provider(id),
             Command::Check {
-                id,
+                requests,
                 home,
-                check_id,
                 started,
-            } => self.check_provider(id, home, check_id, started),
+            } => {
+                for (id, check_id) in requests {
+                    self.check_provider(id, home.clone(), check_id, started);
+                }
+            }
             Command::FetchModels {
                 scope,
                 generation,
@@ -246,12 +249,12 @@ impl Worker {
     }
 
     fn refuse_until_restored(&self, command: &Command) {
-        let check = match command {
-            Command::Check { id, check_id, .. } => Some((id.clone(), check_id.clone())),
-            _ => None,
+        let checks = match command {
+            Command::Check { requests, .. } => requests.clone(),
+            _ => Vec::new(),
         };
         let _ = self.weak.upgrade_in_event_loop(move |app| {
-            if let Some((id, check_id)) = check {
+            for (id, check_id) in checks {
                 finish_provider_check(&app, &id, &check_id, 0, Err("请先恢复原配置".into()));
             }
             app.set_recovery_only(true);

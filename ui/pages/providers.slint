@@ -21,6 +21,7 @@ export component ProvidersPage inherits VerticalLayout {
     callback begin-subscription-editor(string);
     callback begin-xai-editor(string);
     callback check-provider(string);
+    callback check-all-providers();
     callback preview-direct(string);
     callback begin-model-editor(string, string);
     spacing: 16px;
@@ -42,11 +43,11 @@ export component ProvidersPage inherits VerticalLayout {
         }
 
         QuietButton {
-            width: 96px;
-            text: "检查凭据";
+            width: 116px;
+            text: "检查所有凭据";
             ghost: true;
-            enabled: !root.busy;
-            clicked => { root.refresh(true); }
+            enabled: !root.busy && !root.recovery-only && root.providers.length > 0;
+            clicked => { root.check-all-providers(); }
         }
 
         QuietButton {

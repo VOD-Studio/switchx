@@ -53,9 +53,9 @@ pub(super) enum Command {
     SaveCommonConfig(String),
     Delete(String),
     Check {
-        id: String,
+        /// Provider IDs and their corresponding per-card check IDs.
+        requests: Vec<(String, String)>,
         home: String,
-        check_id: String,
         started: std::time::Instant,
     },
     FetchModels {

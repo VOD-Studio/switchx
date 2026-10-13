@@ -76,6 +76,7 @@ export component AppWindow inherits Window {
     min-height: 680px;
     background: Theme.background;
     forward-focus: app-keyboard;
+    in property <string> app-version;
     in property <bool> native-titlebar-overlay: false;
     property <Point> dropdown-viewport: { x: root.width, y: root.height };
     init => { DropdownViewport.size = root.dropdown-viewport; }
@@ -460,6 +461,7 @@ export component AppWindow inherits Window {
     changed model-reasoning-levels => { root.update-reasoning-options(); }
     changed model-upstream-id => { root.update-model-display-name(); }
     callback refresh(bool);
+    callback check-all-providers();
     callback refresh-requests();
     callback filter-requests(int);
     callback filter-providers(string);
@@ -717,7 +719,7 @@ export component AppWindow inherits Window {
                         }
 
                         Text {
-                            text: "LOCAL FIRST";
+                            text: "v" + root.app-version;
                             color: Theme.muted-text;
                             font-size: 10px;
                         }
@@ -1001,6 +1003,7 @@ export component AppWindow inherits Window {
                                                     begin-xai-editor(id) => { root.begin-xai-editor(id); }
                                                     begin-subscription-editor(id) => { root.begin-subscription-editor(id); }
                                                     check-provider(id) => { root.check-provider(id); }
+                                                    check-all-providers() => { root.check-all-providers(); }
                                                     preview-direct(id) => { root.selected-provider-id = id; root.direct-drawer-open = true; root.inspect-direct(id, root.config-home); }
                                                     begin-model-editor(provider-id, model-id) => { root.begin-connection-models(provider-id); }
                                                 }

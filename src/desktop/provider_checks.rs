@@ -23,38 +23,70 @@ use super::{
 };
 
 pub(super) fn connect(app: &AppWindow, sender: &mpsc::Sender<Command>) {
-    let sender = sender.clone();
+    let check_sender = sender.clone();
     let weak = app.as_weak();
     app.on_check_provider(move |id| {
-        let Some(app) = weak.upgrade() else {
-            return;
-        };
-        if app.get_busy()
-            || app.get_recovery_only()
-            || !app
-                .get_providers()
-                .iter()
-                .any(|row| row.id == id && row.check_id.is_empty())
-        {
-            return;
-        }
-        let check_id = match new_id() {
-            Ok(id) => id,
-            Err(error) => {
-                show_action_feedback(&app, Err(error));
-                return;
-            }
-        };
-        set_provider_check_id(&app, &id, &check_id);
-        if let Err(error) = sender.try_send(Command::Check {
-            id: id.to_string(),
-            home: app.get_config_home().into(),
-            check_id: check_id.clone(),
-            started: std::time::Instant::now(),
-        }) {
-            finish_provider_check(&app, &id, &check_id, 0, Err(send_error(&error).into()));
+        if let Some(app) = weak.upgrade() {
+            start_provider_checks(&app, &check_sender, [id.to_string()]);
         }
     });
+    let sender = sender.clone();
+    let weak = app.as_weak();
+    app.on_check_all_providers(move || {
+        if let Some(app) = weak.upgrade() {
+            let ids = app
+                .get_providers()
+                .iter()
+                .map(|row| row.id.to_string())
+                .collect::<Vec<_>>();
+            start_provider_checks(&app, &sender, ids);
+        }
+    });
+}
+
+fn start_provider_checks(
+    app: &AppWindow,
+    sender: &mpsc::Sender<Command>,
+    ids: impl IntoIterator<Item = String>,
+) {
+    if app.get_busy() || app.get_recovery_only() {
+        return;
+    }
+    let providers = app.get_providers();
+    let mut requests = Vec::new();
+    for id in ids {
+        if !providers
+            .iter()
+            .any(|row| row.id == id && row.check_id.is_empty())
+        {
+            continue;
+        }
+        match new_id() {
+            Ok(check_id) => requests.push((id, check_id)),
+            Err(error) => {
+                show_action_feedback(app, Err(error));
+                return;
+            }
+        }
+    }
+    if requests.is_empty() {
+        return;
+    }
+    for (id, check_id) in &requests {
+        set_provider_check_id(app, id, check_id);
+    }
+    if let Err(error) = sender.try_send(Command::Check {
+        requests,
+        home: app.get_config_home().into(),
+        started: std::time::Instant::now(),
+    }) {
+        let message = send_error(&error);
+        if let Command::Check { requests, .. } = error.into_inner() {
+            for (id, check_id) in requests {
+                finish_provider_check(app, &id, &check_id, 0, Err(message.into()));
+            }
+        }
+    }
 }
 
 pub(super) fn set_provider_check_id(app: &AppWindow, id: &str, check_id: &str) {
@@ -292,6 +324,174 @@ mod tests {
         workbench::show_result,
         worker,
     };
+
+    #[test]
+    fn checking_all_providers_dispatches_unfiltered_cards_as_one_batch() {
+        use i_slint_backend_testing::ElementHandle;
+
+        let window = headless::install();
+        let app = AppWindow::new().unwrap();
+        app.global::<Theme>().set_animations_enabled(false);
+        app.set_loading(false);
+        app.set_active_page(1);
+        initialize_provider_icons(&app).unwrap();
+        let (sender, mut receiver) = mpsc::channel(1);
+        connect(&app, &sender);
+        app.show().unwrap();
+
+        for (width, height) in [(1200, 820), (1000, 680)] {
+            app.window()
+                .set_size(slint::PhysicalSize::new(width, height));
+            for dark in [false, true] {
+                app.invoke_set_appearance(dark);
+                let rows = (0..32)
+                    .map(|index| {
+                        let (name, icon, subscription, grok) = match index {
+                            0 => ("ChatGPT", "openai", true, false),
+                            1 => ("Grok", "grok", true, true),
+                            _ => ("API", "anthropic", false, false),
+                        };
+                        let brand = provider_icon_row(&app, icon);
+                        ProviderRow {
+                            id: format!("synthetic-{index}").into(),
+                            name: name.into(),
+                            icon: brand.icon,
+                            icon_id: brand.id,
+                            monochrome: brand.monochrome,
+                            is_subscription: subscription,
+                            is_grok: grok,
+                            check_id: if index == 2 { "existing-check" } else { "" }.into(),
+                            ..Default::default()
+                        }
+                    })
+                    .collect::<Vec<_>>();
+                app.set_providers(ModelRc::new(VecModel::from(rows)));
+                app.set_provider_query("ChatGPT".into());
+                filter_providers(&app, "ChatGPT");
+                assert_eq!(app.get_filtered_providers().row_count(), 1);
+                headless::render(&window);
+                let button = ElementHandle::find_by_accessible_label(&app, "检查所有凭据")
+                    .next()
+                    .expect("the bulk check button must be visible");
+                let position = button.absolute_position();
+                let size = button.size();
+                headless::click(
+                    &window,
+                    position.x + size.width / 2.0,
+                    position.y + size.height / 2.0,
+                );
+                let Ok(Command::Check { requests, .. }) = receiver.try_recv() else {
+                    panic!("the toolbar must queue the whole batch");
+                };
+                assert_eq!(requests.len(), 31, "filtered cards must also be checked");
+                assert!(
+                    receiver.try_recv().is_err(),
+                    "the batch must use one queue slot"
+                );
+                assert!(
+                    !app.get_busy(),
+                    "batch checks must leave the app interactive"
+                );
+                assert!(
+                    app.get_providers()
+                        .iter()
+                        .all(|row| !row.check_id.is_empty())
+                );
+                assert_eq!(
+                    app.get_providers().row_data(2).unwrap().check_id,
+                    "existing-check"
+                );
+                app.invoke_check_all_providers();
+                assert!(
+                    receiver.try_recv().is_err(),
+                    "pending checks must not be duplicated"
+                );
+
+                app.set_provider_query("".into());
+                filter_providers(&app, "");
+                let draw = |state: &str| {
+                    headless::save_snapshot(
+                        "SWITCHX_ALL_CREDENTIAL_SNAPSHOTS",
+                        &format!(
+                            "{}-{width}x{height}-{state}",
+                            if dark { "dark" } else { "light" }
+                        ),
+                        &headless::render(&window),
+                    );
+                };
+                draw("checking");
+                for (id, check_id) in requests {
+                    let result = if id == "synthetic-1" {
+                        Err("合成授权失败".into())
+                    } else {
+                        Ok(ProviderCheckResult {
+                            message: "合成检查完成".into(),
+                            detail: "合成检查详情".into(),
+                        })
+                    };
+                    finish_provider_check(&app, &id, &check_id, 1000, result);
+                }
+                assert_eq!(
+                    app.get_providers().row_data(0).unwrap().check_message,
+                    "合成检查完成"
+                );
+                assert!(app.get_providers().row_data(1).unwrap().check_failed);
+                assert_eq!(
+                    app.get_providers().row_data(1).unwrap().check_detail,
+                    "合成授权失败"
+                );
+                assert_eq!(
+                    app.get_providers().row_data(2).unwrap().check_id,
+                    "existing-check"
+                );
+                draw("finished");
+            }
+        }
+    }
+
+    #[test]
+    fn bulk_checks_respect_operation_guards_and_clear_queue_failures() {
+        headless::install();
+        let app = AppWindow::new().unwrap();
+        let (sender, mut receiver) = mpsc::channel(1);
+        connect(&app, &sender);
+        app.invoke_check_all_providers();
+        assert!(receiver.try_recv().is_err(), "empty lists need no command");
+        app.set_providers(ModelRc::new(VecModel::from(vec![
+            ProviderRow {
+                id: "first".into(),
+                ..Default::default()
+            },
+            ProviderRow {
+                id: "second".into(),
+                ..Default::default()
+            },
+        ])));
+        app.set_busy(true);
+        app.invoke_check_all_providers();
+        assert!(receiver.try_recv().is_err());
+        app.set_busy(false);
+        app.set_recovery_only(true);
+        app.invoke_check_all_providers();
+        assert!(receiver.try_recv().is_err());
+        app.set_recovery_only(false);
+
+        sender.try_send(Command::PollRouteStatus).unwrap();
+        app.invoke_check_all_providers();
+        for row in app.get_providers().iter() {
+            assert!(row.check_id.is_empty());
+            assert!(row.check_failed);
+            assert_eq!(row.check_detail, "操作仍在执行，请稍后重试");
+        }
+        assert!(matches!(receiver.try_recv(), Ok(Command::PollRouteStatus)));
+        drop(receiver);
+        app.invoke_check_all_providers();
+        for row in app.get_providers().iter() {
+            assert!(row.check_id.is_empty());
+            assert_eq!(row.check_detail, "后台状态通道已停止");
+        }
+        assert!(!app.get_busy());
+    }
 
     #[test]
     fn provider_checks_preserve_workbench_animation_and_expanded_models() {
@@ -548,11 +748,14 @@ mod tests {
                     !app.get_busy(),
                     "one provider check must not lock the whole app"
                 );
-                let Ok(Command::Check { id, check_id, .. }) = receiver.try_recv() else {
+                let Ok(Command::Check { requests, .. }) = receiver.try_recv() else {
                     panic!("the first check must be queued");
                 };
+                let [(id, chatgpt_check)] = requests.as_slice() else {
+                    panic!("a card must queue exactly one check");
+                };
                 assert_eq!(id, "synthetic-chatgpt");
-                let chatgpt_check = check_id;
+                let chatgpt_check = chatgpt_check.clone();
                 assert_eq!(
                     app.get_filtered_providers(),
                     visible_cards,
@@ -584,11 +787,14 @@ mod tests {
                     "duplicate checks must be ignored"
                 );
                 click(width as f32 - 88.0, 568.0);
-                let Ok(Command::Check { id, check_id, .. }) = receiver.try_recv() else {
+                let Ok(Command::Check { requests, .. }) = receiver.try_recv() else {
                     panic!("the other connection must still be checkable");
                 };
+                let [(id, grok_check)] = requests.as_slice() else {
+                    panic!("a card must queue exactly one check");
+                };
                 assert_eq!(id, "synthetic-grok");
-                let grok_check = check_id;
+                let grok_check = grok_check.clone();
                 click(width as f32 - 122.0, 497.0);
                 assert!(
                     matches!(receiver.try_recv(), Ok(Command::BeginXaiEditor(id)) if id == "synthetic-grok")
@@ -618,9 +824,10 @@ mod tests {
                 // Saving and rechecking a connection invalidates its old completion.
                 set_provider_check_id(&app, "synthetic-grok", "");
                 app.invoke_check_provider("synthetic-grok".into());
-                let Ok(Command::Check { check_id, .. }) = receiver.try_recv() else {
+                let Ok(Command::Check { requests, .. }) = receiver.try_recv() else {
                     panic!("a saved connection can be checked again");
                 };
+                let check_id = requests[0].1.clone();
                 finish_provider_check(
                     &app,
                     "synthetic-grok",
@@ -631,7 +838,10 @@ mod tests {
                 update_provider_check(&app, "synthetic-grok", &grok_check, |row| {
                     row.check_stage = "过时步骤".into()
                 });
-                assert_eq!(app.get_providers().row_data(1).unwrap().check_id, check_id);
+                assert_eq!(
+                    app.get_providers().row_data(1).unwrap().check_id,
+                    check_id.as_str()
+                );
                 assert_ne!(
                     app.get_providers().row_data(1).unwrap().check_stage,
                     "过时步骤"
@@ -792,7 +1002,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn provider_checks_overlap_without_blocking_other_commands() {
+    async fn batch_provider_checks_overlap_without_blocking_other_commands() {
         use axum::{Json, Router, routing::get};
         use std::{sync::Arc, time::Duration};
         use tokio::{net::TcpListener, sync::Notify, time::timeout};
@@ -869,23 +1079,16 @@ mod tests {
         ));
         sender
             .send(Command::Check {
-                id: "slow".into(),
+                requests: vec![
+                    ("slow".into(), "slow-check".into()),
+                    ("fast".into(), "fast-check".into()),
+                ],
                 home: String::new(),
-                check_id: "slow-check".into(),
                 started: std::time::Instant::now(),
             })
             .await
             .unwrap();
         timeout(Duration::from_secs(2), slow_started.notified())
-            .await
-            .unwrap();
-        sender
-            .send(Command::Check {
-                id: "fast".into(),
-                home: String::new(),
-                check_id: "fast-check".into(),
-                started: std::time::Instant::now(),
-            })
             .await
             .unwrap();
         timeout(Duration::from_secs(2), fast_started.notified())
