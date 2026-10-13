@@ -556,8 +556,8 @@ export component AppWindow inherits Window {
     }
 
     property <bool> modal-open: root.workspace-open || root.account-removing-id != "" || root.account-login-confirm-open || root.drawer-open || root.connection-picker-open || root.connection-models-open || root.xai-editor-open || root.editor-open || root.subscription-editor-open || root.common-config-editor-open || root.icon-picker-open || root.model-editor-open || root.fallback-editor-open || root.publish-drawer-open || root.direct-drawer-open || root.delete-account-confirm;
-    property <string> page-title: root.active-page == 0 ? "模型，随手可用。" : root.active-page == 1 ? "连接" : root.active-page == 3 ? "每次请求，有迹可循。" : root.active-page == 4 ? "让工作流更顺手。" : "让它适合你。";
-    property <string> page-subtitle: root.active-page == 0 ? "配好连接，整组模型随手可用。" : root.active-page == 1 ? "账号与上游，集中管理。" : root.active-page == 3 ? "查看模型、耗时与结果。" : root.active-page == 4 ? "MCP 与 Skills，独立于模型连接。" : "外观、工作空间和配置，各在其位。";
+    property <string> page-title: root.active-page == 0 ? "模型，随手可用。" : root.active-page == 1 ? "连接" : root.active-page == 3 ? "每次请求，有迹可循。" : root.active-page == 4 ? "让工作流更顺手。" : "设置";
+    property <string> page-subtitle: root.active-page == 0 ? "配好连接，整组模型随手可用。" : root.active-page == 1 ? "账号与上游，集中管理。" : root.active-page == 3 ? "查看模型、耗时与结果。" : root.active-page == 4 ? "MCP 与 Skills，独立于模型连接。" : "把工作空间调成你喜欢的样子。";
     animate background { duration: Theme.page-motion; }
     Timer {
         interval: 16ms;
@@ -789,7 +789,7 @@ export component AppWindow inherits Window {
                                 horizontal-stretch: 1;
                             }
 
-                            if root.active-page != 1: StatusPill {
+                            if root.active-page != 1 && root.active-page != 5: StatusPill {
                                 width: 98px;
                                 label: root.loading ? "读取中…" : "● " + root.connection-label;
                                 ink: root.route-running || root.direct-active ? Theme.success : Theme.warning;
