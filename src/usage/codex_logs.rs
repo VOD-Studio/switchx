@@ -235,7 +235,7 @@ fn read_file(
             break;
         }
         offset += read as i64;
-        if lines % 4096 == 0 && cancel.load(Ordering::Relaxed) {
+        if lines.is_multiple_of(4096) && cancel.load(Ordering::Relaxed) {
             return Err(ReadError::Cancelled);
         }
         if let Some(record) = state.line(&line, since) {
