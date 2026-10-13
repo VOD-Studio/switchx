@@ -128,10 +128,97 @@ component PublishImpact inherits HorizontalLayout {
     }
 }
 
+// Shows the scope of the pending operation, without inventing progress or
+// marking individual checks complete before the worker returns its result.
+component PublishLoading inherits Rectangle {
+    in property <bool> active;
+    in property <bool> applying;
+    private property <bool> motion: root.active && Theme.fast > 0ms;
+    private property <angle> beat: root.motion ? 360deg * mod(animation-tick(), 1500ms) / 1500ms : 0deg;
+    private property <float> shimmer: root.motion ? mod(animation-tick(), 1800ms) / 1800ms : 0.4;
+    height: 112px;
+    border-radius: 10px;
+    border-width: 1px;
+    border-color: Theme.brand.with-alpha(0.16);
+    background: Theme.inset;
+    accessible-role: progress-indicator;
+    accessible-label: root.applying ? "正在启用模型" : "正在检查启用条件";
+    VerticalLayout {
+        padding: 14px;
+        spacing: 10px;
+        HorizontalLayout {
+            spacing: 8px;
+            cross-axis-alignment: center;
+            Text {
+                text: root.applying ? "正在启用模型" : "正在检查启用条件";
+                color: Theme.primary-text;
+                font-size: 12px;
+                font-weight: 500;
+                horizontal-stretch: 0;
+            }
+
+            Rectangle {
+                horizontal-stretch: 1;
+            }
+
+            Text {
+                text: root.applying ? "处理中" : "核对中";
+                color: Theme.brand;
+                font-size: 10px;
+                horizontal-stretch: 0;
+            }
+
+            HorizontalLayout {
+                width: 22px;
+                height: 6px;
+                spacing: 3px;
+                for index in 3: Rectangle {
+                    width: 4px;
+                    height: 4px;
+                    border-radius: 2px;
+                    background: Theme.brand;
+                    opacity: root.motion ? 0.3 + 0.7 * (1 + sin(root.beat - index * 65deg)) / 2 : 0.6;
+                }
+            }
+        }
+
+        Text {
+            text: root.applying ? "正在校验连接并应用配置，请稍候。" : "正在准备检查结果，完成后即可确认启用。";
+            color: Theme.muted-text;
+            font-size: 11px;
+        }
+
+        HorizontalLayout {
+            spacing: 18px;
+            for label[index] in (root.applying ? ["校验连接", "发布模型", "保存恢复"] : ["模型目录", "账号绑定", "目标配置"]): VerticalLayout {
+                spacing: 8px;
+                Text {
+                    text: label;
+                    color: Theme.muted-text;
+                    font-size: 11px;
+                }
+
+                Rectangle {
+                    height: 4px;
+                    border-radius: 2px;
+                    background: Theme.brand.with-alpha(0.12);
+                    clip: true;
+                    Rectangle {
+                        x: -self.width + (parent.width + self.width) * mod(root.shimmer + index * 0.18, 1);
+                        width: parent.width * 0.55;
+                        height: parent.height;
+                        background: @linear-gradient(90deg, Theme.brand.with-alpha(0) 0%, Theme.brand.with-alpha(0.65) 50%, Theme.brand.with-alpha(0) 100%);
+                    }
+                }
+            }
+        }
+    }
+}
+
 export component RoutePublishSheet inherits VerticalLayout {
     in property <bool> open;
     in property <int> model-count;
-    in property <string> default-model;
+    in property <string> default-model-label;
     in property <string> config-home;
     in property <string> preview;
     in property <bool> ready;
@@ -146,7 +233,15 @@ export component RoutePublishSheet inherits VerticalLayout {
     private property <bool> passed: root.ready && !root.busy && !root.has-error;
     private property <bool> motion: root.open && root.busy && Theme.fast > 0ms;
     private property <float> sweep: root.motion ? mod(animation-tick(), 1600ms) / 1600ms : 0.35;
-    changed open => { root.cleanup-pending = !root.open; }
+    private property <float> loading-reveal: root.busy ? 1 : 0;
+    animate loading-reveal {
+        duration: Theme.page-motion;
+        easing: cubic-bezier(0.22, 1, 0.36, 1);
+    }
+    changed open => {
+        root.cleanup-pending = !root.open;
+        if root.open { root.applying = false; }
+    }
     // Preserve the scrolled composition until the panel has faded out.
     Timer {
         interval: max(1ms, Theme.drawer-motion);
@@ -159,7 +254,8 @@ export component RoutePublishSheet inherits VerticalLayout {
         }
     }
 
-    changed busy => { if !root.busy { root.applying = false; } }
+    // Keep the operation label during the loading card's exit fade. A new
+    // inspection or the completed dismissal resets it before the next run.
     spacing: 16px;
 
     Rectangle {
@@ -213,7 +309,7 @@ export component RoutePublishSheet inherits VerticalLayout {
                                     }
 
                                     Text {
-                                        text: root.busy ? (root.applying ? "正在启用你的模型…" : "让一切准备就绪。")
+                                        text: root.busy ? (root.applying ? "正在启用你的模型…" : "正在检查，请稍候。")
                                             : root.has-error ? "还差一步，稍作调整。"
                                             : root.passed ? "准备好了，开始吧。" : "启用之前，确认一下。";
                                         font-size: 23px;
@@ -282,9 +378,9 @@ export component RoutePublishSheet inherits VerticalLayout {
                                         font-size: 10px;
                                     }
 
-                                    Text {
+                                    default-model-name := Text {
                                         min-width: 0px;
-                                        text: root.default-model == "" ? "尚未选择" : root.default-model;
+                                        text: root.default-model-label == "" ? "尚未选择" : root.default-model-label;
                                         color: Theme.primary-text;
                                         font-size: 14px;
                                         font-weight: 500;
@@ -344,16 +440,39 @@ export component RoutePublishSheet inherits VerticalLayout {
                             }
                         }
 
-                        PublishImpact {
-                            icon: @image-url("../assets/ui/blocks.svg");
-                            title: "一次启用，统一模型菜单";
-                            description: "发布所选模型与默认模型，通过本地路由连接各个上游。";
-                        }
+                        Rectangle {
+                            height: effects.preferred-height * (1 - root.loading-reveal) + 112px * root.loading-reveal;
+                            clip: true;
+                            Rectangle {
+                                width: parent.width;
+                                height: effects.preferred-height;
+                                y: -8px * root.loading-reveal;
+                                opacity: 1 - root.loading-reveal;
+                                visible: root.loading-reveal < 1;
+                                effects := VerticalLayout {
+                                    spacing: 13px;
+                                    PublishImpact {
+                                        icon: @image-url("../assets/ui/blocks.svg");
+                                        title: "一次启用，统一模型菜单";
+                                        description: "发布所选模型与默认模型，通过本地路由连接各个上游。";
+                                    }
 
-                        PublishImpact {
-                            icon: @image-url("../assets/ui/lock.svg");
-                            title: "保留恢复记录";
-                            description: "停止时恢复受管配置；如有外部修改，会保留并提示冲突。";
+                                    PublishImpact {
+                                        icon: @image-url("../assets/ui/lock.svg");
+                                        title: "保留恢复记录";
+                                        description: "停止时恢复受管配置；如有外部修改，会保留并提示冲突。";
+                                    }
+                                }
+                            }
+
+                            PublishLoading {
+                                width: parent.width;
+                                y: 8px * (1 - root.loading-reveal);
+                                opacity: root.loading-reveal;
+                                visible: root.loading-reveal > 0;
+                                active: root.open && root.busy;
+                                applying: root.applying;
+                            }
                         }
                     }
                 }
@@ -457,10 +576,13 @@ export component RoutePublishSheet inherits VerticalLayout {
                 }
 
                 QuietButton {
-                    text: root.busy ? (root.applying ? "正在启用…" : "正在检查…") : "确认启用  →";
+                    text: root.busy ? (root.applying ? "正在启用…" : "正在检查…") : "确认启用";
                     accessible-label: "确认启用模型";
                     height: 42px;
                     primary: true;
+                    loading: root.open && root.busy;
+                    icon: root.busy ? @image-url("../assets/ui/loader.svg") : @image-url("../assets/ui/arrow-right.svg");
+                    icon-color: Theme.on-brand;
                     enabled: root.open && !root.busy && root.can-act && root.passed;
                     clicked => { root.applying = true; root.apply(); }
                 }

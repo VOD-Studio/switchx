@@ -1,6 +1,6 @@
 use std::{cell::Cell, error::Error, fs, path::Path, rc::Rc, time::Duration};
 
-use i_slint_backend_testing::ElementHandle;
+use i_slint_backend_testing::{ElementHandle, ElementQuery};
 use slint::platform::{WindowEvent, software_renderer::MinimalSoftwareWindow};
 use slint::{ComponentHandle, LogicalPosition, Model, ModelRc, PhysicalSize, VecModel};
 use switchx::{
@@ -11,10 +11,56 @@ use switchx::{
 use crate::support::{every, frame, play, render, set_theme, snapshot, snapshot_now};
 
 const DEFAULT_MODEL: &str = "sx-synthetic-chatgpt-gpt-5-5";
+const DEFAULT_DISPLAY_NAME: &str = "星河旗舰 · GPT-5.5";
 const INSPECT: &str = "重新检查启用条件";
 const APPLY: &str = "确认启用模型";
 const EXPAND: &str = "展开检查详情";
 const COLLAPSE: &str = "收起检查详情";
+
+fn visible_text(app: &AppWindow) -> String {
+    ElementQuery::from_root(app)
+        .find_all()
+        .into_iter()
+        .flat_map(|element| [element.accessible_label(), element.accessible_value()])
+        .flatten()
+        .map(|text| text.to_string())
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+fn assert_display_name(app: &AppWindow) {
+    let model = ElementHandle::find_by_element_id(app, "RoutePublishSheet::default-model-name")
+        .next()
+        .expect("visible default model name in the publish sheet");
+    assert_eq!(
+        model.accessible_label().as_deref(),
+        Some(DEFAULT_DISPLAY_NAME)
+    );
+    assert!(
+        !visible_text(app).contains("sx-synthetic-"),
+        "internal public model IDs must not appear in visible UI text"
+    );
+}
+
+fn assert_checking(app: &AppWindow) {
+    assert!(app.get_busy());
+    assert!(!app.get_route_preview_ready());
+    assert_display_name(app);
+    let text = visible_text(app);
+    for label in [
+        "模型目录",
+        "账号绑定",
+        "目标配置",
+        "核对中",
+        "正在检查启用条件",
+    ] {
+        assert!(text.contains(label), "missing checking state text: {label}");
+    }
+    assert!(
+        !text.contains("模型目录与发布配置已核对"),
+        "checking must not claim success"
+    );
+}
 
 // Resolve the actual controls through their accessibility semantics. This keeps
 // pointer dispatch faithful while allowing the responsive layout to change.
@@ -99,7 +145,11 @@ fn seed(app: &AppWindow) -> Result<(), Box<dyn Error>> {
                     } else {
                         format!("sx-synthetic-{id}-{index}").into()
                     },
-                    display_name: format!("{model}/{name}").into(),
+                    display_name: if id == "chatgpt" && index == 0 {
+                        DEFAULT_DISPLAY_NAME.into()
+                    } else {
+                        format!("{model}/{name}").into()
+                    },
                     saved: true,
                     ready: true,
                     included: true,
@@ -139,7 +189,7 @@ fn seed(app: &AppWindow) -> Result<(), Box<dyn Error>> {
     app.set_selected_connection_count(3);
     app.set_default_model(DEFAULT_MODEL.into());
     app.set_route_preview_model(DEFAULT_MODEL.into());
-    app.set_default_model_label("gpt-5.5/ChatGPT 订阅".into());
+    app.set_default_model_label(DEFAULT_DISPLAY_NAME.into());
     app.set_config_home("/Users/preview/.codex".into());
     app.set_status_text("合成 UI 预览 · 不访问账号或 Codex 配置".into());
     app.set_active_page(0);
@@ -153,8 +203,8 @@ fn preview(app: &AppWindow) -> String {
     ];
     for row in app.get_models().iter() {
         lines.push(format!(
-            "{} → {} (https://example.invalid/v1) / {}",
-            row.display_name, row.provider_name, row.upstream_model
+            "{} → {} (https://example.invalid)",
+            row.display_name, row.provider_name
         ));
     }
     lines.extend([
@@ -188,16 +238,20 @@ fn checking(app: &AppWindow) {
     app.set_action_message("正在核对模型目录、连接与目标配置…".into());
 }
 
-fn reset(app: &AppWindow, window: &MinimalSoftwareWindow) {
+fn reset(app: &AppWindow, window: &MinimalSoftwareWindow, initially_checking: bool) {
     app.set_publish_drawer_open(false);
     app.set_busy(false);
     app.set_config_managed(false);
     app.set_chatgpt_login_pending(false);
     app.set_xai_pending(false);
-    app.set_default_model_label("gpt-5.5/ChatGPT 订阅".into());
+    app.set_default_model_label(DEFAULT_DISPLAY_NAME.into());
     app.set_config_home("/Users/preview/.codex".into());
     render(window);
-    ready(app);
+    if initially_checking {
+        checking(app);
+    } else {
+        ready(app);
+    }
     app.set_publish_drawer_open(true);
     render(window);
 }
@@ -216,8 +270,8 @@ pub(super) fn render_route_publish(
         let weak = app.as_weak();
         app.on_inspect_route(move || {
             let app = weak.upgrade().unwrap();
-            app.set_publish_drawer_open(true);
             checking(&app);
+            app.set_publish_drawer_open(true);
             let weak = app.as_weak();
             slint::Timer::single_shot(Duration::from_millis(1400), move || {
                 if let Some(app) = weak.upgrade() {
@@ -241,8 +295,7 @@ pub(super) fn render_route_publish(
         let weak = app.as_weak();
         slint::Timer::single_shot(Duration::ZERO, move || {
             let app = weak.upgrade().unwrap();
-            ready(&app);
-            app.set_publish_drawer_open(true);
+            app.invoke_inspect_route();
         });
         return Ok(app.run()?);
     }
@@ -256,7 +309,11 @@ pub(super) fn render_route_publish(
     });
     let applications = Rc::new(Cell::new(0));
     let calls = applications.clone();
-    app.on_apply_route(move || calls.set(calls.get() + 1));
+    let weak = app.as_weak();
+    app.on_apply_route(move || {
+        calls.set(calls.get() + 1);
+        weak.upgrade().unwrap().set_busy(true);
+    });
     let cancellations = Rc::new(Cell::new(0));
     let calls = cancellations.clone();
     app.on_cancel_route_preview(move || calls.set(calls.get() + 1));
@@ -266,12 +323,22 @@ pub(super) fn render_route_publish(
         for dark in [false, true] {
             app.global::<Theme>().set_animations_enabled(false);
             set_theme(app, window, dark);
-            reset(app, window);
             let suffix = format!("{}-{width}x{height}", if dark { "dark" } else { "light" });
+            reset(app, window, true);
+            assert_checking(app);
+            snapshot(
+                window,
+                output,
+                &format!("publish-initial-checking-{suffix}"),
+            )?;
+            ready(app);
+            render(window);
+            assert_display_name(app);
             snapshot(window, output, &format!("publish-ready-{suffix}"))?;
 
             click(app, window, EXPAND);
             assert_eq!(control(app, COLLAPSE).accessible_expanded(), Some(true));
+            assert_display_name(app);
             snapshot(window, output, &format!("publish-details-{suffix}"))?;
             scroll_body_to_details(app, window);
             snapshot(
@@ -285,6 +352,7 @@ pub(super) fn render_route_publish(
             let inspect_count = inspections.get();
             click(app, window, INSPECT);
             assert_eq!(inspections.get(), inspect_count + 1);
+            assert_checking(app);
             snapshot(window, output, &format!("publish-checking-{suffix}"))?;
             let apply_count = applications.get();
             click(app, window, APPLY);
@@ -300,6 +368,13 @@ pub(super) fn render_route_publish(
             render(window);
             click(app, window, APPLY);
             assert_eq!(applications.get(), apply_count + 1);
+            assert!(app.get_busy(), "confirmation must enter a real busy state");
+            assert!(visible_text(app).contains("正在启用你的模型…"));
+            assert_display_name(app);
+            snapshot(window, output, &format!("publish-applying-{suffix}"))?;
+            click(app, window, APPLY);
+            assert_eq!(applications.get(), apply_count + 1, "no duplicate apply");
+            app.set_busy(false);
             app.set_route_preview_ready(false);
             render(window);
             click(app, window, APPLY);
@@ -322,7 +397,24 @@ pub(super) fn render_route_publish(
                 "failed check cannot apply"
             );
 
+            click(app, window, INSPECT);
+            assert_eq!(
+                inspections.get(),
+                inspect_count + 2,
+                "failed checks can retry"
+            );
+            assert_checking(app);
+            assert!(
+                app.get_error_message().is_empty(),
+                "retry clears the previous error"
+            );
+            snapshot(window, output, &format!("publish-retrying-{suffix}"))?;
             ready(app);
+            render(window);
+            assert_display_name(app);
+            assert!(visible_text(app).contains("模型目录与发布配置已核对"));
+            snapshot(window, output, &format!("publish-retry-passed-{suffix}"))?;
+
             app.set_default_model_label(
                 "synthetic-extremely-long-model-display-name/合成团队的共享订阅连接".into(),
             );
@@ -339,7 +431,7 @@ pub(super) fn render_route_publish(
             click(app, window, APPLY);
             assert_eq!(
                 inspections.get(),
-                inspect_count + 1,
+                inspect_count + 2,
                 "managed config blocks checks"
             );
             assert_eq!(
@@ -367,14 +459,14 @@ pub(super) fn render_route_publish(
 
     app.window().set_size(PhysicalSize::new(1200, 820));
     set_theme(app, window, true);
-    reset(app, window);
+    reset(app, window, true);
     app.set_publish_drawer_open(false);
     render(window);
     app.global::<Theme>().set_animations_enabled(true);
     app.set_publish_drawer_open(true);
     play(window, output, "publish-entry", &every(16, 640))?;
-    click(app, window, INSPECT);
-    play(window, output, "publish-checking", &every(16, 960))?;
+    assert_checking(app);
+    play(window, output, "publish-checking", &every(16, 1920))?;
     ready(app);
     play(window, output, "publish-check-complete", &every(16, 640))?;
     window.dispatch_event(WindowEvent::PointerMoved {
@@ -388,16 +480,48 @@ pub(super) fn render_route_publish(
     headless::render(window);
     click(app, window, EXPAND);
     play(window, output, "publish-details-reversed", &every(16, 480))?;
-    click(app, window, "关闭");
+    click(app, window, COLLAPSE);
+    play(window, output, "publish-details-close", &every(16, 480))?;
+    click(app, window, APPLY);
+    assert!(app.get_busy());
+    assert!(visible_text(app).contains("正在启用你的模型…"));
+    play(window, output, "publish-applying", &every(16, 960))?;
+    app.set_busy(false);
+    app.set_publish_drawer_open(false);
     play(window, output, "publish-exit", &every(16, 480))?;
+
+    // An external workbench action can reopen the sheet before its closing
+    // animation finishes. A previous failed apply must not label a new check
+    // as an application operation while the delayed cleanup is still pending.
+    reset(app, window, false);
+    render(window);
+    click(app, window, APPLY);
+    assert!(app.get_busy());
+    assert!(visible_text(app).contains("正在启用你的模型…"));
+    app.set_busy(false);
+    app.set_route_preview_ready(false);
+    app.set_error_message("合成启用失败，请重新检查。".into());
+    app.set_publish_drawer_open(false);
+    headless::render(window);
+    frame(48);
+    headless::render(window);
+    checking(app);
+    app.set_publish_drawer_open(true);
+    render(window);
+    assert_checking(app);
+    assert!(
+        !visible_text(app).contains("正在启用你的模型…"),
+        "a rapid external reopen must clear the previous applying operation"
+    );
 
     // System reduced motion must settle without decorative movement, including
     // the checking state, while keeping controls and state transitions usable.
     app.global::<Theme>().set_system_reduced_motion(true);
-    reset(app, window);
+    reset(app, window, false);
     snapshot_now(window, output, "publish-reduced-ready")?;
     checking(app);
     render(window);
+    assert_checking(app);
     window.dispatch_event(WindowEvent::PointerMoved {
         position: LogicalPosition::new(5.0, 5.0),
     });
@@ -423,11 +547,14 @@ pub(super) fn render_route_publish(
         format!(
             "Synthetic data only; no account, filesystem configuration, or upstream access.\n\
              Themes: light and dark. Sizes: 1000x680 and 1200x820.\n\
-             States: ready, details, checking, awaiting-check, error, long labels.\n\
+             States: initial checking, ready, details, rechecking, applying, awaiting-check, error, retry, passed, long labels.\n\
+             Model labels: custom display name is visible; internal sx-synthetic public IDs are absent.\n\
              Real pointer callbacks: {} checks, {} confirmations, {} cancellations.\n\
-             Blocked actions: busy, stale preview, failed check, managed configuration.\n\
+             Blocked actions: checking/applying busy, stale preview, failed check, managed configuration.\n\
+             Recovery: failed check, actual retry callback, loading, successful check.\n\
+             Interrupted exit: failed apply, close, external checking reopen after 48 ms.\n\
              Disclosure: expand, collapse, rapid reversal, reset after close.\n\
-             Animation frames: entry, checking, completion, hover, details, exit.\n\
+             Animation frames: initial checking entry, checking, completion, hover, details, applying, applied exit.\n\
              Reduced motion: checking frame pixels unchanged after 640 ms.\n",
             inspections.get(),
             applications.get(),
