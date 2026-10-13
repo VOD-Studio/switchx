@@ -1691,6 +1691,7 @@ mod tests {
                 store.provider(&provider.id).unwrap().unwrap().kind,
                 ProviderKind::ApiKey
             );
+            drop(store);
             std::fs::remove_dir_all(directory).unwrap();
         }
         let missing = std::env::temp_dir().join(format!(
@@ -1764,6 +1765,7 @@ mod tests {
                 .bind_session("root", if left { &b } else { &a }, true)
                 .unwrap()
         );
+        drop(store);
         std::fs::remove_file(path).unwrap();
     }
 

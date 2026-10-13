@@ -985,6 +985,7 @@ mod tests {
                 .iter()
                 .all(|model| model.provider_id != b)
         );
+        drop(store);
         std::fs::remove_dir_all(root).unwrap();
     }
 
