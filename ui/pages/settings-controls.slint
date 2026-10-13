@@ -1,0 +1,339 @@
+import { Theme } from "../tokens.slint";
+import { QuietButton } from "../components.slint";
+
+export component SettingsHeading inherits HorizontalLayout {
+    in property <image> icon;
+    in property <string> title;
+    in property <string> description;
+    in property <string> trailing;
+    height: 38px;
+    spacing: 10px;
+    cross-axis-alignment: center;
+    Rectangle {
+        width: 34px;
+        height: 34px;
+        border-radius: 10px;
+        background: Theme.brand-surface;
+        animate background { duration: Theme.page-motion; }
+        Image {
+            x: 8px;
+            y: 8px;
+            width: 18px;
+            height: 18px;
+            source: root.icon;
+            colorize: Theme.brand;
+        }
+    }
+
+    VerticalLayout {
+        spacing: 5px;
+        Text {
+            text: root.title;
+            color: Theme.primary-text;
+            font-size: 14px;
+            font-weight: 600;
+        }
+
+        Text {
+            text: root.description;
+            color: Theme.muted-text;
+            font-size: 11px;
+            overflow: elide;
+        }
+    }
+
+    if root.trailing != "": Text {
+        text: root.trailing;
+        color: Theme.muted-text;
+        font-size: 10px;
+        horizontal-alignment: right;
+    }
+}
+
+export component AppearanceChoice inherits Rectangle {
+    in property <bool> dark;
+    in property <bool> selected;
+    callback chosen();
+    private property <color> preview-bg: root.dark ? #1b201f : #f6f7f3;
+    private property <color> preview-panel: root.dark ? #2b3430 : #ffffff;
+    private property <color> preview-line: root.dark ? #617568 : #d7e0d5;
+    private property <float> emphasis: root.selected ? 1 : 0;
+    private property <length> lift: touch.pressed ? 1px : touch.has-hover ? -3px : 0px;
+    animate lift {
+        duration: Theme.fast;
+        easing: ease-out;
+    }
+    animate emphasis {
+        duration: Theme.page-motion;
+        easing: ease-out;
+    }
+    horizontal-stretch: 1;
+    min-width: 140px;
+    forward-focus: keyboard;
+    accessible-role: button;
+    accessible-label: root.dark ? "深色主题" : "浅色主题";
+    accessible-value: root.selected ? "已选择" : "未选择";
+    accessible-action-default => { root.chosen(); }
+    Rectangle {
+        y: root.lift;
+        width: parent.width;
+        height: parent.height;
+        border-radius: 12px;
+        border-width: root.selected || keyboard.has-focus ? 2px : 1px;
+        border-color: root.selected || keyboard.has-focus ? Theme.brand : touch.has-hover ? Theme.muted-text : Theme.border;
+        background: Theme.inset;
+        animate background, border-color { duration: Theme.page-motion; }
+        Rectangle {
+            x: 10px;
+            y: 10px;
+            width: parent.width - 20px;
+            height: parent.height - 51px;
+            border-radius: 6px;
+            background: root.preview-bg;
+            clip: true;
+            Rectangle {
+                x: 0px;
+                y: 0px;
+                width: parent.width * 0.23;
+                height: parent.height;
+                background: root.dark ? #131916 : #e6ebe2;
+                for i in 3: Rectangle {
+                    x: 8px;
+                    y: 16px + i * 13px;
+                    width: parent.width - 16px;
+                    height: 4px;
+                    border-radius: 2px;
+                    background: i == 0 ? #92b29a : root.preview-line.with-alpha(0.5);
+                }
+            }
+
+            Rectangle {
+                x: parent.width * 0.29;
+                y: 13px;
+                width: parent.width * 0.33;
+                height: 5px;
+                border-radius: 2px;
+                background: root.preview-line;
+            }
+
+            Rectangle {
+                x: parent.width * 0.29;
+                y: 25px;
+                width: parent.width * 0.49;
+                height: 3px;
+                border-radius: 2px;
+                background: root.preview-line.with-alpha(0.45);
+            }
+
+            for i in 2: Rectangle {
+                x: parent.width * (0.29 + i * 0.33);
+                y: 39px;
+                width: parent.width * 0.28;
+                height: 32px;
+                border-radius: 4px;
+                background: root.preview-panel;
+                Rectangle {
+                    x: 7px;
+                    y: 8px;
+                    width: 11px;
+                    height: 4px;
+                    border-radius: 2px;
+                    background: #92b29a;
+                }
+
+                Rectangle {
+                    x: 7px;
+                    y: 19px;
+                    width: parent.width - 15px;
+                    height: 3px;
+                    border-radius: 2px;
+                    background: root.preview-line.with-alpha(0.45);
+                }
+            }
+        }
+
+        HorizontalLayout {
+            y: parent.height - 36px;
+            height: 30px;
+            padding-left: 13px;
+            padding-right: 13px;
+            spacing: 8px;
+            cross-axis-alignment: center;
+            Image {
+                width: 14px;
+                height: 14px;
+                source: root.dark ? @image-url("../../assets/ui/moon.svg") : @image-url("../../assets/ui/sun.svg");
+                colorize: root.selected ? Theme.brand : Theme.muted-text;
+            }
+
+            Text {
+                text: root.dark ? "静谧深色" : "柔和浅色";
+                color: Theme.primary-text;
+                font-size: 12px;
+                font-weight: root.selected ? 600 : 400;
+            }
+
+            Rectangle {
+                width: 16px;
+                height: 16px;
+                border-radius: 8px;
+                border-width: 1px;
+                border-color: root.selected ? Theme.brand : Theme.border;
+                background: root.selected ? Theme.brand : transparent;
+                animate background, border-color { duration: Theme.fast; }
+                Image {
+                    x: 3px;
+                    y: 3px + (1 - root.emphasis) * 3px;
+                    width: 10px;
+                    height: 10px;
+                    opacity: root.emphasis;
+                    source: @image-url("../../assets/ui/check.svg");
+                    colorize: Theme.on-brand;
+                }
+            }
+        }
+    }
+
+    touch := TouchArea {
+        mouse-cursor: pointer;
+        clicked => { keyboard.focus(); root.chosen(); }
+    }
+
+    keyboard := FocusScope {
+        width: 0px;
+        key-pressed(event) => {
+            if event.text == Key.Return || event.text == Key.Space { root.chosen(); return accept; }
+            reject
+        }
+    }
+}
+
+component MotionSwitch inherits Rectangle {
+    in-out property <bool> checked;
+    in property <bool> enabled: true;
+    width: 38px;
+    height: 24px;
+    forward-focus: keyboard;
+    accessible-role: checkbox;
+    accessible-label: "启用界面动画";
+    accessible-checked: root.checked;
+    accessible-enabled: root.enabled;
+    accessible-action-default => { root.toggle(); }
+    function toggle() { if root.enabled { root.checked = !root.checked; } }
+    Rectangle {
+        height: 22px;
+        y: 1px;
+        width: parent.width;
+        border-radius: 11px;
+        border-width: 1px;
+        border-color: keyboard.has-focus || touch.has-hover ? Theme.brand : transparent;
+        background: root.checked ? Theme.brand : Theme.border;
+        opacity: root.enabled ? 1 : 0.45;
+        animate background, opacity { duration: Theme.fast; }
+        Rectangle {
+            x: root.checked ? 18px : 3px;
+            y: 3px;
+            width: 16px;
+            height: 16px;
+            border-radius: 8px;
+            background: root.checked ? Theme.on-brand : Theme.panel;
+            animate x {
+                duration: Theme.page-motion;
+                easing: cubic-bezier(0.2, 0.8, 0.2, 1);
+            }
+            animate background { duration: Theme.fast; }
+        }
+    }
+
+    touch := TouchArea {
+        enabled: root.enabled;
+        mouse-cursor: pointer;
+        clicked => { keyboard.focus(); root.toggle(); }
+    }
+
+    keyboard := FocusScope {
+        width: 0px;
+        enabled: root.enabled;
+        key-pressed(event) => { if event.text == Key.Space || event.text == Key.Return { root.toggle(); return accept; } reject }
+    }
+}
+
+export component MotionPreference inherits VerticalLayout {
+    private property <bool> preview-alternate;
+    private property <float> preview-progress: root.preview-alternate ? 1 : 0;
+    animate preview-progress {
+        duration: Theme.drawer-motion;
+        easing: cubic-bezier(0.16, 1, 0.3, 1);
+    }
+    spacing: 10px;
+    HorizontalLayout {
+        height: 24px;
+        cross-axis-alignment: center;
+        Text {
+            text: "交互动效";
+            color: Theme.primary-text;
+            font-size: 12px;
+            font-weight: 600;
+        }
+
+        MotionSwitch {
+            checked <=> Theme.animations-enabled;
+            enabled: !Theme.system-reduced-motion;
+        }
+    }
+
+    Text {
+        text: Theme.system-reduced-motion ? "已跟随系统减少动态效果" : Theme.animations-enabled ? "让每一次操作，自然衔接。" : "动画已关闭，操作即时响应。";
+        color: Theme.muted-text;
+        font-size: 11px;
+        wrap: word-wrap;
+    }
+
+    Rectangle {
+        min-height: 46px;
+        border-radius: 9px;
+        background: Theme.inset;
+        Rectangle {
+            x: 10px + root.preview-progress * (parent.width - 106px);
+            y: (parent.height - 28px) / 2;
+            width: 86px;
+            height: 28px;
+            border-radius: 7px;
+            background: Theme.brand-surface;
+            Image {
+                x: 9px;
+                y: 7px;
+                width: 14px;
+                height: 14px;
+                source: @image-url("../../assets/ui/check.svg");
+                colorize: Theme.brand;
+            }
+
+            Text {
+                x: 30px;
+                width: 50px;
+                text: root.preview-alternate ? "已就绪" : "准备好";
+                color: Theme.brand;
+                font-size: 11px;
+                vertical-alignment: center;
+            }
+        }
+
+        for i in 3: Rectangle {
+            x: parent.width - 28px - i * 7px;
+            opacity: 1 - root.preview-progress;
+            y: (parent.height - self.height) / 2;
+            width: 3px;
+            height: 6px + i * 5px;
+            border-radius: 2px;
+            background: Theme.brand.with-alpha(0.25 + i * 0.16);
+        }
+    }
+
+    QuietButton {
+        height: 24px;
+        text: "播放动效预览";
+        ghost: true;
+        clicked => { root.preview-alternate = !root.preview-alternate; }
+    }
+}

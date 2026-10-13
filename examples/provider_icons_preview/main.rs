@@ -14,6 +14,7 @@
 //! Grok subscription editor: add --xai-editor-design.
 //! Reasoning multi-select: add --reasoning-picker (themes, sizes, and motion).
 //! Shared configuration: add --common-config-design or --common-config-native.
+//! Settings: add --settings-design (themes, layouts, states, and motion).
 //! Model mapping editor: add --model-editor-design (states, actions, and motion)
 //! or --model-editor-native (window; add --light for the light theme).
 //! Also: --connection-status, --accounts-design, --codex-quota, --xai-quota,
@@ -26,6 +27,7 @@ mod editors;
 mod fixtures;
 mod models;
 mod overview;
+mod settings;
 mod status;
 mod support;
 mod workspace;
@@ -71,6 +73,10 @@ fn main() -> Result<(), Box<dyn Error>> {
     switchx::reasoning_picker::connect(&app);
     app.set_loading(false);
     app.global::<Theme>().set_animations_enabled(false);
+    if flag("--settings-design") {
+        app.show()?;
+        return settings::render_settings_design(&app, &window, output);
+    }
     if flag("--connection-picker-motion") {
         app.show()?;
         return connections::render_connection_picker_motion(&app, &window, output);
