@@ -189,3 +189,125 @@ export struct RequestBar {
     label: string,
     stamp: int,
 }
+
+// Usage page view models. Rust formats every value; levels are 0–1 of each chart's scale.
+export struct UsageSummary {
+    tokens: float,
+    requests: float,
+    // 0–1, or -1 when no input was reported.
+    cache-rate: float,
+    fresh-share: float,
+    output-share: float,
+    cache-share: float,
+    fresh-text: string,
+    output-text: string,
+    reasoning-text: string,
+    cache-text: string,
+    delta-text: string,
+    // 0 neutral, 1 up, 2 down.
+    delta-tone: int,
+    cost-text: string,
+    cost-secondary: string,
+    cost-note: string,
+    speed-text: string,
+    range-text: string,
+    empty: bool,
+}
+
+export struct UsagePoint {
+    key: string,
+    label: string,
+    tip-title: string,
+    tip-detail: string,
+    future: bool,
+    current: bool,
+    tokens-level: float,
+    // Shares of the token bar, bottom to top: fresh input, output, then cache.
+    fresh-share: float,
+    output-share: float,
+    cost-level: float,
+    // Share of the cost bar billed by API connections; the rest is subscription-equivalent.
+    api-share: float,
+    requests-level: float,
+}
+
+export struct UsageScale {
+    tokens-top: string,
+    tokens-mid: string,
+    cost-top: string,
+    cost-mid: string,
+    requests-top: string,
+    requests-mid: string,
+    cost-caption: string,
+}
+
+export struct UsageShareRow {
+    key: string,
+    name: string,
+    detail: string,
+    icon: image,
+    has-icon: bool,
+    monochrome: bool,
+    letter: string,
+    level: float,
+    percent: string,
+    value: string,
+    cost: string,
+    // Folded remainder rows cannot be used as filters.
+    selectable: bool,
+}
+
+export struct UsageHeatCell {
+    level: float,
+    tip: string,
+}
+
+export struct UsageDetailRow {
+    id: string,
+    clock: string,
+    time: string,
+    connection: string,
+    kind: string,
+    icon: image,
+    has-icon: bool,
+    monochrome: bool,
+    letter: string,
+    model: string,
+    public-model: string,
+    fresh: string,
+    cached: string,
+    output: string,
+    reasoning: string,
+    cost: string,
+    speed: string,
+    duration: string,
+    source: string,
+    routed: bool,
+    // Shares of the row's input plus output, for the expanded composition bar.
+    fresh-share: float,
+    cache-share: float,
+    output-share: float,
+    stamp: int,
+}
+
+export struct UsageSyncState {
+    running: bool,
+    progress: float,
+    enabled: bool,
+    text: string,
+    detail: string,
+    error: string,
+}
+
+export struct UsagePriceRow {
+    provider-id: string,
+    model: string,
+    scope: string,
+    currency: string,
+    input: string,
+    cached: string,
+    output: string,
+    usage: string,
+    priced: bool,
+    reference: string,
+}

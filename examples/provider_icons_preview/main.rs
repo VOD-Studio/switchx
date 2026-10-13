@@ -8,6 +8,7 @@
 //! Connection directory/workbench: add --connection-workbench; hover cards: --workbench-hover.
 //! Shared workspace menu and operation feedback: add --workspace-feedback.
 //! Activity timeline: add --activity-design (entry, arrivals, pause, details, filter).
+//! Usage page: add --usage-design (entry, metric and period changes, hover, filter, empty).
 //! API connection editor: add --provider-editor-design.
 //! Add-connection navigation: add --connection-picker-motion (frames and back actions).
 //! ChatGPT subscription editor: add --subscription-editor-design.
@@ -32,6 +33,9 @@ mod publish;
 mod settings;
 mod status;
 mod support;
+mod usage;
+#[path = "../../src/desktop/usage_view.rs"]
+mod usage_view;
 mod workspace;
 
 use std::{error::Error, fs, path::Path};
@@ -138,6 +142,10 @@ fn main() -> Result<(), Box<dyn Error>> {
     if flag("--activity-design") {
         app.show()?;
         return activity::render_activity_design(&app, &window, output);
+    }
+    if flag("--usage-design") {
+        app.show()?;
+        return usage::render_usage_design(&app, &window, output);
     }
     if flag("--workspace-feedback") {
         app.show()?;

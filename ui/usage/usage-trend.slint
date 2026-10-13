@@ -1,0 +1,281 @@
+import { Theme } from "../tokens.slint";
+import { QuietSegmented } from "../components.slint";
+import { UsagePoint, UsageScale } from "../view-models.slint";
+import { LegendKey } from "usage-parts.slint";
+
+// Series colors per metric: tokens split into fresh input, output, and cache;
+// cost into API-billed and subscription-equivalent; requests stay one series.
+global TrendInk {
+    public pure function low(metric: int) -> color {
+        return metric == 0 ? Theme.usage-input : metric == 1 ? Theme.usage-output : Theme.brand;
+    }
+}
+
+component TrendBar inherits Rectangle {
+    in property <UsagePoint> point;
+    in property <int> metric;
+    in property <int> index;
+    in property <length> plot-height;
+    in property <bool> hovered;
+    in property <bool> dimmed;
+    private property <bool> motion: Theme.animations-enabled && !Theme.system-reduced-motion;
+    private property <bool> entered: !root.motion;
+    private property <float> level: root.metric == 0 ? root.point.tokens-level : root.metric == 1 ? root.point.cost-level : root.point.requests-level;
+    private property <float> shown: root.entered ? root.level : 0;
+    animate shown {
+        duration: root.motion ? 640ms : 0ms;
+        delay: root.motion ? min(root.index * 14ms, 360ms) : 0ms;
+        easing: cubic-bezier(0.22, 1, 0.36, 1);
+    }
+    // Wait until the bar has painted at zero so entry grows from the baseline.
+    Timer {
+        interval: 32ms;
+        running: !root.entered;
+        triggered => { root.entered = true; }
+    }
+
+    private property <float> low: root.metric == 0 ? root.point.fresh-share : root.metric == 1 ? root.point.api-share : 1;
+    private property <float> mid: root.metric == 0 ? root.point.output-share : 0;
+    animate low, mid {
+        duration: Theme.page-motion * 2;
+        easing: cubic-bezier(0.22, 1, 0.36, 1);
+    }
+    private property <length> bar: root.plot-height * root.shown;
+    private property <length> low-height: root.bar * root.low;
+    private property <length> mid-height: root.bar * root.mid;
+    private property <length> top-height: max(0px, root.bar - root.low-height - root.mid-height);
+    // A surface gap separates touching segments once they are tall enough to read.
+    private property <length> gap: 1px;
+    height: root.plot-height;
+    opacity: root.dimmed ? 0.45 : 1;
+    animate opacity { duration: Theme.fast; }
+    accessible-role: none;
+
+    if root.point.future: Rectangle {
+        y: root.plot-height - 2px;
+        height: 2px;
+        border-radius: 1px;
+        background: Theme.border;
+    }
+
+    column := Rectangle {
+        y: root.plot-height - root.bar;
+        height: root.bar;
+        border-top-left-radius: min(4px, self.width / 2);
+        border-top-right-radius: min(4px, self.width / 2);
+        clip: true;
+        Rectangle {
+            y: parent.height - root.low-height;
+            height: root.low-height;
+            background: TrendInk.low(root.metric);
+            animate background { duration: Theme.fast; }
+        }
+
+        Rectangle {
+            y: parent.height - root.low-height - root.mid-height;
+            height: max(0px, root.mid-height - (root.low-height > 2px ? root.gap : 0px));
+            background: Theme.usage-output;
+        }
+
+        Rectangle {
+            y: 0px;
+            height: max(0px, root.top-height - (root.low-height + root.mid-height > 2px ? root.gap : 0px));
+            background: Theme.usage-cache;
+        }
+    }
+
+    if root.hovered: Rectangle {
+        y: column.y - 1px;
+        height: column.height + 1px;
+        border-top-left-radius: column.border-top-left-radius;
+        border-top-right-radius: column.border-top-right-radius;
+        border-width: 1px;
+        border-color: Theme.primary-text.with-alpha(0.35);
+    }
+    if root.point.current && root.bar > 0px: Rectangle {
+        x: (parent.width - self.width) / 2;
+        y: column.y - 7px;
+        width: 4px;
+        height: 4px;
+        border-radius: 2px;
+        background: Theme.brand;
+    }
+}
+
+export component UsageTrend inherits Rectangle {
+    in property <[UsagePoint]> points;
+    in property <UsageScale> scale;
+    in property <string> title;
+    in-out property <int> metric;
+    private property <length> gutter: 54px;
+    private property <length> plot-top: 74px;
+    private property <length> plot-height: 150px;
+    private property <length> plot-width: max(1px, root.width - root.gutter - 36px);
+    private property <length> slot: root.plot-width / max(1, root.points.length);
+    private property <length> bar-width: max(2px, min(26px, root.slot * 0.62));
+    private property <int> label-step: max(1, ceil(root.points.length / max(1, floor(root.plot-width / 70px))));
+    private property <int> hovered: plot-touch.has-hover && plot-touch.mouse-x >= 0px ? min(root.points.length - 1, floor(plot-touch.mouse-x / root.slot)) : -1;
+    private property <string> top-label: root.metric == 0 ? root.scale.tokens-top : root.metric == 1 ? root.scale.cost-top : root.scale.requests-top;
+    private property <string> mid-label: root.metric == 0 ? root.scale.tokens-mid : root.metric == 1 ? root.scale.cost-mid : root.scale.requests-mid;
+    height: root.plot-top + root.plot-height + 44px;
+    border-radius: 14px;
+    border-width: 1px;
+    border-color: Theme.border;
+    background: Theme.panel;
+    animate background, border-color { duration: Theme.page-motion; }
+
+    HorizontalLayout {
+        x: 20px;
+        y: 16px;
+        width: parent.width - 40px;
+        height: 32px;
+        spacing: 12px;
+        Text {
+            text: root.title;
+            color: Theme.primary-text;
+            font-size: 14px;
+            font-weight: 600;
+            vertical-alignment: center;
+        }
+
+        Rectangle {
+            horizontal-stretch: 1;
+        }
+
+        QuietSegmented {
+            width: 186px;
+            options: ["Token", "费用", "请求"];
+            current-index: root.metric;
+            selected(index) => { root.metric = index; }
+        }
+    }
+
+    HorizontalLayout {
+        x: 20px;
+        y: 50px;
+        height: 16px;
+        spacing: 16px;
+        alignment: start;
+        if root.metric == 0: LegendKey {
+            ink: Theme.usage-input;
+            label: "新输入";
+        }
+        if root.metric == 0: LegendKey {
+            ink: Theme.usage-output;
+            label: "输出 · 含推理";
+        }
+        if root.metric == 0: LegendKey {
+            ink: Theme.usage-cache;
+            label: "缓存命中";
+        }
+        if root.metric == 1: LegendKey {
+            ink: Theme.usage-output;
+            label: "API 费用";
+        }
+        if root.metric == 1: LegendKey {
+            ink: Theme.usage-cache;
+            label: "订阅等效";
+        }
+        if root.metric == 1 && root.scale.cost-caption != "": Text {
+            text: root.scale.cost-caption;
+            color: Theme.muted-text;
+            font-size: 11px;
+            vertical-alignment: center;
+        }
+        if root.metric == 2: LegendKey {
+            ink: Theme.brand;
+            label: "请求次数";
+        }
+    }
+
+    // Recessive grid: baseline, midpoint, and top of the scale.
+    for line[index] in [0, 0.5, 1]: Rectangle {
+        x: root.gutter;
+        y: root.plot-top + root.plot-height * (1 - line);
+        width: root.plot-width + 16px;
+        height: 1px;
+        background: index == 0 ? Theme.border : Theme.border.with-alpha(0.55);
+    }
+    for label[index] in [root.top-label, root.mid-label, "0"]: Text {
+        x: 12px;
+        y: root.plot-top + root.plot-height * index / 2 - 7px;
+        width: root.gutter - 18px;
+        height: 14px;
+        text: label;
+        color: Theme.muted-text;
+        font-size: 10px;
+        horizontal-alignment: right;
+        vertical-alignment: center;
+    }
+
+    plot := Rectangle {
+        x: root.gutter + 8px;
+        y: root.plot-top;
+        width: root.plot-width;
+        height: root.plot-height;
+        for point[index] in root.points: TrendBar {
+            x: root.slot * index + (root.slot - root.bar-width) / 2;
+            width: root.bar-width;
+            point: point;
+            index: index;
+            metric: root.metric;
+            plot-height: root.plot-height;
+            hovered: index == root.hovered;
+            dimmed: root.hovered >= 0 && index != root.hovered;
+        }
+        plot-touch := TouchArea { }
+    }
+
+    for point[index] in root.points: Text {
+        x: plot.x + root.slot * index + root.slot / 2 - self.width / 2;
+        y: root.plot-top + root.plot-height + 8px;
+        width: root.slot * root.label-step;
+        text: point.label;
+        visible: mod(index, root.label-step) == 0;
+        color: point.current ? Theme.primary-text : Theme.muted-text;
+        font-size: 10px;
+        horizontal-alignment: center;
+        overflow: elide;
+    }
+
+    tip := Rectangle {
+        private property <int> index: max(0, root.hovered);
+        private property <length> center: plot.x + root.slot * self.index + root.slot / 2;
+        x: max(8px, min(root.width - self.width - 8px, self.center - self.width / 2));
+        y: root.plot-top - 4px;
+        width: max(tip-layout.preferred-width, 132px);
+        height: tip-layout.preferred-height;
+        opacity: root.hovered >= 0 ? 1 : 0;
+        border-radius: 9px;
+        border-width: 1px;
+        border-color: Theme.border;
+        background: Theme.panel;
+        drop-shadow-blur: 14px;
+        drop-shadow-offset-y: 4px;
+        drop-shadow-color: Theme.dark ? #00000050 : #18221a1c;
+        animate x {
+            duration: Theme.fast * 1.4;
+            easing: cubic-bezier(0.22, 1, 0.36, 1);
+        }
+        animate opacity { duration: Theme.fast; }
+        accessible-role: none;
+        tip-layout := VerticalLayout {
+            padding: 9px;
+            padding-left: 11px;
+            padding-right: 11px;
+            spacing: 3px;
+            Text {
+                text: root.points.length > 0 ? root.points[tip.index].tip-title : "";
+                color: Theme.muted-text;
+                font-size: 10px;
+            }
+
+            Text {
+                text: root.points.length > 0 ? root.points[tip.index].tip-detail : "";
+                color: Theme.primary-text;
+                font-size: 11px;
+                font-weight: 500;
+            }
+        }
+    }
+}

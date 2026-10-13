@@ -289,8 +289,8 @@ impl GroupKind {
         match self {
             Self::Api => "API",
             Self::Subscription => "订阅",
-            Self::Native => "Codex 原生",
-            Self::RoutedLegacy => "路由 · 历史",
+            Self::Native => "原生登录",
+            Self::RoutedLegacy => "路由历史",
             Self::Other => "其他提供方",
             Self::Unknown => "未知",
         }

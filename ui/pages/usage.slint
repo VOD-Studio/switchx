@@ -1,0 +1,519 @@
+import { Theme } from "../tokens.slint";
+import { ButtonSheen } from "../button-sheen.slint";
+import { QuietButton, QuietSegmented } from "../components.slint";
+import { QuietScrollView as ScrollView } from "../scroll-view.slint";
+import { QuotaSpinner } from "../quota-loading.slint";
+import {
+    UsageSummary,
+    UsagePoint,
+    UsageScale,
+    UsageShareRow,
+    UsageHeatCell,
+    UsageDetailRow,
+    UsageSyncState,
+} from "../view-models.slint";
+import {
+    CacheRing,
+    CompositionRibbon,
+    LegendKey,
+    UsageFigure,
+    UsageShimmer,
+} from "../usage/usage-parts.slint";
+import { UsageTrend } from "../usage/usage-trend.slint";
+import { UsageRank } from "../usage/usage-rank.slint";
+import { UsageHeat } from "../usage/usage-heat.slint";
+import { UsageDetails } from "../usage/usage-details.slint";
+
+component Divider inherits Rectangle {
+    width: 1px;
+    background: Theme.border;
+}
+
+component Caption inherits Text {
+    color: Theme.muted-text;
+    font-size: 12px;
+}
+
+// An active filter; it pops in when applied and clears with one click.
+component FilterChip inherits Rectangle {
+    in property <string> label;
+    callback cleared();
+    private property <bool> motion: Theme.animations-enabled && !Theme.system-reduced-motion;
+    private property <bool> entered: !root.motion;
+    Timer {
+        interval: 16ms;
+        running: !root.entered;
+        triggered => { root.entered = true; }
+    }
+
+    height: 30px;
+    width: chip-layout.preferred-width;
+    border-radius: 15px;
+    background: Theme.brand-surface;
+    border-width: 1px;
+    border-color: Theme.brand.with-alpha(0.35);
+    opacity: root.entered ? 1 : 0;
+    transform-scale: root.entered ? 1 : 0.9;
+    transform-origin: { x: self.width / 2, y: self.height / 2 };
+    animate opacity { duration: Theme.fast; }
+    animate transform-scale {
+        duration: Theme.page-motion;
+        easing: cubic-bezier(0.34, 1.45, 0.64, 1);
+    }
+    accessible-role: button;
+    accessible-label: "取消筛选：" + root.label;
+    accessible-action-default => { root.cleared(); }
+    chip-layout := HorizontalLayout {
+        padding-left: 12px;
+        padding-right: 8px;
+        spacing: 6px;
+        Text {
+            text: root.label;
+            color: Theme.brand;
+            font-size: 12px;
+            font-weight: 500;
+            vertical-alignment: center;
+            max-width: 220px;
+            overflow: elide;
+        }
+
+        Image {
+            y: (parent.height - self.height) / 2;
+            width: 12px;
+            height: 12px;
+            source: @image-url("../../assets/ui/close.svg");
+            colorize: touch.has-hover ? Theme.primary-text : Theme.brand;
+        }
+    }
+
+    ButtonSheen {
+        hovered: touch.has-hover;
+        enabled: true;
+        border-radius: 15px;
+    }
+
+    touch := TouchArea {
+        mouse-cursor: pointer;
+        clicked => { root.cleared(); }
+    }
+}
+
+// Sync state: a calm dot when idle, a spinner and percentage while reading logs.
+component SyncPill inherits Rectangle {
+    in property <UsageSyncState> sync;
+    callback clicked();
+    height: 30px;
+    width: pill-layout.preferred-width;
+    border-radius: 15px;
+    background: touch.has-hover ? Theme.raised : Theme.inset;
+    border-width: 1px;
+    border-color: root.sync.error != "" ? Theme.warning.with-alpha(0.5) : Theme.border;
+    animate background, border-color { duration: Theme.fast; }
+    accessible-role: button;
+    accessible-label: "数据来源：" + root.sync.text;
+    accessible-action-default => { root.clicked(); }
+    pill-layout := HorizontalLayout {
+        padding-left: 11px;
+        padding-right: 12px;
+        spacing: 7px;
+        if root.sync.running: QuotaSpinner {
+            y: (parent.height - self.height) / 2;
+            width: 12px;
+            height: 12px;
+        }
+        if !root.sync.running: Rectangle {
+            y: (parent.height - self.height) / 2;
+            width: 7px;
+            height: 7px;
+            border-radius: 3.5px;
+            background: root.sync.error != "" ? Theme.warning : root.sync.enabled ? Theme.success : Theme.muted-text;
+            animate background { duration: Theme.fast; }
+        }
+        Text {
+            text: root.sync.text;
+            color: Theme.muted-text;
+            font-size: 12px;
+            vertical-alignment: center;
+        }
+    }
+
+    touch := TouchArea {
+        mouse-cursor: pointer;
+        clicked => { root.clicked(); }
+    }
+}
+
+component Hero inherits Rectangle {
+    in property <UsageSummary> summary;
+    in property <bool> loaded;
+    border-radius: 16px;
+    border-width: 1px;
+    border-color: Theme.border;
+    background: Theme.panel;
+    animate background, border-color { duration: Theme.page-motion; }
+
+    VerticalLayout {
+        padding: 20px;
+        padding-left: 24px;
+        padding-right: 24px;
+        spacing: 16px;
+        HorizontalLayout {
+            spacing: 24px;
+            VerticalLayout {
+                horizontal-stretch: 1.6;
+                alignment: center;
+                spacing: 6px;
+                Caption {
+                    text: "Token 总量";
+                }
+
+                if root.loaded: UsageFigure {
+                    value: root.summary.tokens;
+                    format: 0;
+                    order: 0;
+                    font-size: 42px;
+                    font-weight: 600;
+                    letter-spacing: -0.5px;
+                }
+                if !root.loaded: UsageShimmer {
+                    width: 150px;
+                    height: 42px;
+                }
+                Text {
+                    text: root.summary.delta-text;
+                    color: root.summary.delta-tone == 0 ? Theme.muted-text : Theme.primary-text;
+                    font-size: 12px;
+                }
+            }
+
+            Divider { }
+
+            VerticalLayout {
+                horizontal-stretch: 1;
+                alignment: center;
+                spacing: 6px;
+                Caption {
+                    text: "估算费用";
+                }
+
+                if root.loaded: Text {
+                    text: root.summary.cost-text;
+                    color: root.summary.cost-text == "未定价" ? Theme.muted-text : Theme.primary-text;
+                    font-size: 24px;
+                    font-weight: 600;
+                }
+                if !root.loaded: UsageShimmer {
+                    width: 96px;
+                    height: 26px;
+                }
+                if root.summary.cost-secondary != "": Text {
+                    text: root.summary.cost-secondary;
+                    color: Theme.primary-text;
+                    font-size: 12px;
+                }
+                Text {
+                    text: root.summary.cost-note;
+                    color: Theme.muted-text;
+                    font-size: 11px;
+                    wrap: word-wrap;
+                }
+            }
+
+            Divider { }
+
+            VerticalLayout {
+                horizontal-stretch: 1;
+                alignment: center;
+                spacing: 6px;
+                Caption {
+                    text: "请求";
+                }
+
+                if root.loaded: UsageFigure {
+                    value: root.summary.requests;
+                    format: 1;
+                    order: 1;
+                    font-size: 24px;
+                    font-weight: 600;
+                }
+                if !root.loaded: UsageShimmer {
+                    width: 72px;
+                    height: 26px;
+                }
+                Text {
+                    text: root.summary.speed-text;
+                    color: Theme.muted-text;
+                    font-size: 11px;
+                }
+            }
+
+            CacheRing {
+                y: (parent.height - self.height) / 2;
+                rate: root.loaded ? root.summary.cache-rate : -1;
+                order: 2;
+            }
+        }
+
+        CompositionRibbon {
+            fresh: root.summary.fresh-share;
+            output: root.summary.output-share;
+            cache: root.summary.cache-share;
+        }
+
+        HorizontalLayout {
+            height: 14px;
+            spacing: 18px;
+            LegendKey {
+                ink: Theme.usage-input;
+                label: "新输入";
+                value: root.summary.fresh-text;
+            }
+
+            LegendKey {
+                ink: Theme.usage-output;
+                label: root.summary.reasoning-text == "" ? "输出" : "输出 · 推理 " + root.summary.reasoning-text;
+                value: root.summary.output-text;
+            }
+
+            LegendKey {
+                ink: Theme.usage-cache;
+                label: "缓存命中";
+                value: root.summary.cache-text;
+            }
+
+            Rectangle {
+                horizontal-stretch: 1;
+            }
+
+            Text {
+                text: root.summary.range-text;
+                color: Theme.muted-text;
+                font-size: 11px;
+                vertical-alignment: center;
+            }
+        }
+    }
+}
+
+component EmptyUsage inherits Rectangle {
+    callback open-sources();
+    height: 200px;
+    border-radius: 14px;
+    border-width: 1px;
+    border-color: Theme.border;
+    background: Theme.panel;
+    VerticalLayout {
+        alignment: center;
+        spacing: 10px;
+        Rectangle {
+            height: 48px;
+            Rectangle {
+                x: (parent.width - 44px) / 2;
+                width: 44px;
+                height: 44px;
+                border-radius: 22px;
+                background: Theme.brand-surface;
+                Image {
+                    width: 22px;
+                    height: 22px;
+                    source: @image-url("../../assets/ui/usage.svg");
+                    colorize: Theme.brand;
+                }
+            }
+        }
+
+        Text {
+            text: "这段时间还没有用量";
+            color: Theme.primary-text;
+            font-size: 16px;
+            font-weight: 600;
+            horizontal-alignment: center;
+        }
+
+        Text {
+            text: "经 SwitchX 路由的请求会实时计入；直连与原生 Codex 会话来自会话日志。";
+            color: Theme.muted-text;
+            font-size: 12px;
+            horizontal-alignment: center;
+        }
+
+        HorizontalLayout {
+            alignment: center;
+            QuietButton {
+                width: 120px;
+                text: "数据来源";
+                icon: @image-url("../../assets/ui/database.svg");
+                icon-color: Theme.muted-text;
+                clicked => { root.open-sources(); }
+            }
+        }
+    }
+}
+
+export component UsagePage inherits VerticalLayout {
+    in property <UsageSummary> summary;
+    in property <[UsagePoint]> points;
+    in property <UsageScale> scale;
+    in property <[UsageShareRow]> connections;
+    in property <[UsageShareRow]> models;
+    in property <[UsageHeatCell]> heat;
+    in property <string> heat-caption;
+    in property <[UsageDetailRow]> rows;
+    in property <string> rows-summary;
+    in property <bool> rows-more;
+    in property <int> rows-arrival;
+    in property <UsageSyncState> sync;
+    in property <bool> loading;
+    in property <bool> loaded;
+    in property <string> error;
+    // Polling runs only while this page exists and the window is shown.
+    in property <bool> live: true;
+    in property <string> group-filter;
+    in property <string> group-filter-label;
+    in property <string> model-filter;
+    in-out property <int> period;
+    in-out property <int> metric;
+    callback select-period(int);
+    callback filter-group(string);
+    callback filter-model(string);
+    callback load-more();
+    callback refresh();
+    callback open-sources();
+    callback open-prices();
+    private property <[string]> periods: ["今天", "7 天", "30 天", "90 天", "全部"];
+    spacing: 14px;
+    init => { root.refresh(); }
+    Timer {
+        interval: 30s;
+        running: root.live;
+        triggered => { root.refresh(); }
+    }
+
+    HorizontalLayout {
+        height: 32px;
+        spacing: 10px;
+        QuietSegmented {
+            width: 320px;
+            options: root.periods;
+            current-index: root.period;
+            selected(index) => {
+                root.period = index;
+                root.select-period(index);
+            }
+        }
+
+        if root.group-filter != "": FilterChip {
+            y: 1px;
+            label: "连接 · " + root.group-filter-label;
+            cleared => { root.filter-group(""); }
+        }
+        if root.model-filter != "": FilterChip {
+            y: 1px;
+            label: "模型 · " + root.model-filter;
+            cleared => { root.filter-model(""); }
+        }
+        Rectangle {
+            horizontal-stretch: 1;
+        }
+
+        SyncPill {
+            y: 1px;
+            sync: root.sync;
+            clicked => { root.open-sources(); }
+        }
+
+        QuietButton {
+            width: 80px;
+            height: 32px;
+            text: "定价";
+            icon: @image-url("../../assets/ui/tag.svg");
+            icon-color: Theme.muted-text;
+            clicked => { root.open-prices(); }
+        }
+    }
+
+    if root.error != "": Text {
+        text: root.error;
+        color: Theme.error;
+        font-size: 12px;
+        wrap: word-wrap;
+    }
+
+    scroll := ScrollView {
+        horizontal-scrollbar-policy: always-off;
+        // Near the end, the next page of detail rows loads on its own.
+        scrolled => {
+            if (root.rows-more && !root.loading && self.content-y <= self.visible-height - self.content-height + 240px) {
+                root.load-more();
+            }
+        }
+        VerticalLayout {
+            spacing: 14px;
+            padding-bottom: 8px;
+            Hero {
+                summary: root.summary;
+                loaded: root.loaded;
+            }
+
+            UsageTrend {
+                points: root.points;
+                scale: root.scale;
+                title: "趋势 · " + root.periods[root.period];
+                metric <=> root.metric;
+            }
+
+            if root.loaded && root.summary.empty && root.group-filter == "" && root.model-filter == "": EmptyUsage {
+                open-sources => { root.open-sources(); }
+            }
+            if !(root.loaded && root.summary.empty && root.group-filter == "" && root.model-filter == ""): HorizontalLayout {
+                spacing: 14px;
+                UsageRank {
+                    title: "按连接";
+                    hint: "点击筛选";
+                    rows: root.connections;
+                    selected: root.group-filter;
+                    toggle(key) => { root.filter-group(key); }
+                }
+
+                UsageRank {
+                    title: "按模型";
+                    hint: "点击筛选";
+                    rows: root.models;
+                    selected: root.model-filter;
+                    show-avatar: false;
+                    toggle(key) => { root.filter-model(key); }
+                }
+            }
+            if !(root.loaded && root.summary.empty && root.group-filter == "" && root.model-filter == ""): UsageHeat {
+                cells: root.heat;
+                caption: root.heat-caption;
+            }
+            if !(root.loaded && root.summary.empty && root.group-filter == "" && root.model-filter == ""): UsageDetails {
+                rows: root.rows;
+                summary: root.rows-summary;
+                more: root.rows-more;
+                loading: root.loading;
+                arrival: root.rows-arrival;
+                load-more => { root.load-more(); }
+            }
+            HorizontalLayout {
+                spacing: 6px;
+                Image {
+                    y: (parent.height - self.height) / 2;
+                    width: 12px;
+                    height: 12px;
+                    source: @image-url("../../assets/ui/lock.svg");
+                    colorize: Theme.muted-text;
+                }
+
+                Text {
+                    text: "只记录 Token 数、模型与时间，不保存提示词、回复与凭据。费用按当前定价估算，订阅连接显示等效 API 价格。";
+                    color: Theme.muted-text;
+                    font-size: 11px;
+                    wrap: word-wrap;
+                    horizontal-stretch: 1;
+                }
+            }
+        }
+    }
+}
