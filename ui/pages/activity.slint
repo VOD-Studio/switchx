@@ -757,6 +757,13 @@ component RequestItem inherits Rectangle {
                         vertical-alignment: center;
                         overflow: elide;
                     }
+
+                    if root.request.tokens != "": Text {
+                        text: root.request.tokens;
+                        color: Theme.muted-text;
+                        font-size: 11px;
+                        vertical-alignment: center;
+                    }
                 }
             }
 
@@ -883,6 +890,10 @@ component RequestItem inherits Rectangle {
                 }
             }
 
+            if root.request.token-detail != "": Fact {
+                label: "Token 用量";
+                value: root.request.token-detail;
+            }
             Fact {
                 label: "请求 ID";
                 value: root.request.id;
@@ -1250,7 +1261,7 @@ export component ActivityPage inherits VerticalLayout {
         }
 
         Text {
-            text: "仅保存路由请求的必要元数据，正文与凭据不进入记录。用量与费用统计尚未接入。";
+            text: "仅保存路由请求的必要元数据与 Token 用量，正文与凭据不进入记录。汇总与费用见「用量」页。";
             color: Theme.muted-text;
             font-size: 11px;
             overflow: elide;

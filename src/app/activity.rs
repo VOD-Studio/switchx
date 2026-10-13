@@ -19,6 +19,7 @@ pub struct RequestView {
     pub status: RequestStatus,
     pub error: String,
     pub fallback: String,
+    pub usage: Option<crate::usage::TokenUsage>,
 }
 
 /// Aggregates for the activity header. Latency percentiles cover completed
@@ -121,6 +122,7 @@ pub fn load_requests(data_dir: &Path) -> Result<Vec<RequestView>, AppError> {
                     })
                     .unwrap_or_default(),
                 provider,
+                usage: record.usage,
                 id: record.id,
                 generation: record.generation,
             })
@@ -182,6 +184,7 @@ mod tests {
             status,
             error: String::new(),
             fallback: String::new(),
+            usage: None,
         };
         assert_eq!(request_stats(&[]), RequestStats::default());
         let mut requests = (1..=20)

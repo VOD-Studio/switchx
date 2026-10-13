@@ -166,6 +166,9 @@ export struct RequestRow {
     kind: int,
     error: string,
     fallback: string,
+    // Compact total and breakdown when the upstream reported usage.
+    tokens: string,
+    token-detail: string,
     stamp: int,
 }
 
