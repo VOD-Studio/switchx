@@ -1,3 +1,4 @@
+export { RequestRules } from "editors/request-overrides.slint";
 import { XaiEditor } from "editors/xai-editor.slint";
 import { ConnectionModels } from "editors/connection-models.slint";
 import { Palette } from "std-widgets.slint";
@@ -292,6 +293,11 @@ export component AppWindow inherits Window {
     in-out property <string> model-display-name: "";
     in-out property <bool> model-display-name-custom: false;
     in-out property <string> model-source-path: "";
+    in-out property <string> model-user-agent;
+    in-out property <string> model-header-overrides;
+    in-out property <string> model-body-overrides;
+    in-out property <bool> model-request-open;
+
     in-out property <string> model-original-id: "";
     in-out property <string> model-context-window: "";
     in-out property <string> model-reasoning-levels: "";
@@ -457,6 +463,12 @@ export component AppWindow inherits Window {
     changed model-provider-id => { root.reset-model-discovery(); }
     changed model-original-id => { root.reset-model-discovery(); }
     changed model-editor-open => {
+        if !root.model-editor-open {
+            root.model-user-agent = "";
+            root.model-header-overrides = "";
+            root.model-body-overrides = "";
+            root.model-request-open = false;
+        }
         root.reset-model-discovery();
         root.arm-batch-autofetch();
     }
@@ -1488,6 +1500,10 @@ export component AppWindow inherits Window {
             model-display-name <=> root.model-display-name;
             model-display-name-custom <=> root.model-display-name-custom;
             model-source-path <=> root.model-source-path;
+            model-user-agent <=> root.model-user-agent;
+            model-header-overrides <=> root.model-header-overrides;
+            model-body-overrides <=> root.model-body-overrides;
+            model-request-open <=> root.model-request-open;
             model-original-id: root.model-original-id;
             model-context-window <=> root.model-context-window;
             model-reasoning-levels <=> root.model-reasoning-levels;

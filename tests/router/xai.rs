@@ -153,6 +153,16 @@ impl Fixture {
             .routes
             .get_mut("sx-grok")
             .unwrap()
+            .request_overrides = switchx::request_overrides::RequestOverrides::parse(
+            "synthetic-grok/1",
+            r#"{"x-tenant":"synthetic-grok"}"#,
+            r#"{"temperature":0.3}"#,
+        )
+        .unwrap();
+        publication
+            .routes
+            .get_mut("sx-grok")
+            .unwrap()
             .upstream_model = "grok-4.5".into();
         publication
             .routes
@@ -232,6 +242,9 @@ async fn xai_oauth_streaming_tools_and_encrypted_replay_stay_in_their_account_an
     ] {
         assert!(!headers.contains_key(name));
     }
+    assert_eq!(headers["user-agent"], "synthetic-grok/1");
+    assert_eq!(headers["x-tenant"], "synthetic-grok");
+    assert_eq!(request["temperature"], 0.3);
     assert_eq!(request["model"], "grok-4.5");
     assert_eq!(request["tools"][0]["name"], "functions__exec_command");
     assert!(request.get("prompt_cache_retention").is_none());

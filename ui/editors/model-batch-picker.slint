@@ -1,3 +1,4 @@
+import { RequestOverridesEditor, RequestRules } from "request-overrides.slint";
 import { ButtonSheen } from "../button-sheen.slint";
 import { Theme } from "../tokens.slint";
 import {
@@ -364,6 +365,13 @@ component BatchRow inherits Rectangle {
 // Pick many discovered models at once. Rows hold their own overrides; the
 // shared values below apply to rows without overrides or templates.
 export component ModelBatchPicker inherits Rectangle {
+    in property <bool> show-request-settings: false;
+    in-out property <string> request-user-agent;
+    in-out property <string> request-headers;
+    in-out property <string> request-body;
+    in-out property <bool> request-expanded;
+    private property <string> request-error: RequestRules.validate(root.request-user-agent, root.request-headers, root.request-body);
+
     in property <[BatchModelRow]> rows;
     in property <BatchSummary> summary;
     in property <string> provider-name;
@@ -807,6 +815,15 @@ export component ModelBatchPicker inherits Rectangle {
             }
         }
 
+        if root.show-request-settings: RequestOverridesEditor {
+            user-agent <=> root.request-user-agent;
+            headers <=> root.request-headers;
+            body <=> root.request-body;
+            expanded <=> root.request-expanded;
+            enabled: root.editable;
+            batch: true;
+        }
+
         Text {
             text: "新模型会加入已选，显示名称用于本地路由且须唯一，之后可逐个编辑。预览发布后重启 Codex 刷新模型菜单。";
             color: Theme.muted-text;
@@ -828,7 +845,7 @@ export component ModelBatchPicker inherits Rectangle {
                     icon-height: 14px;
                     icon-color: Theme.on-brand;
                     loading: root.saving;
-                    enabled: root.editable && root.selected > 0;
+                    enabled: root.editable && root.selected > 0 && root.request-error == "";
                     clicked => { root.save(); }
                 }
 

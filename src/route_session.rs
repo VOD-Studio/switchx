@@ -1236,6 +1236,7 @@ mod tests {
              ALTER TABLE providers DROP COLUMN kind;
              DROP TABLE session_bindings;
              DROP TABLE model_aliases;
+             ALTER TABLE published_models DROP COLUMN request_overrides;
              PRAGMA user_version = 8;",
             )
             .unwrap();
@@ -1359,6 +1360,7 @@ mod tests {
         )
         .unwrap();
         let first = ModelRecord {
+            request_overrides: Default::default(),
             provider_id: "primary".into(),
             public_id: "sx-first".into(),
             display_name: "First".into(),

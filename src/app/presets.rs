@@ -226,6 +226,7 @@ pub(super) fn new_preset_models(
         })
         .map(|model| {
             Ok(ModelRecord {
+                request_overrides: Default::default(),
                 provider_id: provider.id.clone(),
                 public_id: format!("sx-{}", new_id()?),
                 display_name: format!("{}/{}", model.model_id, provider.name),

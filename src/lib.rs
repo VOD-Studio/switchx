@@ -12,6 +12,7 @@ pub mod macos;
 pub mod model_picker;
 pub mod provider_icons;
 pub mod reasoning_picker;
+pub mod request_overrides;
 pub mod requests;
 pub mod route_session;
 pub mod router;

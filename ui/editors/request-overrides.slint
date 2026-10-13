@@ -1,0 +1,245 @@
+import { Theme } from "../tokens.slint";
+import {
+    AnimatedSection,
+    QuietButton,
+    QuietLineEdit,
+    QuietSegmented,
+} from "../components.slint";
+import { CodeEditor } from "../code-editor.slint";
+import { MappingSection } from "model-mapping-surfaces.slint";
+
+export global RequestRules {
+    pure callback validate(string, string, string) -> string;
+    pure callback format(string) -> string;
+}
+
+export component RequestOverridesEditor inherits Rectangle {
+    in-out property <string> user-agent;
+    in-out property <string> headers;
+    in-out property <string> body;
+    in-out property <bool> expanded;
+    in property <bool> enabled: true;
+    in property <bool> batch;
+    in property <int> replay;
+    out property <float> reveal: section.reveal;
+    out property <string> error: RequestRules.validate(root.user-agent, root.headers, root.body);
+    callback toggled(bool);
+    private property <bool> presets-open: false;
+    private property <int> tab: 0;
+    private property <float> tab-reveal: root.tab;
+    private property <bool> configured: root.user-agent != "" || root.headers != "" || root.body != "";
+    animate tab-reveal {
+        duration: Theme.page-motion;
+        easing: cubic-bezier(0.22, 1, 0.36, 1);
+    }
+    changed expanded => { if !root.expanded { root.presets-open = false; } }
+    preferred-height: card.preferred-height;
+    min-height: card.preferred-height;
+    vertical-stretch: 0;
+
+    card := MappingSection {
+        title: "请求定制";
+        caption: root.batch ? "应用到本次添加的模型 · 仅本地路由生效" : "自定义客户端标识与上游参数 · 仅本地路由生效";
+        icon: @image-url("../../assets/ui/settings.svg");
+        badge: root.error != "" ? "待修正" : root.configured ? "已定制" : "可选";
+        collapsible: true;
+        expanded <=> root.expanded;
+        replay: root.replay;
+        delay: 300ms;
+        active: ua.has-focus || header-editor.has-focus || body-editor.has-focus;
+        toggled(open) => { root.toggled(open); }
+        section := AnimatedSection {
+            expanded: root.expanded;
+            content-height: content.preferred-height;
+            content := VerticalLayout {
+                height: self.preferred-height;
+                spacing: 12px;
+                Rectangle {
+                    height: 32px;
+                    border-radius: 8px;
+                    background: Theme.brand-surface.with-alpha(0.65);
+                    HorizontalLayout {
+                        padding-left: 12px;
+                        padding-right: 12px;
+                        spacing: 10px;
+                        Text {
+                            text: "Codex";
+                            color: Theme.muted-text;
+                            font-size: 11px;
+                            vertical-alignment: center;
+                        }
+
+                        Text {
+                            text: "→";
+                            color: Theme.muted-text;
+                            vertical-alignment: center;
+                        }
+
+                        Text {
+                            text: "SwitchX 请求定制";
+                            color: Theme.brand;
+                            font-size: 11px;
+                            font-weight: 600;
+                            vertical-alignment: center;
+                        }
+
+                        Text {
+                            text: "→";
+                            color: Theme.muted-text;
+                            vertical-alignment: center;
+                        }
+
+                        Text {
+                            text: "上游模型";
+                            color: Theme.muted-text;
+                            font-size: 11px;
+                            vertical-alignment: center;
+                        }
+                    }
+                }
+
+                HorizontalLayout {
+                    spacing: 8px;
+                    Text {
+                        text: "User-Agent";
+                        color: Theme.primary-text;
+                        font-size: 12px;
+                        font-weight: 600;
+                        vertical-alignment: center;
+                        horizontal-stretch: 1;
+                    }
+
+                    QuietButton {
+                        text: "选择预设";
+                        height: 28px;
+                        width: 90px;
+                        ghost: true;
+                        selected: root.presets-open;
+                        enabled: root.enabled && root.expanded;
+                        clicked => { root.presets-open = !root.presets-open; }
+                    }
+                }
+
+                ua := QuietLineEdit {
+                    text <=> root.user-agent;
+                    placeholder-text: "留空沿用当前客户端标识";
+                    accessible-label: "自定义 User-Agent";
+                    enabled: root.enabled && root.expanded;
+                }
+
+                AnimatedSection {
+                    expanded: root.presets-open;
+                    content-height: 34px;
+                    HorizontalLayout {
+                        height: 34px;
+                        spacing: 6px;
+                        for preset in [
+                            { label: "Claude CLI", value: "claude-cli/2.1.161 (external, cli)" },
+                            { label: "CLI 简写", value: "claude-cli/2.1.161" },
+                            { label: "Code 1.0", value: "claude-code/1.0.0" },
+                            { label: "Code 0.1", value: "claude-code/0.1.0" },
+                            { label: "Kilo Code", value: "Kilo-Code/1.0" },
+                        ]: QuietButton {
+                            height: 30px;
+                            text: preset.label;
+                            selected: root.user-agent == preset.value;
+                            enabled: root.enabled && root.expanded && root.presets-open;
+                            clicked => { root.user-agent = preset.value; }
+                        }
+                    }
+                }
+
+                HorizontalLayout {
+                    spacing: 10px;
+                    QuietSegmented {
+                        width: 250px;
+                        height: 32px;
+                        horizontal-stretch: 0;
+                        options: ["Header 覆盖", "Body 覆盖"];
+                        current-index: root.tab;
+                        selected(index) => { root.tab = index; }
+                        enabled: root.enabled && root.expanded;
+                    }
+
+                    Rectangle {
+                        horizontal-stretch: 1;
+                    }
+
+                    QuietButton {
+                        text: "格式化";
+                        height: 28px;
+                        width: 72px;
+                        ghost: true;
+                        enabled: root.enabled && root.expanded && root.error == "";
+                        clicked => {
+                            if root.tab == 0 { root.headers = RequestRules.format(root.headers); }
+                            else { root.body = RequestRules.format(root.body); }
+                        }
+                    }
+                }
+
+                Rectangle {
+                    height: 156px;
+                    clip: true;
+                    header-editor := CodeEditor {
+                        x: -12px * root.tab-reveal;
+                        width: parent.width;
+                        height: parent.height;
+                        opacity: 1 - root.tab-reveal;
+                        visible: root.tab-reveal < 1;
+                        text <=> root.headers;
+                        language: "json";
+                        content-padding: 12px;
+                        show-line-numbers: true;
+                        placeholder-text: "{\n  \"x-provider\": \"switchx\"\n}";
+                        accessible-label: "Header 覆盖 JSON";
+                        enabled: root.enabled && root.expanded && root.tab == 0;
+                    }
+
+                    body-editor := CodeEditor {
+                        x: 12px * (1 - root.tab-reveal);
+                        width: parent.width;
+                        height: parent.height;
+                        opacity: root.tab-reveal;
+                        visible: root.tab-reveal > 0;
+                        text <=> root.body;
+                        language: "json";
+                        content-padding: 12px;
+                        show-line-numbers: true;
+                        placeholder-text: "{\n  \"temperature\": 0.2\n}";
+                        accessible-label: "Body 覆盖 JSON";
+                        enabled: root.enabled && root.expanded && root.tab == 1;
+                    }
+                }
+
+                Text {
+                    text: root.tab == 0 ? "同名 Header 会被替换；这里的 User-Agent 优先于上方设置。认证与会话字段不可覆盖。" : "在格式转换后递归合并对象；数组整体替换，null 保留。模型、流式、输入和工具由路由管理。";
+                    color: Theme.muted-text;
+                    font-size: 11px;
+                    wrap: word-wrap;
+                }
+
+                HorizontalLayout {
+                    spacing: 10px;
+                    Text {
+                        text: root.error != "" ? root.error : root.configured ? "保存后，在下次发布路由时生效" : "未设置覆盖，保持原请求";
+                        color: root.error != "" ? Theme.error : root.configured ? Theme.success : Theme.muted-text;
+                        font-size: 11px;
+                        wrap: word-wrap;
+                        vertical-alignment: center;
+                        horizontal-stretch: 1;
+                    }
+
+                    QuietButton {
+                        text: "清空定制";
+                        width: 82px;
+                        height: 28px;
+                        ghost: true;
+                        enabled: root.enabled && root.expanded && root.configured;
+                        clicked => { root.user-agent = ""; root.headers = ""; root.body = ""; }
+                    }
+                }
+            }
+        }
+    }
+}

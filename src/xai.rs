@@ -718,6 +718,7 @@ pub fn save_provider_with_directory(
     } else if existing.is_none() {
         let metadata = default_model_metadata()?;
         vec![ModelRecord {
+            request_overrides: Default::default(),
             provider_id: provider.id.clone(),
             public_id: format!("sx-grok-{}", provider.id),
             display_name: format!("Grok 4.5 / {}", provider.name),

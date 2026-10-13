@@ -4,7 +4,7 @@ use rusqlite::{Connection, OpenFlags, Result, params};
 
 use crate::credentials::Secret;
 
-const SCHEMA_VERSION: i64 = 12;
+const SCHEMA_VERSION: i64 = 13;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ProviderKind {
@@ -87,6 +87,7 @@ pub struct SessionAuthContext {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ModelRecord {
+    pub request_overrides: crate::request_overrides::RequestOverrides,
     pub provider_id: String,
     pub public_id: String,
     pub display_name: String,
@@ -175,7 +176,7 @@ impl Store {
     fn open_compatible(path: &Path, flags: OpenFlags) -> Result<Self> {
         let connection = Connection::open_with_flags(path, flags)?;
         let version: i64 = connection.query_row("PRAGMA user_version", [], |row| row.get(0))?;
-        if !matches!(version, 8 | 9 | 10 | 11 | SCHEMA_VERSION) {
+        if !matches!(version, 8 | 9 | 10 | 11 | 12 | SCHEMA_VERSION) {
             return Err(rusqlite::Error::InvalidQuery);
         }
         connection.prepare("SELECT settings_config FROM providers LIMIT 0")?;
@@ -408,6 +409,14 @@ impl Store {
                     public_id TEXT NOT NULL REFERENCES published_models(public_id) ON DELETE CASCADE
                  );
                  PRAGMA user_version = 12;
+                 COMMIT;",
+            )?;
+        }
+        if version < 13 {
+            connection.execute_batch(
+                "BEGIN IMMEDIATE;
+                 ALTER TABLE published_models ADD COLUMN request_overrides TEXT NOT NULL DEFAULT '{}';
+                 PRAGMA user_version = 13;
                  COMMIT;",
             )?;
         }
@@ -918,6 +927,12 @@ impl Store {
 
     fn write_model(connection: &Connection, model: &ModelRecord) -> Result<()> {
         use rusqlite::OptionalExtension;
+        model
+            .request_overrides
+            .validate()
+            .map_err(rusqlite::Error::InvalidParameterName)?;
+        let request_overrides = serde_json::to_string(&model.request_overrides)
+            .map_err(|_| rusqlite::Error::InvalidQuery)?;
         Self::validate_model_name(connection, &model.display_name, &model.public_id)?;
         // IDs also occupy the routing namespace, for pre-upgrade clients.
         Self::validate_model_name(connection, &model.public_id, &model.public_id)?;
@@ -929,16 +944,17 @@ impl Store {
             )
             .optional()?;
         let changed = connection.execute(
-            "INSERT INTO published_models (provider_id, public_id, display_name, upstream_model, metadata, enabled, fallback_provider_id)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
+            "INSERT INTO published_models (provider_id, public_id, display_name, upstream_model, metadata, enabled, fallback_provider_id, request_overrides)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)
              ON CONFLICT(public_id) DO UPDATE SET
                 display_name = excluded.display_name,
                 upstream_model = excluded.upstream_model,
                 metadata = excluded.metadata,
                 enabled = excluded.enabled,
-                fallback_provider_id = excluded.fallback_provider_id
+                fallback_provider_id = excluded.fallback_provider_id,
+                request_overrides = excluded.request_overrides
              WHERE published_models.provider_id = excluded.provider_id",
-            params![model.provider_id, model.public_id, model.display_name, model.upstream_model, model.metadata, model.enabled, model.fallback_provider_id],
+            params![model.provider_id, model.public_id, model.display_name, model.upstream_model, model.metadata, model.enabled, model.fallback_provider_id, request_overrides],
         )?;
         if changed == 0 {
             Err(rusqlite::Error::InvalidQuery)
@@ -1141,12 +1157,14 @@ impl Store {
 
     pub fn models(&self) -> Result<Vec<ModelRecord>> {
         let mut statement = self.connection.prepare(
-            "SELECT provider_id, public_id, display_name, upstream_model, metadata, enabled, fallback_provider_id
+            "SELECT provider_id, public_id, display_name, upstream_model, metadata, enabled, fallback_provider_id, request_overrides
              FROM published_models ORDER BY public_id",
         )?;
         statement
             .query_map([], |row| {
                 Ok(ModelRecord {
+                    request_overrides: serde_json::from_str(&row.get::<_, String>(7)?)
+                        .map_err(|_| rusqlite::Error::InvalidQuery)?,
                     provider_id: row.get(0)?,
                     public_id: row.get(1)?,
                     display_name: row.get(2)?,
@@ -1247,6 +1265,34 @@ mod tests {
     use super::*;
 
     #[test]
+    fn v12_migration_keeps_models_and_initializes_empty_request_customization() {
+        let path = std::env::temp_dir().join(format!(
+            "switchx-override-migration-{}.sqlite",
+            crate::id::new_id().unwrap()
+        ));
+        let store = Store::open(&path).unwrap();
+        let provider = api_provider();
+        store.put_provider(&provider).unwrap();
+        let model = ModelRecord {
+            provider_id: provider.id,
+            public_id: "sx-migration".into(),
+            display_name: "Migration".into(),
+            upstream_model: "model".into(),
+            metadata: "{}".into(),
+            enabled: true,
+            fallback_provider_id: None,
+            request_overrides: Default::default(),
+        };
+        store.put_model(&model).unwrap();
+        store.connection.execute_batch("ALTER TABLE published_models DROP COLUMN request_overrides; PRAGMA user_version = 12;").unwrap();
+        drop(store);
+        let store = Store::open(&path).unwrap();
+        assert_eq!(store.models().unwrap(), [model]);
+        drop(store);
+        std::fs::remove_file(path).unwrap();
+    }
+
+    #[test]
     fn clearing_history_is_atomic_persistent_and_leaves_route_data_and_new_arrivals() {
         let path = std::env::temp_dir().join(format!(
             "switchx-clear-requests-{}.sqlite",
@@ -1312,6 +1358,7 @@ mod tests {
         let provider = api_provider();
         store.put_provider(&provider).unwrap();
         let model = ModelRecord {
+            request_overrides: Default::default(),
             provider_id: provider.id.clone(),
             public_id: "sx-original".into(),
             display_name: "原名称 / Podlink".into(),
@@ -1323,7 +1370,7 @@ mod tests {
         store.put_model(&model).unwrap();
         store
             .connection
-            .execute_batch("DROP TABLE model_aliases; PRAGMA user_version = 11;")
+            .execute_batch("DROP TABLE model_aliases; ALTER TABLE published_models DROP COLUMN request_overrides; PRAGMA user_version = 11;")
             .unwrap();
         drop(store);
         // Old journals can still read credentials without schema migration.
@@ -1364,7 +1411,7 @@ mod tests {
                 "ALTER TABLE providers DROP COLUMN icon_id; ALTER TABLE providers DROP COLUMN account_binding;
              ALTER TABLE providers DROP COLUMN kind;
              DROP TABLE session_bindings;
-             DROP TABLE IF EXISTS model_aliases; PRAGMA user_version = 8;",
+             DROP TABLE IF EXISTS model_aliases; ALTER TABLE published_models DROP COLUMN request_overrides; PRAGMA user_version = 8;",
             )
             .unwrap();
     }
@@ -1388,6 +1435,7 @@ mod tests {
             .unwrap();
         store.put_provider(&backup).unwrap();
         let model = ModelRecord {
+            request_overrides: Default::default(),
             provider_id: primary.id.clone(),
             public_id: "v10-model".into(),
             display_name: "Fixture".into(),
@@ -1410,7 +1458,7 @@ mod tests {
              INSERT INTO old_providers SELECT * FROM providers;
              DROP TABLE providers;
              ALTER TABLE old_providers RENAME TO providers;
-             DROP TABLE IF EXISTS model_aliases; PRAGMA user_version = 10;
+             DROP TABLE IF EXISTS model_aliases; ALTER TABLE published_models DROP COLUMN request_overrides; PRAGMA user_version = 10;
              COMMIT;"
         ).unwrap();
         drop(store);
@@ -1481,7 +1529,7 @@ mod tests {
         store.put_local_token(&reference, &token).unwrap();
         store
             .connection
-            .execute_batch("ALTER TABLE providers DROP COLUMN icon_id; DROP TABLE IF EXISTS model_aliases; PRAGMA user_version = 9;")
+            .execute_batch("ALTER TABLE providers DROP COLUMN icon_id; DROP TABLE IF EXISTS model_aliases; ALTER TABLE published_models DROP COLUMN request_overrides; PRAGMA user_version = 9;")
             .unwrap();
         drop(store);
         for expected_version in [9, SCHEMA_VERSION] {
@@ -1590,6 +1638,7 @@ mod tests {
                 icon_id: None,
             };
             let model = ModelRecord {
+                request_overrides: Default::default(),
                 provider_id: provider.id.clone(),
                 public_id: "sx-chatgpt-same-model".into(),
                 display_name: "Legacy model".into(),
@@ -1657,6 +1706,7 @@ mod tests {
             icon_id: None,
         };
         let wrong_model = ModelRecord {
+            request_overrides: Default::default(),
             provider_id: "missing".into(),
             public_id: "sx-test".into(),
             display_name: "Test".into(),
@@ -2034,6 +2084,7 @@ mod tests {
         };
         store.put_provider(&other).unwrap();
         let owned = ModelRecord {
+            request_overrides: Default::default(),
             provider_id: other.id,
             public_id: "sx-owned".into(),
             display_name: "Owned".into(),
@@ -2270,7 +2321,7 @@ mod tests {
         store
             .connection
             .execute_batch(
-                "ALTER TABLE providers DROP COLUMN settings_config; ALTER TABLE providers DROP COLUMN icon_id; ALTER TABLE providers DROP COLUMN account_binding; ALTER TABLE providers DROP COLUMN kind; DROP TABLE session_bindings; DROP TABLE IF EXISTS model_aliases; PRAGMA user_version = 7;",
+                "ALTER TABLE providers DROP COLUMN settings_config; ALTER TABLE providers DROP COLUMN icon_id; ALTER TABLE providers DROP COLUMN account_binding; ALTER TABLE providers DROP COLUMN kind; DROP TABLE session_bindings; DROP TABLE IF EXISTS model_aliases; ALTER TABLE published_models DROP COLUMN request_overrides; PRAGMA user_version = 7;",
             )
             .unwrap();
         drop(store);
@@ -2367,6 +2418,7 @@ mod tests {
         };
         store.put_provider(&other).unwrap();
         let owned = ModelRecord {
+            request_overrides: Default::default(),
             provider_id: "other".into(),
             public_id: "sx-owned".into(),
             display_name: "Owned model".into(),
@@ -2476,6 +2528,7 @@ mod tests {
             credential_ref: Some("synthetic-reference".into()),
         };
         let model = ModelRecord {
+            request_overrides: Default::default(),
             provider_id: "primary".into(),
             public_id: "sx-first".into(),
             display_name: "First".into(),
@@ -2495,7 +2548,7 @@ mod tests {
                  ALTER TABLE providers DROP COLUMN codex_options;
                  ALTER TABLE providers DROP COLUMN settings_config; ALTER TABLE providers DROP COLUMN icon_id; ALTER TABLE providers DROP COLUMN account_binding; ALTER TABLE providers DROP COLUMN kind; DROP TABLE session_bindings;
                  DROP TABLE app_settings;
-                 DROP TABLE IF EXISTS model_aliases; PRAGMA user_version = 6;",
+                 DROP TABLE IF EXISTS model_aliases; ALTER TABLE published_models DROP COLUMN request_overrides; PRAGMA user_version = 6;",
             )
             .unwrap();
         drop(store);
@@ -2538,6 +2591,7 @@ mod tests {
                 .unwrap();
         }
         let first = ModelRecord {
+            request_overrides: Default::default(),
             provider_id: "primary".into(),
             public_id: "sx-first".into(),
             display_name: "First".into(),
@@ -2673,6 +2727,7 @@ mod tests {
                 .unwrap();
         }
         let mut model = ModelRecord {
+            request_overrides: Default::default(),
             provider_id: "primary".into(),
             public_id: "sx-primary".into(),
             display_name: "Primary".into(),
@@ -2872,6 +2927,7 @@ mod tests {
         drop(connection);
         let store = Store::open(&path).unwrap();
         let model = ModelRecord {
+            request_overrides: Default::default(),
             provider_id: "one".into(),
             public_id: "sx-one".into(),
             display_name: "One".into(),

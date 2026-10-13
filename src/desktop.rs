@@ -58,6 +58,7 @@ pub fn run() -> Result<(), Box<dyn std::error::Error>> {
         });
     }
     code_highlight::connect(&app);
+    switchx::request_overrides::connect(&app);
     initialize_provider_presets(&app)?;
     icon_picker::initialize_provider_icons(&app)?;
     let tray = SwitchXTray::new()?;

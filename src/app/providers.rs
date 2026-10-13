@@ -265,6 +265,7 @@ fn picked_models(
         )
         .map_err(|error| format!("{model_id}：{error}"))?;
         added.push(ModelRecord {
+            request_overrides: Default::default(),
             provider_id: provider.id.clone(),
             public_id: format!("sx-{}", new_id()?),
             display_name,
