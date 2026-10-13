@@ -24,7 +24,7 @@ env:
 jobs:
   check:
     name: Version, formatting, Clippy and tests
-    runs-on: [self-hosted, Linux, X64, docker, compose, omarchy]
+    runs-on: ubuntu-24.04
     container: ubuntu:24.04
     timeout-minutes: 90
     defaults:

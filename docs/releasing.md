@@ -17,7 +17,7 @@ macOS 的 `CFBundleShortVersionString` 与 `CFBundleVersion` 使用数值版本�
 - 正式条目格式为 `## [0.1.0] - 2026-10-12`，按版本从新到旧排列。
 - 配置、数据格式或凭据存储变化应说明影响与迁移步骤，不记录真实账号或密钥。
 
-仓库目前的 `0.1.0` 尚未发布，初始功能记录在 `Unreleased`，因此首次可以准备 `0.1.0`。此后每次发布都必须递增版本，已经发布的版本与标签不得覆盖。
+首次发布可以使用初始版本 `0.1.0`。此后每次发布都必须递增版本，已经发布的版本与标签不得覆盖。
 
 ## 发版步骤
 
@@ -45,7 +45,7 @@ git push origin v0.1.0
 
 在 [Release 工作流](https://github.com/VOD-Studio/switchx/actions/workflows/release.yml) 中确认所有检查与构建成功，再到 [Releases](https://github.com/VOD-Studio/switchx/releases) 核对附件。普通分支推送、PR 和手动 CI 只运行检查与测试；版本标签推送才会构建六个平台的产物并发布。
 
-检查任务使用 `vod-omarchy-docker-01` 对应的 `self-hosted`、`Linux`、`X64`、`docker`、`compose`、`omarchy` 标签，在 Ubuntu 24.04 容器内安装 Git LFS、Python 3.12、仓库固定的 Rust 工具链和 Slint 格式化工具，再运行 `make check`。该 runner 所在组需允许本仓库使用，并且 runner 需能运行 Docker 容器。
+检查任务使用 GitHub 托管的 `ubuntu-24.04` x64 runner，在 Ubuntu 24.04 容器内安装 Git LFS、Python 3.12、仓库固定的 Rust 工具链和 Slint 格式化工具，再运行 `make check`。普通 CI、发版前置检查和六个平台构建均使用 GitHub 托管 runner。
 
 ## 构建矩阵与附件
 
@@ -58,7 +58,7 @@ git push origin v0.1.0
 | Linux | x64 | `x86_64-unknown-linux-gnu` | `.tar.gz`，包含 `switchx` |
 | Linux | ARM64 | `aarch64-unknown-linux-gnu` | `.tar.gz`，包含 `switchx` |
 
-版本标签通过自托管 runner 的检查后，每个平台使用 [GitHub 提供的对应架构原生 runner](https://docs.github.com/en/actions/reference/runners/github-hosted-runners)，先跑 Clippy、单元和集成测试，再构建 release 二进制。包名为 `SwitchX-<version>-<target>.<extension>`，包内包含 changelog、README、供应商图标许可和记录版本/target/源提交/工作区是否有改动/Rust 工具链的 `BUILD-INFO.json`。Windows 构建静态链接 CRT；Linux 包在 Ubuntu 24.04 构建，不承诺兼容更旧的 glibc。
+版本标签通过 GitHub 托管 runner 的检查后，每个平台使用 [GitHub 提供的对应架构原生 runner](https://docs.github.com/en/actions/reference/runners/github-hosted-runners)，先跑 Clippy、单元和集成测试，再构建 release 二进制。包名为 `SwitchX-<version>-<target>.<extension>`，包内包含 changelog、README、供应商图标许可和记录版本/target/源提交/工作区是否有改动/Rust 工具链的 `BUILD-INFO.json`。Windows 构建静态链接 CRT；Linux 包在 Ubuntu 24.04 构建，不承诺兼容更旧的 glibc。
 
 Release 发布前会校验标签、workspace 版本、lockfile 和 changelog，要求六个平台包与各自 `.sha256` 文件齐全，核对包内版本与源提交、拒绝从有未提交改动的工作区构建的包，并生成 `SHA256SUMS`。任一检查失败都会阻止发布。全部完成后先创建 draft、上传附件，再公开 Release；上传失败时 draft 可以在重跑工作流后继续。已经公开的 Release 不会被覆盖。预发布版本自动标为 prerelease，且不会成为 latest。
 
