@@ -73,6 +73,7 @@ fn main() -> Result<(), Box<dyn Error>> {
             headless::install_with_manual_time()
         };
     let app = AppWindow::new()?;
+    app.set_app_version(env!("CARGO_PKG_VERSION").into());
     switchx::model_picker::connect(&app);
     app.set_native_titlebar_overlay(flag("--native-titlebar-overlay"));
     switchx::reasoning_picker::connect(&app);

@@ -76,6 +76,7 @@ export component AppWindow inherits Window {
     min-height: 680px;
     background: Theme.background;
     forward-focus: app-keyboard;
+    in property <string> app-version;
     in property <bool> native-titlebar-overlay: false;
     property <Point> dropdown-viewport: { x: root.width, y: root.height };
     init => { DropdownViewport.size = root.dropdown-viewport; }
@@ -704,7 +705,7 @@ export component AppWindow inherits Window {
                         }
 
                         Text {
-                            text: "LOCAL FIRST";
+                            text: "v" + root.app-version;
                             color: Theme.muted-text;
                             font-size: 10px;
                         }
