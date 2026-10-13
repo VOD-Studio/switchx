@@ -198,6 +198,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 _ => None,
             },
             fallback_from: None,
+            usage: (status != RequestStatus::Failed).then_some(switchx::usage::TokenUsage {
+                input: 42_000,
+                cached_input: 36_000,
+                cache_write: 0,
+                output: 900,
+                reasoning: 300,
+            }),
+            response_id: None,
         })?;
     }
     let bundle = fixture_bundle(&root.0, &binary, &data, &home)?;
