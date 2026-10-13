@@ -1287,6 +1287,7 @@ fn validate_api_key(key: &str) -> Result<()> {
 mod usage;
 
 use usage::usage_columns;
+pub use usage::{UsageLogFile, UsageRecord, UsageSource};
 
 fn settings_with_key(settings: &str, key: &Secret) -> Result<String> {
     validate_api_key(key.expose())?;

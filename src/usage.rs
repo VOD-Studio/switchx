@@ -3,6 +3,8 @@
 
 use serde_json::Value;
 
+pub mod codex_logs;
+
 /// Counts for one model response. `input` includes `cached_input`, and
 /// `output` includes `reasoning`, following the Responses usage object.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
