@@ -415,48 +415,7 @@ impl RouteSession {
             switch.with_credential_helper(helper, &token_reference)?
         };
         let client_version = client::check_catalog_using(&publication.catalog, &cli_path).await?;
-        let mappings = models
-            .iter()
-            .filter(|model| model.enabled)
-            .map(|model| {
-                let provider = providers
-                    .iter()
-                    .find(|provider| provider.id == model.provider_id)
-                    .unwrap();
-                let destination = |provider: &ProviderRecord| {
-                    format!(
-                        "{} ({})",
-                        provider.name,
-                        reqwest::Url::parse(&provider.base_url)
-                            .unwrap()
-                            .origin()
-                            .ascii_serialization()
-                    )
-                };
-                let fallback = model
-                    .fallback_provider_id
-                    .as_ref()
-                    .map(|id| {
-                        let provider = providers
-                            .iter()
-                            .find(|provider| &provider.id == id)
-                            .unwrap();
-                        format!(
-                            "\n  备用 → {} / {}；仅主连接建立失败时尝试，费用与数据接收方可能变化",
-                            destination(provider),
-                            model.upstream_model
-                        )
-                    })
-                    .unwrap_or_default();
-                format!(
-                    "{} → {} / {}{fallback}",
-                    model.display_name,
-                    destination(provider),
-                    model.upstream_model
-                )
-            })
-            .collect::<Vec<_>>()
-            .join("\n");
+        let mappings = preview_model_mappings(&models, &providers);
         let summary = format!(
             "{client_version} 已核对 {} 个可选模型 · http://{address}/v1\n目标：{}\n{mappings}\n受管变更：{}{}",
             publication.routes.len(),
@@ -913,6 +872,49 @@ fn delete_local_token(state_dir: &Path, reference: &str) -> Result<(), String> {
         .map_err(|_| "路由已停止，但数据库中的本地令牌清理失败")?
         .delete_local_token(reference)
         .map_err(|_| "路由已停止，但数据库中的本地令牌清理失败".into())
+}
+
+fn preview_model_mappings(models: &[ModelRecord], providers: &[ProviderRecord]) -> String {
+    models
+        .iter()
+        .filter(|model| model.enabled)
+        .map(|model| {
+            let provider = providers
+                .iter()
+                .find(|provider| provider.id == model.provider_id)
+                .unwrap();
+            let destination = |provider: &ProviderRecord| {
+                format!(
+                    "{} ({})",
+                    provider.name,
+                    reqwest::Url::parse(&provider.base_url)
+                        .unwrap()
+                        .origin()
+                        .ascii_serialization()
+                )
+            };
+            let fallback = model
+                .fallback_provider_id
+                .as_ref()
+                .map(|id| {
+                    let provider = providers
+                        .iter()
+                        .find(|provider| &provider.id == id)
+                        .unwrap();
+                    format!(
+                        "\n  备用 → {}；仅主连接建立失败时尝试，费用与数据接收方可能变化",
+                        destination(provider)
+                    )
+                })
+                .unwrap_or_default();
+            format!(
+                "{} → {}{fallback}",
+                model.display_name,
+                destination(provider)
+            )
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
 }
 
 fn selected_inputs(state_dir: &Path) -> Result<(Vec<ModelRecord>, Vec<ProviderRecord>), String> {
@@ -1401,6 +1403,14 @@ mod tests {
         assert_eq!(models.len(), 3);
         assert!(models.iter().all(|model| model.public_id != "sx-unused"));
         assert_eq!(catalog::publish_saved(&models).unwrap().routes.len(), 2);
+        let preview = preview_model_mappings(&models, &providers);
+        assert!(preview.contains("First → primary (https://example.invalid)"));
+        assert!(preview.contains("Second → primary (https://example.invalid)"));
+        assert!(preview.contains("备用 → backup (https://example.invalid)"));
+        assert!(!preview.contains("sx-"));
+        assert!(!preview.contains("model-a"));
+        assert!(!preview.contains("model-b"));
+        assert!(!preview.contains("Unused"));
         drop(store);
         std::fs::remove_dir_all(path).unwrap();
     }

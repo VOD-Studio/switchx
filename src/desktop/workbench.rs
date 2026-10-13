@@ -262,6 +262,7 @@ pub(super) fn connect(app: &AppWindow, sender: &mpsc::Sender<Command>) {
                 .iter()
                 .find(|model| model.public_id == app.get_default_model())
                 .map(|model| model.display_name)
+                .filter(|name| !name.trim().is_empty())
                 .unwrap_or_else(|| "尚未选择".into());
             app.set_default_model_label(label);
         }
@@ -287,6 +288,46 @@ impl Worker {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn default_model_label_tracks_reloaded_names_without_falling_back_to_ids() {
+        switchx::headless::install();
+        let app = AppWindow::new().unwrap();
+        let (sender, _receiver) = mpsc::channel(1);
+        connect(&app, &sender);
+        let snapshot = |name: &str| Snapshot {
+            providers: Vec::new(),
+            models: vec![switchx::app::ModelView {
+                provider_id: "synthetic".into(),
+                provider_name: "Synthetic provider".into(),
+                binding_label: String::new(),
+                upstream_model: "upstream-model-id".into(),
+                public_id: "sx-internal-model-id".into(),
+                display_name: name.into(),
+                detail: String::new(),
+                context_window: String::new(),
+                reasoning_levels: String::new(),
+                default_reasoning: String::new(),
+                saved: true,
+                ready: true,
+                enabled: true,
+                fallback_provider_id: String::new(),
+                fallback_label: String::new(),
+            }],
+            credentials_checked: false,
+        };
+        show_result(&app, Ok(snapshot("Friendly model")));
+        assert_eq!(app.get_default_model_label(), "Friendly model");
+        show_result(&app, Ok(snapshot("Renamed model")));
+        assert_eq!(app.get_default_model_label(), "Renamed model");
+        assert_eq!(app.get_default_model(), "sx-internal-model-id");
+
+        show_result(&app, Ok(snapshot("  ")));
+        assert_eq!(app.get_default_model_label(), "尚未选择");
+        app.set_default_model("sx-missing-model-id".into());
+        app.invoke_update_default_model_label();
+        assert_eq!(app.get_default_model_label(), "尚未选择");
+    }
 
     #[test]
     fn provider_filter_matches_chinese_names_and_ignores_case() {

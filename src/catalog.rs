@@ -184,7 +184,7 @@ impl Publication {
             || (alias != name && self.routes.contains_key(alias))
             || self.aliases.get(alias).is_some_and(|old| old != name)
         {
-            return Err(format!("模型名称或兼容名称重复：{alias}"));
+            return Err(format!("模型“{name}”与现有模型或历史名称重复"));
         }
         if alias != name {
             self.aliases.insert(alias.into(), name.into());
@@ -490,7 +490,9 @@ mod tests {
         second.public_id = "sx-other".into();
         assert!(publish_saved(&[model.clone(), second.clone()]).is_err());
         second.display_name = model.public_id.clone();
-        assert!(publish_saved(&[model, second]).is_err());
+        let error = publish_saved(&[model, second]).unwrap_err();
+        assert!(error.contains(name));
+        assert!(!error.contains("sx-stable"));
     }
 
     #[tokio::test]
