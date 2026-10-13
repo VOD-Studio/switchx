@@ -130,6 +130,9 @@ pub(super) fn show_request_rows(app: &AppWindow, keep_history: bool) {
 }
 
 pub(super) fn show_requests(app: &AppWindow, records: Vec<app::RequestView>) {
+    if !records.is_empty() {
+        app.set_request_cleared(false);
+    }
     let stats = app::request_stats(&records);
     let sync = app.get_request_sync().saturating_add(1);
     // The first refresh is history; later unknown ids are live arrivals.
@@ -192,6 +195,7 @@ pub(super) fn connect(app: &AppWindow, sender: &mpsc::Sender<Command>) {
         // a full queue skips this tick rather than reporting an error.
         if let Some(app) = weak.upgrade()
             && !app.get_request_loading()
+            && !app.get_request_clearing()
         {
             app.set_request_loading(true);
             if request_sender.try_send(Command::RefreshRequests).is_err() {
@@ -206,9 +210,77 @@ pub(super) fn connect(app: &AppWindow, sender: &mpsc::Sender<Command>) {
             show_request_rows(&app, false);
         }
     });
+    let weak = app.as_weak();
+    let clear_sender = sender.clone();
+    app.on_clear_requests(move || {
+        if let Some(app) = weak.upgrade()
+            && !app.get_request_clearing()
+        {
+            app.set_request_clearing(true);
+            app.set_request_clear_error("".into());
+            if let Err(error) = clear_sender.try_send(Command::ClearRequests) {
+                app.set_request_clearing(false);
+                app.set_request_clear_error(
+                    match error {
+                        mpsc::error::TrySendError::Full(_) => "后台正在处理其他操作，请稍后重试。",
+                        mpsc::error::TrySendError::Closed(_) => {
+                            "后台已停止，请重新打开 SwitchX 后重试。"
+                        }
+                    }
+                    .into(),
+                );
+            }
+        }
+    });
+    let weak = app.as_weak();
+    app.on_finish_clear_requests(move || {
+        if let Some(app) = weak.upgrade()
+            && app.get_request_erasing()
+        {
+            reset_request_history(&app);
+            app.set_request_erasing(false);
+            app.set_request_clearing(false);
+            app.set_request_cleared(true);
+            // A route can finish another request during the exit animation.
+            app.invoke_refresh_requests();
+        }
+    });
+}
+
+fn reset_request_history(app: &AppWindow) {
+    app.set_requests(ModelRc::new(VecModel::default()));
+    app.set_request_log(ModelRc::new(VecModel::default()));
+    app.set_request_bars(ModelRc::new(VecModel::default()));
+    app.set_request_stats(RequestStats {
+        success_rate: -1.0,
+        p50_ms: -1.0,
+        p95_ms: -1.0,
+        first_event_ms: -1.0,
+        ..Default::default()
+    });
+    app.set_request_filter(0);
+    app.set_request_following(true);
+    app.set_request_unseen(0);
+    app.set_request_error("".into());
 }
 
 impl Worker {
+    pub(super) fn clear_requests(&self) {
+        let result = self.data_dir.get().and_then(app::clear_requests);
+        let _ = self.weak.upgrade_in_event_loop(move |app| match result {
+            Ok(_) => {
+                app.set_request_clear_open(false);
+                app.set_request_erasing(true);
+            }
+            Err(error) => {
+                app.set_request_clearing(false);
+                app.set_request_clear_error(
+                    format!("清空失败：{}。记录已保留，请稍后重试。", error.message()).into(),
+                );
+            }
+        });
+    }
+
     pub(super) fn refresh_requests(&self) {
         let result = self.data_dir.get().and_then(app::load_requests);
         let _ = self.weak.upgrade_in_event_loop(move |app| {
@@ -230,6 +302,67 @@ impl Worker {
 mod tests {
     use super::*;
     use switchx::headless;
+
+    #[test]
+    fn clearing_waits_for_success_resets_paused_history_and_refreshes_new_arrivals() {
+        headless::install();
+        let app = AppWindow::new().unwrap();
+        let (sender, mut receiver) = mpsc::channel(1);
+        connect(&app, &sender);
+        let rows = ModelRc::new(VecModel::from(vec![RequestRow {
+            id: "retained-old-request".into(),
+            ..Default::default()
+        }]));
+        app.set_requests(rows.clone());
+        app.set_request_log(rows);
+        app.set_request_filter(2);
+        app.set_request_following(false);
+        app.set_request_unseen(4);
+        app.invoke_clear_requests();
+        assert!(app.get_request_clearing());
+        app.invoke_clear_requests();
+        app.invoke_refresh_requests();
+        assert!(matches!(receiver.try_recv(), Ok(Command::ClearRequests)));
+        assert!(receiver.try_recv().is_err(), "no duplicate clears or polls");
+        app.invoke_finish_clear_requests();
+        assert_eq!(
+            app.get_requests().row_count(),
+            1,
+            "wait for database success"
+        );
+
+        // Queue pressure must leave the old list available for a retry.
+        app.set_request_clearing(false);
+        sender
+            .try_send(Command::PollRouteStatus)
+            .unwrap_or_else(|_| panic!("empty queue"));
+        app.invoke_clear_requests();
+        assert!(!app.get_request_clearing());
+        assert!(!app.get_request_clear_error().is_empty());
+        assert_eq!(app.get_requests().row_count(), 1);
+        receiver
+            .try_recv()
+            .unwrap_or_else(|_| panic!("queued poll"));
+
+        app.invoke_clear_requests();
+        receiver
+            .try_recv()
+            .unwrap_or_else(|_| panic!("queued clear"));
+        app.set_request_erasing(true);
+        app.invoke_finish_clear_requests();
+        assert!(!app.get_request_clearing());
+        assert!(!app.get_request_erasing());
+        assert!(app.get_request_cleared());
+        assert_eq!(app.get_requests().row_count(), 0);
+        assert_eq!(app.get_request_log().row_count(), 0);
+        assert_eq!(app.get_request_bars().row_count(), 0);
+        assert_eq!(app.get_request_stats().total, 0);
+        assert_eq!(app.get_request_stats().p50_ms, -1.0);
+        assert_eq!(app.get_request_filter(), 0);
+        assert_eq!(app.get_request_unseen(), 0);
+        assert!(app.get_request_following());
+        assert!(matches!(receiver.try_recv(), Ok(Command::RefreshRequests)));
+    }
 
     #[test]
     fn paused_request_rows_keep_aged_history_and_count_arrivals() {

@@ -16,7 +16,9 @@ mod providers;
 mod snapshot;
 mod usage;
 
-pub use activity::{RequestStats, RequestView, format_duration, load_requests, request_stats};
+pub use activity::{
+    RequestStats, RequestView, clear_requests, format_duration, load_requests, request_stats,
+};
 pub use common_config::{
     extract_and_save_common_config, initialize_common_config, load_common_config,
     save_common_config,

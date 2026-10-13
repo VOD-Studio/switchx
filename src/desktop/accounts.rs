@@ -10,6 +10,7 @@ use switchx::{
     id::new_id,
     storage::{AccountBinding, ProviderKind, ProviderRecord, Store},
     ui::{AccountRow, AppWindow, CodexQuotaRow},
+    upstream,
 };
 use tokio::sync::{mpsc, watch};
 
@@ -532,6 +533,8 @@ impl Worker {
             SubscriptionAction::SwitchToApi => {
                 let port = route_port(port)?;
                 let helper = std::env::current_exe().map_err(|_| "无法定位 SwitchX 程序")?;
+                // API routes record this helper; refuse before restoring the current route.
+                upstream::ensure_persistent_helper(&helper)?;
                 let snapshot = load_snapshot(data_dir, false).map_err(|error| error.message())?;
                 let model = snapshot
                     .models

@@ -1,0 +1,163 @@
+import { Theme } from "../tokens.slint";
+import { QuietButton } from "../components.slint";
+
+export component ClearHistoryButton inherits QuietButton {
+    height: 30px;
+    width: 104px;
+    text: "清空记录";
+    icon: @image-url("../../assets/ui/trash.svg");
+    icon-width: 14px;
+    icon-height: 14px;
+    icon-color: root.hovered ? Theme.error : Theme.muted-text;
+    icon-angle: root.hovered ? -8deg : 0deg;
+    ghost: true;
+    border-radius: 15px;
+    border-width: 1px;
+    border-color: root.hovered ? Theme.error.with-alpha(0.35) : transparent;
+    background: root.hovered ? Theme.error.with-alpha(0.09) : transparent;
+}
+
+// Always mounted inside the shared animated modal, so closing can finish its motion.
+export component ClearHistoryConfirm inherits VerticalLayout {
+    in property <bool> open;
+    in property <bool> busy;
+    callback confirm();
+    callback cancel();
+    private property <bool> motion: Theme.animations-enabled && !Theme.system-reduced-motion;
+    private property <float> reveal: root.open ? 1 : 0;
+    animate reveal {
+        duration: root.motion ? 460ms : 0ms;
+        easing: cubic-bezier(0.22, 1, 0.36, 1);
+    }
+    spacing: 16px;
+
+    Rectangle {
+        height: 104px;
+        border-radius: 14px;
+        background: @linear-gradient(110deg, Theme.error.with-alpha(0.07) 0%, Theme.raised.with-alpha(0.5) 100%);
+        clip: true;
+        accessible-role: none;
+        for offset[index] in [0, 1, 2]: Rectangle {
+            private property <float> slide: root.busy ? 1 : 0;
+            animate slide {
+                duration: root.motion ? 480ms : 0ms;
+                delay: root.motion ? index * 70ms : 0ms;
+                easing: cubic-bezier(0.22, 1, 0.36, 1);
+            }
+            x: parent.width / 2 - 32px + offset * 6px - self.slide * 24px;
+            y: 18px + offset * 20px + (1 - root.reveal) * (12px + offset * 5px);
+            width: 132px;
+            height: 28px;
+            border-radius: 8px;
+            background: Theme.panel;
+            border-width: 1px;
+            border-color: Theme.border;
+            opacity: clamp(root.reveal * (1 - self.slide), 0, 1);
+            Rectangle {
+                x: 10px;
+                y: 10px;
+                width: 7px;
+                height: 7px;
+                border-radius: 4px;
+                background: Theme.brand.with-alpha(0.55);
+            }
+
+            Rectangle {
+                x: 26px;
+                y: 11px;
+                width: 48px - offset * 8px;
+                height: 5px;
+                border-radius: 3px;
+                background: Theme.muted-text.with-alpha(0.25);
+            }
+
+            Rectangle {
+                x: 103px;
+                y: 11px;
+                width: 18px;
+                height: 5px;
+                border-radius: 3px;
+                background: Theme.brand.with-alpha(0.25);
+            }
+        }
+        Rectangle {
+            x: parent.width / 2 - 104px;
+            y: 22px + (1 - root.reveal) * 12px;
+            width: 60px;
+            height: 60px;
+            border-radius: 20px;
+            background: Theme.panel;
+            border-width: 1px;
+            border-color: Theme.error.with-alpha(0.2);
+            drop-shadow-blur: 14px;
+            drop-shadow-offset-y: 4px;
+            drop-shadow-color: Theme.error.with-alpha(0.07);
+            opacity: root.reveal;
+            Image {
+                x: (parent.width - self.width) / 2;
+                y: (parent.height - self.height) / 2;
+                width: 26px;
+                height: 26px;
+                source: root.busy ? @image-url("../../assets/ui/loader.svg") : @image-url("../../assets/ui/trash.svg");
+                colorize: Theme.error;
+                private property <angle> spin: root.busy ? 360deg : 0deg;
+                transform-rotation: root.busy ? self.spin : -8deg * (1 - root.reveal);
+                animate spin {
+                    duration: root.busy && root.motion ? 1000ms : 0ms;
+                    iteration-count: root.busy ? -1 : 1;
+                }
+            }
+        }
+    }
+
+    Text {
+        text: "将删除全部历史请求记录，包括其他筛选下的记录。\n清空后无法恢复。";
+        color: Theme.primary-text;
+        font-size: 13px;
+        wrap: word-wrap;
+        opacity: root.reveal;
+    }
+
+    HorizontalLayout {
+        spacing: 7px;
+        Image {
+            width: 13px;
+            height: 13px;
+            source: @image-url("../../assets/ui/activity.svg");
+            colorize: Theme.brand;
+        }
+
+        Text {
+            text: "路由继续运行，新的请求会继续记录。";
+            color: Theme.muted-text;
+            font-size: 12px;
+            horizontal-stretch: 1;
+        }
+    }
+
+    Rectangle {
+        height: 1px;
+        background: Theme.border.with-alpha(0.65);
+    }
+
+    HorizontalLayout {
+        height: 38px;
+        spacing: 10px;
+        QuietButton {
+            text: "保留记录";
+            height: 38px;
+            enabled: root.open && !root.busy;
+            clicked => { root.cancel(); }
+        }
+
+        confirm-button := QuietButton {
+            text: root.busy ? "正在清空…" : "确认清空";
+            height: 38px;
+            primary: true;
+            background: self.hovered ? Theme.error.with-alpha(0.88) : Theme.error;
+            border-color: Theme.error;
+            enabled: root.open && !root.busy;
+            clicked => { root.confirm(); }
+        }
+    }
+}

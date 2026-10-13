@@ -9,6 +9,7 @@ use super::feedback::show_action;
 pub(super) enum Command {
     Refresh(bool),
     RefreshRequests,
+    ClearRequests,
     PollRouteStatus,
     Save(ProviderForm),
     BeginProviderEditor {

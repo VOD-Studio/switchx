@@ -49,6 +49,7 @@ import { RoutingPage } from "pages/routing.slint";
 import { ActivityPage } from "pages/activity.slint";
 import { UsagePage } from "pages/usage.slint";
 import { UsageSourcesSheet, UsagePricesSheet } from "usage/usage-sheets.slint";
+import { ClearHistoryConfirm } from "pages/activity-clear.slint";
 import { ConfigPage } from "pages/config.slint";
 import { ConnectionStatusDialog } from "connection-status.slint";
 import { WorkspaceMenu } from "workspace-menu.slint";
@@ -281,6 +282,11 @@ export component AppWindow inherits Window {
     in-out property <bool> request-loading: false;
     in-out property <bool> request-write-failed: false;
     in-out property <string> request-error: "";
+    in-out property <bool> request-clear-open;
+    in-out property <bool> request-clearing;
+    in-out property <bool> request-erasing;
+    in-out property <bool> request-cleared;
+    in-out property <string> request-clear-error;
     // Usage page: Rust formats every figure; the page animates between reports.
     in-out property <UsageSummary> usage-summary: { cache-rate: -1 };
     in-out property <[UsagePoint]> usage-points: [];
@@ -522,6 +528,16 @@ export component AppWindow inherits Window {
     callback check-all-providers();
     callback refresh-requests();
     callback filter-requests(int);
+    callback clear-requests();
+    callback finish-clear-requests();
+
+    // The timer belongs to the window so leaving the page cannot strand a clear.
+    Timer {
+        interval: Theme.animations-enabled && !Theme.system-reduced-motion ? 560ms : 1ms;
+        running: root.request-erasing;
+        triggered => { root.finish-clear-requests(); }
+    }
+
     callback filter-providers(string);
     callback save-provider(string, string, string, string, string);
     callback begin-provider-editor(string);
@@ -629,7 +645,7 @@ export component AppWindow inherits Window {
         triggered => { root.departing-connection-form = 0; }
     }
 
-    property <bool> modal-open: root.usage-sources-open || root.usage-prices-open || root.workspace-open || root.account-removing-id != "" || root.account-login-confirm-open || root.drawer-open || root.connection-picker-open || root.connection-models-open || root.xai-editor-open || root.editor-open || root.subscription-editor-open || root.common-config-editor-open || root.icon-picker-open || root.model-editor-open || root.fallback-editor-open || root.publish-drawer-open || root.direct-drawer-open || root.delete-account-confirm;
+    property <bool> modal-open: root.request-clear-open || root.usage-sources-open || root.usage-prices-open || root.workspace-open || root.account-removing-id != "" || root.account-login-confirm-open || root.drawer-open || root.connection-picker-open || root.connection-models-open || root.xai-editor-open || root.editor-open || root.subscription-editor-open || root.common-config-editor-open || root.icon-picker-open || root.model-editor-open || root.fallback-editor-open || root.publish-drawer-open || root.direct-drawer-open || root.delete-account-confirm;
     property <string> page-title: root.active-page == 0 ? "模型，随手可用。" : root.active-page == 1 ? "连接" : root.active-page == 2 ? "用量，心中有数。" : root.active-page == 3 ? "每次请求，有迹可循。" : root.active-page == 4 ? "让工作流更顺手。" : "设置";
     property <string> page-subtitle: root.active-page == 0 ? "配好连接，整组模型随手可用。" : root.active-page == 1 ? "账号与上游，集中管理。" : root.active-page == 2 ? "Token、缓存与估算费用，按连接和模型细看。" : root.active-page == 3 ? "查看模型、耗时与结果。" : root.active-page == 4 ? "MCP 与 Skills，独立于模型连接。" : "把工作空间调成你喜欢的样子。";
     animate background { duration: Theme.page-motion; }
@@ -1206,6 +1222,9 @@ export component AppWindow inherits Window {
                                     bars: root.request-bars;
                                     sync: root.request-sync;
                                     loading: root.request-loading;
+                                    clearing: root.request-clearing;
+                                    erasing: root.request-erasing;
+                                    cleared: root.request-cleared;
                                     request-error: root.request-error;
                                     write-failed: root.request-write-failed;
                                     route-running: root.route-running;
@@ -1215,6 +1234,7 @@ export component AppWindow inherits Window {
                                     unseen <=> root.request-unseen;
                                     refresh-requests() => { root.refresh-requests(); }
                                     filter-requests(index) => { root.filter-requests(index); }
+                                    clear-history() => { root.request-clear-error = ""; root.request-clear-open = true; }
                                 }
                                 if root.active-page == 4: VerticalLayout {
                                     spacing: 22px;
@@ -1708,6 +1728,23 @@ export component AppWindow inherits Window {
             choose-provider-icon(id) => { root.choose-provider-icon(id); }
             close-provider-icon-picker() => { root.close-provider-icon-picker(); }
             filter-provider-icons(query) => { root.filter-provider-icons(query); }
+        }
+    }
+
+    Drawer {
+        open: root.request-clear-open;
+        centered: true;
+        title: "清空活动记录";
+        subtitle: "为新的请求留出空间。";
+        panel-width: 460px;
+        busy: root.request-clearing;
+        error-message: root.request-clear-error;
+        dismissed => { root.request-clear-open = false; }
+        ClearHistoryConfirm {
+            open: root.request-clear-open;
+            busy: root.request-clearing;
+            confirm => { root.clear-requests(); }
+            cancel => { root.request-clear-open = false; }
         }
     }
 

@@ -161,6 +161,7 @@ impl Worker {
         match command {
             Command::PollRouteStatus => {}
             Command::RefreshRequests => self.refresh_requests(),
+            Command::ClearRequests => self.clear_requests(),
             Command::Refresh(check_credentials) => self.refresh(check_credentials),
             Command::BeginXaiEditor(id) => self.begin_xai_editor(id),
             Command::SaveXai {
@@ -260,6 +261,8 @@ impl Worker {
             app.set_recovery_only(true);
             app.set_loading(false);
             app.set_request_loading(false);
+            app.set_request_clearing(false);
+            app.set_request_clear_open(false);
             app.set_config_managed(true);
             app.set_active_page(5);
             show_action(
