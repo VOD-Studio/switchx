@@ -148,25 +148,38 @@ pub const TRANSIENT_HELPER_MESSAGE: &str = "SwitchX 正从磁盘映像或 macOS 
 /// `AppTranslocation` directory; both paths vanish after eject or reboot.
 pub fn ensure_persistent_helper(path: &Path) -> Result<(), String> {
     if cfg!(target_os = "macos") {
-        // `/Volumes/Macintosh HD` links to `/`, so judge where the path leads.
-        let resolved = std::fs::canonicalize(path);
-        if is_transient_macos_location(resolved.as_deref().unwrap_or(path)) {
+        let resolved = std::fs::canonicalize(path).ok();
+        let startup_disk = |volume: &Path| {
+            std::fs::canonicalize(volume).is_ok_and(|target| target == Path::new("/"))
+        };
+        if is_transient_macos_helper(path, resolved.as_deref(), startup_disk) {
             return Err(TRANSIENT_HELPER_MESSAGE.into());
         }
     }
     Ok(())
 }
 
-fn is_transient_macos_location(path: &Path) -> bool {
+/// Codex runs `written` as stored, so it and the file it `resolved` to must
+/// both outlast this launch. `is_startup_disk` recognizes the boot volume's
+/// permanent link to `/`, such as `/Volumes/Macintosh HD`.
+fn is_transient_macos_helper(
+    written: &Path,
+    resolved: Option<&Path>,
+    is_startup_disk: impl Fn(&Path) -> bool,
+) -> bool {
     let named = |component: Component, name: &str| component.as_os_str().eq_ignore_ascii_case(name);
-    let mut components = path.components();
-    let mounted_image = components.next() == Some(Component::RootDir)
-        && components.next().is_some_and(|name| named(name, "Volumes"))
-        && components.next().is_some();
-    mounted_image
-        || path
-            .components()
-            .any(|name| named(name, "AppTranslocation"))
+    std::iter::once(written).chain(resolved).any(|path| {
+        let mut components = path.components();
+        let mounted_volume = components.next() == Some(Component::RootDir)
+            && components.next().is_some_and(|name| named(name, "Volumes"))
+            && components
+                .next()
+                .is_some_and(|volume| !is_startup_disk(&Path::new("/Volumes").join(volume)));
+        mounted_volume
+            || path
+                .components()
+                .any(|name| named(name, "AppTranslocation"))
+    })
 }
 
 #[cfg(test)]
@@ -192,13 +205,14 @@ mod tests {
 
     #[test]
     fn recognizes_macos_helper_locations_that_vanish_after_eject_or_reboot() {
+        let transient = |path| is_transient_macos_helper(Path::new(path), None, |_| false);
         for path in [
             "/Volumes/SwitchX/SwitchX.app/Contents/MacOS/switchx",
             "/volumes/SwitchX 0.1.0/SwitchX.app/Contents/MacOS/switchx",
             "/private/var/folders/ab/c1d2/T/AppTranslocation/0F1E2D3C-4B5A-6978-8796-A5B4C3D2E1F0/d/SwitchX.app/Contents/MacOS/switchx",
             "/var/folders/ab/c1d2/T/apptranslocation/UUID/d/SwitchX.app/Contents/MacOS/switchx",
         ] {
-            assert!(is_transient_macos_location(Path::new(path)), "{path}");
+            assert!(transient(path), "{path}");
         }
         for path in [
             "/Applications/SwitchX.app/Contents/MacOS/switchx",
@@ -209,8 +223,39 @@ mod tests {
             "Volumes/SwitchX/SwitchX.app/Contents/MacOS/switchx",
             "/Volumes",
         ] {
-            assert!(!is_transient_macos_location(Path::new(path)), "{path}");
+            assert!(!transient(path), "{path}");
         }
+    }
+
+    #[test]
+    fn judges_both_the_written_helper_path_and_its_target() {
+        let installed = Path::new("/Applications/SwitchX.app/Contents/MacOS/switchx");
+        let startup_disk = |volume: &Path| volume == Path::new("/Volumes/Macintosh HD");
+        // A link on an ejectable volume disappears even when its target stays.
+        assert!(is_transient_macos_helper(
+            Path::new("/Volumes/Tools/switchx"),
+            Some(installed),
+            startup_disk
+        ));
+        assert!(is_transient_macos_helper(
+            Path::new("/Users/example/bin/switchx"),
+            Some(Path::new(
+                "/private/var/folders/ab/c1d2/T/AppTranslocation/UUID/d/SwitchX.app/Contents/MacOS/switchx"
+            )),
+            startup_disk
+        ));
+        assert!(!is_transient_macos_helper(
+            Path::new("/Volumes/Macintosh HD/Applications/SwitchX.app/Contents/MacOS/switchx"),
+            Some(installed),
+            startup_disk
+        ));
+        assert!(is_transient_macos_helper(
+            Path::new("/Volumes/Macintosh HD/Volumes/SwitchX/SwitchX.app/Contents/MacOS/switchx"),
+            Some(Path::new(
+                "/Volumes/SwitchX/SwitchX.app/Contents/MacOS/switchx"
+            )),
+            startup_disk
+        ));
     }
 
     #[cfg(target_os = "macos")]
@@ -242,6 +287,21 @@ mod tests {
         std::fs::remove_dir_all(&root).unwrap();
         assert_eq!(outside, Ok(()));
         assert_eq!(linked, Err(TRANSIENT_HELPER_MESSAGE.into()));
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn persistent_helper_check_accepts_the_startup_disk_link() {
+        let Some(startup_disk) = std::fs::read_dir("/Volumes").unwrap().find_map(|entry| {
+            let path = entry.unwrap().path();
+            (std::fs::canonicalize(&path).ok()? == Path::new("/")).then_some(path)
+        }) else {
+            return;
+        };
+        assert_eq!(
+            ensure_persistent_helper(&startup_disk.join("usr/bin/true")),
+            Ok(())
+        );
     }
 
     #[cfg(not(target_os = "macos"))]
