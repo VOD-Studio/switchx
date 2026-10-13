@@ -47,7 +47,8 @@ import {
     AccountLoginConfirm,
     AccountRemovalConfirm,
 } from "pages/account-dialogs.slint";
-import { DirectSwitchSheet, RoutePublishSheet } from "config-previews.slint";
+import { DirectSwitchSheet } from "config-previews.slint";
+import { RoutePublishSheet } from "route-publish.slint";
 
 export {
     XaiQuotaRow,
@@ -1607,9 +1608,10 @@ export component AppWindow inherits Window {
 
     Drawer {
         open: root.publish-drawer-open;
-        title: "启用前，确认一下。";
-        subtitle: "检查目录与连接，确认配置变化，再开启新的 Codex 会话。";
-        panel-width: 690px;
+        title: "准备启用模型";
+        subtitle: "你的模型工作空间，即将就绪。";
+        centered: true;
+        panel-width: 680px;
         busy: root.busy;
         error-message: root.error-code == "" ? "" : root.error-message + " · " + root.error-action;
         dismissed => {
@@ -1618,13 +1620,14 @@ export component AppWindow inherits Window {
             app-keyboard.focus();
         }
         RoutePublishSheet {
+            open: root.publish-drawer-open;
             model-count: root.selected-model-count;
-            default-model: root.default-model;
+            default-model: root.default-model-label;
             config-home: root.config-home;
             preview: root.route-preview;
             ready: root.route-preview-ready;
-            action-message: root.action-message;
             busy: root.busy;
+            has-error: root.error-code != "";
             can-act: !root.config-managed && !root.chatgpt-login-pending && !root.xai-pending;
             inspect => { root.inspect-route(); }
             apply => { root.apply-route(); }

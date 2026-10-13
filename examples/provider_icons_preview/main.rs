@@ -17,6 +17,7 @@
 //! Settings: add --settings-design (themes, layouts, states, and motion).
 //! Model mapping editor: add --model-editor-design (states, actions, and motion)
 //! or --model-editor-native (window; add --light for the light theme).
+//! Route confirmation: add --route-publish-design or --route-publish-native.
 //! Also: --connection-status, --accounts-design, --codex-quota, --xai-quota,
 //! --quota-loading-motion, --check-progress, --route-launch, and --layout-only.
 
@@ -27,6 +28,7 @@ mod editors;
 mod fixtures;
 mod models;
 mod overview;
+mod publish;
 mod settings;
 mod status;
 mod support;
@@ -60,19 +62,26 @@ fn main() -> Result<(), Box<dyn Error>> {
     let native_provider = flag("--provider-editor-native");
     let native_common = flag("--common-config-native");
     let native_model = flag("--model-editor-native");
-    let window = if native_connections || native_provider || native_common || native_model {
-        #[cfg(target_os = "macos")]
-        macos::configure_window()?;
-        MinimalSoftwareWindow::new(RepaintBufferType::NewBuffer)
-    } else {
-        headless::install_with_manual_time()
-    };
+    let native_publish = flag("--route-publish-native");
+    let window =
+        if native_connections || native_provider || native_common || native_model || native_publish
+        {
+            #[cfg(target_os = "macos")]
+            macos::configure_window()?;
+            MinimalSoftwareWindow::new(RepaintBufferType::NewBuffer)
+        } else {
+            headless::install_with_manual_time()
+        };
     let app = AppWindow::new()?;
     switchx::model_picker::connect(&app);
     app.set_native_titlebar_overlay(flag("--native-titlebar-overlay"));
     switchx::reasoning_picker::connect(&app);
     app.set_loading(false);
     app.global::<Theme>().set_animations_enabled(false);
+    if native_publish || flag("--route-publish-design") {
+        app.show()?;
+        return publish::render_route_publish(&app, &window, output, native_publish);
+    }
     if flag("--settings-design") {
         app.show()?;
         return settings::render_settings_design(&app, &window, output);

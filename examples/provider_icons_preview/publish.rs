@@ -1,0 +1,439 @@
+use std::{cell::Cell, error::Error, fs, path::Path, rc::Rc, time::Duration};
+
+use i_slint_backend_testing::ElementHandle;
+use slint::platform::{WindowEvent, software_renderer::MinimalSoftwareWindow};
+use slint::{ComponentHandle, LogicalPosition, Model, ModelRc, PhysicalSize, VecModel};
+use switchx::{
+    headless, provider_icons,
+    ui::{AppWindow, ModelRow, ProviderRow, Theme},
+};
+
+use crate::support::{every, frame, play, render, set_theme, snapshot, snapshot_now};
+
+const DEFAULT_MODEL: &str = "sx-synthetic-chatgpt-gpt-5-5";
+const INSPECT: &str = "重新检查启用条件";
+const APPLY: &str = "确认启用模型";
+const EXPAND: &str = "展开检查详情";
+const COLLAPSE: &str = "收起检查详情";
+
+// Resolve the actual controls through their accessibility semantics. This keeps
+// pointer dispatch faithful while allowing the responsive layout to change.
+fn control(app: &AppWindow, label: &str) -> ElementHandle {
+    let mut matches = ElementHandle::find_by_accessible_label(app, label);
+    let item = matches
+        .next()
+        .unwrap_or_else(|| panic!("missing publish control: {label}"));
+    assert!(
+        matches.next().is_none(),
+        "ambiguous publish control: {label}"
+    );
+    item
+}
+
+fn point(app: &AppWindow, label: &str) -> LogicalPosition {
+    let item = control(app, label);
+    let position = item.absolute_position();
+    let size = item.size();
+    LogicalPosition::new(
+        position.x + size.width / 2.0,
+        position.y + size.height / 2.0,
+    )
+}
+
+fn click(app: &AppWindow, window: &MinimalSoftwareWindow, label: &str) {
+    let position = point(app, label);
+    let size = app.window().size();
+    assert!(
+        position.x > 0.0
+            && position.y > 0.0
+            && position.x < size.width as f32
+            && position.y < size.height as f32,
+        "publish control must be visible: {label} at {position:?}"
+    );
+    headless::click(window, position.x, position.y);
+    headless::render(window);
+}
+
+fn scroll_body_to_details(app: &AppWindow, window: &MinimalSoftwareWindow) {
+    let before = point(app, COLLAPSE).y;
+    let viewport = ElementHandle::find_by_element_id(app, "RoutePublishSheet::content-scroll")
+        .next()
+        .expect("publish body scroll viewport");
+    let position = viewport.absolute_position();
+    // The top of the viewport is outside the nested diagnostics scroll area.
+    headless::scroll(
+        window,
+        position.x + viewport.size().width / 2.0,
+        position.y + 12.0,
+        -10_000.0,
+    );
+    render(window);
+    assert!(
+        point(app, COLLAPSE).y < before,
+        "expanded diagnostics must be reachable by scrolling the body"
+    );
+}
+
+fn seed(app: &AppWindow) -> Result<(), Box<dyn Error>> {
+    let groups = [
+        ("chatgpt", "ChatGPT 订阅", "openai", true, false, 8),
+        ("grok", "Grok", "grok", true, true, 3),
+        ("api", "Podlink", "anthropic", false, false, 14),
+    ];
+    let mut providers = Vec::new();
+    for (id, name, icon_id, subscription, grok, count) in groups {
+        let icon = provider_icons::icon(icon_id).unwrap();
+        let models = (0..count)
+            .map(|index| {
+                let model = if id == "chatgpt" && index == 0 {
+                    "gpt-5.5".to_owned()
+                } else {
+                    format!("synthetic-{id}-{}", index + 1)
+                };
+                ModelRow {
+                    provider_id: format!("preview-{id}").into(),
+                    provider_name: name.into(),
+                    upstream_model: model.clone().into(),
+                    public_id: if id == "chatgpt" && index == 0 {
+                        DEFAULT_MODEL.into()
+                    } else {
+                        format!("sx-synthetic-{id}-{index}").into()
+                    },
+                    display_name: format!("{model}/{name}").into(),
+                    saved: true,
+                    ready: true,
+                    included: true,
+                    is_subscription: subscription,
+                    ..Default::default()
+                }
+            })
+            .collect::<Vec<_>>();
+        providers.push(ProviderRow {
+            id: format!("preview-{id}").into(),
+            name: name.into(),
+            icon: slint::Image::load_from_svg_data(icon.data)?,
+            monochrome: icon.monochrome,
+            endpoint: "https://example.invalid/v1".into(),
+            base_url: "https://example.invalid/v1".into(),
+            binding_label: "绑定：合成预览账号".into(),
+            is_subscription: subscription,
+            is_grok: grok,
+            model_count: count,
+            ready_model_count: count,
+            selected_model_count: count,
+            models: ModelRc::new(VecModel::from(models)),
+            ..Default::default()
+        });
+    }
+    app.set_models(ModelRc::new(VecModel::from(
+        providers
+            .iter()
+            .flat_map(|provider| provider.models.iter())
+            .collect::<Vec<_>>(),
+    )));
+    let providers = ModelRc::new(VecModel::from(providers));
+    app.set_providers(providers.clone());
+    app.set_filtered_providers(providers);
+    app.set_selected_model_count(25);
+    app.set_selectable_model_count(25);
+    app.set_selected_connection_count(3);
+    app.set_default_model(DEFAULT_MODEL.into());
+    app.set_route_preview_model(DEFAULT_MODEL.into());
+    app.set_default_model_label("gpt-5.5/ChatGPT 订阅".into());
+    app.set_config_home("/Users/preview/.codex".into());
+    app.set_status_text("合成 UI 预览 · 不访问账号或 Codex 配置".into());
+    app.set_active_page(0);
+    Ok(())
+}
+
+fn preview(app: &AppWindow) -> String {
+    let mut lines = vec![
+        "codex-cli 0.162.1 已核对 25 个可选模型 · http://127.0.0.1:18731/v1".to_owned(),
+        "目标：/Users/preview/.codex/config.toml".to_owned(),
+    ];
+    for row in app.get_models().iter() {
+        lines.push(format!(
+            "{} → {} (https://example.invalid/v1) / {}",
+            row.display_name, row.provider_name, row.upstream_model
+        ));
+    }
+    lines.extend([
+        "受管变更：model、model_provider、model_catalog_json、model_providers.switchx_router"
+            .into(),
+        "订阅认证由目标 Codex 管理；仅向官方模型传递认证。".into(),
+        "独立本地令牌会写入仅当前用户可读的配置及恢复记录。".into(),
+        "Grok 账号在发布时固定；更换账号或模型请启动新会话。".into(),
+        "Codex 窗口与通用配置使用默认模型的供应商设置。".into(),
+    ]);
+    lines.join("\n")
+}
+
+fn ready(app: &AppWindow) {
+    app.set_busy(false);
+    app.set_route_preview(preview(app).into());
+    app.set_route_preview_ready(true);
+    app.set_error_code("".into());
+    app.set_error_message("".into());
+    app.set_error_action("".into());
+    app.set_action_message("发布预览已准备；确认启用后，在新的 Codex 会话中选择模型。".into());
+}
+
+fn checking(app: &AppWindow) {
+    app.set_busy(true);
+    app.set_route_preview_ready(false);
+    app.set_route_preview("".into());
+    app.set_error_code("".into());
+    app.set_error_message("".into());
+    app.set_error_action("".into());
+    app.set_action_message("正在核对模型目录、连接与目标配置…".into());
+}
+
+fn reset(app: &AppWindow, window: &MinimalSoftwareWindow) {
+    app.set_publish_drawer_open(false);
+    app.set_busy(false);
+    app.set_config_managed(false);
+    app.set_chatgpt_login_pending(false);
+    app.set_xai_pending(false);
+    app.set_default_model_label("gpt-5.5/ChatGPT 订阅".into());
+    app.set_config_home("/Users/preview/.codex".into());
+    render(window);
+    ready(app);
+    app.set_publish_drawer_open(true);
+    render(window);
+}
+
+pub(super) fn render_route_publish(
+    app: &AppWindow,
+    window: &MinimalSoftwareWindow,
+    output: &Path,
+    native: bool,
+) -> Result<(), Box<dyn Error>> {
+    seed(app)?;
+    if native {
+        app.window().set_size(PhysicalSize::new(1200, 820));
+        app.invoke_set_appearance(!std::env::args().any(|arg| arg == "--light"));
+        app.global::<Theme>().set_animations_enabled(true);
+        let weak = app.as_weak();
+        app.on_inspect_route(move || {
+            let app = weak.upgrade().unwrap();
+            app.set_publish_drawer_open(true);
+            checking(&app);
+            let weak = app.as_weak();
+            slint::Timer::single_shot(Duration::from_millis(1400), move || {
+                if let Some(app) = weak.upgrade() {
+                    ready(&app);
+                }
+            });
+        });
+        let weak = app.as_weak();
+        app.on_apply_route(move || {
+            if let Some(app) = weak.upgrade() {
+                app.set_busy(true);
+                let weak = app.as_weak();
+                slint::Timer::single_shot(Duration::from_secs(1), move || {
+                    if let Some(app) = weak.upgrade() {
+                        app.set_busy(false);
+                        app.set_publish_drawer_open(false);
+                    }
+                });
+            }
+        });
+        let weak = app.as_weak();
+        slint::Timer::single_shot(Duration::ZERO, move || {
+            let app = weak.upgrade().unwrap();
+            ready(&app);
+            app.set_publish_drawer_open(true);
+        });
+        return Ok(app.run()?);
+    }
+
+    let inspections = Rc::new(Cell::new(0));
+    let calls = inspections.clone();
+    let weak = app.as_weak();
+    app.on_inspect_route(move || {
+        calls.set(calls.get() + 1);
+        checking(&weak.upgrade().unwrap());
+    });
+    let applications = Rc::new(Cell::new(0));
+    let calls = applications.clone();
+    app.on_apply_route(move || calls.set(calls.get() + 1));
+    let cancellations = Rc::new(Cell::new(0));
+    let calls = cancellations.clone();
+    app.on_cancel_route_preview(move || calls.set(calls.get() + 1));
+
+    for (width, height) in [(1200, 820), (1000, 680)] {
+        app.window().set_size(PhysicalSize::new(width, height));
+        for dark in [false, true] {
+            app.global::<Theme>().set_animations_enabled(false);
+            set_theme(app, window, dark);
+            reset(app, window);
+            let suffix = format!("{}-{width}x{height}", if dark { "dark" } else { "light" });
+            snapshot(window, output, &format!("publish-ready-{suffix}"))?;
+
+            click(app, window, EXPAND);
+            assert_eq!(control(app, COLLAPSE).accessible_expanded(), Some(true));
+            snapshot(window, output, &format!("publish-details-{suffix}"))?;
+            scroll_body_to_details(app, window);
+            snapshot(
+                window,
+                output,
+                &format!("publish-details-scrolled-{suffix}"),
+            )?;
+            click(app, window, COLLAPSE);
+            assert_eq!(control(app, EXPAND).accessible_expanded(), Some(false));
+
+            let inspect_count = inspections.get();
+            click(app, window, INSPECT);
+            assert_eq!(inspections.get(), inspect_count + 1);
+            snapshot(window, output, &format!("publish-checking-{suffix}"))?;
+            let apply_count = applications.get();
+            click(app, window, APPLY);
+            click(app, window, INSPECT);
+            let cancel_count = cancellations.get();
+            click(app, window, "关闭");
+            assert!(app.get_publish_drawer_open(), "busy must block dismissing");
+            assert_eq!(cancellations.get(), cancel_count);
+            assert_eq!(applications.get(), apply_count, "busy must block enabling");
+            assert_eq!(inspections.get(), inspect_count + 1, "no duplicate check");
+
+            ready(app);
+            render(window);
+            click(app, window, APPLY);
+            assert_eq!(applications.get(), apply_count + 1);
+            app.set_route_preview_ready(false);
+            render(window);
+            click(app, window, APPLY);
+            assert_eq!(
+                applications.get(),
+                apply_count + 1,
+                "stale preview cannot apply"
+            );
+            snapshot(window, output, &format!("publish-awaiting-check-{suffix}"))?;
+
+            app.set_error_code("SYNTHETIC_CONNECTION_UNAVAILABLE".into());
+            app.set_error_message("无法连接合成 API 服务，模型目录检查未完成。".into());
+            app.set_error_action("检查连接设置后重试".into());
+            app.set_action_message("".into());
+            snapshot(window, output, &format!("publish-error-{suffix}"))?;
+            click(app, window, APPLY);
+            assert_eq!(
+                applications.get(),
+                apply_count + 1,
+                "failed check cannot apply"
+            );
+
+            ready(app);
+            app.set_default_model_label(
+                "synthetic-extremely-long-model-display-name/合成团队的共享订阅连接".into(),
+            );
+            app.set_config_home(
+                "/Users/preview/Developer/synthetic-workspaces/review-environment/.codex".into(),
+            );
+            render(window);
+            app.set_route_preview_ready(true);
+            snapshot(window, output, &format!("publish-long-labels-{suffix}"))?;
+
+            app.set_config_managed(true);
+            render(window);
+            click(app, window, INSPECT);
+            click(app, window, APPLY);
+            assert_eq!(
+                inspections.get(),
+                inspect_count + 1,
+                "managed config blocks checks"
+            );
+            assert_eq!(
+                applications.get(),
+                apply_count + 1,
+                "managed config blocks apply"
+            );
+            app.set_config_managed(false);
+
+            click(app, window, EXPAND);
+            let cancel_count = cancellations.get();
+            click(app, window, "关闭");
+            assert!(!app.get_publish_drawer_open());
+            assert_eq!(cancellations.get(), cancel_count + 1);
+            // Finish dismissing before a fresh opening; interrupted exits may
+            // intentionally preserve the still-visible diagnostic layout.
+            render(window);
+            app.set_publish_drawer_open(true);
+            render(window);
+            assert_eq!(control(app, EXPAND).accessible_expanded(), Some(false));
+            app.set_publish_drawer_open(false);
+            render(window);
+        }
+    }
+
+    app.window().set_size(PhysicalSize::new(1200, 820));
+    set_theme(app, window, true);
+    reset(app, window);
+    app.set_publish_drawer_open(false);
+    render(window);
+    app.global::<Theme>().set_animations_enabled(true);
+    app.set_publish_drawer_open(true);
+    play(window, output, "publish-entry", &every(16, 640))?;
+    click(app, window, INSPECT);
+    play(window, output, "publish-checking", &every(16, 960))?;
+    ready(app);
+    play(window, output, "publish-check-complete", &every(16, 640))?;
+    window.dispatch_event(WindowEvent::PointerMoved {
+        position: point(app, APPLY),
+    });
+    play(window, output, "publish-confirm-hover", &every(16, 256))?;
+    click(app, window, EXPAND);
+    play(window, output, "publish-details-open", &every(16, 480))?;
+    click(app, window, COLLAPSE);
+    frame(64);
+    headless::render(window);
+    click(app, window, EXPAND);
+    play(window, output, "publish-details-reversed", &every(16, 480))?;
+    click(app, window, "关闭");
+    play(window, output, "publish-exit", &every(16, 480))?;
+
+    // System reduced motion must settle without decorative movement, including
+    // the checking state, while keeping controls and state transitions usable.
+    app.global::<Theme>().set_system_reduced_motion(true);
+    reset(app, window);
+    snapshot_now(window, output, "publish-reduced-ready")?;
+    checking(app);
+    render(window);
+    window.dispatch_event(WindowEvent::PointerMoved {
+        position: LogicalPosition::new(5.0, 5.0),
+    });
+    let before = headless::render(window);
+    snapshot_now(window, output, "publish-reduced-checking-0000ms")?;
+    frame(640);
+    let after = headless::render(window);
+    snapshot_now(window, output, "publish-reduced-checking-0640ms")?;
+    assert!(
+        before.as_bytes() == after.as_bytes(),
+        "reduced motion must stop ambient animation"
+    );
+    ready(app);
+    render(window);
+    click(app, window, EXPAND);
+    assert_eq!(control(app, COLLAPSE).accessible_expanded(), Some(true));
+    snapshot_now(window, output, "publish-reduced-details")?;
+    app.global::<Theme>().set_system_reduced_motion(false);
+    app.global::<Theme>().set_animations_enabled(false);
+
+    fs::write(
+        output.join("publish-validation.txt"),
+        format!(
+            "Synthetic data only; no account, filesystem configuration, or upstream access.\n\
+             Themes: light and dark. Sizes: 1000x680 and 1200x820.\n\
+             States: ready, details, checking, awaiting-check, error, long labels.\n\
+             Real pointer callbacks: {} checks, {} confirmations, {} cancellations.\n\
+             Blocked actions: busy, stale preview, failed check, managed configuration.\n\
+             Disclosure: expand, collapse, rapid reversal, reset after close.\n\
+             Animation frames: entry, checking, completion, hover, details, exit.\n\
+             Reduced motion: checking frame pixels unchanged after 640 ms.\n",
+            inspections.get(),
+            applications.get(),
+            cancellations.get()
+        ),
+    )?;
+    println!("Synthetic route publication previews: {}", output.display());
+    Ok(())
+}
