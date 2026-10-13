@@ -103,6 +103,8 @@ pub(super) fn render_connections_motion(
     let checks = Rc::new(Cell::new(0));
     let check_count = checks.clone();
     app.on_refresh(move |_| check_count.set(check_count.get() + 1));
+    let check_count = checks.clone();
+    app.on_check_all_providers(move || check_count.set(check_count.get() + 1));
     for (width, height) in [(1200, 820), (1000, 680)] {
         app.window().set_size(PhysicalSize::new(width, height));
         for dark in [false, true] {
