@@ -1,16 +1,20 @@
 name: Set up native Rust build
 description: Install the pinned toolchain and Linux GUI dependencies, then restore the Rust cache
 inputs:
+  python-version:
+    description: Python version to install, or empty to use the container's Python
+    default: '3.12'
   cache-key:
-    description: Separate formatting and native build caches
+    description: Separate CI check and native build caches
     required: true
 runs:
   using: composite
   steps:
     - name: Set up Python
+      if: inputs.python-version != ''
       uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
       with:
-        python-version: '3.12'
+        python-version: ${{ inputs.python-version }}
     - name: Install Linux dependencies
       if: runner.os == 'Linux'
       shell: bash
@@ -22,7 +26,14 @@ runs:
           libwayland-dev libx11-dev libgl1-mesa-dev fonts-dejavu-core
     - name: Install the repository Rust toolchain
       shell: bash
-      run: rustup show
+      run: |
+        if ! command -v rustup >/dev/null; then
+          curl --proto '=https' --tlsv1.2 -fsSL https://sh.rustup.rs -o "$RUNNER_TEMP/rustup-init.sh"
+          sh "$RUNNER_TEMP/rustup-init.sh" -y --profile minimal --default-toolchain none --no-modify-path
+        fi
+        export PATH="$HOME/.cargo/bin:$PATH"
+        echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
+        rustup show
     - name: Cache Rust build dependencies
       uses: Swatinem/rust-cache@63fed3e2fecf6f7b51dc6f043341b79ef82a9ae7 # v2.9.2
       with:

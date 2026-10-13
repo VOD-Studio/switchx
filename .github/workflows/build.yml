@@ -1,19 +1,19 @@
-name: Verify and build
+name: Check and build releases
 
 on:
   workflow_call:
     inputs:
       release-tag:
-        description: Require this tag to match the workspace version and changelog
+        description: Build release packages after validating this version tag
         type: string
         default: ''
     outputs:
       version:
         description: Validated workspace version
-        value: ${{ jobs.metadata.outputs.version }}
+        value: ${{ jobs.check.outputs.version }}
       prerelease:
         description: Whether the version is a prerelease
-        value: ${{ jobs.metadata.outputs.prerelease }}
+        value: ${{ jobs.check.outputs.prerelease }}
 
 permissions:
   contents: read
@@ -22,22 +22,31 @@ env:
   CARGO_TERM_COLOR: always
 
 jobs:
-  metadata:
-    name: Version and release tooling
-    runs-on: ubuntu-24.04
-    timeout-minutes: 10
+  check:
+    name: Version, formatting, Clippy and tests
+    runs-on: [self-hosted, Linux, X64, docker, compose, omarchy]
+    container: ubuntu:24.04
+    timeout-minutes: 90
+    defaults:
+      run:
+        shell: bash
     outputs:
       version: ${{ steps.version.outputs.version }}
       prerelease: ${{ steps.version.outputs.prerelease }}
     steps:
+      - name: Prepare the CI container
+        run: |
+          apt-get update
+          apt-get install --no-install-recommends -y \
+            ca-certificates curl git git-lfs sudo python3 python-is-python3
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
+          lfs: true
           persist-credentials: false
-      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+      - uses: ./.github/actions/setup
         with:
-          python-version: '3.12'
-      - name: Test version and artifact validation
-        run: python -m unittest discover -s scripts/tests -v
+          python-version: ''
+          cache-key: check
       - name: Validate version, lockfile and changelog
         id: version
         env:
@@ -54,6 +63,10 @@ jobs:
           else
             echo 'prerelease=false' >> "$GITHUB_OUTPUT"
           fi
+      - name: Install the pinned Slint formatter
+        run: cargo install slint-lsp --version 1.18.1 --locked
+      - name: Check formatting, lint and run all tests
+        run: make check
       - name: Upload release notes
         if: inputs.release-tag != ''
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
@@ -63,29 +76,10 @@ jobs:
           if-no-files-found: error
           retention-days: 7
 
-  format:
-    name: Rust and Slint formatting
-    needs: metadata
-    runs-on: ubuntu-24.04
-    timeout-minutes: 45
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          lfs: true
-          persist-credentials: false
-      - uses: ./.github/actions/setup
-        with:
-          cache-key: format
-      - name: Install the pinned Slint formatter
-        run: |
-          if ! command -v slint-lsp >/dev/null; then
-            cargo install slint-lsp --version 1.18.1 --locked
-          fi
-      - run: make format-check
-
   native:
     name: ${{ matrix.target }}
-    needs: metadata
+    if: inputs.release-tag != ''
+    needs: check
     runs-on: ${{ matrix.os }}
     timeout-minutes: 90
     strategy:

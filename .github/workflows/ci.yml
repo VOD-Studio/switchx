@@ -3,7 +3,7 @@ name: CI
 on:
   push:
     branches: ['**']
-    # Version tags run the same checks through release.yml.
+    # Version tags also build all native packages through release.yml.
     tags: ['**', '!v*']
   pull_request:
   workflow_dispatch:
@@ -16,5 +16,5 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
-  build:
+  check:
     uses: ./.github/workflows/build.yml
