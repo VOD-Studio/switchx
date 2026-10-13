@@ -116,10 +116,19 @@ pub(super) fn connect(app: &AppWindow, sender: &mpsc::Sender<Command>) {
             let _ = callback_sender.try_send(Command::PollRouteStatus);
         }
     });
-    app.on_inspect_route(queue_on(app, sender, |app| Command::InspectRoute {
-        home: app.get_config_home().into(),
-        port: app.get_route_port().into(),
-        model: app.get_default_model().into(),
+    app.on_inspect_route(queue_on(app, sender, |app| {
+        // Invalidate the previous result before the worker begins checking again.
+        app.set_route_preview_ready(false);
+        app.set_route_preview("".into());
+        app.set_action_message("".into());
+        app.set_error_code("".into());
+        app.set_error_message("".into());
+        app.set_error_action("".into());
+        Command::InspectRoute {
+            home: app.get_config_home().into(),
+            port: app.get_route_port().into(),
+            model: app.get_default_model().into(),
+        }
     }));
     app.on_apply_route(queue_on(app, sender, |app| Command::ApplyRoute {
         home: app.get_config_home().into(),
@@ -364,7 +373,10 @@ impl Worker {
                         Ok("发布预览已准备；确认启用后点击“启动 Codex”，在新会话选择模型".into()),
                     );
                 }
-                Err(error) => show_action(&app, Err(error)),
+                Err(error) => {
+                    app.set_route_preview("".into());
+                    show_action(&app, Err(error));
+                }
             }
         });
     }

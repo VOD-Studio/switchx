@@ -1,0 +1,592 @@
+import { Theme } from "tokens.slint";
+import { QuietScrollView as ScrollView } from "scroll-view.slint";
+import { QuietButton, AnimatedSection } from "components.slint";
+
+component PublishArrival inherits Rectangle {
+    in property <bool> open;
+    in property <duration> lag;
+    private property <float> reveal: root.open ? 1 : 0;
+    animate reveal {
+        duration: Theme.drawer-motion;
+        delay: root.open && Theme.drawer-motion > 0ms ? root.lag : 0ms;
+        easing: cubic-bezier(0.22, 1, 0.36, 1);
+    }
+    opacity: root.reveal;
+    Rectangle {
+        y: 12px * (1 - root.reveal);
+        width: root.width;
+        height: root.height;
+        @children
+    }
+}
+
+// Only busy work reads the frame clock. Success gets a single settling ripple.
+component PublishSignal inherits Rectangle {
+    in property <bool> open;
+    in property <bool> busy;
+    in property <bool> ready;
+    in property <bool> has-error;
+    private property <bool> motion: root.open && root.busy && Theme.fast > 0ms;
+    private property <angle> orbit: root.motion ? 360deg * mod(animation-tick(), 2400ms) / 2400ms : 0deg;
+    private property <float> settled: root.open && root.ready && !root.busy && !root.has-error ? 1 : 0;
+    private property <color> ink: root.has-error && !root.busy ? Theme.warning : Theme.brand;
+    animate settled {
+        duration: Theme.drawer-motion > 0ms ? 560ms : 0ms;
+        easing: cubic-bezier(0.16, 1, 0.3, 1);
+    }
+    width: 88px;
+    height: 88px;
+    accessible-role: none;
+    Rectangle {
+        x: 9px - 9px * root.settled;
+        y: self.x;
+        width: 70px + 18px * root.settled;
+        height: self.width;
+        border-radius: self.width / 2;
+        border-width: 1px;
+        border-color: root.ink.with-alpha(0.12);
+    }
+
+    Rectangle {
+        x: 10px;
+        y: 10px;
+        width: 68px;
+        height: 68px;
+        border-radius: 34px;
+        background: root.ink.with-alpha(0.07);
+        border-width: 1px;
+        border-color: root.ink.with-alpha(0.16);
+    }
+
+    for index in 3: Rectangle {
+        x: 41px + 39px * cos(root.orbit + index * 120deg);
+        y: 41px + 39px * sin(root.orbit + index * 120deg);
+        width: 6px;
+        height: 6px;
+        border-radius: 3px;
+        background: root.ink;
+        opacity: root.busy ? 0.8 - index * 0.2 : 0.3;
+        animate opacity { duration: Theme.page-motion; }
+    }
+    Rectangle {
+        x: 20px - root.settled * 2px;
+        y: self.x;
+        width: 48px + root.settled * 4px;
+        height: self.width;
+        border-radius: 16px;
+        background: root.ink.with-alpha(0.16);
+        Image {
+            x: (parent.width - self.width) / 2;
+            y: (parent.height - self.height) / 2;
+            width: 24px;
+            height: 24px;
+            source: root.busy ? @image-url("../assets/ui/loader.svg")
+                : root.has-error ? @image-url("../assets/ui/alert.svg")
+                : root.ready ? @image-url("../assets/ui/check.svg") : @image-url("../assets/ui/blocks.svg");
+            colorize: root.ink;
+            transform-rotation: root.motion ? 360deg * mod(animation-tick(), 1000ms) / 1000ms : 0deg;
+        }
+    }
+}
+
+component PublishImpact inherits HorizontalLayout {
+    in property <image> icon;
+    in property <string> title;
+    in property <string> description;
+    spacing: 12px;
+    cross-axis-alignment: center;
+    Rectangle {
+        width: 30px;
+        height: 30px;
+        border-radius: 9px;
+        background: Theme.raised;
+        Image {
+            x: 7px;
+            y: 7px;
+            width: 16px;
+            height: 16px;
+            source: root.icon;
+            colorize: Theme.muted-text;
+        }
+    }
+
+    VerticalLayout {
+        spacing: 3px;
+        Text {
+            text: root.title;
+            color: Theme.primary-text;
+            font-size: 12px;
+            font-weight: 500;
+        }
+
+        Text {
+            text: root.description;
+            color: Theme.muted-text;
+            font-size: 12px;
+            wrap: word-wrap;
+        }
+    }
+}
+
+// Shows the scope of the pending operation, without inventing progress or
+// marking individual checks complete before the worker returns its result.
+component PublishLoading inherits Rectangle {
+    in property <bool> active;
+    in property <bool> applying;
+    private property <bool> motion: root.active && Theme.fast > 0ms;
+    private property <angle> beat: root.motion ? 360deg * mod(animation-tick(), 1500ms) / 1500ms : 0deg;
+    private property <float> shimmer: root.motion ? mod(animation-tick(), 1800ms) / 1800ms : 0.4;
+    height: 112px;
+    border-radius: 10px;
+    border-width: 1px;
+    border-color: Theme.brand.with-alpha(0.16);
+    background: Theme.inset;
+    accessible-role: progress-indicator;
+    accessible-label: root.applying ? "正在启用模型" : "正在检查启用条件";
+    VerticalLayout {
+        padding: 14px;
+        spacing: 10px;
+        HorizontalLayout {
+            spacing: 8px;
+            cross-axis-alignment: center;
+            Text {
+                text: root.applying ? "正在启用模型" : "正在检查启用条件";
+                color: Theme.primary-text;
+                font-size: 12px;
+                font-weight: 500;
+                horizontal-stretch: 0;
+            }
+
+            Rectangle {
+                horizontal-stretch: 1;
+            }
+
+            Text {
+                text: root.applying ? "处理中" : "核对中";
+                color: Theme.brand;
+                font-size: 10px;
+                horizontal-stretch: 0;
+            }
+
+            HorizontalLayout {
+                width: 22px;
+                height: 6px;
+                spacing: 3px;
+                for index in 3: Rectangle {
+                    width: 4px;
+                    height: 4px;
+                    border-radius: 2px;
+                    background: Theme.brand;
+                    opacity: root.motion ? 0.3 + 0.7 * (1 + sin(root.beat - index * 65deg)) / 2 : 0.6;
+                }
+            }
+        }
+
+        Text {
+            text: root.applying ? "正在校验连接并应用配置，请稍候。" : "正在准备检查结果，完成后即可确认启用。";
+            color: Theme.muted-text;
+            font-size: 11px;
+        }
+
+        HorizontalLayout {
+            spacing: 18px;
+            for label[index] in (root.applying ? ["校验连接", "发布模型", "保存恢复"] : ["模型目录", "账号绑定", "目标配置"]): VerticalLayout {
+                spacing: 8px;
+                Text {
+                    text: label;
+                    color: Theme.muted-text;
+                    font-size: 11px;
+                }
+
+                Rectangle {
+                    height: 4px;
+                    border-radius: 2px;
+                    background: Theme.brand.with-alpha(0.12);
+                    clip: true;
+                    Rectangle {
+                        x: -self.width + (parent.width + self.width) * mod(root.shimmer + index * 0.18, 1);
+                        width: parent.width * 0.55;
+                        height: parent.height;
+                        background: @linear-gradient(90deg, Theme.brand.with-alpha(0) 0%, Theme.brand.with-alpha(0.65) 50%, Theme.brand.with-alpha(0) 100%);
+                    }
+                }
+            }
+        }
+    }
+}
+
+export component RoutePublishSheet inherits VerticalLayout {
+    in property <bool> open;
+    in property <int> model-count;
+    in property <string> default-model-label;
+    in property <string> config-home;
+    in property <string> preview;
+    in property <bool> ready;
+    in property <bool> busy;
+    in property <bool> has-error;
+    in property <bool> can-act;
+    callback inspect();
+    callback apply();
+    private property <bool> details-open: false;
+    private property <bool> applying: false;
+    private property <bool> cleanup-pending: false;
+    private property <bool> passed: root.ready && !root.busy && !root.has-error;
+    private property <bool> motion: root.open && root.busy && Theme.fast > 0ms;
+    private property <float> sweep: root.motion ? mod(animation-tick(), 1600ms) / 1600ms : 0.35;
+    private property <float> loading-reveal: root.busy ? 1 : 0;
+    animate loading-reveal {
+        duration: Theme.page-motion;
+        easing: cubic-bezier(0.22, 1, 0.36, 1);
+    }
+    changed open => {
+        root.cleanup-pending = !root.open;
+        if root.open { root.applying = false; }
+    }
+    // Preserve the scrolled composition until the panel has faded out.
+    Timer {
+        interval: max(1ms, Theme.drawer-motion);
+        running: root.cleanup-pending && !root.open;
+        triggered => {
+            root.cleanup-pending = false;
+            root.details-open = false;
+            root.applying = false;
+            content-scroll.content-y = 0px;
+        }
+    }
+
+    // Keep the operation label during the loading card's exit fade. A new
+    // inspection or the completed dismissal resets it before the next run.
+    spacing: 16px;
+
+    Rectangle {
+        min-height: 140px;
+        preferred-height: min(460px, body.preferred-height + 2px);
+        vertical-stretch: 1;
+        content-scroll := ScrollView {
+            x: 0px;
+            y: 0px;
+            width: parent.width + 14px;
+            height: parent.height;
+            content-width: self.visible-width;
+            horizontal-scrollbar-policy: always-off;
+            body := VerticalLayout {
+                spacing: 16px;
+                alignment: start;
+                PublishArrival {
+                    open: root.open;
+                    lag: 35ms;
+                    height: 190px;
+                    Rectangle {
+                        border-radius: 14px;
+                        border-width: 1px;
+                        border-color: Theme.brand.with-alpha(0.22);
+                        background: @linear-gradient(115deg, Theme.brand-surface 0%, Theme.panel 100%);
+                        clip: true;
+                        Rectangle {
+                            x: parent.width - 174px;
+                            y: -100px;
+                            width: 260px;
+                            height: 260px;
+                            border-radius: 130px;
+                            border-width: 1px;
+                            border-color: Theme.brand.with-alpha(0.08);
+                        }
+
+                        VerticalLayout {
+                            padding: 20px;
+                            spacing: 14px;
+                            HorizontalLayout {
+                                spacing: 18px;
+                                cross-axis-alignment: center;
+                                VerticalLayout {
+                                    spacing: 8px;
+                                    Text {
+                                        text: "SWITCHX  /  CODEX";
+                                        color: Theme.brand;
+                                        font-size: 10px;
+                                        font-weight: 600;
+                                        letter-spacing: 1.4px;
+                                    }
+
+                                    Text {
+                                        text: root.busy ? (root.applying ? "正在启用你的模型…" : "正在检查，请稍候。")
+                                            : root.has-error ? "还差一步，稍作调整。"
+                                            : root.passed ? "准备好了，开始吧。" : "启用之前，确认一下。";
+                                        font-size: 23px;
+                                        font-weight: 600;
+                                        color: Theme.primary-text;
+                                    }
+
+                                    Text {
+                                        text: root.busy ? (root.applying ? "正在校验连接并应用配置" : "正在核对模型目录与目标配置")
+                                            : root.has-error ? "请处理上方提示，再重新检查。"
+                                            : root.passed ? "模型目录与发布配置已核对" : "检查模型目录，预览即将应用的配置。";
+                                        color: root.has-error && !root.busy ? Theme.warning : Theme.muted-text;
+                                        font-size: 12px;
+                                    }
+                                }
+
+                                PublishSignal {
+                                    open: root.open;
+                                    busy: root.busy;
+                                    ready: root.ready;
+                                    has-error: root.has-error;
+                                }
+                            }
+
+                            Rectangle {
+                                height: 1px;
+                                background: Theme.brand.with-alpha(0.15);
+                            }
+
+                            HorizontalLayout {
+                                spacing: 18px;
+                                cross-axis-alignment: center;
+                                HorizontalLayout {
+                                    width: 130px;
+                                    horizontal-stretch: 0;
+                                    alignment: start;
+                                    spacing: 7px;
+                                    cross-axis-alignment: center;
+                                    Text {
+                                        text: root.model-count;
+                                        color: Theme.primary-text;
+                                        font-size: 30px;
+                                        font-weight: 600;
+                                        horizontal-stretch: 0;
+                                    }
+
+                                    Text {
+                                        text: "个模型";
+                                        color: Theme.muted-text;
+                                        font-size: 12px;
+                                        horizontal-stretch: 0;
+                                    }
+                                }
+
+                                Rectangle {
+                                    width: 1px;
+                                    height: 28px;
+                                    background: Theme.brand.with-alpha(0.15);
+                                }
+
+                                VerticalLayout {
+                                    spacing: 4px;
+                                    Text {
+                                        text: "默认模型";
+                                        color: Theme.muted-text;
+                                        font-size: 10px;
+                                    }
+
+                                    default-model-name := Text {
+                                        min-width: 0px;
+                                        text: root.default-model-label == "" ? "尚未选择" : root.default-model-label;
+                                        color: Theme.primary-text;
+                                        font-size: 14px;
+                                        font-weight: 500;
+                                        overflow: elide;
+                                    }
+                                }
+                            }
+                        }
+                        // Indeterminate motion; no fabricated percentages or step completion.
+                        if root.busy: Rectangle {
+                            y: parent.height - 2px;
+                            height: 2px;
+                            width: parent.width;
+                            clip: true;
+                            background: Theme.brand.with-alpha(0.1);
+                            Rectangle {
+                                x: -self.width + (parent.width + self.width) * root.sweep;
+                                width: parent.width * 0.4;
+                                height: 2px;
+                                background: @linear-gradient(90deg, Theme.brand.with-alpha(0) 0%, Theme.brand 50%, Theme.brand.with-alpha(0) 100%);
+                            }
+                        }
+                    }
+                }
+
+                PublishArrival {
+                    open: root.open;
+                    lag: 95ms;
+                    height: impact-layout.preferred-height;
+                    impact-layout := VerticalLayout {
+                        spacing: 13px;
+                        HorizontalLayout {
+                            alignment: start;
+                            spacing: 8px;
+                            cross-axis-alignment: center;
+                            Image {
+                                width: 14px;
+                                height: 14px;
+                                source: @image-url("../assets/ui/folder.svg");
+                                colorize: Theme.muted-text;
+                            }
+
+                            Text {
+                                text: "目标目录";
+                                color: Theme.muted-text;
+                                font-size: 11px;
+                                horizontal-stretch: 0;
+                            }
+
+                            Text {
+                                min-width: 0px;
+                                text: root.config-home;
+                                color: Theme.primary-text;
+                                font-size: 12px;
+                                horizontal-stretch: 1;
+                                wrap: word-wrap;
+                            }
+                        }
+
+                        Rectangle {
+                            height: effects.preferred-height * (1 - root.loading-reveal) + 112px * root.loading-reveal;
+                            clip: true;
+                            Rectangle {
+                                width: parent.width;
+                                height: effects.preferred-height;
+                                y: -8px * root.loading-reveal;
+                                opacity: 1 - root.loading-reveal;
+                                visible: root.loading-reveal < 1;
+                                effects := VerticalLayout {
+                                    spacing: 13px;
+                                    PublishImpact {
+                                        icon: @image-url("../assets/ui/blocks.svg");
+                                        title: "一次启用，统一模型菜单";
+                                        description: "发布所选模型与默认模型，通过本地路由连接各个上游。";
+                                    }
+
+                                    PublishImpact {
+                                        icon: @image-url("../assets/ui/lock.svg");
+                                        title: "保留恢复记录";
+                                        description: "停止时恢复受管配置；如有外部修改，会保留并提示冲突。";
+                                    }
+                                }
+                            }
+
+                            PublishLoading {
+                                width: parent.width;
+                                y: 8px * (1 - root.loading-reveal);
+                                opacity: root.loading-reveal;
+                                visible: root.loading-reveal > 0;
+                                active: root.open && root.busy;
+                                applying: root.applying;
+                            }
+                        }
+                    }
+                }
+
+                Rectangle {
+                    height: details-layout.preferred-height;
+                    border-radius: 10px;
+                    border-width: 1px;
+                    border-color: Theme.border;
+                    background: Theme.inset;
+                    details-layout := VerticalLayout {
+                        spacing: 0px;
+                        QuietButton {
+                            text: root.details-open ? "收起检查详情" : "查看检查详情";
+                            accessible-label: root.details-open ? "收起检查详情" : "展开检查详情";
+                            accessible-expanded: root.details-open;
+                            height: 40px;
+                            ghost: true;
+                            left-aligned: true;
+                            icon: @image-url("../assets/ui/chevron-down.svg");
+                            icon-color: Theme.muted-text;
+                            icon-angle: root.details-open ? 180deg : 0deg;
+                            enabled: root.open;
+                            clicked => { root.details-open = !root.details-open; }
+                        }
+
+                        AnimatedSection {
+                            expanded: root.details-open;
+                            content-height: 194px;
+                            Rectangle {
+                                x: 14px;
+                                width: parent.width - 28px;
+                                height: 1px;
+                                background: Theme.border;
+                            }
+
+                            ScrollView {
+                                x: 14px;
+                                y: 12px;
+                                width: parent.width - 22px;
+                                height: 168px;
+                                content-width: self.visible-width;
+                                horizontal-scrollbar-policy: always-off;
+                                VerticalLayout {
+                                    spacing: 8px;
+                                    Text {
+                                        text: root.busy ? "检查处理中，完成后显示最新明细。"
+                                            : root.has-error || !root.ready ? "当前检查尚未通过，请重新检查以生成最新明细。"
+                                            : "模型映射 · 配置变更 · 账号绑定";
+                                        font-size: 11px;
+                                        color: Theme.muted-text;
+                                        wrap: word-wrap;
+                                    }
+
+                                    if root.passed: Text {
+                                        min-width: 0px;
+                                        text: root.preview;
+                                        font-size: 11px;
+                                        color: Theme.primary-text;
+                                        wrap: word-wrap;
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    PublishArrival {
+        open: root.open;
+        lag: 155ms;
+        height: footer.preferred-height;
+        vertical-stretch: 0;
+        footer := VerticalLayout {
+            spacing: 12px;
+            Rectangle {
+                height: 1px;
+                background: Theme.border;
+            }
+
+            Text {
+                text: "确认时再次校验连接。启用后启动 Codex 并新建会话；跨上游切换也请新建会话。";
+                color: Theme.muted-text;
+                font-size: 11px;
+                wrap: word-wrap;
+            }
+
+            HorizontalLayout {
+                spacing: 12px;
+                QuietButton {
+                    text: "重新检查";
+                    accessible-label: "重新检查启用条件";
+                    height: 42px;
+                    width: 136px;
+                    icon: @image-url("../assets/ui/loader.svg");
+                    icon-color: Theme.muted-text;
+                    enabled: root.open && !root.busy && root.can-act;
+                    clicked => { root.applying = false; root.inspect(); }
+                }
+
+                QuietButton {
+                    text: root.busy ? (root.applying ? "正在启用…" : "正在检查…") : "确认启用";
+                    accessible-label: "确认启用模型";
+                    height: 42px;
+                    primary: true;
+                    loading: root.open && root.busy;
+                    icon: root.busy ? @image-url("../assets/ui/loader.svg") : @image-url("../assets/ui/arrow-right.svg");
+                    icon-color: Theme.on-brand;
+                    enabled: root.open && !root.busy && root.can-act && root.passed;
+                    clicked => { root.applying = true; root.apply(); }
+                }
+            }
+        }
+    }
+}
