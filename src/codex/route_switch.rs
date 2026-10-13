@@ -17,7 +17,7 @@ use crate::{
     catalog::Publication,
     codex::overlay::Overlay,
     codex::route_config::{PROVIDER_ID, Preview, preview_route},
-    upstream::helper_is_usable,
+    upstream::{ensure_persistent_helper, helper_is_usable},
 };
 
 const FIELDS: [&str; 3] = ["model", "model_provider", "model_catalog_json"];
@@ -333,6 +333,7 @@ impl PreparedSwitch {
         helper_path: &Path,
         reference: &str,
     ) -> Result<Self, String> {
+        ensure_persistent_helper(helper_path)?;
         if !helper_is_usable(helper_path) || !valid_token_reference(reference) {
             return Err("SwitchX local token helper is unavailable or invalid".into());
         }
@@ -1198,6 +1199,23 @@ mod tests {
                 .contains("[model_providers.switchx_router] # user note")
         );
         assert!(home.state().join(ROUTE_JOURNAL).exists());
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn helper_route_refuses_translocated_helper() {
+        let home = TestHome::new();
+        let reference = format!("router-{}", crate::id::new_id().unwrap());
+        let helper = Path::new(
+            "/private/var/folders/ab/c1d2/T/AppTranslocation/UUID/d/SwitchX.app/Contents/MacOS/switchx",
+        );
+        assert_eq!(
+            inspect(&home)
+                .with_credential_helper(helper, &reference)
+                .err()
+                .as_deref(),
+            Some(crate::upstream::TRANSIENT_HELPER_MESSAGE)
+        );
     }
 
     #[test]

@@ -14,7 +14,7 @@ use crate::{
         write_exclusive_atomic,
     },
     storage::{ModelRecord, ProviderRecord},
-    upstream::{helper_is_usable, validate_provider},
+    upstream::{ensure_persistent_helper, helper_is_usable, validate_provider},
 };
 
 const FIELDS: [&str; 3] = ["model", "model_provider", "model_catalog_json"];
@@ -76,6 +76,7 @@ impl PreparedDirectSwitch {
         if !config_path.parent().is_some_and(Path::is_dir) {
             return Err("Codex 配置目录不存在".into());
         }
+        ensure_persistent_helper(helper_path)?;
         if !helper_is_usable(helper_path) {
             return Err("SwitchX credential helper is unavailable".into());
         }
@@ -789,6 +790,19 @@ mod tests {
         assert!(text.contains("# private-preference"));
         assert!(text.contains("# keep-window-note"));
         assert!(!text.contains("switchx_direct_test-id"));
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn direct_switch_refuses_helper_on_mounted_disk_image() {
+        let home = Home::new();
+        let helper = Path::new("/Volumes/SwitchX/SwitchX.app/Contents/MacOS/switchx");
+        assert_eq!(
+            PreparedDirectSwitch::inspect(&home.config(), &home.state(), &provider(), helper)
+                .err()
+                .as_deref(),
+            Some(crate::upstream::TRANSIENT_HELPER_MESSAGE)
+        );
     }
 
     #[test]

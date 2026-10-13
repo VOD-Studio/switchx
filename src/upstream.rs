@@ -1,4 +1,7 @@
-use std::{path::Path, time::Duration};
+use std::{
+    path::{Component, Path},
+    time::Duration,
+};
 
 use reqwest::{Client, Url, redirect::Policy};
 use serde_json::Value;
@@ -137,6 +140,35 @@ pub fn helper_is_usable(path: &Path) -> bool {
     path.is_absolute() && path.is_file()
 }
 
+pub const TRANSIENT_HELPER_MESSAGE: &str = "SwitchX 正从磁盘映像或 macOS 临时隔离位置运行，推出映像或重启后 Codex 将找不到 SwitchX 凭据程序。请将 SwitchX 拖到「应用程序」文件夹，退出后从「应用程序」重新打开。";
+
+/// Codex runs the helper long after this process exits. On macOS, an app
+/// opened from a mounted disk image runs under `/Volumes/`, and a quarantined
+/// copy that Finder did not move runs from a randomized, read-only
+/// `AppTranslocation` directory; both paths vanish after eject or reboot.
+pub fn ensure_persistent_helper(path: &Path) -> Result<(), String> {
+    if cfg!(target_os = "macos") {
+        // `/Volumes/Macintosh HD` links to `/`, so judge where the path leads.
+        let resolved = std::fs::canonicalize(path);
+        if is_transient_macos_location(resolved.as_deref().unwrap_or(path)) {
+            return Err(TRANSIENT_HELPER_MESSAGE.into());
+        }
+    }
+    Ok(())
+}
+
+fn is_transient_macos_location(path: &Path) -> bool {
+    let named = |component: Component, name: &str| component.as_os_str().eq_ignore_ascii_case(name);
+    let mut components = path.components();
+    let mounted_image = components.next() == Some(Component::RootDir)
+        && components.next().is_some_and(|name| named(name, "Volumes"))
+        && components.next().is_some();
+    mounted_image
+        || path
+            .components()
+            .any(|name| named(name, "AppTranslocation"))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -156,6 +188,69 @@ mod tests {
         assert!(validate_provider("ok", "https://user:secret@example.test/v1", "m").is_err());
         assert!(validate_provider("ok", "https://example.test/v1?token=secret", "m").is_err());
         assert!(validate_provider("ok", "https://example.test/v1", "model with spaces").is_err());
+    }
+
+    #[test]
+    fn recognizes_macos_helper_locations_that_vanish_after_eject_or_reboot() {
+        for path in [
+            "/Volumes/SwitchX/SwitchX.app/Contents/MacOS/switchx",
+            "/volumes/SwitchX 0.1.0/SwitchX.app/Contents/MacOS/switchx",
+            "/private/var/folders/ab/c1d2/T/AppTranslocation/0F1E2D3C-4B5A-6978-8796-A5B4C3D2E1F0/d/SwitchX.app/Contents/MacOS/switchx",
+            "/var/folders/ab/c1d2/T/apptranslocation/UUID/d/SwitchX.app/Contents/MacOS/switchx",
+        ] {
+            assert!(is_transient_macos_location(Path::new(path)), "{path}");
+        }
+        for path in [
+            "/Applications/SwitchX.app/Contents/MacOS/switchx",
+            "/Users/example/Applications/SwitchX.app/Contents/MacOS/switchx",
+            "/Users/example/Volumes/SwitchX.app/Contents/MacOS/switchx",
+            "/Users/example/AppTranslocationNotes/SwitchX.app/Contents/MacOS/switchx",
+            "/VolumesBackup/SwitchX.app/Contents/MacOS/switchx",
+            "Volumes/SwitchX/SwitchX.app/Contents/MacOS/switchx",
+            "/Volumes",
+        ] {
+            assert!(!is_transient_macos_location(Path::new(path)), "{path}");
+        }
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn persistent_helper_check_follows_links_into_translocated_copies() {
+        assert_eq!(
+            ensure_persistent_helper(Path::new(
+                "/Volumes/SwitchX/SwitchX.app/Contents/MacOS/switchx"
+            )),
+            Err(TRANSIENT_HELPER_MESSAGE.into())
+        );
+        let mut nonce = [0_u8; 8];
+        getrandom::fill(&mut nonce).unwrap();
+        let root = std::env::temp_dir().join(format!(
+            "switchx-helper-{}",
+            nonce
+                .iter()
+                .map(|byte| format!("{byte:02x}"))
+                .collect::<String>()
+        ));
+        let translocated = root.join("AppTranslocation/UUID/d");
+        std::fs::create_dir_all(&translocated).unwrap();
+        let helper = translocated.join("switchx");
+        std::fs::write(&helper, "").unwrap();
+        let link = root.join("switchx");
+        std::os::unix::fs::symlink(&helper, &link).unwrap();
+        let outside = ensure_persistent_helper(&root);
+        let linked = ensure_persistent_helper(&link);
+        std::fs::remove_dir_all(&root).unwrap();
+        assert_eq!(outside, Ok(()));
+        assert_eq!(linked, Err(TRANSIENT_HELPER_MESSAGE.into()));
+    }
+
+    #[cfg(not(target_os = "macos"))]
+    #[test]
+    fn persistent_helper_check_applies_only_on_macos() {
+        assert_eq!(
+            ensure_persistent_helper(Path::new("/Volumes/SwitchX/switchx")),
+            Ok(())
+        );
     }
 
     #[test]

@@ -4,6 +4,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- macOS 上直接从磁盘映像或系统临时隔离位置（App Translocation）运行 SwitchX 时，不再把推出映像或重启后失效的程序路径写入 Codex 凭据配置；直连和 API 路由会拒绝应用，并提示将 SwitchX 拖到「应用程序」后重新打开。
+
 ## [0.1.0] - 2026-10-13
 
 ### Added
