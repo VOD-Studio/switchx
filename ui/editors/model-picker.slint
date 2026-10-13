@@ -1,3 +1,4 @@
+import { ButtonSheen } from "../button-sheen.slint";
 import { QuietLineEdit, DropdownViewport } from "../components.slint";
 import { QuietScrollView } from "../scroll-view.slint";
 import { Theme } from "../tokens.slint";
@@ -109,6 +110,12 @@ export component ModelPicker inherits QuietLineEdit {
         enabled: root.enabled;
         mouse-cursor: pointer;
         clicked => { root.focus(); root.open-popup(); }
+
+        ButtonSheen {
+            border-radius: 8px;
+            hovered: parent.has-hover;
+            enabled: parent.enabled;
+        }
     }
 
     popup := PopupWindow {

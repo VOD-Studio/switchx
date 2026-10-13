@@ -1,6 +1,7 @@
 import { ComboBox } from "std-widgets.slint";
 import { QuietScrollView as ScrollView } from "scroll-view.slint";
 import { Theme } from "tokens.slint";
+import { ButtonSheen } from "button-sheen.slint";
 
 // Bound by the owning Window so outside clicks can request an animated close.
 export global DropdownViewport {
@@ -48,7 +49,7 @@ export component StatusPill inherits Rectangle {
 }
 
 export component QuietButton {
-    out property <bool> hovered: hit-area.has-hover;
+    out property <bool> hovered: root.enabled && hit-area.has-hover;
     in property <string> text;
     in property <string> description: "";
     in property <image> icon;
@@ -86,12 +87,12 @@ export component QuietButton {
     vertical-stretch: 0;
     in property <length> border-radius: 8px;
     in property <length> border-width: root.ghost || root.navigation || root.tab ? 0px : 1px;
-    in property <color> border-color: root.primary ? Theme.solid : root.selected ? Theme.brand : hit-area.has-hover ? Theme.muted-text : Theme.border;
-    in property <brush> background: root.primary ? ((hit-area.pressed || root.keyboard-pressed) ? Theme.brand : hit-area.has-hover && root.enabled ? Theme.solid.with-alpha(0.9) : Theme.solid)
+    in property <color> border-color: root.primary ? Theme.solid : root.selected || root.hovered ? Theme.brand : Theme.border;
+    in property <brush> background: root.primary ? ((hit-area.pressed || root.keyboard-pressed) && root.enabled ? Theme.brand : root.hovered ? Theme.solid.with-alpha(0.9) : Theme.solid)
         // The sidebar slides one shared highlight and marker behind its navigation items.
         : root.navigation && root.selected ? transparent
         : root.selected && !root.tab ? Theme.brand-surface
-        : hit-area.has-hover || hit-area.pressed || root.keyboard-pressed ? Theme.raised
+        : root.enabled && (hit-area.has-hover || hit-area.pressed || root.keyboard-pressed) ? Theme.raised
         : root.ghost || root.navigation ? transparent : Theme.panel;
     forward-focus: key-focus;
     accessible-role: button;
@@ -150,7 +151,7 @@ export component QuietButton {
             width: parent.width - self.x - 12px;
             height: root.description != "" ? 20px : parent.height - (root.stacked-icon ? self.y : 0px);
             text: root.text;
-            color: root.primary ? Theme.on-brand : root.selected && root.tab ? Theme.primary-text : root.selected && !root.navigation ? Theme.brand : root.ghost && !hit-area.has-hover ? Theme.muted-text : Theme.primary-text;
+            color: root.primary ? Theme.on-brand : root.selected && root.tab ? Theme.primary-text : root.selected && !root.navigation ? Theme.brand : root.ghost && !root.hovered ? Theme.muted-text : Theme.primary-text;
             font-size: root.description != "" ? 14px : 12px;
             font-weight: root.selected || root.primary ? 600 : 400;
             horizontal-alignment: root.left-aligned ? left : center;
@@ -179,8 +180,14 @@ export component QuietButton {
             accessible-role: none;
         }
 
+        ButtonSheen {
+            hovered: root.hovered;
+            enabled: root.enabled;
+            border-radius: root.border-radius;
+        }
+
         Rectangle {
-            border-radius: 8px;
+            border-radius: root.border-radius;
             border-width: 2px;
             border-color: Theme.brand;
             opacity: key-focus.has-focus ? 1 : 0;
@@ -663,6 +670,12 @@ export component QuietComboBox inherits Rectangle {
         accessible-role: none;
     }
 
+    ButtonSheen {
+        hovered: touch.has-hover;
+        enabled: root.enabled;
+        border-radius: root.border-radius;
+    }
+
     touch := TouchArea {
         enabled: root.enabled;
         mouse-cursor: pointer;
@@ -880,6 +893,12 @@ export component QuietSegmented inherits Rectangle {
             vertical-alignment: center;
             animate color { duration: Theme.fast; }
             accessible-role: none;
+        }
+
+        ButtonSheen {
+            hovered: segment-touch.has-hover;
+            enabled: root.option-is-enabled(index);
+            border-radius: 7px;
         }
 
         segment-touch := TouchArea {

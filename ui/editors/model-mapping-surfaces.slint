@@ -1,3 +1,4 @@
+import { ButtonSheen } from "../button-sheen.slint";
 import { Theme } from "../tokens.slint";
 import { QuietLineEdit } from "../components.slint";
 import { ReasoningChoices, ReasoningChoice } from "reasoning-picker.slint";
@@ -634,6 +635,13 @@ export component MappingSection inherits Rectangle {
             @children
         }
 
+        ButtonSheen {
+            height: 54px;
+            border-radius: 14px;
+            hovered: header-touch.has-hover;
+            enabled: root.collapsible;
+        }
+
         header-touch := TouchArea {
             y: 0px;
             height: 14px + 32px + 8px;
@@ -795,6 +803,12 @@ export component CopyButton inherits Rectangle {
         }
     }
 
+    ButtonSheen {
+        border-radius: root.border-radius;
+        hovered: touch.has-hover;
+        enabled: root.enabled;
+    }
+
     touch := TouchArea {
         enabled: root.enabled;
         mouse-cursor: pointer;
@@ -922,6 +936,12 @@ export component ConfirmDeleteButton inherits Rectangle {
             overflow: elide;
             opacity: root.arm;
             accessible-role: none;
+        }
+
+        ButtonSheen {
+            border-radius: 8px;
+            hovered: touch.has-hover;
+            enabled: root.enabled;
         }
 
         Rectangle {
@@ -1086,6 +1106,12 @@ export component ContextDial inherits VerticalLayout {
                 vertical-alignment: center;
                 animate color { duration: Theme.fast; }
                 accessible-role: none;
+            }
+
+            ButtonSheen {
+                border-radius: 8px;
+                hovered: preset-touch.has-hover;
+                enabled: root.enabled;
             }
 
             preset-touch := TouchArea {

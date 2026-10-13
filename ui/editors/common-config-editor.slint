@@ -245,52 +245,9 @@ component ConfigHero inherits Rectangle {
     }
 }
 
-component ConfigAction inherits Rectangle {
-    in property <string> text;
-    in property <image> icon;
-    in property <brush> icon-color;
-    in property <bool> primary;
-    in property <bool> ghost;
-    in property <bool> loading;
-    in property <bool> enabled: true;
-    callback clicked();
+component ConfigAction inherits QuietButton {
     height: 42px;
-    forward-focus: action;
-    accessible-role: none;
-    private property <float> sheen: action.hovered && root.enabled ? 1 : 0;
-    animate sheen {
-        duration: Theme.fast > 0ms ? 650ms : 0ms;
-        easing: cubic-bezier(0.22, 1, 0.36, 1);
-    }
-    action := QuietButton {
-        width: root.width;
-        height: root.height;
-        text: root.text;
-        icon: root.icon;
-        icon-color: root.icon-color;
-        primary: root.primary;
-        ghost: root.ghost;
-        loading: root.loading;
-        enabled: root.enabled;
-        border-radius: 10px;
-        border-color: root.primary ? Theme.solid : self.hovered && root.enabled ? Theme.brand : Theme.border;
-        clicked => { root.clicked(); }
-    }
-
-    Rectangle {
-        width: root.width;
-        height: root.height;
-        border-radius: 10px;
-        clip: true;
-        accessible-role: none;
-        Rectangle {
-            x: -self.width + (parent.width + self.width) * root.sheen;
-            width: parent.width * 0.45;
-            height: parent.height;
-            opacity: root.sheen > 0 && root.sheen < 1 ? 1 : 0;
-            background: @linear-gradient(105deg, #ffffff00 0%, #ffffff.with-alpha(Theme.dark ? 0.1 : 0.25) 50%, #ffffff00 100%);
-        }
-    }
+    border-radius: 10px;
 }
 
 export component CommonConfigEditor inherits SurfaceCard {

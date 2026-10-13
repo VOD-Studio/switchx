@@ -1,3 +1,4 @@
+import { ButtonSheen } from "../button-sheen.slint";
 import { Theme } from "../tokens.slint";
 
 // Keep entrance motion inside stable surfaces, including the no-motion path.
@@ -121,6 +122,12 @@ export component SubscriptionIdentity inherits Rectangle {
         accessible-label: "选择 ChatGPT 订阅头像";
         accessible-enabled: root.enabled;
         accessible-action-default => { if root.enabled { root.pick(); } }
+    }
+
+    ButtonSheen {
+        border-radius: root.border-radius;
+        hovered: touch.has-hover;
+        enabled: root.enabled && root.interactive;
     }
 
     touch := TouchArea {

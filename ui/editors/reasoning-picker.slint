@@ -1,3 +1,4 @@
+import { ButtonSheen } from "../button-sheen.slint";
 import { Theme } from "../tokens.slint";
 import {
     QuietButton,
@@ -149,6 +150,12 @@ export component ReasoningPicker inherits Rectangle {
             duration: Theme.page-motion;
             easing: ease-out;
         }
+    }
+
+    ButtonSheen {
+        border-radius: root.border-radius;
+        hovered: touch.has-hover;
+        enabled: root.enabled;
     }
 
     touch := TouchArea {

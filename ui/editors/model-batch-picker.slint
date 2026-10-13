@@ -1,3 +1,4 @@
+import { ButtonSheen } from "../button-sheen.slint";
 import { Theme } from "../tokens.slint";
 import {
     QuietButton,
@@ -284,6 +285,12 @@ component BatchRow inherits Rectangle {
                             transform-rotation: root.opened * 180deg;
                             accessible-role: none;
                         }
+                    }
+
+                    ButtonSheen {
+                        border-radius: 8px;
+                        hovered: chip-touch.has-hover;
+                        enabled: root.active && root.enabled;
                     }
 
                     chip-touch := TouchArea {

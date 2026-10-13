@@ -1,0 +1,22 @@
+import { Theme } from "tokens.slint";
+
+// A decorative layer only: the owning control keeps its hit area and focus.
+export component ButtonSheen inherits Rectangle {
+    in property <bool> hovered;
+    in property <bool> enabled: true;
+    private property <float> sweep: root.hovered && root.enabled && Theme.fast > 0ms ? 1 : 0;
+    animate sweep {
+        duration: root.enabled && Theme.fast > 0ms ? 650ms : 0ms;
+        easing: cubic-bezier(0.22, 1, 0.36, 1);
+    }
+    border-radius: 8px;
+    clip: true;
+    accessible-role: none;
+    Rectangle {
+        x: -self.width + (parent.width + self.width) * root.sweep;
+        width: parent.width * 0.45;
+        height: parent.height;
+        opacity: root.enabled && Theme.fast > 0ms && root.sweep > 0 && root.sweep < 1 ? 1 : 0;
+        background: @linear-gradient(105deg, #ffffff00 0%, #ffffff.with-alpha(Theme.dark ? 0.1 : 0.25) 50%, #ffffff00 100%);
+    }
+}

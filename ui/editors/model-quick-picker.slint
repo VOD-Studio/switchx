@@ -1,3 +1,4 @@
+import { ButtonSheen } from "../button-sheen.slint";
 import { Theme } from "../tokens.slint";
 import { QuietCheckBox, QuietLineEdit } from "../components.slint";
 import { QuietScrollView } from "../scroll-view.slint";
@@ -181,6 +182,12 @@ component QuickRow inherits Rectangle {
                     vertical-alignment: center;
                     opacity: clamp(root.crowned, 0, 1);
                     accessible-role: none;
+                }
+
+                ButtonSheen {
+                    border-radius: 13px;
+                    hovered: star-touch.has-hover;
+                    enabled: root.enabled && !root.is-default;
                 }
 
                 star-touch := TouchArea {

@@ -1,3 +1,4 @@
+import { ButtonSheen } from "../button-sheen.slint";
 import { Theme } from "../tokens.slint";
 import { QuietButton } from "../components.slint";
 
@@ -192,6 +193,14 @@ export component AppearanceChoice inherits Rectangle {
                 }
             }
         }
+    }
+
+    ButtonSheen {
+        y: root.lift;
+        width: root.width;
+        height: root.height;
+        border-radius: 12px;
+        hovered: touch.has-hover;
     }
 
     touch := TouchArea {
