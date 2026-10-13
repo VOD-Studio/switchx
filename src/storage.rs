@@ -468,6 +468,12 @@ impl Store {
         Ok(())
     }
 
+    /// Clears persisted history, including records outside the UI's recent window.
+    /// Requests inserted after this atomic statement remain available.
+    pub fn clear_requests(&self) -> Result<usize> {
+        self.connection.execute("DELETE FROM request_records", [])
+    }
+
     pub fn requests(&self, limit: usize) -> Result<Vec<RequestRecord>> {
         let mut statement = self.connection.prepare(
             "SELECT id, started_at_ms, public_model, provider_id, upstream_model, generation,
@@ -1239,6 +1245,62 @@ fn settings_with_key(settings: &str, key: &Secret) -> Result<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn clearing_history_is_atomic_persistent_and_leaves_route_data_and_new_arrivals() {
+        let path = std::env::temp_dir().join(format!(
+            "switchx-clear-requests-{}.sqlite",
+            crate::id::new_id().unwrap()
+        ));
+        let store = Store::open(&path).unwrap();
+        let provider = api_provider();
+        store.put_provider(&provider).unwrap();
+        store
+            .connection
+            .execute_batch(
+                "INSERT INTO app_settings (key, value) VALUES ('synthetic-setting', 'keep');
+                 INSERT INTO session_bindings VALUES ('synthetic-session', 'synthetic-context');
+                 WITH RECURSIVE records(n) AS (VALUES(1) UNION ALL SELECT n+1 FROM records WHERE n<137)
+                 INSERT INTO request_records (id, started_at_ms, generation, duration_ms, status)
+                 SELECT 'old-' || n, n, 'synthetic', 12, 'completed' FROM records;
+                 CREATE TRIGGER refuse_clear BEFORE DELETE ON request_records
+                 WHEN OLD.id = 'old-60' BEGIN SELECT RAISE(ABORT, 'synthetic failure'); END;",
+            )
+            .unwrap();
+        assert!(store.clear_requests().is_err());
+        assert_eq!(store.requests(1000).unwrap().len(), 137);
+        store
+            .connection
+            .execute_batch("DROP TRIGGER refuse_clear;")
+            .unwrap();
+        assert_eq!(store.clear_requests().unwrap(), 137);
+        assert_eq!(store.clear_requests().unwrap(), 0);
+        assert_eq!(store.providers().unwrap(), [provider]);
+        let preserved: (String, String) = store
+            .connection
+            .query_row(
+                "SELECT (SELECT value FROM app_settings WHERE key='synthetic-setting'),
+                        (SELECT context FROM session_bindings WHERE session_id='synthetic-session')",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(preserved, ("keep".into(), "synthetic-context".into()));
+        let writer = Store::open(&path).unwrap();
+        writer
+            .connection
+            .execute_batch(
+                "INSERT INTO request_records (id, started_at_ms, generation, duration_ms, status)
+             VALUES ('new-arrival', 999, 'synthetic', 12, 'completed');",
+            )
+            .unwrap();
+        drop(writer);
+        drop(store);
+        let reopened = Store::open(&path).unwrap();
+        assert_eq!(reopened.requests(100).unwrap()[0].id, "new-arrival");
+        drop(reopened);
+        std::fs::remove_file(path).unwrap();
+    }
 
     #[test]
     fn v11_name_migration_keeps_records_and_rename_aliases_are_transactional() {

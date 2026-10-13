@@ -75,6 +75,12 @@ pub fn format_duration(ms: i64) -> String {
     }
 }
 
+pub fn clear_requests(data_dir: &Path) -> Result<usize, AppError> {
+    open_store(data_dir)?
+        .clear_requests()
+        .map_err(|_| AppError::Database)
+}
+
 pub fn load_requests(data_dir: &Path) -> Result<Vec<RequestView>, AppError> {
     let store = open_store(data_dir)?;
     let providers = store.providers().map_err(|_| AppError::Database)?;

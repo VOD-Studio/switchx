@@ -2,6 +2,7 @@ import { ButtonSheen } from "../button-sheen.slint";
 import { ListView } from "../scroll-view.slint";
 import { Theme } from "../tokens.slint";
 import { QuietSegmented } from "../components.slint";
+import { ClearHistoryButton } from "activity-clear.slint";
 import { RequestRow, RequestStats, RequestBar } from "../view-models.slint";
 
 // Status vocabulary shared by the pulse, timeline nodes, and detail callouts.
@@ -154,6 +155,12 @@ component PulseChart inherits Rectangle {
     in property <[RequestBar]> bars;
     in property <int> sync;
     in property <int> capacity: 48;
+    in property <bool> erasing;
+    private property <float> remaining: root.erasing ? 0 : 1;
+    animate remaining {
+        duration: root.motion ? 380ms : 0ms;
+        easing: cubic-bezier(0.22, 1, 0.36, 1);
+    }
     private property <bool> motion: Theme.animations-enabled && !Theme.system-reduced-motion;
     private property <bool> entering: root.motion;
     private property <int> hovered: -1;
@@ -229,7 +236,8 @@ component PulseChart inherits Rectangle {
             height: plot.height;
 
             private property <color> tone: Ink.tone(bar.kind);
-            private property <length> level-height: max(3px, plot.height * max(0.05, bar.level) * self.rise);
+            private property <length> level-height: max(3px, plot.height * max(0.05, bar.level) * self.rise) * root.remaining;
+            opacity: root.remaining;
             Rectangle {
                 y: parent.height - parent.level-height;
                 height: parent.level-height;
@@ -277,6 +285,7 @@ component PulseCard inherits Rectangle {
     in property <RequestStats> stats;
     in property <[RequestBar]> bars;
     in property <int> sync;
+    in property <bool> erasing;
     height: 118px;
     border-radius: 16px;
     border-width: 1px;
@@ -330,6 +339,7 @@ component PulseCard inherits Rectangle {
             horizontal-stretch: 1;
             bars: root.bars;
             sync: root.sync;
+            erasing: root.erasing;
         }
     }
 }
@@ -579,6 +589,15 @@ component RequestItem inherits Rectangle {
     in property <bool> expanded;
     in property <bool> fresh;
     in property <int> cascade: -1;
+    in property <bool> erasing;
+    in property <int> erase-order;
+    private property <float> remaining: root.erasing ? 0 : 1;
+    animate remaining {
+        duration: root.motion ? 320ms : 0ms;
+        delay: root.erasing && root.motion ? min(8, root.erase-order) * 24ms : 0ms;
+        easing: cubic-bezier(0.22, 1, 0.36, 1);
+    }
+    opacity: root.remaining;
     callback toggle();
 
     private property <bool> motion: Theme.animations-enabled && !Theme.system-reduced-motion;
@@ -684,7 +703,7 @@ component RequestItem inherits Rectangle {
     }
 
     card := Rectangle {
-        x: root.card-x + (1 - root.reveal) * 26px;
+        x: root.card-x + (1 - root.reveal) * 26px + (1 - root.remaining) * 18px;
         y: 3px;
         width: root.width - root.card-x - 2px;
         height: root.height - 6px;
@@ -902,6 +921,7 @@ component RequestItem inherits Rectangle {
     }
 
     touch := TouchArea {
+        enabled: !root.erasing;
         x: root.card-x;
         width: root.width - root.card-x;
         height: root.head;
@@ -913,8 +933,21 @@ component RequestItem inherits Rectangle {
 component EmptyState inherits Rectangle {
     in property <bool> filtered;
     in property <bool> route-running;
+    in property <bool> cleared;
     private property <bool> motion: Theme.animations-enabled && !Theme.system-reduced-motion;
     private property <bool> started;
+    private property <bool> entered: !root.motion;
+    private property <float> reveal: root.entered ? 1 : 0;
+    animate reveal {
+        duration: root.motion ? 680ms : 0ms;
+        easing: cubic-bezier(0.22, 1, 0.36, 1);
+    }
+    Timer {
+        interval: 16ms;
+        running: !root.entered;
+        triggered => { root.entered = true; }
+    }
+
     private property <float> wave: root.started ? 1 : 0;
     animate wave {
         duration: root.started ? 2400ms : 0ms;
@@ -929,6 +962,9 @@ component EmptyState inherits Rectangle {
     }
 
     VerticalLayout {
+        y: (1 - root.reveal) * 14px;
+        height: root.height;
+        opacity: root.reveal;
         alignment: center;
         spacing: 14px;
         Rectangle {
@@ -955,14 +991,14 @@ component EmptyState inherits Rectangle {
                 Image {
                     width: 22px;
                     height: 22px;
-                    source: @image-url("../../assets/ui/activity.svg");
+                    source: root.cleared ? @image-url("../../assets/ui/check.svg") : @image-url("../../assets/ui/activity.svg");
                     colorize: Theme.brand;
                 }
             }
         }
 
         Text {
-            text: root.filtered ? "没有符合筛选的请求" : root.route-running ? "正在等待第一条请求…" : "还没有请求记录";
+            text: root.filtered ? "没有符合筛选的请求" : root.cleared ? "记录已清空" : root.route-running ? "正在等待第一条请求…" : "还没有请求记录";
             color: Theme.primary-text;
             font-size: 17px;
             font-weight: 600;
@@ -970,7 +1006,7 @@ component EmptyState inherits Rectangle {
         }
 
         Text {
-            text: root.filtered ? "切换到「全部」查看其他结果。" : root.route-running ? "路由已启用，请求完成后会实时出现在这里。" : "启用路由并完成请求后，结果会实时出现在这里。";
+            text: root.filtered ? "切换到「全部」查看其他结果。" : root.cleared ? "留一点空白，新的请求会从这里开始。" : root.route-running ? "路由已启用，请求完成后会实时出现在这里。" : "启用路由并完成请求后，结果会实时出现在这里。";
             color: Theme.muted-text;
             font-size: 12px;
             horizontal-alignment: center;
@@ -984,6 +1020,9 @@ export component ActivityPage inherits VerticalLayout {
     in property <[RequestBar]> bars;
     in property <int> sync;
     in property <bool> loading;
+    in property <bool> clearing;
+    in property <bool> erasing;
+    in property <bool> cleared;
     in property <string> request-error;
     in property <bool> write-failed;
     in property <bool> route-running;
@@ -994,6 +1033,7 @@ export component ActivityPage inherits VerticalLayout {
     in-out property <int> unseen;
     callback refresh-requests();
     callback filter-requests(int);
+    callback clear-history();
 
     private property <bool> motion: Theme.animations-enabled && !Theme.system-reduced-motion;
     private property <string> expanded-id;
@@ -1037,6 +1077,15 @@ export component ActivityPage inherits VerticalLayout {
     }
     changed live => {
         if (root.live) { root.refresh-requests(); }
+    }
+    changed cleared => {
+        if (root.cleared) {
+            root.expanded-id = "";
+            root.paused-manually = false;
+            root.gliding = false;
+            root.settle-ticks = 0;
+            root.resume();
+        }
     }
     changed bottom-y => {
         if (root.following && root.settle-ticks >= 12) { root.glide(); }
@@ -1093,12 +1142,16 @@ export component ActivityPage inherits VerticalLayout {
         stats: root.stats;
         bars: root.bars;
         sync: root.sync;
+        erasing: root.erasing;
     }
 
-    HorizontalLayout {
-        height: 30px;
-        spacing: 12px;
+    toolbar := Rectangle {
+        private property <bool> compact: root.width < 720px;
+        height: self.compact ? 72px : 30px;
         LiveBadge {
+            x: 0px;
+            y: 0px;
+            width: 120px;
             live: root.live;
             loading: root.loading;
             pulse: root.pulse;
@@ -1106,6 +1159,8 @@ export component ActivityPage inherits VerticalLayout {
         }
 
         QuietSegmented {
+            x: toolbar.compact ? 0px : 132px;
+            y: toolbar.compact ? 42px : 0px;
             width: 300px;
             height: 30px;
             options: [
@@ -1115,6 +1170,7 @@ export component ActivityPage inherits VerticalLayout {
                 "取消 " + root.stats.cancelled
             ];
             current-index: root.filter;
+            enabled: !root.erasing;
             selected(index) => {
                 root.filter = index;
                 root.filter-requests(index);
@@ -1123,14 +1179,21 @@ export component ActivityPage inherits VerticalLayout {
             }
         }
 
-        Rectangle {
-            horizontal-stretch: 1;
-        }
+        HorizontalLayout {
+            x: parent.width - self.width;
+            width: 254px;
+            height: 30px;
+            spacing: 10px;
+            FollowSwitch {
+                on: root.following;
+                toggled => {
+                    if (root.following) { root.pause(true); } else { root.resume(); }
+                }
+            }
 
-        FollowSwitch {
-            on: root.following;
-            toggled => {
-                if (root.following) { root.pause(true); } else { root.resume(); }
+            ClearHistoryButton {
+                enabled: root.stats.total > 0 && !root.clearing;
+                clicked => { root.clear-history(); }
             }
         }
     }
@@ -1158,6 +1221,8 @@ export component ActivityPage inherits VerticalLayout {
                 expanded: root.expanded-id == request.id;
                 fresh: request.stamp > 0 && request.stamp == root.sync;
                 cascade: root.entering ? min(8, root.requests.length - 1 - index) : -1;
+                erasing: root.erasing;
+                erase-order: root.requests.length - 1 - index;
                 toggle => {
                     if (root.expanded-id == request.id) {
                         root.expanded-id = "";
@@ -1183,10 +1248,11 @@ export component ActivityPage inherits VerticalLayout {
         if root.requests.length == 0: EmptyState {
             filtered: root.filter != 0 && root.stats.total > 0;
             route-running: root.route-running;
+            cleared: root.cleared;
         }
 
         jump := Rectangle {
-            private property <bool> shown: !root.following && (root.distance > 40px || root.unseen > 0);
+            private property <bool> shown: !root.erasing && !root.following && (root.distance > 40px || root.unseen > 0);
             private property <float> reveal: self.shown ? 1 : 0;
             animate reveal {
                 duration: root.motion ? 340ms : 0ms;
