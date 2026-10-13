@@ -309,6 +309,64 @@ pub fn delete_price(data_dir: &Path, provider_id: &str, model: &str) -> Result<(
         .map_err(|_| AppError::Database.message().to_owned())
 }
 
+/// A model's saved price, if any, beside its all-time usage.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PriceView {
+    pub model: String,
+    pub currency: Option<Currency>,
+    pub input: String,
+    pub cached_input: String,
+    pub output: String,
+    pub requests: u64,
+    pub tokens: u64,
+}
+
+/// Unpriced models with usage come first, busiest first, then priced ones.
+pub fn load_prices(data_dir: &Path) -> Result<Vec<PriceView>, AppError> {
+    let store = open_store(data_dir)?;
+    let prices = store.model_prices().map_err(|_| AppError::Database)?;
+    let mut views = store
+        .usage_models()
+        .map_err(|_| AppError::Database)?
+        .into_iter()
+        .map(|(model, requests, tokens)| PriceView {
+            model,
+            currency: None,
+            input: String::new(),
+            cached_input: String::new(),
+            output: String::new(),
+            requests,
+            tokens,
+        })
+        .collect::<Vec<_>>();
+    for price in prices.iter().filter(|price| price.provider_id.is_empty()) {
+        let index = match views.iter().position(|view| view.model == price.model) {
+            Some(index) => index,
+            None => {
+                views.push(PriceView {
+                    model: price.model.clone(),
+                    currency: None,
+                    input: String::new(),
+                    cached_input: String::new(),
+                    output: String::new(),
+                    requests: 0,
+                    tokens: 0,
+                });
+                views.len() - 1
+            }
+        };
+        let view = &mut views[index];
+        view.currency = Some(price.currency);
+        view.input = price_text(price.input_micros);
+        view.cached_input = price_text(price.cached_input_micros);
+        view.output = price_text(price.output_micros);
+    }
+    views.sort_by(|a, b| {
+        (a.currency.is_some(), b.tokens, &a.model).cmp(&(b.currency.is_some(), a.tokens, &b.model))
+    });
+    Ok(views)
+}
+
 /// Price text for an editor field: no trailing zeros, at least one digit.
 pub fn price_text(micros: u64) -> String {
     let text = format!("{}.{:06}", micros / 1_000_000, micros % 1_000_000);
@@ -472,6 +530,18 @@ mod tests {
             },
         )
         .unwrap();
+        let prices = load_prices(&data).unwrap();
+        let order = prices
+            .iter()
+            .map(|price| (price.model.as_str(), price.currency, price.output.as_str()))
+            .collect::<Vec<_>>();
+        assert_eq!(
+            order,
+            [
+                ("logged-model", None, ""),
+                ("routed-model", Some(Currency::Usd), "10")
+            ]
+        );
         let view = load_usage(&data, &UsageQuery::default()).unwrap();
         assert_eq!(view.report.totals.requests, 2);
         assert_eq!(view.today.requests, 2);

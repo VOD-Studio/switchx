@@ -17,7 +17,7 @@ use std::{
 use chrono::Local;
 use slint::{ComponentHandle, Model, ModelRc, SharedString, VecModel, Weak};
 use switchx::{
-    app::{self, USAGE_PAGE, USAGE_ROW_LIMIT, UsageQuery, UsageView},
+    app::{self, PriceInput, USAGE_PAGE, USAGE_ROW_LIMIT, UsageQuery, UsageView},
     storage::UsageFilter,
     ui::{AppWindow, UsageSyncState},
     usage::report::Period,
@@ -26,7 +26,7 @@ use switchx::{
 use super::{
     icon_picker,
     rows::sync_rows,
-    usage_view::{detail_row, heat, points, scale, share_rows, summary},
+    usage_view::{detail_row, heat, points, price_rows, scale, share_rows, summary},
 };
 
 // Session logs are append-only, so an unchanged scan costs a few milliseconds.
@@ -35,6 +35,11 @@ const SYNC_INTERVAL: Duration = Duration::from_secs(60);
 enum Job {
     Load(UsageQuery),
     Sync { home: PathBuf, force: bool },
+    SetImport { enabled: bool, home: PathBuf },
+    Rebuild { home: PathBuf },
+    Prices,
+    SavePrice(PriceInput),
+    DeletePrice(String),
 }
 
 /// Runs usage work on its own thread; queued loads collapse to the latest query.
@@ -42,6 +47,10 @@ enum Job {
 pub(super) struct UsageService {
     sender: mpsc::Sender<Job>,
     cancel: Arc<AtomicBool>,
+}
+
+fn absolute(home: &str) -> Option<PathBuf> {
+    Some(PathBuf::from(home)).filter(|home| home.is_absolute())
 }
 
 impl UsageService {
@@ -56,14 +65,17 @@ impl UsageService {
         Self { sender, cancel }
     }
 
+    fn send(&self, job: Job) {
+        let _ = self.sender.send(job);
+    }
+
     pub(super) fn load(&self, query: UsageQuery) {
-        let _ = self.sender.send(Job::Load(query));
+        self.send(Job::Load(query));
     }
 
     pub(super) fn sync(&self, home: &str, force: bool) {
-        let home = PathBuf::from(home);
-        if home.is_absolute() {
-            let _ = self.sender.send(Job::Sync { home, force });
+        if let Some(home) = absolute(home) {
+            self.send(Job::Sync { home, force });
         }
     }
 
@@ -85,39 +97,102 @@ fn run(receiver: mpsc::Receiver<Job>, weak: Weak<AppWindow>, cancel: Arc<AtomicB
             Err(mpsc::RecvTimeoutError::Timeout) => None,
             Err(mpsc::RecvTimeoutError::Disconnected) => return,
         };
+        let jobs = first
+            .into_iter()
+            .chain(receiver.try_iter())
+            .collect::<Vec<_>>();
+        if cancel.load(Ordering::Relaxed) {
+            return;
+        }
+        let Ok(data_dir) = data_dir.as_deref() else {
+            next_sync = Instant::now() + SYNC_INTERVAL;
+            if !jobs.is_empty() {
+                post_error(&weak, app::AppError::DataDirectory.message());
+            }
+            continue;
+        };
         let mut query = None;
         let mut sync = None::<bool>;
-        for job in first.into_iter().chain(receiver.try_iter()) {
+        let mut prices = false;
+        let mut reload = false;
+        for job in jobs {
             match job {
                 Job::Load(next) => query = Some(next),
                 Job::Sync { home: next, force } => {
                     home = Some(next);
                     sync = Some(sync.unwrap_or(false) || force);
                 }
+                Job::SetImport {
+                    enabled,
+                    home: next,
+                } => {
+                    home = Some(next);
+                    match app::set_usage_log_import(data_dir, enabled) {
+                        Ok(()) if enabled => sync = Some(true),
+                        Ok(()) => {
+                            sync = None;
+                            post_sync(&weak, SyncOutcome::Off);
+                        }
+                        Err(error) => post_sync(&weak, SyncOutcome::Failed(error)),
+                    }
+                    reload = true;
+                }
+                Job::Rebuild { home: next } => {
+                    home = Some(next.clone());
+                    sync = None;
+                    let mut progress = Progress::new(&weak);
+                    let result = app::rebuild_usage_logs(data_dir, &next, &cancel, |step| {
+                        progress.post(step.done, step.total, "正在重新导入")
+                    });
+                    post_sync(
+                        &weak,
+                        match result {
+                            Ok((summary, backup)) => SyncOutcome::Rebuilt(
+                                summary.added,
+                                backup
+                                    .file_name()
+                                    .map(|name| name.to_string_lossy().into_owned())
+                                    .unwrap_or_default(),
+                            ),
+                            Err(error) => SyncOutcome::Failed(error),
+                        },
+                    );
+                    next_sync = Instant::now() + SYNC_INTERVAL;
+                    reload = true;
+                }
+                Job::Prices => prices = true,
+                Job::SavePrice(input) => {
+                    let model = input.model.clone();
+                    post_price(&weak, app::save_price(data_dir, &input), &model);
+                    prices = true;
+                    reload = true;
+                }
+                Job::DeletePrice(model) => {
+                    post_price(&weak, app::delete_price(data_dir, "", &model), &model);
+                    prices = true;
+                    reload = true;
+                }
             }
         }
-        if cancel.load(Ordering::Relaxed) {
-            return;
-        }
-        let Ok(data_dir) = data_dir.as_deref() else {
-            next_sync = Instant::now() + SYNC_INTERVAL;
-            if query.is_some() {
-                post_error(&weak, app::AppError::DataDirectory.message());
-            }
-            continue;
-        };
         // Periodic scans run while the app is open; a page refresh may force one sooner.
         if Instant::now() >= next_sync && sync.is_none() && home.is_some() {
             sync = Some(false);
         }
         if let (Some(force), Some(home)) = (sync, home.as_deref()) {
             next_sync = Instant::now() + SYNC_INTERVAL;
-            let added = sync_logs(&weak, data_dir, home, force, &cancel);
-            if added && query.is_none() {
-                query = last_query.clone();
-            }
+            reload |= sync_logs(&weak, data_dir, home, force, &cancel);
         } else if Instant::now() >= next_sync {
             next_sync = Instant::now() + SYNC_INTERVAL;
+        }
+        if prices {
+            let result = app::load_prices(data_dir);
+            let _ = weak.upgrade_in_event_loop(move |app| match result {
+                Ok(prices) => show_prices(&app, prices),
+                Err(error) => app.set_usage_price_error(error.message().into()),
+            });
+        }
+        if query.is_none() && reload {
+            query = last_query.clone();
         }
         if let Some(query) = query {
             let result = app::load_usage(data_dir, &query);
@@ -138,6 +213,84 @@ fn run(receiver: mpsc::Receiver<Job>, weak: Weak<AppWindow>, cancel: Arc<AtomicB
     }
 }
 
+/// Posts import progress at most every 120 ms; quick scans finish before the first post.
+struct Progress<'a> {
+    weak: &'a Weak<AppWindow>,
+    last: Instant,
+}
+
+impl<'a> Progress<'a> {
+    fn new(weak: &'a Weak<AppWindow>) -> Self {
+        Self {
+            weak,
+            last: Instant::now(),
+        }
+    }
+
+    fn post(&mut self, done: usize, total: usize, verb: &'static str) {
+        if total == 0 || self.last.elapsed() < Duration::from_millis(120) {
+            return;
+        }
+        self.last = Instant::now();
+        let fraction = done as f32 / total as f32;
+        let _ = self.weak.upgrade_in_event_loop(move |app| {
+            app.set_usage_sync(UsageSyncState {
+                running: true,
+                progress: fraction,
+                text: format!("{verb} {}%", (fraction * 100.0).round()).into(),
+                ..app.get_usage_sync()
+            });
+        });
+    }
+}
+
+enum SyncOutcome {
+    Synced { read: usize, added: usize },
+    Rebuilt(usize, String),
+    Off,
+    Failed(String),
+}
+
+fn post_sync(weak: &Weak<AppWindow>, outcome: SyncOutcome) {
+    let now = Local::now().format("%H:%M").to_string();
+    let _ = weak.upgrade_in_event_loop(move |app| {
+        let mut state = app.get_usage_sync();
+        state.running = false;
+        state.progress = 0.0;
+        state.error = "".into();
+        match outcome {
+            SyncOutcome::Synced { read, added } => {
+                state.enabled = true;
+                state.text = format!("已同步 · {now}").into();
+                state.detail = format!(
+                    "上次扫描 {now}：读取 {read} 个有变化的文件，新增 {} 条",
+                    app::format_count(added as u64)
+                )
+                .into();
+            }
+            SyncOutcome::Rebuilt(added, backup) => {
+                state.enabled = true;
+                state.text = format!("已重新导入 · {now}").into();
+                state.detail = format!(
+                    "已重新导入 {} 条；原数据库备份为 {backup}",
+                    app::format_count(added as u64)
+                )
+                .into();
+            }
+            SyncOutcome::Off => {
+                state.enabled = false;
+                state.text = "仅路由记录".into();
+                state.detail = "会话日志扫描已关闭；已导入的用量仍会保留。".into();
+            }
+            SyncOutcome::Failed(error) => {
+                state.error = error.into();
+                state.text = "同步未完成".into();
+            }
+        }
+        app.set_usage_sync(state);
+    });
+}
+
 /// Imports new log usage and reports progress; true when rows were added.
 fn sync_logs(
     weak: &Weak<AppWindow>,
@@ -146,56 +299,44 @@ fn sync_logs(
     force: bool,
     cancel: &AtomicBool,
 ) -> bool {
-    let mut last_post = Instant::now();
-    let mut announced = false;
-    let result = app::sync_usage_logs(data_dir, home, force, cancel, |progress| {
-        // Large first imports show progress; quick incremental scans stay quiet.
-        if progress.total == 0 || last_post.elapsed() < Duration::from_millis(120) {
-            return;
-        }
-        last_post = Instant::now();
-        announced = true;
-        let fraction = progress.done as f32 / progress.total as f32;
-        let _ = weak.upgrade_in_event_loop(move |app| {
-            app.set_usage_sync(UsageSyncState {
-                running: true,
-                progress: fraction,
-                text: format!("正在读取会话日志 {}%", (fraction * 100.0).round()).into(),
-                ..app.get_usage_sync()
-            });
-        });
+    let mut progress = Progress::new(weak);
+    let result = app::sync_usage_logs(data_dir, home, force, cancel, |step| {
+        progress.post(step.done, step.total, "正在读取会话日志")
     });
-    let now = Local::now().format("%H:%M").to_string();
     let added = matches!(result, Ok(Some(summary)) if summary.added > 0);
-    let _ = weak.upgrade_in_event_loop(move |app| {
-        let mut state = app.get_usage_sync();
-        state.running = false;
-        state.progress = if announced { 1.0 } else { 0.0 };
+    post_sync(
+        weak,
         match result {
-            Ok(Some(summary)) => {
-                state.enabled = true;
-                state.error = "".into();
-                state.text = format!("已同步 · {now}").into();
-                state.detail = format!(
-                    "上次扫描 {now}，读取 {} 个文件，新增 {} 条",
-                    summary.read,
-                    app::format_count(summary.added as u64)
-                )
-                .into();
-            }
-            Ok(None) => {
-                state.enabled = false;
-                state.error = "".into();
-                state.text = "仅路由记录".into();
-            }
-            Err(error) => {
-                state.error = error.into();
-                state.text = "同步未完成".into();
-            }
-        }
-        app.set_usage_sync(state);
-    });
+            Ok(Some(summary)) => SyncOutcome::Synced {
+                read: summary.read,
+                added: summary.added,
+            },
+            Ok(None) => SyncOutcome::Off,
+            Err(error) => SyncOutcome::Failed(error),
+        },
+    );
     added
+}
+
+fn post_price(weak: &Weak<AppWindow>, result: Result<(), String>, model: &str) {
+    let message = result
+        .err()
+        .map(|error| format!("{model}：{error}"))
+        .unwrap_or_default();
+    let _ = weak.upgrade_in_event_loop(move |app| {
+        app.set_usage_price_saving("".into());
+        app.set_usage_price_error(message.into());
+    });
+}
+
+fn show_prices(app: &AppWindow, prices: Vec<app::PriceView>) {
+    let rows = price_rows(prices);
+    sync_rows(
+        app.get_usage_prices(),
+        rows,
+        |row| row.model.clone(),
+        |model| app.set_usage_prices(model),
+    );
 }
 
 fn post_error(weak: &Weak<AppWindow>, message: &'static str) {
@@ -285,10 +426,75 @@ pub(super) fn connect(app: &AppWindow, service: &UsageService) {
         }
     });
     let weak = app.as_weak();
-    let sources_service = service.clone();
     app.on_usage_open_sources(move || {
         if let Some(app) = weak.upgrade() {
-            sources_service.sync(&app.get_config_home(), true);
+            app.set_usage_sources_open(true);
+        }
+    });
+    let weak = app.as_weak();
+    let prices_service = service.clone();
+    app.on_usage_open_prices(move || {
+        if let Some(app) = weak.upgrade() {
+            app.set_usage_price_error("".into());
+            app.set_usage_prices_open(true);
+            prices_service.send(Job::Prices);
+        }
+    });
+    let weak = app.as_weak();
+    let import_service = service.clone();
+    app.on_usage_set_log_import(move |enabled| {
+        if let Some(app) = weak.upgrade()
+            && let Some(home) = absolute(&app.get_config_home())
+        {
+            // The switch moves at once; the thread confirms or reports failure.
+            let mut sync = app.get_usage_sync();
+            sync.enabled = enabled;
+            app.set_usage_sync(sync);
+            import_service.send(Job::SetImport { enabled, home });
+        }
+    });
+    let weak = app.as_weak();
+    let sync_service = service.clone();
+    app.on_usage_sync_now(move || {
+        if let Some(app) = weak.upgrade() {
+            sync_service.sync(&app.get_config_home(), true);
+        }
+    });
+    let weak = app.as_weak();
+    let rebuild_service = service.clone();
+    app.on_usage_rebuild(move || {
+        if let Some(app) = weak.upgrade()
+            && let Some(home) = absolute(&app.get_config_home())
+        {
+            let mut sync = app.get_usage_sync();
+            sync.running = true;
+            sync.progress = 0.0;
+            sync.text = "正在备份数据库".into();
+            app.set_usage_sync(sync);
+            rebuild_service.send(Job::Rebuild { home });
+        }
+    });
+    let weak = app.as_weak();
+    let price_service = service.clone();
+    app.on_usage_save_price(move |model, currency, input, cached, output| {
+        if let Some(app) = weak.upgrade() {
+            app.set_usage_price_saving(model.clone());
+            price_service.send(Job::SavePrice(PriceInput {
+                provider_id: String::new(),
+                model: model.into(),
+                currency: currency.into(),
+                input: input.into(),
+                cached_input: cached.into(),
+                output: output.into(),
+            }));
+        }
+    });
+    let weak = app.as_weak();
+    let delete_service = service.clone();
+    app.on_usage_delete_price(move |model| {
+        if let Some(app) = weak.upgrade() {
+            app.set_usage_price_saving(model.clone());
+            delete_service.send(Job::DeletePrice(model.into()));
         }
     });
 }

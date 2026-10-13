@@ -1,0 +1,472 @@
+import { Theme } from "../tokens.slint";
+import {
+    AnimatedSection,
+    QuietButton,
+    QuietLineEdit,
+    QuietSegmented,
+} from "../components.slint";
+import { QuietScrollView as ScrollView } from "../scroll-view.slint";
+import { QuotaSpinner } from "../quota-loading.slint";
+import { UsagePriceRow, UsageSyncState } from "../view-models.slint";
+
+component Switch inherits Rectangle {
+    in property <bool> on;
+    in property <string> label;
+    callback toggled();
+    width: 40px;
+    height: 24px;
+    border-radius: 12px;
+    background: root.on ? Theme.brand : Theme.raised;
+    border-width: 1px;
+    border-color: root.on ? Theme.brand : touch.has-hover ? Theme.brand.with-alpha(0.5) : Theme.border;
+    animate background, border-color { duration: Theme.page-motion; }
+    accessible-role: checkbox;
+    accessible-label: root.label;
+    accessible-checked: root.on;
+    accessible-action-default => { root.toggled(); }
+    Rectangle {
+        x: root.on ? parent.width - self.width - 4px : 4px;
+        y: (parent.height - self.height) / 2;
+        width: touch.pressed ? 19px : 16px;
+        height: 16px;
+        border-radius: 8px;
+        background: root.on ? Theme.on-brand : Theme.muted-text;
+        drop-shadow-blur: 3px;
+        drop-shadow-offset-y: 1px;
+        drop-shadow-color: #00000030;
+        animate x {
+            duration: Theme.page-motion;
+            easing: cubic-bezier(0.34, 1.56, 0.64, 1);
+        }
+        animate width, background { duration: Theme.fast; }
+    }
+
+    touch := TouchArea {
+        mouse-cursor: pointer;
+        clicked => { root.toggled(); }
+    }
+}
+
+component Section inherits Rectangle {
+    vertical-stretch: 0;
+    border-radius: 14px;
+    border-width: 1px;
+    border-color: Theme.border;
+    background: Theme.inset;
+    animate background, border-color { duration: Theme.page-motion; }
+}
+
+component Heading inherits HorizontalLayout {
+    in property <image> icon;
+    in property <string> title;
+    in property <string> badge;
+    spacing: 10px;
+    Image {
+        y: (parent.height - self.height) / 2;
+        width: 18px;
+        height: 18px;
+        source: root.icon;
+        colorize: Theme.brand;
+    }
+
+    Text {
+        text: root.title;
+        color: Theme.primary-text;
+        font-size: 15px;
+        font-weight: 600;
+        vertical-alignment: center;
+    }
+
+    Rectangle {
+        horizontal-stretch: 1;
+    }
+
+    @children
+}
+
+component Body inherits Text {
+    color: Theme.muted-text;
+    font-size: 12px;
+    wrap: word-wrap;
+}
+
+// Progress across a log import; the fill eases toward each reported fraction.
+component ImportBar inherits Rectangle {
+    in property <float> progress;
+    private property <float> shown: root.progress;
+    animate shown {
+        duration: Theme.page-motion;
+        easing: ease-out;
+    }
+    height: 4px;
+    border-radius: 2px;
+    background: Theme.raised;
+    clip: true;
+    Rectangle {
+        x: 0px;
+        width: parent.width * root.shown;
+        border-radius: 2px;
+        background: Theme.brand;
+    }
+}
+
+export component UsageSourcesSheet inherits VerticalLayout {
+    in property <UsageSyncState> sync;
+    in property <string> sessions-path;
+    callback set-log-import(bool);
+    callback sync-now();
+    callback rebuild();
+    private property <bool> confirming;
+    spacing: 14px;
+    Section {
+        VerticalLayout {
+            padding: 18px;
+            spacing: 10px;
+            Heading {
+                icon: @image-url("../../assets/ui/activity.svg");
+                title: "SwitchX 路由";
+                Rectangle {
+                    y: (parent.height - self.height) / 2;
+                    width: 56px;
+                    height: 22px;
+                    border-radius: 6px;
+                    background: Theme.brand-surface;
+                    Text {
+                        text: "始终开启";
+                        color: Theme.brand;
+                        font-size: 11px;
+                        font-weight: 500;
+                        horizontal-alignment: center;
+                        vertical-alignment: center;
+                    }
+                }
+            }
+
+            Body {
+                text: "经路由的请求完成时，记录上游返回的 Token 数、实际连接与模型，以及生成速度。";
+            }
+        }
+    }
+
+    Section {
+        VerticalLayout {
+            padding: 18px;
+            spacing: 10px;
+            Heading {
+                icon: @image-url("../../assets/ui/database.svg");
+                title: "Codex 会话日志";
+                Switch {
+                    y: (parent.height - self.height) / 2;
+                    label: "自动扫描 Codex 会话日志";
+                    on: root.sync.enabled;
+                    toggled => { root.set-log-import(!root.sync.enabled); }
+                }
+            }
+
+            Body {
+                text: "覆盖直连、原生登录与其他提供方的会话。启动时扫描一次，之后每分钟只读取新增内容；经路由的会话以路由记录为准，不重复计入。";
+            }
+
+            Rectangle {
+                height: 30px;
+                border-radius: 8px;
+                background: Theme.panel;
+                Text {
+                    x: 10px;
+                    width: parent.width - 20px;
+                    text: root.sessions-path;
+                    color: Theme.primary-text;
+                    font-size: 11px;
+                    font-family: "Menlo";
+                    vertical-alignment: center;
+                    overflow: elide;
+                }
+            }
+
+            if root.sync.running: ImportBar {
+                progress: root.sync.progress;
+            }
+            HorizontalLayout {
+                spacing: 8px;
+                if root.sync.running: QuotaSpinner {
+                    y: (parent.height - self.height) / 2;
+                }
+                Text {
+                    horizontal-stretch: 1;
+                    text: root.sync.error != "" ? root.sync.error : root.sync.detail != "" ? root.sync.detail : root.sync.text;
+                    color: root.sync.error != "" ? Theme.warning : Theme.muted-text;
+                    font-size: 11px;
+                    vertical-alignment: center;
+                    wrap: word-wrap;
+                }
+
+                QuietButton {
+                    width: 112px;
+                    height: 32px;
+                    text: "立即同步";
+                    icon: @image-url("../../assets/refresh.svg");
+                    icon-color: Theme.muted-text;
+                    loading: root.sync.running;
+                    enabled: !root.sync.running;
+                    clicked => { root.sync-now(); }
+                }
+            }
+        }
+    }
+
+    Section {
+        VerticalLayout {
+            padding: 18px;
+            spacing: 10px;
+            Heading {
+                icon: @image-url("../../assets/refresh.svg");
+                title: "重新导入会话日志";
+                QuietButton {
+                    width: 96px;
+                    height: 32px;
+                    text: "重新导入…";
+                    enabled: !root.sync.running && !root.confirming;
+                    clicked => { root.confirming = true; }
+                }
+            }
+
+            Body {
+                text: "先在数据目录备份数据库，再清除日志导入的用量并重新读取全部会话日志。已删除的日志无法再导入。";
+            }
+
+            AnimatedSection {
+                expanded: root.confirming;
+                content-height: 44px;
+                HorizontalLayout {
+                    padding-top: 6px;
+                    spacing: 8px;
+                    alignment: end;
+                    QuietButton {
+                        width: 72px;
+                        height: 32px;
+                        text: "取消";
+                        ghost: true;
+                        clicked => { root.confirming = false; }
+                    }
+
+                    QuietButton {
+                        width: 120px;
+                        height: 32px;
+                        text: "备份并重新导入";
+                        primary: true;
+                        clicked => {
+                            root.confirming = false;
+                            root.rebuild();
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    HorizontalLayout {
+        spacing: 6px;
+        Image {
+            y: 2px;
+            width: 12px;
+            height: 12px;
+            source: @image-url("../../assets/ui/lock.svg");
+            colorize: Theme.muted-text;
+        }
+
+        Body {
+            horizontal-stretch: 1;
+            font-size: 11px;
+            text: "只读取用量记录中的 Token 数、模型 ID、会话 ID 与时间；提示词、回复、工作目录和凭据不会读取或保存。";
+        }
+    }
+
+    Rectangle {
+        vertical-stretch: 1;
+    }
+}
+
+component PriceField inherits VerticalLayout {
+    in property <string> label;
+    in-out property <string> text;
+    in property <string> placeholder;
+    callback accepted();
+    spacing: 4px;
+    horizontal-stretch: 1;
+    Text {
+        text: root.label;
+        color: Theme.muted-text;
+        font-size: 10px;
+    }
+
+    QuietLineEdit {
+        height: 32px;
+        text <=> root.text;
+        placeholder-text: root.placeholder;
+        input-type: decimal;
+        font-size: 12px;
+        accepted => { root.accepted(); }
+    }
+}
+
+component PriceCard inherits Rectangle {
+    in property <UsagePriceRow> entry;
+    in property <bool> saving;
+    callback save(string, string, string, string, string);
+    callback clear(string);
+    private property <int> currency: root.entry.currency == "CNY" ? 1 : 0;
+    private property <string> input: root.entry.input;
+    private property <string> cached: root.entry.cached;
+    private property <string> output: root.entry.output;
+    private property <bool> dirty: root.input != root.entry.input || root.cached != root.entry.cached || root.output != root.entry.output || (root.entry.priced && (root.currency == 1 ? "CNY" : "USD") != root.entry.currency);
+    function submit() {
+        root.save(root.entry.model, root.currency == 1 ? "CNY" : "USD", root.input, root.cached, root.output);
+    }
+    height: card.preferred-height;
+    border-radius: 12px;
+    border-width: 1px;
+    border-color: root.entry.priced ? Theme.border : Theme.warning.with-alpha(0.45);
+    background: Theme.panel;
+    animate border-color { duration: Theme.page-motion; }
+    card := VerticalLayout {
+        padding: 14px;
+        spacing: 10px;
+        HorizontalLayout {
+            spacing: 10px;
+            VerticalLayout {
+                spacing: 3px;
+                horizontal-stretch: 1;
+                Text {
+                    text: root.entry.model;
+                    color: Theme.primary-text;
+                    font-size: 13px;
+                    font-weight: 600;
+                    font-family: "Menlo";
+                    overflow: elide;
+                }
+
+                Text {
+                    text: root.entry.usage;
+                    color: Theme.muted-text;
+                    font-size: 11px;
+                }
+            }
+
+            Rectangle {
+                y: (parent.height - self.height) / 2;
+                width: 54px;
+                height: 22px;
+                border-radius: 6px;
+                background: root.entry.priced ? Theme.brand-surface : Theme.warning-surface;
+                Text {
+                    text: root.entry.priced ? "已定价" : "未定价";
+                    color: root.entry.priced ? Theme.brand : Theme.warning;
+                    font-size: 11px;
+                    font-weight: 500;
+                    horizontal-alignment: center;
+                    vertical-alignment: center;
+                }
+            }
+        }
+
+        HorizontalLayout {
+            spacing: 10px;
+            alignment: stretch;
+            VerticalLayout {
+                spacing: 4px;
+                Text {
+                    text: "币种";
+                    color: Theme.muted-text;
+                    font-size: 10px;
+                }
+
+                QuietSegmented {
+                    width: 112px;
+                    options: ["USD", "CNY"];
+                    current-index: root.currency;
+                    selected(index) => { root.currency = index; }
+                }
+            }
+
+            PriceField {
+                label: "输入 / 百万";
+                text <=> root.input;
+                placeholder: "例如 1.25";
+                accepted => { root.submit(); }
+            }
+
+            PriceField {
+                label: "缓存输入 / 百万";
+                text <=> root.cached;
+                placeholder: "同输入";
+                accepted => { root.submit(); }
+            }
+
+            PriceField {
+                label: "输出 / 百万";
+                text <=> root.output;
+                placeholder: "例如 10";
+                accepted => { root.submit(); }
+            }
+        }
+
+        HorizontalLayout {
+            spacing: 8px;
+            alignment: end;
+            if root.entry.priced: QuietButton {
+                width: 72px;
+                height: 30px;
+                text: "清除";
+                ghost: true;
+                enabled: !root.saving;
+                clicked => { root.clear(root.entry.model); }
+            }
+            QuietButton {
+                width: 80px;
+                height: 30px;
+                text: root.saving ? "保存中…" : "保存";
+                primary: root.dirty;
+                loading: root.saving;
+                enabled: !root.saving && root.input != "" && root.output != "";
+                clicked => { root.submit(); }
+            }
+        }
+    }
+}
+
+export component UsagePricesSheet inherits VerticalLayout {
+    in property <[UsagePriceRow]> prices;
+    in property <string> saving;
+    in property <string> error;
+    callback save(string, string, string, string, string);
+    callback clear(string);
+    spacing: 12px;
+
+    if root.error != "": Text {
+        text: root.error;
+        color: Theme.error;
+        font-size: 12px;
+        wrap: word-wrap;
+    }
+    ScrollView {
+        horizontal-scrollbar-policy: always-off;
+        VerticalLayout {
+            spacing: 10px;
+            padding-bottom: 4px;
+            for price in root.prices: PriceCard {
+                entry: price;
+                saving: root.saving == price.model;
+                save(model, currency, input, cached, output) => { root.save(model, currency, input, cached, output); }
+                clear(model) => { root.clear(model); }
+            }
+            if root.prices.length == 0: Text {
+                height: 96px;
+                text: "有用量的模型会出现在这里";
+                color: Theme.muted-text;
+                font-size: 12px;
+                horizontal-alignment: center;
+                vertical-alignment: center;
+            }
+        }
+    }
+}

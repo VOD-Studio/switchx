@@ -454,6 +454,23 @@ impl super::Store {
         Ok(())
     }
 
+    /// Every model with recorded usage: requests and input plus output tokens.
+    pub fn usage_models(&self) -> Result<Vec<(String, u64, u64)>> {
+        let mut statement = self.connection.prepare(
+            "SELECT model, COUNT(*), SUM(input_tokens + output_tokens)
+             FROM usage_records WHERE model != '' GROUP BY model",
+        )?;
+        statement
+            .query_map([], |row| {
+                Ok((
+                    row.get(0)?,
+                    row.get::<_, i64>(1)?.max(0) as u64,
+                    row.get::<_, i64>(2)?.max(0) as u64,
+                ))
+            })?
+            .collect()
+    }
+
     /// The earliest recorded usage, for an all-time range.
     pub fn first_usage_ms(&self) -> Result<Option<i64>> {
         self.connection

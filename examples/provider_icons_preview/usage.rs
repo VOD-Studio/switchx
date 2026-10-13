@@ -7,7 +7,7 @@ use std::{
 
 use chrono::{Duration, Local, Timelike};
 use slint::platform::{WindowEvent, software_renderer::MinimalSoftwareWindow};
-use slint::{ComponentHandle, LogicalPosition, ModelRc, PhysicalSize, VecModel};
+use slint::{ComponentHandle, LogicalPosition, Model, ModelRc, PhysicalSize, VecModel};
 use switchx::{
     app::{self, UsageQuery, UsageView},
     headless, provider_icons,
@@ -395,6 +395,31 @@ pub(super) fn render_usage_design(
         });
         frame(400);
     }
+
+    // Data sources and pricing open as drawers over the page.
+    app.window().set_size(PhysicalSize::new(1200, 820));
+    set_theme(app, window, true);
+    app.set_usage_sync(UsageSyncState {
+        enabled: true,
+        running: true,
+        progress: 0.42,
+        text: "正在读取会话日志 42%".into(),
+        detail: "上次扫描 16:03：读取 2 个有变化的文件，新增 31 条".into(),
+        ..Default::default()
+    });
+    app.set_usage_sources_open(true);
+    play(window, output, "usage-sources-dark-1200x820", &[96, 400])?;
+    app.set_usage_sources_open(false);
+    frame(500);
+    app.set_usage_prices(ModelRc::new(VecModel::from(usage_view::price_rows(
+        app::load_prices(&data.0).map_err(|error| error.message())?,
+    ))));
+    assert_eq!(app.get_usage_prices().row_count(), 6);
+    set_theme(app, window, false);
+    app.set_usage_prices_open(true);
+    play(window, output, "usage-prices-light-1200x820", &[400])?;
+    app.set_usage_prices_open(false);
+    frame(500);
 
     let empty = seed(true)?;
     app.set_usage_period(0);

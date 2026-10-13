@@ -37,9 +37,10 @@ pub use providers::{
 };
 pub use snapshot::{ModelView, ProviderView, Snapshot, load_snapshot};
 pub use usage::{
-    PriceInput, USAGE_PAGE, USAGE_ROW_LIMIT, UsageQuery, UsageRow, UsageView, delete_price,
-    format_amounts, format_count, format_money, format_tokens, load_usage, parse_price, price_text,
-    rebuild_usage_logs, save_price, set_usage_log_import, sync_usage_logs,
+    PriceInput, PriceView, USAGE_PAGE, USAGE_ROW_LIMIT, UsageQuery, UsageRow, UsageView,
+    delete_price, format_amounts, format_count, format_money, format_tokens, load_prices,
+    load_usage, parse_price, price_text, rebuild_usage_logs, save_price, set_usage_log_import,
+    sync_usage_logs,
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

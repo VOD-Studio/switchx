@@ -7,7 +7,10 @@ use switchx::{
     app::{self, UsageRow},
     provider_icons,
     storage::{Currency, ProviderKind, ProviderRecord},
-    ui::{UsageDetailRow, UsageHeatCell, UsagePoint, UsageScale, UsageShareRow, UsageSummary},
+    ui::{
+        UsageDetailRow, UsageHeatCell, UsagePoint, UsagePriceRow, UsageScale, UsageShareRow,
+        UsageSummary,
+    },
     usage::{
         TokenUsage,
         report::{Granularity, GroupKind, Money, Report, Share, Totals},
@@ -579,6 +582,36 @@ pub fn detail_row(
         output_share: share(usage.output, total),
         stamp,
     }
+}
+
+pub fn price_rows(prices: Vec<app::PriceView>) -> Vec<UsagePriceRow> {
+    prices
+        .into_iter()
+        .map(|price| UsagePriceRow {
+            provider_id: "".into(),
+            scope: "全部连接".into(),
+            currency: price
+                .currency
+                .map_or("", |currency| currency.as_str())
+                .into(),
+            priced: price.currency.is_some(),
+            input: price.input.into(),
+            cached: price.cached_input.into(),
+            output: price.output.into(),
+            usage: if price.requests == 0 {
+                "暂无用量".to_owned()
+            } else {
+                format!(
+                    "{} Token · {} 次请求",
+                    app::format_tokens(price.tokens),
+                    app::format_count(price.requests)
+                )
+            }
+            .into(),
+            reference: "".into(),
+            model: price.model.into(),
+        })
+        .collect()
 }
 
 #[cfg(test)]
