@@ -2,6 +2,7 @@
 """Build portable native packages, or verify all six release assets."""
 
 import argparse
+import contextlib
 import hashlib
 import json
 import os
@@ -10,6 +11,7 @@ import subprocess
 import sys
 import tarfile
 import tempfile
+import time
 import zipfile
 from pathlib import Path
 
@@ -17,8 +19,8 @@ from release import ROOT, check
 
 
 TARGETS = {
-    "aarch64-apple-darwin": ("darwin", "arm64", ".zip"),
-    "x86_64-apple-darwin": ("darwin", "x86_64", ".zip"),
+    "aarch64-apple-darwin": ("darwin", "arm64", ".dmg"),
+    "x86_64-apple-darwin": ("darwin", "x86_64", ".dmg"),
     "aarch64-pc-windows-msvc": ("win32", "arm64", ".zip"),
     "x86_64-pc-windows-msvc": ("win32", "x86_64", ".zip"),
     "aarch64-unknown-linux-gnu": ("linux", "arm64", ".tar.gz"),
@@ -40,6 +42,32 @@ def digest(path):
 
 def output(*command):
     return subprocess.check_output(command, cwd=ROOT, text=True, encoding="utf-8").strip()
+
+
+def create_dmg(source, image, volume_name):
+    command = ["hdiutil", "create", "-volname", volume_name, "-srcfolder", str(source),
+               "-fs", "HFS+", "-format", "UDZO", "-imagekey", "zlib-level=9", "-ov", "-quiet",
+               str(image)]
+    # GitHub's macOS runners intermittently report "Resource busy" while creating images.
+    for attempt in range(3):
+        if attempt:
+            time.sleep(5)
+        result = subprocess.run(command)
+        if result.returncode == 0:
+            return
+    raise subprocess.CalledProcessError(result.returncode, command)
+
+
+@contextlib.contextmanager
+def mounted(image):
+    with tempfile.TemporaryDirectory(prefix="switchx-dmg-") as mountpoint:
+        # Attaching verifies the image checksums; -nobrowse keeps it out of Finder.
+        subprocess.run(["hdiutil", "attach", "-readonly", "-nobrowse", "-noautoopen", "-quiet",
+                        "-mountpoint", mountpoint, str(image)], check=True)
+        try:
+            yield Path(mountpoint)
+        finally:
+            subprocess.run(["hdiutil", "detach", "-force", "-quiet", mountpoint], check=True)
 
 
 def build(target, destination):
@@ -69,6 +97,8 @@ def build(target, destination):
         shutil.copy2(ROOT / "assets/providers/NOTICE.md", staging / "Provider-Icons-NOTICE.md")
         if "apple-darwin" in target:
             shutil.copytree(built / "SwitchX.app", staging / "SwitchX.app", symlinks=True)
+            # Lets users drag the app into Applications from the opened image.
+            (staging / "Applications").symlink_to("/Applications")
         else:
             shutil.copy2(executable, staging)
         (staging / "BUILD-INFO.json").write_text(json.dumps({
@@ -78,10 +108,12 @@ def build(target, destination):
             "dirty": bool(output("git", "status", "--porcelain")),
             "rustc": output("rustc", "--version"),
         }, indent=2) + "\n", encoding="utf-8")
-        if "apple-darwin" in target:
-            # ditto preserves executable permissions, bundle metadata and signatures.
-            subprocess.run(["ditto", "-c", "-k", "--sequesterRsrc", "--keepParent",
-                            str(staging), str(archive)], check=True)
+        if name.endswith(".dmg"):
+            create_dmg(staging, archive, f"SwitchX {version}")
+            with mounted(archive) as volume:
+                # The copy inside the image is what users install; its ad-hoc seal must hold.
+                subprocess.run(["codesign", "--verify", "--deep", "--strict",
+                                str(volume / "SwitchX.app")], check=True)
         elif name.endswith(".zip"):
             shutil.make_archive(str(archive.with_suffix("")), "zip", staging.parent, staging.name)
         else:
@@ -106,7 +138,11 @@ def verify_assets(directory, version, commit):
         if (directory / f"{name}.sha256").read_text(encoding="utf-8") != checksum:
             raise ValueError(f"Checksum mismatch: {name}")
         info_path = f"SwitchX-{version}-{target}/BUILD-INFO.json"
-        if name.endswith(".zip"):
+        if name.endswith(".dmg"):
+            # The image's root is the package folder, so metadata sits at the volume root.
+            with mounted(archive) as volume:
+                info = json.loads((volume / "BUILD-INFO.json").read_text(encoding="utf-8"))
+        elif name.endswith(".zip"):
             with zipfile.ZipFile(archive) as source:
                 info = json.loads(source.read(info_path))
         else:
