@@ -55,12 +55,12 @@ git push origin v0.1.0
 | macOS | Intel | `x86_64-apple-darwin` | `.dmg`，包含 `SwitchX.app` |
 | Windows | x64 | `x86_64-pc-windows-msvc` | `.zip`，包含 `switchx.exe` |
 | Windows | ARM64 | `aarch64-pc-windows-msvc` | `.zip`，包含 `switchx.exe` |
-| Linux | x64 | `x86_64-unknown-linux-gnu` | `.tar.gz`，包含 `switchx` |
-| Linux | ARM64 | `aarch64-unknown-linux-gnu` | `.tar.gz`，包含 `switchx` |
+| Linux | x64 | `x86_64-unknown-linux-gnu` | `.AppImage` 与包含 `switchx` 的 `.tar.gz` |
+| Linux | ARM64 | `aarch64-unknown-linux-gnu` | `.AppImage` 与包含 `switchx` 的 `.tar.gz` |
 
 版本标签通过 GitHub 托管 runner 的检查后，每个平台使用 [GitHub 提供的对应架构原生 runner](https://docs.github.com/en/actions/reference/runners/github-hosted-runners)，先跑 Clippy、单元和集成测试，再构建 release 二进制。包名为 `SwitchX-<version>-<target>.<extension>`，包内包含 changelog、README、供应商图标许可和记录版本/target/源提交/工作区是否有改动/Rust 工具链的 `BUILD-INFO.json`。macOS 包是 HFS+ 格式的 UDZO 压缩磁盘映像，以上文件位于卷根目录，另有指向「应用程序」的快捷方式供拖拽安装；打包后会挂载映像，确认其中的 `SwitchX.app` 签名完整。Windows 构建静态链接 CRT；Linux 包在 Ubuntu 24.04 构建，不承诺兼容更旧的 glibc。
 
-Release 发布前会校验标签、workspace 版本、lockfile 和 changelog，要求六个平台包与各自 `.sha256` 文件齐全，核对包内版本与源提交、拒绝从有未提交改动的工作区构建的包，并生成 `SHA256SUMS`。发布 job 需要用 `hdiutil` 挂载 DMG 读取 `BUILD-INFO.json`，因此运行在 GitHub 托管的 `macos-15` runner。任一检查失败都会阻止发布。全部完成后先创建 draft、上传附件，再公开 Release；上传失败时 draft 可以在重跑工作流后继续。已经公开的 Release 不会被覆盖。预发布版本自动标为 prerelease，且不会成为 latest。
+Release 发布前会校验标签、workspace 版本、lockfile 和 changelog，要求六个平台的八个包（Linux 每种架构各两个）与各自 `.sha256` 文件齐全，核对包内版本与源提交、拒绝从有未提交改动的工作区构建的包，并生成 `SHA256SUMS`。发布 job 在 GitHub 托管的 `macos-15` runner 上用 `hdiutil` 挂载 DMG，用 Homebrew `squashfs` 提供的 `unsquashfs` 读取两个架构 AppImage 内的 `BUILD-INFO.json`，无需执行 Linux 程序。任一检查失败都会阻止发布。全部完成后先创建 draft、上传附件，再公开 Release；上传失败时 draft 可以在重跑工作流后继续。已经公开的 Release 不会被覆盖。预发布版本自动标为 prerelease，且不会成为 latest。
 
 下载后可在 Linux 使用 `sha256sum -c SHA256SUMS`，macOS 使用 `shasum -a 256 -c SHA256SUMS`；如果只下载一个平台包，使用对应 `.sha256` 文件。Windows 可使用 PowerShell 的 `Get-FileHash <文件名> -Algorithm SHA256` 与校验文件比对。
 
@@ -92,3 +92,21 @@ macOS 当前使用 ad-hoc 签名，未做 Developer ID 签名与公证，DMG 本
 ```sh
 python3 scripts/package-release.py --target aarch64-apple-darwin
 ```
+
+## Linux AppImage
+
+在 x64 或 ARM64 Linux 原生主机上安装仓库的 Rust 工具链、Git LFS、GUI 构建依赖，以及 Python 3.11+、binutils、ImageMagick、desktop-file-utils、squashfs-tools，然后运行：
+
+```sh
+make appimage
+# 或显式指定与本机 rustc host 一致的 target：
+python3 scripts/package-release.py --target x86_64-unknown-linux-gnu
+```
+
+两个命令都会生成本机架构的 `.AppImage` 和原有 `.tar.gz`。使用 `CARGO_TARGET_DIR` 时，程序从 Cargo 报告的输出目录读取；工具下载缓存仍在仓库的 `target/appimage-tools/`。`make release` 仍用于 macOS bundle。
+
+`scripts/appimage.py` 从官方发布地址下载 linuxdeploy `1-alpha-20251107-1`、appimagetool `1.9.1` 和 type2-runtime `20251108`，在下载后与每次复用缓存前核对固定 SHA-256。升级工具时应同时更新 URL 版本与两个架构的校验值。打包按 [linuxdeploy 流程](https://docs.appimage.org/packaging-guide/from-source/linuxdeploy-user-guide.html) 收集依赖，使用 `packaging/linux/` 的桌面入口与 AppRun，以及现有应用图标。工具使用 extract-and-run，CI 构建不需要 FUSE。构建完成会在隔离目录中验证版本、API Key helper、路由令牌 helper、数据库未修改和包内构建元数据，全部使用合成凭据。
+
+发布版在 Ubuntu 24.04 构建；AppImage 不降低 glibc 最低版本要求，仍需宿主提供 Fontconfig、XKB、OpenGL 驱动及 X11/Wayland 桌面。较新发行版上的本地构建可能要求更高的 glibc，分发包应使用 CI 的基线环境。
+
+AppImage 启动时，凭据路径解析仅在当前程序位于其 AppDir 布局内时采用运行时的 `APPIMAGE` 绝对路径，防止继承其他 AppImage 的环境变量而误指向别的程序。配置保留外部文件路径，不保存每次启动生成的临时挂载路径。移动、重命名或删除文件后需重新启用配置；手动解压安装应将整个 AppDir 保存在固定位置。

@@ -6,6 +6,65 @@ use std::{ffi::OsString, path::PathBuf};
 
 use crate::{credentials::Secret, storage::Store};
 
+/// The persistent executable Codex should invoke, including after this launch exits.
+pub fn executable() -> Result<PathBuf, String> {
+    let current = std::env::current_exe().map_err(|_| "无法定位 SwitchX 凭据程序")?;
+    #[cfg(target_os = "linux")]
+    return appimage_executable(
+        current,
+        std::env::var_os("APPIMAGE")
+            .as_deref()
+            .map(std::path::Path::new),
+        std::env::var_os("APPDIR")
+            .as_deref()
+            .map(std::path::Path::new),
+    );
+    #[cfg(not(target_os = "linux"))]
+    Ok(current)
+}
+
+#[cfg(target_os = "linux")]
+fn appimage_executable(
+    current: PathBuf,
+    image: Option<&std::path::Path>,
+    directory: Option<&std::path::Path>,
+) -> Result<PathBuf, String> {
+    use std::{io::Read, os::unix::fs::PermissionsExt, path::Path};
+
+    // These variables can be inherited from an unrelated AppImage (e.g. a terminal).
+    // Only trust them when our executable is inside our own AppDir layout.
+    let Some(directory) = directory.and_then(|path| path.canonicalize().ok()) else {
+        return Ok(current);
+    };
+    if current.strip_prefix(&directory).ok() != Some(Path::new("usr/bin/switchx")) {
+        return Ok(current);
+    }
+    let Some(image) = image else {
+        // A manually extracted AppDir can also be installed in a permanent location.
+        return Ok(current);
+    };
+    let invalid = "AppImage 文件路径不可用，请将文件保存在固定位置并重新打开 SwitchX";
+    if !image.is_absolute() {
+        return Err(invalid.into());
+    }
+    let image = image.canonicalize().map_err(|_| invalid)?;
+    let metadata = image.metadata().map_err(|_| invalid)?;
+    if !metadata.is_file()
+        || metadata.permissions().mode() & 0o111 == 0
+        || image.starts_with(&directory)
+    {
+        return Err(invalid.into());
+    }
+    let mut header = [0_u8; 11];
+    std::fs::File::open(&image)
+        .and_then(|mut file| file.read_exact(&mut header))
+        .map_err(|_| invalid)?;
+    if &header[..4] != b"\x7fELF" || &header[8..] != b"AI\x02" {
+        return Err(invalid.into());
+    }
+    Ok(image)
+}
+
 /// Reads the secret a helper command names; `None` when no command was given.
 pub fn read(
     mut args: impl Iterator<Item = OsString>,
@@ -71,6 +130,68 @@ mod tests {
         id::new_id,
         storage::{ProviderKind, ProviderRecord},
     };
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn appimage_helper_survives_unmount_and_rejects_invalid_images() {
+        use std::os::unix::fs::{PermissionsExt, symlink};
+        let root = std::env::temp_dir().join(format!("switchx-appimage-{}", new_id().unwrap()));
+        let appdir = root.join(".mount_SwitchX-test");
+        let current = appdir.join("usr/bin/switchx");
+        std::fs::create_dir_all(current.parent().unwrap()).unwrap();
+        std::fs::write(&current, b"synthetic executable").unwrap();
+        let image = root.join("SwitchX 中文 ' space.AppImage");
+        std::fs::write(&image, b"\x7fELF\x02\x01\x01\x00AI\x02synthetic image").unwrap();
+        std::fs::set_permissions(&image, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let link = root.join("SwitchX.AppImage");
+        symlink(&image, &link).unwrap();
+        let resolve =
+            |image: &Path| appimage_executable(current.clone(), Some(image), Some(&appdir));
+        assert_eq!(resolve(&link).unwrap(), image);
+        for invalid in [
+            Path::new("relative.AppImage"),
+            &root.join("missing"),
+            &current,
+        ] {
+            assert!(resolve(invalid).is_err());
+        }
+        std::fs::set_permissions(&image, std::fs::Permissions::from_mode(0o644)).unwrap();
+        assert!(resolve(&image).is_err());
+        std::fs::set_permissions(&image, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let saved = resolve(&image).unwrap();
+        std::fs::remove_dir_all(&appdir).unwrap();
+        assert!(saved.is_file());
+        assert!(!current.exists());
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn native_helper_ignores_another_appimages_environment() {
+        let current = std::env::current_exe().unwrap();
+        assert_eq!(
+            appimage_executable(current.clone(), None, None).unwrap(),
+            current
+        );
+        assert_eq!(
+            appimage_executable(
+                current.clone(),
+                Some(Path::new("/missing.AppImage")),
+                Some(current.parent().unwrap())
+            )
+            .unwrap(),
+            current,
+        );
+        assert_eq!(
+            appimage_executable(
+                current.clone(),
+                Some(Path::new("/missing.AppImage")),
+                Some(Path::new("/nonexistent/AppDir"))
+            )
+            .unwrap(),
+            current,
+        );
+    }
 
     #[test]
     fn credential_helper_reads_api_key_without_migrating_v8_v9_or_v10() {

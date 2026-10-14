@@ -203,8 +203,7 @@ impl Worker {
             let provider = app::load_provider(data_dir, &id)?;
             app::provider_credential(data_dir, &provider)?;
             let target = client::config_path(&codex_home(&target)?)?;
-            let helper =
-                std::env::current_exe().map_err(|_| "无法定位 SwitchX credential helper")?;
+            let helper = switchx::credential_helper::executable()?;
             let state = app::load_provider_config(data_dir, &id)?;
             let prepared = PreparedDirectSwitch::inspect(&target, data_dir, &provider, &helper)?;
             let prepared = if let Some(options) = &state.options {
@@ -406,7 +405,7 @@ impl Worker {
         let result = async {
             let data_dir = self.data_dir.path()?;
             let target = codex_home(&target)?;
-            let helper = std::env::current_exe().map_err(|_| "无法定位 SwitchX 程序")?;
+            let helper = switchx::credential_helper::executable()?;
             self.route_session
                 .prepare(data_dir, &target, route_port(&port)?, &model, &helper)
                 .await

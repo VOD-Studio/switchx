@@ -23,7 +23,8 @@ runs:
         sudo apt-get install --no-install-recommends -y \
           build-essential cmake pkg-config libfontconfig1-dev \
           libxcb-shape0-dev libxcb-xfixes0-dev libxkbcommon-dev \
-          libwayland-dev libx11-dev libgl1-mesa-dev fonts-dejavu-core
+          libwayland-dev libx11-dev libgl1-mesa-dev fonts-dejavu-core \
+          squashfs-tools desktop-file-utils imagemagick
     - name: Install the repository Rust toolchain
       shell: bash
       run: |

@@ -1,0 +1,10 @@
+[Desktop Entry]
+Type=Application
+Name=SwitchX
+Comment=Manage model providers and local routing for Codex
+Comment[zh_CN]=管理 Codex 模型上游与本地路由
+Exec=switchx
+Icon=switchx
+Terminal=false
+Categories=Development;
+StartupWMClass=switchx

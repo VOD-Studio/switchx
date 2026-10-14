@@ -26,7 +26,14 @@ SwitchX 把 API 供应商、ChatGPT 订阅和 Grok 订阅放进同一个模型�
 
 ## 安装
 
-在 [GitHub Releases](https://github.com/VOD-Studio/switchx/releases) 下载对应平台与架构的包；macOS 打开 `.dmg` 后将 `SwitchX.app` 拖到「应用程序」，Windows 运行 `switchx.exe`，Linux 运行 `./switchx`。每个版本提供 macOS、Windows、Linux 的 x64 与 ARM64 包，以及 `SHA256SUMS` 校验文件。Linux 包在 Ubuntu 24.04 构建，需要兼容的 glibc、Fontconfig、XKB 和 OpenGL 库，以及 X11 或 Wayland 桌面。
+在 [GitHub Releases](https://github.com/VOD-Studio/switchx/releases) 下载对应平台与架构的包；macOS 打开 `.dmg` 后将 `SwitchX.app` 拖到「应用程序」，Windows 运行 `switchx.exe`。Linux 提供 `.AppImage` 与 `.tar.gz`：AppImage 添加执行权限后直接运行，tar.gz 解压后运行 `./switchx`。每个版本提供 macOS、Windows、Linux 的 x64 与 ARM64 包，以及 `SHA256SUMS` 校验文件。Linux 包在 Ubuntu 24.04 构建，需要兼容的 glibc、Fontconfig、XKB 和 OpenGL 库，以及 X11 或 Wayland 桌面；AppImage 随包携带非系统基础依赖，仍使用宿主的图形驱动与桌面环境。
+
+```sh
+chmod +x SwitchX-0.1.0-x86_64-unknown-linux-gnu.AppImage
+./SwitchX-0.1.0-x86_64-unknown-linux-gnu.AppImage
+```
+
+请把 AppImage 保存在固定位置后再启用直连或路由，Codex 凭据配置会记录这个文件的绝对路径。移动或重命名后需重新预览并启用配置。没有可用 FUSE 的环境可以运行 `APPIMAGE_EXTRACT_AND_RUN=1 ./SwitchX-0.1.0-x86_64-unknown-linux-gnu.AppImage`，此模式每次启动会解压文件；Codex 调用凭据程序时也需要这个变量，请在同一终端中先 `export APPIMAGE_EXTRACT_AND_RUN=1`，再启动 SwitchX 和 Codex。
 
 macOS 包采用 ad-hoc 签名，尚未使用 Developer ID 签名或 Apple 公证；Windows 包尚未进行代码签名。macOS 首次打开时如提示无法验证开发者，先关闭提示，再到「系统设置 → 隐私与安全性」点击「仍要打开」；也可以在终端运行 `xattr -dr com.apple.quarantine /Applications/SwitchX.app`。请从「应用程序」启动 SwitchX，不要直接在磁盘映像中运行：Codex 配置会记录应用路径，推出映像后路由将无法取得本地凭据。应用内「启动 Codex」目前仅支持 macOS；其他平台请自行在终端启动新的 Codex 会话。
 
@@ -49,6 +56,8 @@ sh scripts/bundle-macos.sh --release  # target/release/SwitchX.app
 ```
 
 生成的应用采用 ad-hoc 签名，未使用 Developer ID 签名或公证。打包脚本也支持 `--target TRIPLE` 和 `CARGO_TARGET_DIR`。需要与发布版相同的 DMG 时，运行 `python3 scripts/package-release.py --target aarch64-apple-darwin`（target 须与本机 Rust host 一致），结果写入 `dist/`。
+
+在 Linux 上运行 `make appimage`，会构建本机架构的 release 程序并在 `dist/` 生成 `.AppImage`、`.tar.gz` 及各自的校验文件。除 Rust、Git LFS 和原生 GUI 构建依赖外，还需 Python 3.11+、binutils、ImageMagick、`desktop-file-validate`（desktop-file-utils）和 `unsquashfs`（squashfs-tools）。首次打包会从官方 GitHub Releases 下载固定版本的 linuxdeploy、appimagetool 和 AppImage runtime，校验 SHA-256 后缓存到 `target/appimage-tools/`。完整步骤与兼容范围见 [发布指南](docs/releasing.md#linux-appimage)。
 
 ## 使用
 

@@ -4,7 +4,7 @@ SLINT_LSP ?= slint-lsp
 PYTHON ?= python3
 SLINT_FILES := $(shell find ui -type f -name '*.slint' | sort)
 
-.PHONY: build clean release lint format format-check test check check-lib check-app test-router require-slint-lsp release-check test-release prepare-release
+.PHONY: build clean release appimage lint format format-check test check check-lib check-app test-router require-slint-lsp release-check test-release prepare-release
 
 build:
 	cargo build --locked
@@ -14,6 +14,10 @@ clean:
 
 release:
 	./scripts/bundle-macos.sh --release
+
+appimage:
+	@test "$$(uname -s)" = Linux || { echo 'AppImage packaging requires a native Linux host' >&2; exit 1; }
+	$(PYTHON) scripts/package-release.py --target "$$(rustc -vV | sed -n 's/^host: //p')"
 
 lint:
 	cargo clippy --locked --workspace --all-targets -- -D warnings

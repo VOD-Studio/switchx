@@ -43,6 +43,8 @@ pub fn run() -> Result<(), Box<dyn std::error::Error>> {
         .enable_all()
         .build()?;
     let app = AppWindow::new()?;
+    #[cfg(target_os = "linux")]
+    slint::set_xdg_app_id("switchx")?;
     app.set_app_version(env!("CARGO_PKG_VERSION").into());
     switchx::model_picker::connect(&app);
     switchx::reasoning_picker::connect(&app);

@@ -20,7 +20,7 @@ jobs:
   publish:
     name: Publish complete GitHub Release
     needs: build
-    # Verification mounts the macOS disk images with hdiutil to read their build metadata.
+    # hdiutil reads macOS metadata; unsquashfs inspects both Linux AppImage architectures.
     runs-on: macos-15
     timeout-minutes: 15
     permissions:
@@ -48,6 +48,8 @@ jobs:
         with:
           name: release-notes
           path: target/release-notes
+      - name: Install AppImage inspection tools
+        run: brew install squashfs
       - name: Verify artifact set, build metadata and checksums
         run: python scripts/package-release.py --verify-dir dist --tag "$RELEASE_TAG"
       - name: Stage a draft, upload assets, then publish

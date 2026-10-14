@@ -60,7 +60,7 @@ pub(super) fn update_provider_config_preview(app: &AppWindow) {
     }
     let result = (|| {
         let options = editor_codex_options(app)?;
-        let helper = std::env::current_exe().map_err(|_| "无法定位 SwitchX 凭据程序")?;
+        let helper = switchx::credential_helper::executable()?;
         provider_config::preview(
             app.get_edit_name().as_str(),
             app.get_edit_url().as_str(),

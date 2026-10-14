@@ -1,0 +1,6 @@
+#!/bin/sh
+set -eu
+appdir=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
+# linuxdeploy sets relative RPATHs. Keep the caller's working directory and
+# environment intact, including APPIMAGE/APPDIR supplied by the runtime.
+exec "$appdir/usr/bin/switchx" "$@"

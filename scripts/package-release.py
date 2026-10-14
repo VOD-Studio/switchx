@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Build portable native packages, or verify all six release assets."""
+"""Build portable native packages, or verify the complete release asset set."""
 
 import argparse
 import contextlib
@@ -16,6 +16,7 @@ import zipfile
 from pathlib import Path
 
 from release import ROOT, check
+import appimage
 
 
 TARGETS = {
@@ -30,6 +31,13 @@ TARGETS = {
 
 def archive_name(version, target):
     return f"SwitchX-{version}-{target}{TARGETS[target][2]}"
+
+
+def package_names(version, target):
+    names = [archive_name(version, target)]
+    if "linux" in target:
+        names.append(f"SwitchX-{version}-{target}.AppImage")
+    return names
 
 
 def digest(path):
@@ -89,6 +97,7 @@ def build(target, destination):
         raise ValueError("Built executable does not report the workspace version")
     name = archive_name(version, target)
     archive = destination / name
+    archives = [archive]
     with tempfile.TemporaryDirectory(prefix="switchx-package-") as temporary:
         staging = Path(temporary) / f"SwitchX-{version}-{target}"
         staging.mkdir()
@@ -119,20 +128,26 @@ def build(target, destination):
         else:
             with tarfile.open(archive, "w:gz") as destination_file:
                 destination_file.add(staging, arcname=staging.name)
-    (destination / f"{name}.sha256").write_text(f"{digest(archive)}  {name}\n", encoding="utf-8")
-    print(archive)
+        if "linux" in target:
+            image = destination / package_names(version, target)[1]
+            appimage.build(staging, image, target, version)
+            archives.append(image)
+    for archive in archives:
+        (destination / f"{archive.name}.sha256").write_text(
+            f"{digest(archive)}  {archive.name}\n", encoding="utf-8")
+        print(archive)
 
 
 def verify_assets(directory, version, commit):
-    expected = {archive_name(version, target) for target in TARGETS}
+    packages = [(target, name) for target in TARGETS for name in package_names(version, target)]
+    expected = {name for _, name in packages}
     expected |= {f"{name}.sha256" for name in expected}
     present = {item.name for item in directory.iterdir()} - {"SHA256SUMS"}
     if present != expected:
         raise ValueError(f"Release assets differ: missing={sorted(expected - present)}, "
                          f"unexpected={sorted(present - expected)}")
     checksums = []
-    for target in TARGETS:
-        name = archive_name(version, target)
+    for target, name in packages:
         archive = directory / name
         checksum = f"{digest(archive)}  {name}\n"
         if (directory / f"{name}.sha256").read_text(encoding="utf-8") != checksum:
@@ -142,6 +157,8 @@ def verify_assets(directory, version, commit):
             # The image's root is the package folder, so metadata sits at the volume root.
             with mounted(archive) as volume:
                 info = json.loads((volume / "BUILD-INFO.json").read_text(encoding="utf-8"))
+        elif name.endswith(".AppImage"):
+            info = appimage.read_build_info(archive)
         elif name.endswith(".zip"):
             with zipfile.ZipFile(archive) as source:
                 info = json.loads(source.read(info_path))
@@ -172,7 +189,7 @@ def main():
             if not args.tag:
                 raise ValueError("--verify-dir requires --tag")
             verify_assets(args.verify_dir, check(ROOT, args.tag), output("git", "rev-parse", "HEAD"))
-            print("Verified all six native packages and wrote SHA256SUMS")
+            print("Verified all eight native packages and wrote SHA256SUMS")
         else:
             build(args.target, args.output_dir.resolve())
     except (ValueError, OSError, subprocess.CalledProcessError, KeyError) as error:
