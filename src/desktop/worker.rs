@@ -226,6 +226,10 @@ impl Worker {
                 self.subscription(action, home, port).await
             }
             Command::Account { action, id, home } => self.account(action, id, home).await,
+            Command::BeginModelEditor {
+                provider,
+                original_id,
+            } => self.begin_model_editor(provider, original_id),
             Command::SaveModel(form) => self.save_model(form).await,
             Command::SaveModels(form) => self.save_models(form).await,
             Command::BeginConnectionModels {

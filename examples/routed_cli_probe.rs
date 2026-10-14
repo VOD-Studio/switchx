@@ -185,6 +185,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             app::save_model(&data, &provider.id, public_id, display_name, source.to_str().unwrap())?;
             if multiple && index == 0 {
                 app::save_mapping(&data, app::ModelInput {
+                    request_overrides: None,
                     provider_id: &provider.id, original_id: "", public_id: "sx-mock-alpha-extra",
                     display_name: "Alpha extra model", upstream_model: "extra-model", catalog_path: "",
                     settings: Some(switchx::catalog::MappingSettings {
@@ -823,6 +824,7 @@ async fn named_models_probe(
     app::save_mapping(
         data,
         app::ModelInput {
+            request_overrides: None,
             provider_id: &original.provider_id,
             original_id: &original.public_id,
             public_id: &original.public_id,

@@ -1191,6 +1191,7 @@ mod tests {
         .unwrap();
         metadata["custom_field"] = serde_json::json!("preserved");
         let saved = vec![ModelRecord {
+            request_overrides: Default::default(),
             public_id: "sx-existing".into(),
             provider_id: provider.id.clone(),
             display_name: "My custom name".into(),

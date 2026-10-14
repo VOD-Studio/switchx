@@ -388,6 +388,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         let mut api_metadata = native_models[0].clone();
         api_metadata["slug"] = "synthetic-api-model".into();
         store.put_model(&ModelRecord {
+            request_overrides: Default::default(),
             provider_id: api_id,
             public_id: "sx-api".into(),
             display_name: "synthetic-api-model/Synthetic API".into(),

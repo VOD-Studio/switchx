@@ -785,6 +785,7 @@ fn save_subscription_inner(
             ));
         }
         let model = ModelRecord {
+            request_overrides: Default::default(),
             provider_id: id.clone(),
             public_id,
             display_name: format!("{upstream_model}/{}", provider.name),
@@ -1521,6 +1522,7 @@ done
         app::save_mapping(
             &path,
             app::ModelInput {
+                request_overrides: None,
                 provider_id: PROVIDER_ID,
                 original_id: &existing.public_id,
                 public_id: collision,

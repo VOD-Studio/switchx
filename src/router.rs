@@ -473,6 +473,8 @@ impl RouterState {
             return Err("local token must be at least 32 bytes".into());
         }
         for binding in publication.routes.values() {
+            binding.request_overrides.validate()?;
+            binding.fallback_request_overrides.validate()?;
             if !upstreams.contains_key(&binding.provider_id)
                 || binding
                     .fallback_provider_id
@@ -1174,16 +1176,6 @@ async fn forward(
         };
         outbound_headers.insert("x-codex-routing-hint", hint);
     }
-    let Ok(outbound_body) = serde_json::to_vec(&request) else {
-        return request_error(
-            &mut tracker,
-            StatusCode::INTERNAL_SERVER_ERROR,
-            "internal_error",
-            "could not encode request",
-        );
-    };
-
-    let outbound_body = Bytes::from(outbound_body);
     let mut provider_id = &binding.provider_id;
     let upstream_response = loop {
         // Both attempts share one budget, including the final response body.
@@ -1201,28 +1193,44 @@ async fn forward(
         if compact {
             destination.set_path(&format!("{}/compact", destination.path()));
         }
+        let mut attempt_headers = if provider_id == &binding.provider_id {
+            outbound_headers.clone()
+        } else {
+            match upstream.outbound_headers(&headers, &state.local_token) {
+                Ok(headers) => headers,
+                Err(code) => {
+                    return request_error(
+                        &mut tracker,
+                        StatusCode::BAD_GATEWAY,
+                        code,
+                        "upstream credentials are invalid",
+                    );
+                }
+            }
+        };
+        let overrides = if provider_id == &binding.provider_id {
+            &binding.request_overrides
+        } else {
+            &binding.fallback_request_overrides
+        };
+        // Apply after protocol/model transforms. Each destination uses its own settings.
+        let mut attempt_body = request.clone();
+        overrides.apply(&mut attempt_headers, &mut attempt_body);
+        let Ok(outbound_body) = serde_json::to_vec(&attempt_body) else {
+            return request_error(
+                &mut tracker,
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "internal_error",
+                "could not encode request",
+            );
+        };
         let outbound = state
             .client
             .post(destination)
             .header(header::CONTENT_TYPE, "application/json")
-            .headers(if provider_id == &binding.provider_id {
-                outbound_headers.clone()
-            } else {
-                // RouterState excludes subscription accounts from fallback.
-                match upstream.outbound_headers(&headers, &state.local_token) {
-                    Ok(headers) => headers,
-                    Err(code) => {
-                        return request_error(
-                            &mut tracker,
-                            StatusCode::BAD_GATEWAY,
-                            code,
-                            "upstream credentials are invalid",
-                        );
-                    }
-                }
-            })
+            .headers(attempt_headers)
             .timeout(remaining)
-            .body(outbound_body.clone())
+            .body(outbound_body)
             .send();
         let result = tokio::select! {
             biased;

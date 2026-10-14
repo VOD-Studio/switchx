@@ -33,6 +33,7 @@ pub fn save_model(
     save_mapping(
         data_dir,
         ModelInput {
+            request_overrides: None,
             provider_id,
             original_id,
             public_id,
@@ -44,7 +45,25 @@ pub fn save_model(
     )
 }
 
+/// Load private request settings only when opening the model editor.
+pub fn load_request_overrides(
+    data_dir: &Path,
+    provider_id: &str,
+    public_id: &str,
+) -> Result<crate::request_overrides::RequestOverrides, String> {
+    open_store(data_dir)
+        .map_err(|e| e.message().to_owned())?
+        .models()
+        .map_err(|_| "无法读取模型资料")?
+        .into_iter()
+        .find(|m| m.provider_id == provider_id && m.public_id == public_id)
+        .map(|m| m.request_overrides)
+        .ok_or_else(|| "模型映射不存在，请刷新后重试".into())
+}
+
 pub struct ModelInput<'a> {
+    /// None preserves the existing customization; Some(empty) explicitly clears it.
+    pub request_overrides: Option<&'a crate::request_overrides::RequestOverrides>,
     pub provider_id: &'a str,
     pub original_id: &'a str,
     pub public_id: &'a str,
@@ -119,6 +138,11 @@ pub(crate) fn save_mapping_from(
         source.ok_or("请输入包含此模型的 Codex 目录 JSON 文件路径")?
     };
     let mut model = ModelRecord {
+        request_overrides: input
+            .request_overrides
+            .cloned()
+            .or_else(|| old.map(|m| m.request_overrides.clone()))
+            .unwrap_or_default(),
         provider_id: input.provider_id.into(),
         public_id: input.public_id.into(),
         display_name: input.display_name.trim().into(),
@@ -170,6 +194,7 @@ pub struct BatchModel<'a> {
 }
 
 pub struct BatchInput<'a> {
+    pub request_overrides: Option<&'a crate::request_overrides::RequestOverrides>,
     pub provider_id: &'a str,
     pub models: &'a [BatchModel<'a>],
     pub context_window: &'a str,
@@ -382,6 +407,7 @@ pub(crate) fn save_mappings_from(
         )
         .map_err(|error| format!("{model_id}：{error}"))?;
         records.push(ModelRecord {
+            request_overrides: input.request_overrides.cloned().unwrap_or_default(),
             provider_id: provider.id.clone(),
             public_id: format!("sx-{}", new_id()?),
             display_name,
@@ -510,6 +536,7 @@ pub(crate) fn connection_model_records(
         )
         .map_err(|error| format!("{model_id}：{error}"))?;
         let mut record = ModelRecord {
+            request_overrides: old.map(|m| m.request_overrides.clone()).unwrap_or_default(),
             provider_id: provider_id.clone(),
             public_id: match old {
                 Some(model) => model.public_id.clone(),
@@ -621,6 +648,135 @@ mod tests {
     use std::{env, fs};
 
     #[test]
+    fn request_customization_survives_model_and_directory_edits_but_never_enters_catalogs() {
+        use crate::request_overrides::RequestOverrides;
+        let path = env::temp_dir().join(format!("switchx-request-settings-{}", new_id().unwrap()));
+        let store = open_store(&path).unwrap();
+        let provider = ProviderRecord {
+            id: "mock".into(),
+            name: "Mock".into(),
+            base_url: "https://example.invalid/v1".into(),
+            model_id: "model".into(),
+            credential_ref: None,
+            kind: ProviderKind::ApiKey,
+            account_binding: None,
+            icon_id: None,
+        };
+        store.put_provider(&provider).unwrap();
+        let custom = RequestOverrides::parse(
+            "private-agent/1",
+            r#"{"x-tenant":"private-tenant"}"#,
+            r#"{"temperature":0.2}"#,
+        )
+        .unwrap();
+        let save = |original_id, name, request_overrides| {
+            save_mapping(
+                &path,
+                ModelInput {
+                    provider_id: "mock",
+                    original_id,
+                    public_id: "sx-model",
+                    display_name: name,
+                    upstream_model: "model",
+                    catalog_path: "",
+                    settings: Some(catalog::MappingSettings {
+                        context_window: "128000",
+                        reasoning_levels: Some("low, high"),
+                        default_reasoning: Some("high"),
+                    }),
+                    request_overrides,
+                },
+            )
+        };
+        save("", "Model", Some(&custom)).unwrap();
+        drop(store);
+        assert_eq!(
+            load_request_overrides(&path, "mock", "sx-model").unwrap(),
+            custom
+        );
+        save("sx-model", "Renamed", None).unwrap();
+        let store = open_store(&path).unwrap();
+        let records = store.models().unwrap();
+        let drafts = [ConnectionModel {
+            public_id: "sx-model".into(),
+            display_name: "Directory edit".into(),
+            upstream_model: "model".into(),
+            context_window: "256000".into(),
+            reasoning_levels: "low, high".into(),
+            default_reasoning: "high".into(),
+        }];
+        let updated = connection_model_records(&provider, &records, &drafts, &[]).unwrap();
+        assert_eq!(updated[0].request_overrides, custom);
+        let publication = catalog::publish_saved(&records).unwrap();
+        assert_eq!(publication.routes["Renamed"].request_overrides, custom);
+        let backup_custom =
+            RequestOverrides::parse("backup-agent/1", "", r#"{"temperature":0.4}"#).unwrap();
+        let mut primary = records[0].clone();
+        primary.fallback_provider_id = Some("backup".into());
+        let backup = ModelRecord {
+            provider_id: "backup".into(),
+            public_id: "sx-backup".into(),
+            display_name: "Backup".into(),
+            enabled: false,
+            request_overrides: backup_custom.clone(),
+            ..records[0].clone()
+        };
+        let with_fallback = catalog::publish_saved(&[primary, backup]).unwrap();
+        assert_eq!(
+            with_fallback.routes["Renamed"].fallback_request_overrides,
+            backup_custom
+        );
+        assert_eq!(
+            with_fallback.routes.len(),
+            1,
+            "unpublished backup still supplies its own settings"
+        );
+        for output in [
+            publication.catalog.to_string(),
+            format!("{publication:?}"),
+            format!("{:?}", load_snapshot(&path, false).unwrap()),
+        ] {
+            assert!(!output.contains("private-agent") && !output.contains("private-tenant"));
+        }
+        save("sx-model", "Renamed", Some(&RequestOverrides::default())).unwrap();
+        assert!(
+            load_request_overrides(&path, "mock", "sx-model")
+                .unwrap()
+                .is_empty()
+        );
+        // Bulk additions get independent copies, and clearing one leaves the other intact.
+        let ids = save_mappings(
+            &path,
+            &BatchInput {
+                provider_id: "mock",
+                models: &[
+                    BatchModel {
+                        upstream_model: "second",
+                        context_window: "",
+                        reasoning_levels: "",
+                    },
+                    BatchModel {
+                        upstream_model: "third",
+                        context_window: "",
+                        reasoning_levels: "",
+                    },
+                ],
+                context_window: "128000",
+                reasoning_levels: "",
+                default_reasoning: "",
+                request_overrides: Some(&custom),
+            },
+        )
+        .unwrap();
+        assert_eq!(ids.len(), 2);
+        for id in ids {
+            assert_eq!(load_request_overrides(&path, "mock", &id).unwrap(), custom);
+        }
+        drop(store);
+        fs::remove_dir_all(path).unwrap();
+    }
+
+    #[test]
     fn mappings_can_be_added_edited_selected_and_deleted_independently() {
         let path = env::temp_dir().join(format!("switchx-mapping-edit-{}", new_id().unwrap()));
         let store = open_store(&path).unwrap();
@@ -640,6 +796,7 @@ mod tests {
             save_mapping(
                 &path,
                 ModelInput {
+                    request_overrides: None,
                     provider_id: "mock",
                     original_id,
                     public_id,
@@ -711,6 +868,7 @@ mod tests {
         save_mappings(
             &path,
             &BatchInput {
+                request_overrides: None,
                 provider_id: "deepseek",
                 models: &[BatchModel {
                     upstream_model: "deepseek-flash",
@@ -744,6 +902,7 @@ mod tests {
 
         let before = store.models().unwrap();
         let shared = |models| BatchInput {
+            request_overrides: None,
             provider_id: "deepseek",
             models,
             context_window: "200000",
@@ -886,6 +1045,7 @@ mod tests {
             save_mappings_from(
                 &path,
                 &BatchInput {
+                    request_overrides: None,
                     provider_id: "plus",
                     models: &[BatchModel {
                         upstream_model,
@@ -954,6 +1114,7 @@ mod tests {
             .unwrap();
             store
                 .put_model(&ModelRecord {
+                    request_overrides: Default::default(),
                     provider_id: "mock".into(),
                     public_id,
                     display_name: id.into(),
