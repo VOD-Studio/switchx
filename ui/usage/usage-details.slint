@@ -64,7 +64,10 @@ component DetailRow inherits Rectangle {
         triggered => { root.settled = true; }
     }
 
-    height: 42px + details.height;
+    // The highlight sits between two rules: the layout's 2px spacing above it is mirrored
+    // by 2px below, so it clears both neighbouring rules equally.
+    private property <length> head: 39px;
+    height: root.head + 3px + details.height;
     clip: true;
     // One node per row: every node in the scrolling page is rebuilt on each scroll step.
     accessible-role: list-item;
@@ -75,7 +78,7 @@ component DetailRow inherits Rectangle {
     accessible-action-expand => { root.toggle(); }
     Rectangle {
         y: 0px;
-        height: parent.height - 1px;
+        height: root.head + details.height;
         border-radius: 8px;
         background: root.expanded ? Theme.inset : touch.has-hover ? Theme.raised : Theme.brand-surface.with-alpha(root.glow);
         animate background { duration: Theme.fast; }
@@ -89,7 +92,7 @@ component DetailRow inherits Rectangle {
 
     HorizontalLayout {
         y: root.lift;
-        height: 42px;
+        height: root.head;
         padding-left: 10px;
         padding-right: 10px;
         spacing: 8px;
@@ -169,14 +172,14 @@ component DetailRow inherits Rectangle {
     }
 
     touch := TouchArea {
-        height: 42px;
+        height: root.head + 3px;
         y: 0px;
         mouse-cursor: pointer;
         clicked => { root.toggle(); }
     }
 
     details := AnimatedSection {
-        y: 42px;
+        y: root.head;
         expanded: root.expanded;
         content-height: 96px;
         // Mounted only while shown, so collapsed rows stay light to lay out and traverse.
