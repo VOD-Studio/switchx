@@ -11,7 +11,10 @@ use std::{
 use serde_json::Value;
 use tokio::sync::watch;
 
-use crate::storage::{RequestRecord, RequestStatus, Store};
+use crate::{
+    storage::{RequestRecord, RequestStatus, Store},
+    usage::TokenUsage,
+};
 
 pub const REQUEST_ID_HEADER: &str = "x-switchx-request-id";
 pub(crate) const MAX_EVENT_BYTES: usize = 2 * 1024 * 1024;
@@ -66,6 +69,8 @@ impl RequestTracker {
                 status: RequestStatus::Cancelled,
                 error_code: None,
                 fallback_from: None,
+                usage: None,
+                response_id: None,
             },
             start: Instant::now(),
             log,
@@ -82,6 +87,15 @@ impl RequestTracker {
         if self.record.first_event_ms.is_none() {
             self.record.first_event_ms = Some(self.elapsed_ms());
         }
+    }
+
+    /// Keeps the usage counts and opaque ID of a terminal response object.
+    fn observe_response(&mut self, response: &Value) {
+        if self.finished {
+            return;
+        }
+        self.record.usage = TokenUsage::from_responses(&response["usage"]);
+        self.record.response_id = crate::usage::response_id(&response["id"]);
     }
 
     pub fn finish(&mut self, status: RequestStatus, code: Option<&'static str>) {
@@ -174,6 +188,12 @@ impl SseObserver {
                     let kind = value["type"].as_str().unwrap_or(&self.event);
                     if !self.event.is_empty() && self.event != "message" && kind != self.event {
                         return Err("invalid_upstream_event");
+                    }
+                    if matches!(
+                        kind,
+                        "response.completed" | "response.failed" | "response.incomplete"
+                    ) {
+                        tracker.observe_response(&value["response"]);
                     }
                     match kind {
                         "response.completed" => {
@@ -273,6 +293,9 @@ impl ResponseObserver {
         }
         match serde_json::from_slice::<Value>(&self.json) {
             Ok(value) => {
+                if value.is_object() {
+                    tracker.observe_response(&value);
+                }
                 if value.get("error").is_some_and(|error| !error.is_null()) {
                     tracker.finish(RequestStatus::Failed, Some("upstream_response_failed"));
                 } else if self.compaction
@@ -343,6 +366,61 @@ mod tests {
                 assert!(record.first_event_ms.is_some());
             }
         }
+    }
+
+    #[test]
+    fn terminal_responses_keep_usage_and_id_but_not_content() {
+        let wire = concat!(
+            "data: {\"type\":\"response.output_text.delta\",\"delta\":\"private text\",",
+            "\"usage\":{\"input_tokens\":1}}\n\n",
+            "event: response.completed\n",
+            "data: {\"type\":\"response.completed\",\"response\":{\"id\":\"resp_sx1\",",
+            "\"status\":\"completed\",\"usage\":{\"input_tokens\":900,",
+            "\"input_tokens_details\":{\"cached_tokens\":700},\"output_tokens\":80,",
+            "\"output_tokens_details\":{\"reasoning_tokens\":30}}}}\n\n"
+        );
+        for chunk_size in [1, 7, wire.len()] {
+            let record = observe(true, wire.as_bytes(), chunk_size);
+            assert_eq!(record.status, RequestStatus::Completed);
+            assert_eq!(record.response_id.as_deref(), Some("resp_sx1"));
+            assert_eq!(
+                record.usage,
+                Some(TokenUsage {
+                    input: 900,
+                    cached_input: 700,
+                    cache_write: 0,
+                    output: 80,
+                    reasoning: 30
+                })
+            );
+        }
+        let incomplete = observe(
+            true,
+            b"data: {\"type\":\"response.incomplete\",\"response\":{\"usage\":{\"input_tokens\":5,\"output_tokens\":2}}}\n\n",
+            3,
+        );
+        assert_eq!(incomplete.status, RequestStatus::Failed);
+        assert_eq!(incomplete.usage.map(TokenUsage::total), Some(7));
+        let json = observe(
+            false,
+            br#"{"id":"resp_json","status":"completed","usage":{"input_tokens":4,"output_tokens":1}}"#,
+            2,
+        );
+        assert_eq!(json.response_id.as_deref(), Some("resp_json"));
+        assert_eq!(json.usage.map(TokenUsage::total), Some(5));
+        // Usage after the first terminal signal cannot replace it.
+        let late = observe(
+            true,
+            b"data: {\"type\":\"response.completed\",\"response\":{\"usage\":{\"input_tokens\":1,\"output_tokens\":1}}}\n\ndata: {\"type\":\"response.completed\",\"response\":{\"usage\":{\"input_tokens\":99,\"output_tokens\":99}}}\n\n",
+            4096,
+        );
+        assert_eq!(late.usage.map(TokenUsage::total), Some(2));
+        let missing = observe(
+            true,
+            b"data: {\"type\":\"response.completed\",\"response\":{}}\n\n",
+            5,
+        );
+        assert!(missing.usage.is_none() && missing.response_id.is_none());
     }
 
     #[test]

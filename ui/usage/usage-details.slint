@@ -1,0 +1,347 @@
+import { Theme } from "../tokens.slint";
+import { AnimatedSection, QuietButton } from "../components.slint";
+import { UsageDetailRow } from "../view-models.slint";
+import { CompositionRibbon, LegendKey, UsageAvatar } from "usage-parts.slint";
+
+// Fixed numeric columns keep figures aligned while the model column flexes.
+global Columns {
+    out property <length> time: 74px;
+    out property <length> connection: 140px;
+    out property <length> number: 62px;
+    out property <length> cost: 74px;
+    out property <length> speed: 70px;
+}
+
+component Cell inherits Text {
+    color: Theme.primary-text;
+    font-size: 12px;
+    vertical-alignment: center;
+    horizontal-alignment: right;
+    overflow: elide;
+}
+
+component Fact inherits VerticalLayout {
+    in property <string> label;
+    in property <string> value;
+    spacing: 3px;
+    Text {
+        text: root.label;
+        color: Theme.muted-text;
+        font-size: 10px;
+    }
+
+    Text {
+        text: root.value;
+        color: Theme.primary-text;
+        font-size: 12px;
+        overflow: elide;
+    }
+}
+
+component DetailRow inherits Rectangle {
+    in property <UsageDetailRow> entry;
+    in property <bool> arrived;
+    in property <bool> expanded;
+    callback toggle();
+    private property <bool> motion: Theme.animations-enabled && !Theme.system-reduced-motion;
+    // New rows slide down into place and their highlight fades over a moment.
+    private property <bool> settled: !root.motion || !root.arrived;
+    private property <float> glow: root.settled ? 0 : 1;
+    private property <length> lift: root.settled ? 0px : -8px;
+    animate glow {
+        duration: root.motion ? 1600ms : 0ms;
+        easing: ease-out;
+    }
+    animate lift {
+        duration: root.motion ? 420ms : 0ms;
+        easing: cubic-bezier(0.22, 1, 0.36, 1);
+    }
+    Timer {
+        interval: 32ms;
+        running: !root.settled;
+        triggered => { root.settled = true; }
+    }
+
+    height: 42px + details.height;
+    clip: true;
+    accessible-role: none;
+    Rectangle {
+        y: 0px;
+        height: parent.height - 1px;
+        border-radius: 8px;
+        background: root.expanded ? Theme.inset : touch.has-hover ? Theme.raised : Theme.brand-surface.with-alpha(root.glow);
+        animate background { duration: Theme.fast; }
+    }
+
+    Rectangle {
+        y: parent.height - 1px;
+        height: 1px;
+        background: Theme.border.with-alpha(0.6);
+    }
+
+    HorizontalLayout {
+        y: root.lift;
+        height: 42px;
+        padding-left: 10px;
+        padding-right: 10px;
+        spacing: 8px;
+        Text {
+            width: Columns.time;
+            text: root.entry.clock;
+            color: Theme.primary-text;
+            font-size: 12px;
+            vertical-alignment: center;
+            overflow: elide;
+        }
+
+        HorizontalLayout {
+            width: Columns.connection;
+            spacing: 8px;
+            UsageAvatar {
+                y: (parent.height - self.height) / 2;
+                width: 20px;
+                height: 20px;
+                icon: root.entry.icon;
+                has-icon: root.entry.has-icon;
+                monochrome: root.entry.monochrome;
+                letter: root.entry.letter;
+            }
+
+            Text {
+                text: root.entry.connection;
+                color: Theme.primary-text;
+                font-size: 12px;
+                vertical-alignment: center;
+                overflow: elide;
+            }
+        }
+
+        Text {
+            horizontal-stretch: 1;
+            min-width: 80px;
+            text: root.entry.model;
+            color: Theme.primary-text;
+            font-size: 12px;
+            font-family: "Menlo";
+            vertical-alignment: center;
+            overflow: elide;
+        }
+
+        Cell {
+            width: Columns.number;
+            text: root.entry.fresh;
+        }
+
+        Cell {
+            width: Columns.number;
+            text: root.entry.cached;
+            color: Theme.muted-text;
+        }
+
+        Cell {
+            width: Columns.number;
+            text: root.entry.output;
+        }
+
+        Cell {
+            width: Columns.cost;
+            text: root.entry.cost;
+            color: root.entry.cost == "未定价" ? Theme.muted-text : Theme.primary-text;
+            font-weight: 500;
+        }
+
+        Cell {
+            width: Columns.speed;
+            text: root.entry.speed;
+            color: Theme.muted-text;
+        }
+    }
+
+    touch := TouchArea {
+        height: 42px;
+        y: 0px;
+        mouse-cursor: pointer;
+        clicked => { root.toggle(); }
+    }
+
+    details := AnimatedSection {
+        y: 42px;
+        expanded: root.expanded;
+        content-height: 96px;
+        VerticalLayout {
+            padding-left: 12px;
+            padding-right: 12px;
+            padding-bottom: 12px;
+            spacing: 10px;
+            CompositionRibbon {
+                fresh: root.entry.fresh-share;
+                output: root.entry.output-share;
+                cache: root.entry.cache-share;
+            }
+
+            HorizontalLayout {
+                spacing: 16px;
+                LegendKey {
+                    ink: Theme.usage-input;
+                    label: "新输入";
+                    value: root.entry.fresh;
+                }
+
+                LegendKey {
+                    ink: Theme.usage-output;
+                    label: "输出";
+                    value: root.entry.output;
+                }
+
+                LegendKey {
+                    ink: Theme.usage-cache;
+                    label: "缓存命中";
+                    value: root.entry.cached;
+                }
+
+                Text {
+                    text: root.entry.reasoning == "0" ? "" : "其中推理 " + root.entry.reasoning;
+                    color: Theme.muted-text;
+                    font-size: 11px;
+                    vertical-alignment: center;
+                }
+
+                Rectangle {
+                    horizontal-stretch: 1;
+                }
+            }
+
+            HorizontalLayout {
+                spacing: 22px;
+                Fact {
+                    label: "时间";
+                    value: root.entry.time;
+                }
+
+                Fact {
+                    label: "来源";
+                    value: root.entry.source;
+                }
+
+                Fact {
+                    label: "连接类型";
+                    value: root.entry.kind;
+                }
+
+                Fact {
+                    label: "耗时";
+                    value: root.entry.duration;
+                }
+
+                Fact {
+                    horizontal-stretch: 1;
+                    label: "Codex 中的名称";
+                    value: root.entry.public-model;
+                }
+            }
+        }
+    }
+}
+
+export component UsageDetails inherits Rectangle {
+    in property <[UsageDetailRow]> rows;
+    in property <string> summary;
+    in property <bool> more;
+    in property <bool> loading;
+    in property <int> arrival;
+    callback load-more();
+    private property <string> expanded-id;
+    border-radius: 14px;
+    border-width: 1px;
+    border-color: Theme.border;
+    background: Theme.panel;
+    animate background, border-color { duration: Theme.page-motion; }
+
+    VerticalLayout {
+        padding: 16px;
+        padding-top: 14px;
+        spacing: 2px;
+        HorizontalLayout {
+            height: 28px;
+            padding-left: 4px;
+            padding-right: 4px;
+            Text {
+                text: "明细";
+                color: Theme.primary-text;
+                font-size: 14px;
+                font-weight: 600;
+                vertical-alignment: center;
+            }
+
+            Rectangle {
+                horizontal-stretch: 1;
+            }
+
+            Text {
+                text: root.summary;
+                color: Theme.muted-text;
+                font-size: 11px;
+                vertical-alignment: center;
+            }
+        }
+
+        HorizontalLayout {
+            height: 30px;
+            padding-left: 10px;
+            padding-right: 10px;
+            spacing: 8px;
+            for column in [
+                { label: "时间", width: Columns.time, stretch: 0, right: false },
+                { label: "连接", width: Columns.connection, stretch: 0, right: false },
+                { label: "模型", width: 80px, stretch: 1, right: false },
+                { label: "新输入", width: Columns.number, stretch: 0, right: true },
+                { label: "缓存", width: Columns.number, stretch: 0, right: true },
+                { label: "输出", width: Columns.number, stretch: 0, right: true },
+                { label: "费用", width: Columns.cost, stretch: 0, right: true },
+                { label: "速度", width: Columns.speed, stretch: 0, right: true },
+            ]: Text {
+                min-width: column.width;
+                preferred-width: column.width;
+                max-width: column.stretch > 0 ? 10000px : column.width;
+                horizontal-stretch: column.stretch;
+                text: column.label;
+                color: Theme.muted-text;
+                font-size: 11px;
+                vertical-alignment: center;
+                horizontal-alignment: column.right ? TextHorizontalAlignment.right : TextHorizontalAlignment.left;
+            }
+        }
+
+        Rectangle {
+            height: 1px;
+            background: Theme.border;
+        }
+
+        for row in root.rows: DetailRow {
+            entry: row;
+            arrived: root.arrival > 0 && row.stamp == root.arrival;
+            expanded: row.id == root.expanded-id;
+            toggle => { root.expanded-id = row.id == root.expanded-id ? "" : row.id; }
+        }
+        if root.rows.length == 0: Text {
+            height: 72px;
+            text: "这段时间没有明细";
+            color: Theme.muted-text;
+            font-size: 12px;
+            horizontal-alignment: center;
+            vertical-alignment: center;
+        }
+        if root.more: HorizontalLayout {
+            padding-top: 10px;
+            alignment: center;
+            QuietButton {
+                width: 132px;
+                text: root.loading ? "正在加载…" : "加载更多";
+                loading: root.loading;
+                ghost: true;
+                enabled: !root.loading;
+                clicked => { root.load-more(); }
+            }
+        }
+    }
+}
