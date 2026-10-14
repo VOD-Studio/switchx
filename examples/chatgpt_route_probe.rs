@@ -257,7 +257,16 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .prepare(&data, &home, 0, &selected.public_id, &binary)
         .await?;
     check(
-        preview.contains("工作区 synthetic-workspace · https://chatgpt.com"),
+        preview.bindings.iter().any(|binding| {
+            binding
+                .facts
+                .iter()
+                .any(|fact| fact.value == "synthetic-workspace")
+                && binding
+                    .facts
+                    .iter()
+                    .any(|fact| fact.value == "https://chatgpt.com")
+        }),
         "production preflight discarded native workspace routing",
     )?;
     preflight.discard_preview();
@@ -388,6 +397,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         let mut api_metadata = native_models[0].clone();
         api_metadata["slug"] = "synthetic-api-model".into();
         store.put_model(&ModelRecord {
+            request_overrides: Default::default(),
             provider_id: api_id,
             public_id: "sx-api".into(),
             display_name: "synthetic-api-model/Synthetic API".into(),

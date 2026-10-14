@@ -87,6 +87,10 @@ pub(super) enum Command {
         id: String,
         home: String,
     },
+    BeginModelEditor {
+        provider: String,
+        original_id: String,
+    },
     SaveModel(ModelForm),
     SaveModels(BatchForm),
     BeginConnectionModels {
@@ -173,6 +177,7 @@ pub(super) struct SubscriptionForm {
 
 /// The single model mapping editor.
 pub(super) struct ModelForm {
+    pub request_overrides: (String, String, String),
     pub provider: String,
     pub original_id: String,
     pub public_id: String,
@@ -185,8 +190,8 @@ pub(super) struct ModelForm {
 }
 
 /// A batch addition from the model picker.
-#[derive(Debug)]
 pub(super) struct BatchForm {
+    pub request_overrides: (String, String, String),
     pub provider: String,
     /// Upstream model, row context window, row reasoning levels.
     pub models: Vec<(String, String, String)>,

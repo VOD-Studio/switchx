@@ -244,11 +244,30 @@ pub(super) fn open_mapping(app: &AppWindow, original_id: &str) {
     app.set_model_editor_open(true);
 }
 
+fn click_mapping_control(
+    window: &MinimalSoftwareWindow,
+    app: &AppWindow,
+    label: &str,
+    role: i_slint_backend_testing::AccessibleRole,
+) {
+    let element = i_slint_backend_testing::ElementHandle::find_by_accessible_label(app, label)
+        .find(|element| element.accessible_role() == Some(role))
+        .unwrap_or_else(|| panic!("missing model control: {label}"));
+    let position = element.absolute_position();
+    let size = element.size();
+    headless::click(
+        window,
+        position.x + size.width / 2.,
+        position.y + size.height / 2.,
+    );
+}
+
 pub(super) fn render_model_editor(
     app: &AppWindow,
     window: &MinimalSoftwareWindow,
     output: &Path,
 ) -> Result<(), Box<dyn Error>> {
+    use i_slint_backend_testing::AccessibleRole::{Button, Checkbox};
     const SAVED_ID: &str = "sx-chatgpt-0000preview0000-synthetic-sol";
     let weak = app.as_weak();
     app.on_update_model_display_name(move || {
@@ -284,8 +303,6 @@ pub(super) fn render_model_editor(
     for (width, height) in [(1200, 820), (1000, 680)] {
         app.window().set_size(PhysicalSize::new(width, height));
         let (w, h) = (width as f32, height as f32);
-        // The form fills a 648px column whose scroll gutter is 14px.
-        let ladder_x = |index: usize| w - 623.0 + index as f32 * 76.0;
         for dark in [false, true] {
             let suffix = format!("{}-{width}x{height}", if dark { "dark" } else { "light" });
             app.global::<Theme>().set_animations_enabled(false);
@@ -324,10 +341,10 @@ pub(super) fn render_model_editor(
             app.set_fetched_models(ModelRc::new(VecModel::from(Vec::new())));
             render(window);
 
-            // Scrolled to the end, the presets sit 486px above the window's bottom.
+            // Locate controls after layout so adding sections does not move test targets.
             headless::scroll(window, w - 350.0, 400.0, -4000.0);
             snapshot(window, output, &format!("mapping-bottom-{suffix}"))?;
-            headless::click(window, w - 119.0, h - 486.0);
+            click_mapping_control(window, app, "上下文 1M", Button);
             assert_eq!(app.get_model_context_window(), "1000000");
             snapshot(window, output, &format!("mapping-context-1m-{suffix}"))?;
             app.set_model_context_window("0".into());
@@ -336,13 +353,13 @@ pub(super) fn render_model_editor(
             snapshot(window, output, &format!("mapping-context-default-{suffix}"))?;
             app.set_model_context_window("272000".into());
 
-            headless::click(window, ladder_x(0), h - 290.0);
+            click_mapping_control(window, app, "none，不思考", Checkbox);
             assert_eq!(
                 app.get_model_reasoning_levels(),
                 "none, low, medium, high, xhigh, max, ultra"
             );
             // Removing the default level clears the default.
-            headless::click(window, ladder_x(2), h - 290.0);
+            click_mapping_control(window, app, "low，轻量，默认", Checkbox);
             assert_eq!(
                 app.get_model_reasoning_levels(),
                 "none, medium, high, xhigh, max, ultra"
@@ -352,7 +369,7 @@ pub(super) fn render_model_editor(
             app.set_model_reasoning_levels("low, medium, high, xhigh, max, ultra".into());
             app.set_model_default_reasoning("low".into());
 
-            headless::click(window, w - 360.0, h - 131.0);
+            click_mapping_control(window, app, "导入完整资料", Button);
             snapshot(window, output, &format!("mapping-advanced-{suffix}"))?;
 
             let count = deletes.get();
@@ -443,7 +460,7 @@ pub(super) fn render_model_editor(
         app.set_model_delete_confirm(false);
         headless::scroll(window, 850.0, 400.0, -4000.0);
         play(window, output, "unused", &[400])?;
-        headless::click(window, 577.0, 530.0);
+        click_mapping_control(window, app, "none，不思考", Checkbox);
         play(
             window,
             output,
@@ -451,7 +468,7 @@ pub(super) fn render_model_editor(
             &every(32, 480),
         )?;
         // The view eases after the last section as it expands.
-        headless::click(window, 840.0, 689.0);
+        click_mapping_control(window, app, "导入完整资料", Button);
         play(
             window,
             output,

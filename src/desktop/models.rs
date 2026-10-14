@@ -49,6 +49,10 @@ pub(super) fn open_model_editor(
                 .ok_or("模型映射不存在，请刷新后重试")?,
         )
     };
+    app.set_model_user_agent("".into());
+    app.set_model_header_overrides("".into());
+    app.set_model_body_overrides("".into());
+    app.set_model_request_open(false);
     app.set_model_provider_id(provider.id.clone());
     app.set_model_provider_name(provider.name);
     app.set_model_original_id(original_id.into());
@@ -120,9 +124,18 @@ pub(super) fn update_reasoning_options(app: &AppWindow) {
     app.set_model_reasoning_options(ModelRc::new(VecModel::from(options)));
 }
 
+pub(super) fn request_draft(app: &AppWindow) -> (String, String, String) {
+    (
+        app.get_model_user_agent().into(),
+        app.get_model_header_overrides().into(),
+        app.get_model_body_overrides().into(),
+    )
+}
+
 pub(super) fn connect(app: &AppWindow, sender: &mpsc::Sender<Command>) {
     app.on_save_model(queue_on(app, sender, |app| {
         Command::SaveModel(ModelForm {
+            request_overrides: request_draft(app),
             provider: app.get_model_provider_id().into(),
             original_id: app.get_model_original_id().into(),
             public_id: app.get_model_public_id().into(),
@@ -138,14 +151,21 @@ pub(super) fn connect(app: &AppWindow, sender: &mpsc::Sender<Command>) {
             },
         })
     }));
+    let callback_sender = sender.clone();
     let weak = app.as_weak();
     app.on_begin_model_editor(move |provider, original_id| {
-        if let Some(app) = weak.upgrade()
-            && let Err(error) = open_model_editor(&app, &provider, &original_id)
-        {
-            show_action(&app, Err(error));
+        if let Some(app) = weak.upgrade() {
+            queue(
+                &app,
+                &callback_sender,
+                Command::BeginModelEditor {
+                    provider: provider.into(),
+                    original_id: original_id.into(),
+                },
+            );
         }
     });
+    let callback_sender = sender.clone();
     let weak = app.as_weak();
     app.on_add_selected_model(move || {
         let Some(app) = weak.upgrade() else {
@@ -154,9 +174,15 @@ pub(super) fn connect(app: &AppWindow, sender: &mpsc::Sender<Command>) {
         if let Some(provider) = app
             .get_model_provider_ids()
             .row_data(app.get_model_provider_choice() as usize)
-            && let Err(error) = open_model_editor(&app, &provider, "")
         {
-            show_action(&app, Err(error));
+            queue(
+                &app,
+                &callback_sender,
+                Command::BeginModelEditor {
+                    provider: provider.into(),
+                    original_id: String::new(),
+                },
+            );
         }
     });
     let weak = app.as_weak();
@@ -281,6 +307,30 @@ pub(super) fn connect(app: &AppWindow, sender: &mpsc::Sender<Command>) {
 }
 
 impl Worker {
+    pub(super) fn begin_model_editor(&self, provider: String, original_id: String) {
+        let result = (|| {
+            if original_id.is_empty() {
+                return Ok(Default::default());
+            }
+            app::load_request_overrides(self.data_dir.path()?, &provider, &original_id)
+        })();
+        let _ = self.weak.upgrade_in_event_loop(move |app| {
+            let result =
+                result.and_then(|overrides: switchx::request_overrides::RequestOverrides| {
+                    open_model_editor(&app, &provider, &original_id)?;
+                    app.set_model_user_agent(overrides.user_agent().into());
+                    app.set_model_header_overrides(overrides.headers_json().into());
+                    app.set_model_body_overrides(overrides.body_json().into());
+                    app.set_model_request_open(!overrides.is_empty());
+                    Ok(())
+                });
+            app.set_busy(false);
+            if let Err(error) = result {
+                show_action(&app, Err(error));
+            }
+        });
+    }
+
     pub(super) async fn save_model(&mut self, form: ModelForm) {
         let ModelForm {
             provider,
@@ -292,11 +342,18 @@ impl Worker {
             context,
             levels,
             default_reasoning,
+            request_overrides,
         } = form;
         let result = async {
             let data_dir = self.data_dir.path()?;
+            let overrides = switchx::request_overrides::RequestOverrides::parse(
+                &request_overrides.0,
+                &request_overrides.1,
+                &request_overrides.2,
+            )?;
             let keep_imported_reasoning = !path.trim().is_empty() && levels.trim().is_empty();
             let input = app::ModelInput {
+                request_overrides: Some(&overrides),
                 provider_id: &provider,
                 original_id: &original_id,
                 public_id: &public_id,
@@ -341,9 +398,15 @@ impl Worker {
             context,
             levels,
             default_reasoning,
+            request_overrides,
         } = form;
         let result = async {
             let data_dir = self.data_dir.path()?;
+            let overrides = switchx::request_overrides::RequestOverrides::parse(
+                &request_overrides.0,
+                &request_overrides.1,
+                &request_overrides.2,
+            )?;
             let models = models
                 .iter()
                 .map(
@@ -355,6 +418,7 @@ impl Worker {
                 )
                 .collect::<Vec<_>>();
             let input = app::BatchInput {
+                request_overrides: Some(&overrides),
                 provider_id: &provider,
                 models: &models,
                 context_window: &context,

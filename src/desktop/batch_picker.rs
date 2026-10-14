@@ -159,6 +159,7 @@ pub(super) fn batch_save_command(app: &AppWindow) -> Option<Command> {
         .collect::<Vec<_>>();
     (!models.is_empty()).then(|| {
         Command::SaveModels(BatchForm {
+            request_overrides: super::models::request_draft(app),
             provider: app.get_model_provider_id().into(),
             models,
             context: app.get_batch_context().trim().into(),
@@ -296,7 +297,9 @@ mod tests {
         update_batch_reasoning_options(&app);
         assert_eq!(app.get_batch_levels_label(), "low, high");
         app.set_batch_default("high".into());
+        app.set_model_user_agent("synthetic-agent/1".into());
         let Some(Command::SaveModels(BatchForm {
+            request_overrides,
             provider,
             models,
             context,
@@ -306,6 +309,7 @@ mod tests {
         else {
             panic!("batch save command")
         };
+        assert_eq!(request_overrides.0, "synthetic-agent/1");
         assert_eq!(provider, "provider");
         assert_eq!(
             models,

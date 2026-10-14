@@ -1,3 +1,4 @@
+export { RequestRules } from "editors/request-overrides.slint";
 import { XaiEditor } from "editors/xai-editor.slint";
 import { ConnectionModels } from "editors/connection-models.slint";
 import { Palette } from "std-widgets.slint";
@@ -30,6 +31,7 @@ import {
     UsageDetailRow,
     UsageSyncState,
     UsagePriceRow,
+    RoutePreviewData,
 } from "view-models.slint";
 import { AccountsPage } from "pages/accounts.slint";
 import { ProviderEditor } from "editors/provider-editor.slint";
@@ -83,6 +85,10 @@ export {
     UsageDetailRow,
     UsageSyncState,
     UsagePriceRow,
+    PreviewFact,
+    PreviewMappingRow,
+    PreviewBindingRow,
+    RoutePreviewData,
 } from "view-models.slint";
 export { SyntaxHighlighting, CodeSpan } from "code-editor.slint";
 
@@ -340,7 +346,7 @@ export component AppWindow inherits Window {
     in-out property <string> route-status: "路由未启用";
     in-out property <string> route-port: "18731";
     in-out property <string> default-model: "";
-    in-out property <string> route-preview: "";
+    in-out property <RoutePreviewData> route-preview;
     in-out property <bool> route-preview-ready: false;
     in-out property <string> route-preview-model: "";
     in-out property <bool> model-editor-open: false;
@@ -351,6 +357,11 @@ export component AppWindow inherits Window {
     in-out property <string> model-display-name: "";
     in-out property <bool> model-display-name-custom: false;
     in-out property <string> model-source-path: "";
+    in-out property <string> model-user-agent;
+    in-out property <string> model-header-overrides;
+    in-out property <string> model-body-overrides;
+    in-out property <bool> model-request-open;
+
     in-out property <string> model-original-id: "";
     in-out property <string> model-context-window: "";
     in-out property <string> model-reasoning-levels: "";
@@ -517,6 +528,12 @@ export component AppWindow inherits Window {
     changed model-provider-id => { root.reset-model-discovery(); }
     changed model-original-id => { root.reset-model-discovery(); }
     changed model-editor-open => {
+        if !root.model-editor-open {
+            root.model-user-agent = "";
+            root.model-header-overrides = "";
+            root.model-body-overrides = "";
+            root.model-request-open = false;
+        }
         root.reset-model-discovery();
         root.arm-batch-autofetch();
     }
@@ -1639,6 +1656,10 @@ export component AppWindow inherits Window {
             model-display-name <=> root.model-display-name;
             model-display-name-custom <=> root.model-display-name-custom;
             model-source-path <=> root.model-source-path;
+            model-user-agent <=> root.model-user-agent;
+            model-header-overrides <=> root.model-header-overrides;
+            model-body-overrides <=> root.model-body-overrides;
+            model-request-open <=> root.model-request-open;
             model-original-id: root.model-original-id;
             model-context-window <=> root.model-context-window;
             model-reasoning-levels <=> root.model-reasoning-levels;
@@ -1816,8 +1837,7 @@ export component AppWindow inherits Window {
         open: root.publish-drawer-open;
         title: "准备启用模型";
         subtitle: "你的模型工作空间，即将就绪。";
-        centered: true;
-        panel-width: 680px;
+        panel-width: 620px;
         busy: root.busy;
         error-message: root.error-code == "" ? "" : root.error-message + " · " + root.error-action;
         dismissed => {

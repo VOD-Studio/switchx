@@ -21,6 +21,95 @@ use crate::{
     upstream,
 };
 
+/// What a route publication will change, grouped for review before applying.
+/// It never carries provider keys, OAuth tokens, or the local router token.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RoutePreview {
+    pub client_version: String,
+    pub model_count: usize,
+    pub endpoint: String,
+    pub target: PathBuf,
+    pub mappings: Vec<PreviewMapping>,
+    pub changed_fields: Vec<String>,
+    pub bindings: Vec<PreviewBinding>,
+    pub notes: Vec<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PreviewMapping {
+    pub model: String,
+    pub destination: PreviewDestination,
+    /// Tried only when the primary connection cannot be established.
+    pub fallback: Option<PreviewDestination>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PreviewDestination {
+    pub name: String,
+    pub origin: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PreviewBinding {
+    pub provider: String,
+    pub grok: bool,
+    pub facts: Vec<PreviewFact>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PreviewFact {
+    pub label: String,
+    pub value: String,
+}
+
+impl PreviewFact {
+    fn new(label: &str, value: &str) -> Self {
+        Self {
+            label: label.into(),
+            value: value.into(),
+        }
+    }
+}
+
+impl std::fmt::Display for PreviewDestination {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{} ({})", self.name, self.origin)
+    }
+}
+
+impl std::fmt::Display for RoutePreview {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "{} 已核对 {} 个可选模型 · {}\n目标：{}",
+            self.client_version,
+            self.model_count,
+            self.endpoint,
+            self.target.display()
+        )?;
+        for mapping in &self.mappings {
+            write!(f, "\n{} → {}", mapping.model, mapping.destination)?;
+            if let Some(fallback) = &mapping.fallback {
+                write!(
+                    f,
+                    "\n  备用 → {fallback}；仅主连接建立失败时尝试，费用与数据接收方可能变化"
+                )?;
+            }
+        }
+        write!(f, "\n受管变更：{}", self.changed_fields.join("、"))?;
+        for binding in &self.bindings {
+            write!(f, "\n{}", binding.provider)?;
+            for fact in &binding.facts {
+                write!(f, " · {} {}", fact.label, fact.value)?;
+            }
+        }
+        for note in &self.notes {
+            write!(f, "\n{note}")?;
+        }
+        Ok(())
+    }
+}
+
 struct PreparedRoute {
     switch: PreparedSwitch,
     listener: TcpListener,
@@ -288,7 +377,7 @@ impl RouteSession {
         port: u16,
         default_model: &str,
         helper: &Path,
-    ) -> Result<String, String> {
+    ) -> Result<RoutePreview, String> {
         self.prepare_using(
             state_dir,
             config_home,
@@ -308,7 +397,7 @@ impl RouteSession {
         default_model: &str,
         helper: &Path,
         resolve_cli: impl FnOnce() -> Result<PathBuf, String>,
-    ) -> Result<String, String> {
+    ) -> Result<RoutePreview, String> {
         self.discard_preview();
         if self.active.is_some() {
             return Err("请先恢复原配置并停止当前路由".into());
@@ -415,73 +504,78 @@ impl RouteSession {
             switch.with_credential_helper(helper, &token_reference)?
         };
         let client_version = client::check_catalog_using(&publication.catalog, &cli_path).await?;
-        let mappings = preview_model_mappings(&models, &providers);
-        let summary = format!(
-            "{client_version} 已核对 {} 个可选模型 · http://{address}/v1\n目标：{}\n{mappings}\n受管变更：{}{}",
-            publication.routes.len(),
-            target.display(),
-            switch.preview.changed_fields.join("、"),
-            if uses_chatgpt {
+        let mut notes = Vec::new();
+        if uses_chatgpt {
+            notes.push(
                 if accounts.values().any(|account| account.id.is_some()) {
-                    "\n订阅请求固定使用所选保存账号；仅官方模型传递认证。独立本地令牌会写入仅当前用户可读的配置及恢复记录。切换账号请先恢复；切到第三方时请新建会话。"
+                    "订阅请求固定使用所选保存账号；仅官方模型传递认证。独立本地令牌会写入仅当前用户可读的配置及恢复记录。切换账号请先恢复；切到第三方时请新建会话。"
                 } else {
-                    "\n订阅认证由目标 Codex 管理；仅官方模型传递认证。独立本地令牌会写入仅当前用户可读的配置及恢复记录。切换工作区请先恢复；切到第三方时请新建会话。"
+                    "订阅认证由目标 Codex 管理；仅官方模型传递认证。独立本地令牌会写入仅当前用户可读的配置及恢复记录。切换工作区请先恢复；切到第三方时请新建会话。"
                 }
-            } else {
-                ""
-            }
-        );
-        let destinations = accounts
+                .to_owned(),
+            );
+        }
+        let provider_name = |id: &str| {
+            providers
+                .iter()
+                .find(|provider| provider.id == id)
+                .unwrap()
+                .name
+                .clone()
+        };
+        let mut bindings = accounts
             .iter()
             .map(|(provider_id, resolved)| {
-                let provider = providers
-                    .iter()
-                    .find(|provider| &provider.id == provider_id)
-                    .unwrap();
-                let account = resolved.id.as_deref().unwrap_or("原生登录");
-                match &resolved.workspace {
-                    Some(workspace) => format!(
-                        "{} · 账号 {} · 工作区 {} · {} · {}",
-                        provider.name,
-                        account,
-                        workspace.account_id,
-                        workspace.backend_origin,
-                        workspace.routing_override
-                    ),
-                    None => format!("{} · 账号 {}", provider.name, account),
+                let mut facts = vec![PreviewFact::new(
+                    "账号",
+                    resolved.id.as_deref().unwrap_or("原生登录"),
+                )];
+                if let Some(workspace) = &resolved.workspace {
+                    facts.extend([
+                        PreviewFact::new("工作区", &workspace.account_id),
+                        PreviewFact::new("服务", &workspace.backend_origin),
+                        PreviewFact::new("路由", &workspace.routing_override.to_string()),
+                    ]);
+                }
+                PreviewBinding {
+                    provider: provider_name(provider_id),
+                    grok: false,
+                    facts,
                 }
             })
-            .collect::<Vec<_>>()
-            .join("\n");
-        let summary = if destinations.is_empty() {
-            summary
-        } else {
-            format!("{summary}\n{destinations}")
-        };
-        let summary = if xai_accounts.is_empty() {
-            summary
-        } else {
-            let mut bindings = xai_accounts
-                .iter()
-                .map(|(provider, account)| format!("Grok 上游 {provider} · 保存账号 {account}"))
-                .collect::<Vec<_>>();
-            bindings.sort();
-            format!(
-                "{summary}\n{}\nGrok 账号在发布时固定；更换账号或模型请启动新会话。",
-                bindings.join("\n")
-            )
-        };
-        let summary = if config_state.options.is_some() || !config_state.common.is_empty() {
-            format!(
-                "{summary}\nCodex 窗口与通用配置使用默认模型的供应商设置{}",
+            .collect::<Vec<_>>();
+        if !xai_accounts.is_empty() {
+            bindings.extend(
+                xai_accounts
+                    .iter()
+                    .map(|(provider_id, account)| PreviewBinding {
+                        provider: provider_name(provider_id),
+                        grok: true,
+                        facts: vec![PreviewFact::new("保存账号", account)],
+                    }),
+            );
+            notes.push("Grok 账号在发布时固定；更换账号或模型请启动新会话。".to_owned());
+        }
+        bindings.sort_by(|left, right| left.provider.cmp(&right.provider));
+        if config_state.options.is_some() || !config_state.common.is_empty() {
+            notes.push(format!(
+                "Codex 窗口与通用配置使用默认模型的供应商设置{}",
                 if remote_direct_only {
                     "；API 上游的远程压缩选项仅在直连时生效。"
                 } else {
                     "。"
                 }
-            )
-        } else {
-            summary
+            ));
+        }
+        let summary = RoutePreview {
+            client_version: client_version.clone(),
+            model_count: publication.routes.len(),
+            endpoint: format!("http://{address}/v1"),
+            target: target.clone(),
+            mappings: preview_model_mappings(&models, &providers),
+            changed_fields: switch.preview.changed_fields.clone(),
+            bindings,
+            notes,
         };
         self.prepared = Some(PreparedRoute {
             switch,
@@ -874,47 +968,29 @@ fn delete_local_token(state_dir: &Path, reference: &str) -> Result<(), String> {
         .map_err(|_| "路由已停止，但数据库中的本地令牌清理失败".into())
 }
 
-fn preview_model_mappings(models: &[ModelRecord], providers: &[ProviderRecord]) -> String {
+fn preview_model_mappings(
+    models: &[ModelRecord],
+    providers: &[ProviderRecord],
+) -> Vec<PreviewMapping> {
+    let destination = |id: &str| {
+        let provider = providers.iter().find(|provider| provider.id == id).unwrap();
+        PreviewDestination {
+            name: provider.name.clone(),
+            origin: reqwest::Url::parse(&provider.base_url)
+                .unwrap()
+                .origin()
+                .ascii_serialization(),
+        }
+    };
     models
         .iter()
         .filter(|model| model.enabled)
-        .map(|model| {
-            let provider = providers
-                .iter()
-                .find(|provider| provider.id == model.provider_id)
-                .unwrap();
-            let destination = |provider: &ProviderRecord| {
-                format!(
-                    "{} ({})",
-                    provider.name,
-                    reqwest::Url::parse(&provider.base_url)
-                        .unwrap()
-                        .origin()
-                        .ascii_serialization()
-                )
-            };
-            let fallback = model
-                .fallback_provider_id
-                .as_ref()
-                .map(|id| {
-                    let provider = providers
-                        .iter()
-                        .find(|provider| &provider.id == id)
-                        .unwrap();
-                    format!(
-                        "\n  备用 → {}；仅主连接建立失败时尝试，费用与数据接收方可能变化",
-                        destination(provider)
-                    )
-                })
-                .unwrap_or_default();
-            format!(
-                "{} → {}{fallback}",
-                model.display_name,
-                destination(provider)
-            )
+        .map(|model| PreviewMapping {
+            model: model.display_name.clone(),
+            destination: destination(&model.provider_id),
+            fallback: model.fallback_provider_id.as_deref().map(destination),
         })
-        .collect::<Vec<_>>()
-        .join("\n")
+        .collect()
 }
 
 fn selected_inputs(state_dir: &Path) -> Result<(Vec<ModelRecord>, Vec<ProviderRecord>), String> {
@@ -1236,6 +1312,7 @@ mod tests {
              ALTER TABLE providers DROP COLUMN kind;
              DROP TABLE session_bindings;
              DROP TABLE model_aliases;
+             ALTER TABLE published_models DROP COLUMN request_overrides;
              PRAGMA user_version = 8;",
             )
             .unwrap();
@@ -1359,6 +1436,7 @@ mod tests {
         )
         .unwrap();
         let first = ModelRecord {
+            request_overrides: Default::default(),
             provider_id: "primary".into(),
             public_id: "sx-first".into(),
             display_name: "First".into(),
@@ -1404,13 +1482,28 @@ mod tests {
         assert!(models.iter().all(|model| model.public_id != "sx-unused"));
         assert_eq!(catalog::publish_saved(&models).unwrap().routes.len(), 2);
         let preview = preview_model_mappings(&models, &providers);
-        assert!(preview.contains("First → primary (https://example.invalid)"));
-        assert!(preview.contains("Second → primary (https://example.invalid)"));
-        assert!(preview.contains("备用 → backup (https://example.invalid)"));
-        assert!(!preview.contains("sx-"));
-        assert!(!preview.contains("model-a"));
-        assert!(!preview.contains("model-b"));
-        assert!(!preview.contains("Unused"));
+        let destination = |name: &str| PreviewDestination {
+            name: name.into(),
+            origin: "https://example.invalid".into(),
+        };
+        // Display names only; public IDs, upstream models, and disabled rows stay out.
+        assert_eq!(
+            preview
+                .iter()
+                .map(|mapping| (mapping.model.as_str(), &mapping.destination))
+                .collect::<Vec<_>>(),
+            [
+                ("First", &destination("primary")),
+                ("Second", &destination("primary"))
+            ]
+        );
+        assert_eq!(
+            preview
+                .iter()
+                .filter_map(|mapping| mapping.fallback.as_ref())
+                .collect::<Vec<_>>(),
+            [&destination("backup")]
+        );
         drop(store);
         std::fs::remove_dir_all(path).unwrap();
     }

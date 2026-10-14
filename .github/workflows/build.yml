@@ -24,7 +24,10 @@ env:
 jobs:
   check:
     name: Version, formatting, Clippy and tests
-    runs-on: ubuntu-24.04
+    # Repository variable USE_SELF_HOSTED_RUNNER=true moves this job to a self-hosted
+    # runner (labels from SELF_HOSTED_RUNNER_LABELS, a JSON array). Fork pull requests
+    # always stay on GitHub-hosted runners because this repository is public.
+    runs-on: ${{ vars.USE_SELF_HOSTED_RUNNER == 'true' && github.event.pull_request.head.repo.fork != true && fromJSON(vars.SELF_HOSTED_RUNNER_LABELS || '["self-hosted","linux","x64"]') || 'ubuntu-24.04' }}
     container: ubuntu:24.04
     timeout-minutes: 90
     defaults:

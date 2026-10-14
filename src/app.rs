@@ -25,9 +25,9 @@ pub use common_config::{
 };
 pub use models::{
     BatchCandidate, BatchInput, BatchModel, ConnectionModel, ModelInput, batch_candidates,
-    connection_draft_candidates, delete_model, draft_candidates, save_connection_models,
-    save_fallback, save_mapping, save_mappings, save_model, select_model, select_models,
-    validate_connection_draft,
+    connection_draft_candidates, delete_model, draft_candidates, load_request_overrides,
+    save_connection_models, save_fallback, save_mapping, save_mappings, save_model, select_model,
+    select_models, validate_connection_draft,
 };
 pub(crate) use models::{connection_model_records, save_mapping_from, save_mappings_from};
 pub use presets::{ModelPreset, PROVIDER_PRESETS, ProviderPreset, provider_preset};

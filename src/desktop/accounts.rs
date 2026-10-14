@@ -16,7 +16,8 @@ use tokio::sync::{mpsc, watch};
 
 use super::{
     codex_config::{
-        clear_previews, codex_home, restore_connections, route_port, show_config_status,
+        clear_previews, codex_home, restore_connections, route_port, route_preview_data,
+        show_config_status,
     },
     command::{AccountAction, Command, SubscriptionAction, queue},
     feedback::show_action,
@@ -563,12 +564,14 @@ impl Worker {
                     .await;
                 let snapshot = load_snapshot(data_dir, false).map_err(|error| error.message())?;
                 let ready = summary.is_ok();
-                let preview = summary.as_ref().ok().cloned().unwrap_or_default();
+                let preview = summary.as_ref().ok().cloned();
                 let _ = self.weak.upgrade_in_event_loop(move |app| {
                     app.set_route_preview_model(model.as_str().into());
                     show_result(&app, Ok(snapshot));
                     app.set_default_model(model.into());
-                    app.set_route_preview(preview.into());
+                    app.set_route_preview(
+                        preview.as_ref().map(route_preview_data).unwrap_or_default(),
+                    );
                     app.set_route_preview_ready(ready);
                     app.set_active_page(0);
                     app.set_publish_drawer_open(true);

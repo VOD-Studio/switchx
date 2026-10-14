@@ -2,6 +2,8 @@ use std::{collections::HashMap, io, sync::Arc, time::Duration};
 
 #[path = "router/managed_accounts.rs"]
 mod managed_accounts;
+#[path = "router/request_overrides.rs"]
+mod request_overrides;
 #[path = "router/xai.rs"]
 mod xai;
 
@@ -1020,6 +1022,7 @@ async fn display_names_and_hidden_aliases_route_to_the_exact_upstream() {
     ]
     .into_iter()
     .map(|(id, name, actual)| switchx::storage::ModelRecord {
+        request_overrides: Default::default(),
         provider_id: "api".into(),
         public_id: id.into(),
         display_name: name.into(),

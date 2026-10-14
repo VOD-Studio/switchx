@@ -145,6 +145,8 @@ pub fn mapping_metadata(
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RouteBinding {
+    pub request_overrides: crate::request_overrides::RequestOverrides,
+    pub fallback_request_overrides: crate::request_overrides::RequestOverrides,
     pub provider_id: String,
     pub upstream_model: String,
     pub fallback_provider_id: Option<String>,
@@ -319,6 +321,7 @@ fn publish_records(records: &[ModelRecord], use_names: bool) -> Result<Publicati
     };
     for record in records.iter().filter(|record| record.enabled) {
         validate_fallback(record, records)?;
+        record.request_overrides.validate()?;
         let metadata: Value =
             serde_json::from_str(&record.metadata).map_err(|_| "已保存的模型资料损坏")?;
         let selected = publish(
@@ -336,6 +339,16 @@ fn publish_records(records: &[ModelRecord], use_names: bool) -> Result<Publicati
         )?;
         for (id, mut binding) in selected.routes {
             binding.fallback_provider_id = record.fallback_provider_id.clone();
+            binding.request_overrides = record.request_overrides.clone();
+            binding.fallback_request_overrides = records
+                .iter()
+                .find(|other| {
+                    Some(&other.provider_id) == record.fallback_provider_id.as_ref()
+                        && other.upstream_model == record.upstream_model
+                })
+                .map(|other| other.request_overrides.clone())
+                .unwrap_or_default();
+            binding.fallback_request_overrides.validate()?;
             if publication.routes.insert(id.clone(), binding).is_some() {
                 return Err(format!("模型名称重复：{id}"));
             }
@@ -446,6 +459,8 @@ pub fn publish(templates: &Value, selections: &[Selection<'_>]) -> Result<Public
         routes.insert(
             id.to_owned(),
             RouteBinding {
+                request_overrides: Default::default(),
+                fallback_request_overrides: Default::default(),
                 provider_id: selection.provider_id.to_owned(),
                 upstream_model: selection.upstream_model.to_owned(),
                 fallback_provider_id: None,
@@ -468,6 +483,7 @@ mod tests {
     fn names_are_catalog_slugs_and_legacy_ids_are_hidden_aliases() {
         let name = "通义千问 qwen3.8-max/Podlink";
         let model = ModelRecord {
+            request_overrides: Default::default(),
             provider_id: "podlink".into(),
             public_id: "sx-stable".into(),
             display_name: name.into(),
@@ -506,6 +522,7 @@ mod tests {
         .into_iter()
         .enumerate()
         .map(|(index, name)| ModelRecord {
+            request_overrides: Default::default(),
             provider_id: "synthetic".into(),
             public_id: format!("sx-{index}"),
             display_name: name,
@@ -615,6 +632,7 @@ mod tests {
     #[test]
     fn fallback_requires_explicit_matching_model_and_complete_capabilities() {
         let primary = ModelRecord {
+            request_overrides: Default::default(),
             provider_id: "primary".into(),
             public_id: "sx-primary".into(),
             display_name: "Primary".into(),
@@ -757,6 +775,7 @@ mod tests {
     fn saved_models_keep_provider_specific_metadata_and_reject_incomplete_templates() {
         let template = templates()["models"][0].clone();
         let first = ModelRecord {
+            request_overrides: Default::default(),
             provider_id: "first".into(),
             public_id: "sx-first".into(),
             display_name: "First".into(),

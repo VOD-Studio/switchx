@@ -1,3 +1,4 @@
+import { RequestOverridesEditor, RequestRules } from "request-overrides.slint";
 import { ReasoningPicker, ReasoningChoices } from "reasoning-picker.slint";
 import { Theme } from "../tokens.slint";
 import {
@@ -37,6 +38,11 @@ export component ModelEditor inherits Rectangle {
     in-out property <string> model-display-name;
     in-out property <bool> model-display-name-custom;
     in-out property <string> model-source-path;
+    in-out property <string> model-user-agent;
+    in-out property <string> model-header-overrides;
+    in-out property <string> model-body-overrides;
+    in-out property <bool> model-request-open;
+    private property <string> request-error: RequestRules.validate(root.model-user-agent, root.model-header-overrides, root.model-body-overrides);
     in property <string> model-original-id;
     in-out property <string> model-context-window;
     in-out property <string> model-reasoning-levels;
@@ -89,12 +95,13 @@ export component ModelEditor inherits Rectangle {
     }
     // The last section grows below the fold, so the view eases after it.
     private property <bool> following: false;
+    private property <bool> following-request: false;
     Timer {
         interval: 16ms;
         running: root.following;
         triggered => {
             let target = min(0px, body.visible-height - body.content-height);
-            if Theme.page-motion == 0ms || (advanced.reveal >= 1 && abs(target - body.content-y) < 1px) {
+            if Theme.page-motion == 0ms || ((root.following-request ? requests.reveal >= 1 : advanced.reveal >= 1) && abs(target - body.content-y) < 1px) {
                 body.content-y = target;
                 root.following = false;
             } else {
@@ -353,7 +360,7 @@ export component ModelEditor inherits Rectangle {
                                     badge: root.model-source-path != "" ? "已填写" : "";
                                     collapsible: true;
                                     expanded <=> root.advanced-open;
-                                    toggled(open) => { root.following = open; }
+                                    toggled(open) => { root.following-request = false; root.following = open; }
                                     active: source-field.has-focus;
                                     replay: root.replay;
                                     delay: 330ms;
@@ -383,6 +390,16 @@ export component ModelEditor inherits Rectangle {
                                             }
                                         }
                                     }
+                                }
+
+                                requests := RequestOverridesEditor {
+                                    user-agent <=> root.model-user-agent;
+                                    headers <=> root.model-header-overrides;
+                                    body <=> root.model-body-overrides;
+                                    expanded <=> root.model-request-open;
+                                    enabled: !root.locked;
+                                    replay: root.replay;
+                                    toggled(open) => { root.following-request = true; root.following = open; }
                                 }
                             }
                         }
@@ -441,7 +458,7 @@ export component ModelEditor inherits Rectangle {
                             icon-width: 14px;
                             icon-height: 14px;
                             icon-color: Theme.on-brand;
-                            enabled: !root.locked;
+                            enabled: !root.locked && root.request-error == "";
                             clicked => { root.save-model(); }
                         }
                     }
@@ -459,6 +476,11 @@ export component ModelEditor inherits Rectangle {
                 VerticalLayout {
                     alignment: start;
                     ModelBatchPicker {
+                        request-user-agent <=> root.model-user-agent;
+                        request-headers <=> root.model-header-overrides;
+                        request-body <=> root.model-body-overrides;
+                        request-expanded <=> root.model-request-open;
+                        show-request-settings: true;
                         rows: root.batch-rows;
                         summary: root.batch-summary;
                         provider-name: root.model-provider-name;

@@ -1,6 +1,7 @@
 import { Theme } from "tokens.slint";
 import { QuietScrollView as ScrollView } from "scroll-view.slint";
-import { QuietButton, AnimatedSection } from "components.slint";
+import { QuietButton } from "components.slint";
+import { RoutePreviewData } from "view-models.slint";
 
 component PublishArrival inherits Rectangle {
     in property <bool> open;
@@ -215,12 +216,555 @@ component PublishLoading inherits Rectangle {
     }
 }
 
+component DetailHeading inherits HorizontalLayout {
+    in property <image> icon;
+    in property <string> title;
+    in property <string> badge: "";
+    spacing: 8px;
+    cross-axis-alignment: center;
+    Image {
+        width: 13px;
+        height: 13px;
+        source: root.icon;
+        colorize: Theme.brand;
+        accessible-role: none;
+    }
+
+    Text {
+        text: root.title;
+        color: Theme.primary-text;
+        font-size: 12px;
+        font-weight: 600;
+        horizontal-stretch: 0;
+    }
+
+    if root.badge != "": Rectangle {
+        horizontal-stretch: 0;
+        height: 18px;
+        border-radius: 9px;
+        background: Theme.brand.with-alpha(0.12);
+        HorizontalLayout {
+            padding-left: 7px;
+            padding-right: 7px;
+            Text {
+                text: root.badge;
+                color: Theme.brand;
+                font-size: 10px;
+                font-weight: 600;
+                vertical-alignment: center;
+            }
+        }
+    }
+    Rectangle {
+        horizontal-stretch: 1;
+    }
+}
+
+// Traces each mapping once as the details open, then rests as a static arrow.
+component FlowArrow inherits Rectangle {
+    in property <bool> shown;
+    in property <duration> lag;
+    private property <float> flow: root.shown ? 1 : 0;
+    private property <length> track: root.width - 7px;
+    animate flow {
+        duration: root.shown && Theme.drawer-motion > 0ms ? 720ms : 0ms;
+        delay: root.shown && Theme.drawer-motion > 0ms ? root.lag : 0ms;
+        easing: cubic-bezier(0.65, 0, 0.35, 1);
+    }
+    width: 46px;
+    height: 16px;
+    horizontal-stretch: 0;
+    accessible-role: none;
+    Rectangle {
+        y: (parent.height - 1px) / 2;
+        width: root.track;
+        height: 1px;
+        background: Theme.border;
+    }
+
+    Rectangle {
+        y: (parent.height - 1px) / 2;
+        width: root.track * root.flow;
+        height: 1px;
+        background: @linear-gradient(90deg, Theme.brand.with-alpha(0.15) 0%, Theme.brand 100%);
+    }
+
+    Rectangle {
+        x: root.track * root.flow - 3px;
+        y: (parent.height - 6px) / 2;
+        width: 6px;
+        height: 6px;
+        border-radius: 3px;
+        background: Theme.brand;
+        opacity: 4 * root.flow * (1 - root.flow);
+    }
+
+    Image {
+        x: parent.width - 12px;
+        y: (parent.height - self.height) / 2;
+        width: 12px;
+        height: 12px;
+        source: @image-url("../assets/ui/chevron-down.svg");
+        colorize: Theme.brand;
+        transform-rotation: -90deg;
+        opacity: max(0, root.flow * 3 - 2);
+    }
+}
+
+component ChangeChip inherits Rectangle {
+    in property <string> text;
+    in property <bool> shown;
+    in property <duration> lag;
+    private property <float> reveal: root.shown ? 1 : 0;
+    animate reveal {
+        duration: Theme.drawer-motion;
+        delay: root.shown && Theme.drawer-motion > 0ms ? root.lag : 0ms;
+        easing: cubic-bezier(0.22, 1, 0.36, 1);
+    }
+    opacity: root.reveal;
+    accessible-role: AccessibleRole.text;
+    accessible-label: root.text;
+    Rectangle {
+        y: 6px * (1 - root.reveal);
+        width: root.width;
+        height: root.height;
+        border-radius: 7px;
+        border-width: 1px;
+        border-color: chip-touch.has-hover ? Theme.brand.with-alpha(0.32) : Theme.brand.with-alpha(0.14);
+        background: chip-touch.has-hover ? Theme.brand.with-alpha(0.11) : Theme.brand.with-alpha(0.05);
+        animate background, border-color { duration: Theme.fast; }
+        Rectangle {
+            x: 10px;
+            y: (parent.height - self.height) / 2;
+            width: 4px;
+            height: 4px;
+            border-radius: 2px;
+            background: Theme.brand;
+        }
+
+        Text {
+            x: 21px;
+            width: parent.width - 29px;
+            height: parent.height;
+            text: root.text;
+            color: Theme.primary-text;
+            font-family: "Menlo";
+            font-size: 10px;
+            vertical-alignment: center;
+            overflow: elide;
+            accessible-role: none;
+        }
+
+        chip-touch := TouchArea { }
+    }
+}
+
+component FactRow inherits HorizontalLayout {
+    in property <string> label;
+    in property <string> value;
+    spacing: 12px;
+    Text {
+        width: 58px;
+        text: root.label;
+        color: Theme.muted-text;
+        font-size: 11px;
+    }
+
+    Text {
+        min-width: 0px;
+        horizontal-stretch: 1;
+        text: root.value;
+        color: Theme.primary-text;
+        font-family: "Menlo";
+        font-size: 11px;
+        wrap: char-wrap;
+    }
+}
+
+component DetailCard inherits Rectangle {
+    border-radius: 10px;
+    border-width: 1px;
+    border-color: Theme.border;
+    background: Theme.panel;
+}
+
+// The checked publication, grouped by what it touches. Sections rise in turn.
+component PublishDetails inherits VerticalLayout {
+    in property <RoutePreviewData> preview;
+    in property <bool> shown;
+    private property <int> mapping-rows: root.preview.mappings.length;
+    private property <int> change-rows: ceil(root.preview.changes.length / 2);
+    // Long menus stay scannable; the rest unfold on request.
+    private property <int> mapping-preview: 5;
+    private property <bool> all-mappings: false;
+    changed shown => { if !root.shown { root.all-mappings = false; } }
+    spacing: 18px;
+
+    PublishArrival {
+        open: root.shown;
+        lag: 0ms;
+        height: environment.preferred-height;
+        environment := VerticalLayout {
+            spacing: 10px;
+            DetailHeading {
+                icon: @image-url("../assets/ui/terminal.svg");
+                title: "运行环境";
+            }
+
+            DetailCard {
+                VerticalLayout {
+                    padding: 12px;
+                    spacing: 9px;
+                    FactRow {
+                        label: "客户端";
+                        value: root.preview.client;
+                    }
+
+                    FactRow {
+                        label: "本地路由";
+                        value: root.preview.endpoint;
+                    }
+
+                    FactRow {
+                        label: "目标文件";
+                        value: root.preview.target;
+                    }
+                }
+            }
+        }
+    }
+
+    PublishArrival {
+        open: root.shown;
+        lag: 60ms;
+        height: mappings.preferred-height;
+        mappings := VerticalLayout {
+            spacing: 10px;
+            DetailHeading {
+                icon: @image-url("../assets/ui/link.svg");
+                title: "模型映射";
+                badge: root.mapping-rows;
+            }
+
+            DetailCard {
+                clip: true;
+                VerticalLayout {
+                    for mapping[index] in root.preview.mappings: mapping-item := Rectangle {
+                        property <bool> listed: root.all-mappings || index < root.mapping-preview;
+                        property <float> reveal: self.listed ? 1 : 0;
+                        animate reveal {
+                            duration: Theme.page-motion;
+                            delay: self.listed && Theme.page-motion > 0ms ? max(0, index - root.mapping-preview) * 18ms : 0ms;
+                            easing: cubic-bezier(0.22, 1, 0.36, 1);
+                        }
+                        height: mapping-row.preferred-height * self.reveal;
+                        clip: true;
+                        visible: self.reveal > 0;
+                        mapping-row := VerticalLayout {
+                            y: 0px;
+                            width: parent.width;
+                            height: self.preferred-height;
+                            opacity: mapping-item.reveal;
+                            if index > 0: HorizontalLayout {
+                                padding-left: 12px;
+                                padding-right: 12px;
+                                Rectangle {
+                                    height: 1px;
+                                    background: Theme.border;
+                                }
+                            }
+                            VerticalLayout {
+                                padding: 12px;
+                                padding-top: 11px;
+                                padding-bottom: 11px;
+                                spacing: 8px;
+                                HorizontalLayout {
+                                    spacing: 12px;
+                                    cross-axis-alignment: center;
+                                    Text {
+                                        min-width: 0px;
+                                        preferred-width: 0px;
+                                        horizontal-stretch: 1;
+                                        text: mapping.model;
+                                        color: Theme.primary-text;
+                                        font-size: 12px;
+                                        font-weight: 600;
+                                        overflow: elide;
+                                    }
+
+                                    FlowArrow {
+                                        shown: root.shown && mapping-item.listed;
+                                        lag: mapping-item.listed && index >= root.mapping-preview ? 120ms : 180ms + min(index, 6) * 80ms;
+                                    }
+
+                                    VerticalLayout {
+                                        horizontal-stretch: 1;
+                                        spacing: 2px;
+                                        Text {
+                                            min-width: 0px;
+                                            preferred-width: 0px;
+                                            text: mapping.provider;
+                                            color: Theme.primary-text;
+                                            font-size: 12px;
+                                            font-weight: 500;
+                                            overflow: elide;
+                                        }
+
+                                        Text {
+                                            min-width: 0px;
+                                            preferred-width: 0px;
+                                            text: mapping.origin;
+                                            color: Theme.muted-text;
+                                            font-family: "Menlo";
+                                            font-size: 10px;
+                                            overflow: elide;
+                                        }
+                                    }
+                                }
+
+                                if mapping.fallback != "": Rectangle {
+                                    border-radius: 7px;
+                                    background: Theme.warning.with-alpha(0.08);
+                                    HorizontalLayout {
+                                        padding: 8px;
+                                        padding-left: 10px;
+                                        spacing: 8px;
+                                        Text {
+                                            text: "备用";
+                                            color: Theme.warning;
+                                            font-size: 10px;
+                                            font-weight: 600;
+                                            horizontal-stretch: 0;
+                                        }
+
+                                        Text {
+                                            min-width: 0px;
+                                            horizontal-stretch: 1;
+                                            text: mapping.fallback + " · " + mapping.fallback-origin + "\n仅主连接建立失败时尝试，费用与数据接收方可能变化。";
+                                            color: Theme.muted-text;
+                                            font-size: 10px;
+                                            wrap: word-wrap;
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+
+                    if root.mapping-rows > root.mapping-preview: VerticalLayout {
+                        HorizontalLayout {
+                            padding-left: 12px;
+                            padding-right: 12px;
+                            Rectangle {
+                                height: 1px;
+                                background: Theme.border;
+                            }
+                        }
+
+                        QuietButton {
+                            height: 38px;
+                            ghost: true;
+                            left-aligned: true;
+                            border-radius: 0px;
+                            text: root.all-mappings ? "收起映射" : "显示其余 " + (root.mapping-rows - root.mapping-preview) + " 个映射";
+                            accessible-expanded: root.all-mappings;
+                            icon: @image-url("../assets/ui/chevron-down.svg");
+                            icon-color: Theme.brand;
+                            icon-angle: root.all-mappings ? 180deg : 0deg;
+                            clicked => { root.all-mappings = !root.all-mappings; }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    if root.preview.changes.length > 0: PublishArrival {
+        open: root.shown;
+        lag: 120ms;
+        height: changes.preferred-height;
+        changes := VerticalLayout {
+            spacing: 10px;
+            DetailHeading {
+                icon: @image-url("../assets/ui/code.svg");
+                title: "受管变更";
+                badge: root.preview.changes.length;
+            }
+
+            Rectangle {
+                property <length> column: (self.width - 8px) / 2;
+                height: root.change-rows * 32px - 6px;
+                for field[index] in root.preview.changes: ChangeChip {
+                    x: mod(index, 2) * (parent.column + 8px);
+                    y: floor(index / 2) * 32px;
+                    width: parent.column;
+                    height: 26px;
+                    text: field;
+                    shown: root.shown;
+                    lag: 160ms + min(index, 14) * 28ms;
+                }
+            }
+
+            Text {
+                text: "停止路由时只恢复以上字段；其他配置保持不变。";
+                color: Theme.muted-text;
+                font-size: 10px;
+                wrap: word-wrap;
+            }
+        }
+    }
+
+    if root.preview.bindings.length > 0: PublishArrival {
+        open: root.shown;
+        lag: 180ms;
+        height: bindings.preferred-height;
+        bindings := VerticalLayout {
+            spacing: 10px;
+            DetailHeading {
+                icon: @image-url("../assets/ui/lock.svg");
+                title: "账号绑定";
+                badge: root.preview.bindings.length;
+            }
+
+            for binding in root.preview.bindings: DetailCard {
+                VerticalLayout {
+                    padding: 12px;
+                    spacing: 10px;
+                    HorizontalLayout {
+                        spacing: 10px;
+                        cross-axis-alignment: center;
+                        Rectangle {
+                            width: 28px;
+                            height: 28px;
+                            border-radius: 8px;
+                            background: Theme.brand.with-alpha(0.12);
+                            Image {
+                                x: 7px;
+                                y: 7px;
+                                width: 14px;
+                                height: 14px;
+                                source: @image-url("../assets/ui/lock.svg");
+                                colorize: Theme.brand;
+                            }
+                        }
+
+                        VerticalLayout {
+                            spacing: 2px;
+                            Text {
+                                text: binding.provider;
+                                color: Theme.primary-text;
+                                font-size: 12px;
+                                font-weight: 600;
+                            }
+
+                            Text {
+                                text: binding.grok ? "Grok 账号 · 发布时固定" : "订阅账号 · 仅官方模型传递认证";
+                                color: Theme.muted-text;
+                                font-size: 10px;
+                            }
+                        }
+                    }
+
+                    Rectangle {
+                        height: 1px;
+                        background: Theme.border;
+                    }
+
+                    for fact in binding.facts: FactRow {
+                        label: fact.label;
+                        value: fact.value;
+                    }
+                }
+            }
+        }
+    }
+
+    if root.preview.notes.length > 0: PublishArrival {
+        open: root.shown;
+        lag: 240ms;
+        height: notes.preferred-height;
+        notes := VerticalLayout {
+            spacing: 10px;
+            DetailHeading {
+                icon: @image-url("../assets/ui/alert.svg");
+                title: "注意事项";
+            }
+
+            for note in root.preview.notes: Rectangle {
+                border-radius: 8px;
+                background: Theme.brand.with-alpha(0.05);
+                HorizontalLayout {
+                    padding: 10px;
+                    spacing: 10px;
+                    Rectangle {
+                        width: 2px;
+                        border-radius: 1px;
+                        background: Theme.brand.with-alpha(0.55);
+                    }
+
+                    Text {
+                        min-width: 0px;
+                        horizontal-stretch: 1;
+                        text: note;
+                        color: Theme.muted-text;
+                        font-size: 11px;
+                        wrap: word-wrap;
+                    }
+                }
+            }
+        }
+    }
+}
+
+// Placeholder bars while a check runs; they shimmer only while busy.
+component DetailsPending inherits VerticalLayout {
+    in property <bool> busy;
+    in property <float> sweep;
+    spacing: 12px;
+    if root.busy: VerticalLayout {
+        spacing: 10px;
+        for width-ratio[index] in [0.62, 0.9, 0.48, 0.76]: Rectangle {
+            width: parent.width * width-ratio;
+            height: 10px;
+            border-radius: 5px;
+            background: Theme.raised;
+            clip: true;
+            Rectangle {
+                x: -self.width + (parent.width + self.width) * mod(root.sweep + index * 0.12, 1);
+                width: 120px;
+                height: parent.height;
+                background: @linear-gradient(90deg, Theme.brand.with-alpha(0) 0%, Theme.brand.with-alpha(0.22) 50%, Theme.brand.with-alpha(0) 100%);
+            }
+        }
+    }
+
+    HorizontalLayout {
+        spacing: 10px;
+        cross-axis-alignment: center;
+        Image {
+            width: 14px;
+            height: 14px;
+            source: root.busy ? @image-url("../assets/ui/loader.svg") : @image-url("../assets/ui/alert.svg");
+            colorize: Theme.muted-text;
+        }
+
+        Text {
+            min-width: 0px;
+            horizontal-stretch: 1;
+            text: root.busy ? "检查处理中，完成后显示最新明细。" : "当前检查尚未通过，请重新检查以生成最新明细。";
+            color: Theme.muted-text;
+            font-size: 11px;
+            wrap: word-wrap;
+        }
+    }
+}
+
 export component RoutePublishSheet inherits VerticalLayout {
     in property <bool> open;
     in property <int> model-count;
     in property <string> default-model-label;
     in property <string> config-home;
-    in property <string> preview;
+    in property <RoutePreviewData> preview;
     in property <bool> ready;
     in property <bool> busy;
     in property <bool> has-error;
@@ -233,6 +777,30 @@ export component RoutePublishSheet inherits VerticalLayout {
     private property <bool> passed: root.ready && !root.busy && !root.has-error;
     private property <bool> motion: root.open && root.busy && Theme.fast > 0ms;
     private property <float> sweep: root.motion ? mod(animation-tick(), 1600ms) / 1600ms : 0.35;
+    private property <color> status-tone: root.busy ? Theme.brand : root.passed ? Theme.success : root.has-error ? Theme.warning : Theme.muted-text;
+    private property <float> details-reveal: root.details-open ? 1 : 0;
+    animate details-reveal {
+        duration: Theme.drawer-motion;
+        easing: cubic-bezier(0.22, 1, 0.36, 1);
+    }
+    private property <length> details-height: details-body.preferred-height * root.details-reveal;
+    // The details grow below the fold in a side panel, so the view eases after them.
+    private property <bool> following: false;
+    Timer {
+        interval: 16ms;
+        running: root.following;
+        triggered => {
+            let limit = max(0px, content-scroll.content-height - content-scroll.visible-height);
+            let target = -max(0px, min(limit, min(details-card.y - 12px, details-card.y + details-card.height + 12px - content-scroll.visible-height)));
+            if Theme.page-motion == 0ms || (root.details-reveal >= 1 && abs(target - content-scroll.content-y) < 1px) {
+                content-scroll.content-y = target;
+                root.following = false;
+            } else {
+                content-scroll.content-y += (target - content-scroll.content-y) * 0.22;
+            }
+        }
+    }
+
     private property <float> loading-reveal: root.busy ? 1 : 0;
     animate loading-reveal {
         duration: Theme.page-motion;
@@ -249,6 +817,7 @@ export component RoutePublishSheet inherits VerticalLayout {
         triggered => {
             root.cleanup-pending = false;
             root.details-open = false;
+            root.following = false;
             root.applying = false;
             content-scroll.content-y = 0px;
         }
@@ -477,64 +1046,159 @@ export component RoutePublishSheet inherits VerticalLayout {
                     }
                 }
 
-                Rectangle {
-                    height: details-layout.preferred-height;
-                    border-radius: 10px;
+                details-card := Rectangle {
+                    height: 58px + root.details-height;
+                    border-radius: 12px;
                     border-width: 1px;
-                    border-color: Theme.border;
+                    border-color: root.details-open ? Theme.brand.with-alpha(0.3) : Theme.border;
                     background: Theme.inset;
-                    details-layout := VerticalLayout {
-                        spacing: 0px;
-                        QuietButton {
-                            text: root.details-open ? "收起检查详情" : "查看检查详情";
-                            accessible-label: root.details-open ? "收起检查详情" : "展开检查详情";
-                            accessible-expanded: root.details-open;
-                            height: 40px;
-                            ghost: true;
-                            left-aligned: true;
-                            icon: @image-url("../assets/ui/chevron-down.svg");
-                            icon-color: Theme.muted-text;
-                            icon-angle: root.details-open ? 180deg : 0deg;
-                            enabled: root.open;
-                            clicked => { root.details-open = !root.details-open; }
+                    clip: true;
+                    animate border-color { duration: Theme.page-motion; }
+                    QuietButton {
+                        x: 0px;
+                        y: 0px;
+                        width: parent.width;
+                        height: 58px;
+                        text: "";
+                        ghost: true;
+                        border-radius: 12px;
+                        accessible-label: root.details-open ? "收起检查详情" : "展开检查详情";
+                        accessible-expanded: root.details-open;
+                        enabled: root.open;
+                        clicked => {
+                            root.details-open = !root.details-open;
+                            root.following = root.details-open;
+                        }
+                    }
+
+                    HorizontalLayout {
+                        y: 0px;
+                        height: 58px;
+                        padding-left: 14px;
+                        padding-right: 14px;
+                        spacing: 12px;
+                        cross-axis-alignment: center;
+                        Rectangle {
+                            width: 32px;
+                            height: 32px;
+                            border-radius: 9px;
+                            background: Theme.brand.with-alpha(root.details-open ? 0.18 : 0.1);
+                            animate background { duration: Theme.page-motion; }
+                            Image {
+                                x: 8px;
+                                y: 8px;
+                                width: 16px;
+                                height: 16px;
+                                source: @image-url("../assets/ui/search.svg");
+                                colorize: Theme.brand;
+                            }
                         }
 
-                        AnimatedSection {
-                            expanded: root.details-open;
-                            content-height: 194px;
-                            Rectangle {
-                                x: 14px;
-                                width: parent.width - 28px;
-                                height: 1px;
-                                background: Theme.border;
+                        VerticalLayout {
+                            horizontal-stretch: 1;
+                            alignment: center;
+                            spacing: 3px;
+                            Text {
+                                text: "检查详情";
+                                color: Theme.primary-text;
+                                font-size: 13px;
+                                font-weight: 600;
                             }
 
-                            ScrollView {
-                                x: 14px;
-                                y: 12px;
-                                width: parent.width - 22px;
-                                height: 168px;
-                                content-width: self.visible-width;
-                                horizontal-scrollbar-policy: always-off;
-                                VerticalLayout {
-                                    spacing: 8px;
-                                    Text {
-                                        text: root.busy ? "检查处理中，完成后显示最新明细。"
-                                            : root.has-error || !root.ready ? "当前检查尚未通过，请重新检查以生成最新明细。"
-                                            : "模型映射 · 配置变更 · 账号绑定";
-                                        font-size: 11px;
-                                        color: Theme.muted-text;
-                                        wrap: word-wrap;
-                                    }
+                            Text {
+                                min-width: 0px;
+                                text: root.busy ? "正在核对，完成后显示明细"
+                                    : root.passed ? root.preview.mappings.length + " 个模型映射 · " + root.preview.changes.length + " 项受管变更"
+                                    + (root.preview.bindings.length > 0 ? " · " + root.preview.bindings.length + " 个账号" : "")
+                                    : "检查通过后可查看模型映射与配置变更";
+                                color: Theme.muted-text;
+                                font-size: 11px;
+                                overflow: elide;
+                            }
+                        }
 
-                                    if root.passed: Text {
-                                        min-width: 0px;
-                                        text: root.preview;
-                                        font-size: 11px;
-                                        color: Theme.primary-text;
-                                        wrap: word-wrap;
-                                    }
+                        Rectangle {
+                            horizontal-stretch: 0;
+                            width: status-layout.preferred-width;
+                            height: 22px;
+                            border-radius: 11px;
+                            background: root.status-tone.with-alpha(0.12);
+                            animate background { duration: Theme.page-motion; }
+                            status-layout := HorizontalLayout {
+                                padding-left: 8px;
+                                padding-right: 9px;
+                                spacing: 5px;
+                                cross-axis-alignment: center;
+                                Image {
+                                    width: 11px;
+                                    height: 11px;
+                                    source: root.busy ? @image-url("../assets/ui/loader.svg")
+                                        : root.passed ? @image-url("../assets/ui/check.svg") : @image-url("../assets/ui/alert.svg");
+                                    colorize: root.status-tone;
+                                    transform-rotation: root.motion ? 360deg * mod(animation-tick(), 1000ms) / 1000ms : 0deg;
                                 }
+
+                                Text {
+                                    text: root.busy ? "核对中" : root.passed ? "已核对" : root.has-error ? "未通过" : "待检查";
+                                    color: root.status-tone;
+                                    font-size: 10px;
+                                    font-weight: 600;
+                                    vertical-alignment: center;
+                                }
+                            }
+                        }
+
+                        Rectangle {
+                            width: 26px;
+                            height: 26px;
+                            border-radius: 13px;
+                            background: root.details-open ? Theme.brand.with-alpha(0.14) : Theme.raised;
+                            animate background { duration: Theme.page-motion; }
+                            Image {
+                                x: 6px;
+                                y: 6px;
+                                width: 14px;
+                                height: 14px;
+                                source: @image-url("../assets/ui/chevron-down.svg");
+                                colorize: root.details-open ? Theme.brand : Theme.muted-text;
+                                transform-rotation: root.details-open ? 180deg : 0deg;
+                                animate transform-rotation {
+                                    duration: Theme.page-motion;
+                                    easing: cubic-bezier(0.22, 1, 0.36, 1);
+                                }
+                            }
+                        }
+                    }
+
+                    Rectangle {
+                        x: 14px;
+                        y: 58px;
+                        width: parent.width - 28px;
+                        height: 1px;
+                        background: Theme.border;
+                        opacity: root.details-open ? 1 : 0;
+                        animate opacity { duration: Theme.page-motion; }
+                    }
+
+                    Rectangle {
+                        y: 59px;
+                        width: parent.width;
+                        height: root.details-height;
+                        clip: true;
+                        details-body := VerticalLayout {
+                            y: 0px;
+                            width: parent.width;
+                            height: self.preferred-height;
+                            padding: 14px;
+                            padding-top: 16px;
+                            padding-bottom: 16px;
+                            if root.passed: PublishDetails {
+                                preview: root.preview;
+                                shown: root.details-open;
+                            }
+                            if !root.passed: DetailsPending {
+                                busy: root.busy;
+                                sweep: root.sweep;
                             }
                         }
                     }

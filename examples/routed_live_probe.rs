@@ -273,6 +273,7 @@ mod tests {
     #[test]
     fn records_must_confirm_two_tool_rounds_and_the_selected_destination() {
         let model = ModelRecord {
+            request_overrides: Default::default(),
             provider_id: "alpha".into(),
             public_id: "sx-alpha".into(),
             display_name: "Alpha".into(),

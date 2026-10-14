@@ -2,10 +2,15 @@ use std::{cell::Cell, error::Error, fs, path::Path, rc::Rc, time::Duration};
 
 use i_slint_backend_testing::{ElementHandle, ElementQuery};
 use slint::platform::{WindowEvent, software_renderer::MinimalSoftwareWindow};
-use slint::{ComponentHandle, LogicalPosition, Model, ModelRc, PhysicalSize, VecModel};
+use slint::{
+    ComponentHandle, LogicalPosition, Model, ModelRc, PhysicalSize, SharedString, VecModel,
+};
 use switchx::{
     headless, provider_icons,
-    ui::{AppWindow, ModelRow, ProviderRow, Theme},
+    ui::{
+        AppWindow, ModelRow, PreviewBindingRow, PreviewFact, PreviewMappingRow, ProviderRow,
+        RoutePreviewData, Theme,
+    },
 };
 
 use crate::support::{every, frame, play, render, set_theme, snapshot, snapshot_now};
@@ -16,6 +21,7 @@ const INSPECT: &str = "重新检查启用条件";
 const APPLY: &str = "确认启用模型";
 const EXPAND: &str = "展开检查详情";
 const COLLAPSE: &str = "收起检查详情";
+const LAST_NOTE: &str = "Codex 窗口与通用配置使用默认模型的供应商设置。";
 
 fn visible_text(app: &AppWindow) -> String {
     ElementQuery::from_root(app)
@@ -100,24 +106,40 @@ fn click(app: &AppWindow, window: &MinimalSoftwareWindow, label: &str) {
     headless::render(window);
 }
 
-fn scroll_body_to_details(app: &AppWindow, window: &MinimalSoftwareWindow) {
-    let before = point(app, COLLAPSE).y;
-    let viewport = ElementHandle::find_by_element_id(app, "RoutePublishSheet::content-scroll")
-        .next()
-        .expect("publish body scroll viewport");
+fn scroll_body(window: &MinimalSoftwareWindow, viewport: &ElementHandle, delta: f32) {
     let position = viewport.absolute_position();
-    // The top of the viewport is outside the nested diagnostics scroll area.
     headless::scroll(
         window,
         position.x + viewport.size().width / 2.0,
         position.y + 12.0,
-        -10_000.0,
+        delta,
     );
     render(window);
+}
+
+// Scrolls the body to its end, checks the last diagnostic, and returns to the
+// top so the disclosure control is visible again.
+fn scroll_body_to_details(
+    app: &AppWindow,
+    window: &MinimalSoftwareWindow,
+    output: &Path,
+    name: &str,
+) -> Result<(), Box<dyn Error>> {
+    let viewport = ElementHandle::find_by_element_id(app, "RoutePublishSheet::content-scroll")
+        .next()
+        .expect("publish body scroll viewport");
+    scroll_body(window, &viewport, -10_000.0);
+    let note = ElementHandle::find_by_accessible_label(app, LAST_NOTE)
+        .next()
+        .expect("the last diagnostic is reachable by scrolling the body");
+    let bottom = viewport.absolute_position().y + viewport.size().height;
     assert!(
-        point(app, COLLAPSE).y < before,
+        note.absolute_position().y + note.size().height <= bottom + 1.0,
         "expanded diagnostics must be reachable by scrolling the body"
     );
+    snapshot(window, output, name)?;
+    scroll_body(window, &viewport, 10_000.0);
+    Ok(())
 }
 
 fn seed(app: &AppWindow) -> Result<(), Box<dyn Error>> {
@@ -196,31 +218,88 @@ fn seed(app: &AppWindow) -> Result<(), Box<dyn Error>> {
     Ok(())
 }
 
-fn preview(app: &AppWindow) -> String {
-    let mut lines = vec![
-        "codex-cli 0.162.1 已核对 25 个可选模型 · http://127.0.0.1:18731/v1".to_owned(),
-        "目标：/Users/preview/.codex/config.toml".to_owned(),
-    ];
-    for row in app.get_models().iter() {
-        lines.push(format!(
-            "{} → {} (https://example.invalid)",
-            row.display_name, row.provider_name
-        ));
-    }
-    lines.extend([
-        "受管变更：model、model_provider、model_catalog_json、model_providers.switchx_router"
+fn preview(app: &AppWindow) -> RoutePreviewData {
+    let strings = |items: &[&str]| {
+        ModelRc::new(VecModel::from(
+            items
+                .iter()
+                .map(|item| SharedString::from(*item))
+                .collect::<Vec<_>>(),
+        ))
+    };
+    let facts = |items: &[(&str, &str)]| {
+        ModelRc::new(VecModel::from(
+            items
+                .iter()
+                .map(|(label, value)| PreviewFact {
+                    label: (*label).into(),
+                    value: (*value).into(),
+                })
+                .collect::<Vec<_>>(),
+        ))
+    };
+    let mappings = app
+        .get_models()
+        .iter()
+        .enumerate()
+        .map(|(index, row)| PreviewMappingRow {
+            model: row.display_name,
+            provider: row.provider_name,
+            origin: "https://example.invalid".into(),
+            // One synthetic backup shows how a fallback destination reads.
+            fallback: if index == 1 { "Podlink" } else { "" }.into(),
+            fallback_origin: if index == 1 {
+                "https://backup.example.invalid"
+            } else {
+                ""
+            }
             .into(),
-        "订阅认证由目标 Codex 管理；仅向官方模型传递认证。".into(),
-        "独立本地令牌会写入仅当前用户可读的配置及恢复记录。".into(),
-        "Grok 账号在发布时固定；更换账号或模型请启动新会话。".into(),
-        "Codex 窗口与通用配置使用默认模型的供应商设置。".into(),
-    ]);
-    lines.join("\n")
+        })
+        .collect::<Vec<_>>();
+    RoutePreviewData {
+        client: "codex-cli 0.162.1".into(),
+        endpoint: "http://127.0.0.1:18731/v1".into(),
+        target: "/Users/preview/.codex/config.toml".into(),
+        mappings: ModelRc::new(VecModel::from(mappings)),
+        changes: strings(&[
+            "model",
+            "model_provider",
+            "model_catalog_json",
+            "model_providers.switchx_router",
+            "model_reasoning_effort",
+            "service_tier",
+            "desktop.conversationDetailMode",
+            "desktop.enabled-reasoning-efforts",
+            "desktop.selected-avatar-id",
+        ]),
+        bindings: ModelRc::new(VecModel::from(vec![
+            PreviewBindingRow {
+                provider: "ChatGPT 订阅".into(),
+                grok: false,
+                facts: facts(&[
+                    ("账号", "原生登录"),
+                    ("工作区", "synthetic-workspace"),
+                    ("服务", "https://chatgpt.com"),
+                    ("路由", "NO_CONSTRAINT"),
+                ]),
+            },
+            PreviewBindingRow {
+                provider: "Grok".into(),
+                grok: true,
+                facts: facts(&[("保存账号", "synthetic-grok-account")]),
+            },
+        ])),
+        notes: strings(&[
+            "订阅认证由目标 Codex 管理；仅官方模型传递认证。独立本地令牌会写入仅当前用户可读的配置及恢复记录。",
+            "Grok 账号在发布时固定；更换账号或模型请启动新会话。",
+            LAST_NOTE,
+        ]),
+    }
 }
 
 fn ready(app: &AppWindow) {
     app.set_busy(false);
-    app.set_route_preview(preview(app).into());
+    app.set_route_preview(preview(app));
     app.set_route_preview_ready(true);
     app.set_error_code("".into());
     app.set_error_message("".into());
@@ -231,7 +310,7 @@ fn ready(app: &AppWindow) {
 fn checking(app: &AppWindow) {
     app.set_busy(true);
     app.set_route_preview_ready(false);
-    app.set_route_preview("".into());
+    app.set_route_preview(Default::default());
     app.set_error_code("".into());
     app.set_error_message("".into());
     app.set_error_action("".into());
@@ -340,8 +419,8 @@ pub(super) fn render_route_publish(
             assert_eq!(control(app, COLLAPSE).accessible_expanded(), Some(true));
             assert_display_name(app);
             snapshot(window, output, &format!("publish-details-{suffix}"))?;
-            scroll_body_to_details(app, window);
-            snapshot(
+            scroll_body_to_details(
+                app,
                 window,
                 output,
                 &format!("publish-details-scrolled-{suffix}"),
