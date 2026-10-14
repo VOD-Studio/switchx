@@ -6,6 +6,7 @@
 
 ### Added
 
+- GitHub Release 新增按平台和架构排列的下载表格，包含安装包徽章按钮与 SHA-256 校验入口；发布时根据已校验的产物清单自动生成当前版本的下载链接。
 - Arch Linux / Omarchy x86_64 新增原生 pacman 包及 `make arch-package` 本地构建入口，安装桌面入口、图标与固定路径的凭据程序；标签发布在 Arch 容器构建和验证，统一校验版本、来源与 SHA-256。
 - 项目采用 MIT 许可证，所有平台发布包附带项目许可证和第三方图标许可。
 - Linux x64 与 ARM64 新增 AppImage 发布包和 `make appimage` 本地打包入口，包含桌面入口、应用图标及依赖；发布流程校验包内元数据与 SHA-256，凭据程序使用持久的 AppImage 文件路径，支持重启后继续由 Codex 调用。

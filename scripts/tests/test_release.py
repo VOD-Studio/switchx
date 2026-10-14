@@ -2,6 +2,7 @@ import contextlib
 import importlib.util
 import io
 import json
+import re
 import shutil
 import sys
 import tarfile
@@ -151,6 +152,12 @@ class ReleaseAssetsTests(unittest.TestCase):
         for target in packaging.TARGETS:
             self.write_archive(target)
         self.write_package(packaging.archlinux.package_name("0.1.0"), packaging.archlinux.TARGET)
+        notes_directory = tempfile.TemporaryDirectory()
+        self.addCleanup(notes_directory.cleanup)
+        self.notes_input = Path(notes_directory.name) / "changelog.md"
+        self.notes_output = Path(notes_directory.name) / "generated/release.md"
+        self.notes = "### Added\n\n- 中文更新与 [文档](https://example.org/docs)。\n"
+        self.notes_input.write_text(self.notes, encoding="utf-8")
 
     def write_archive(self, archive_target, **overrides):
         for name in packaging.package_names("0.1.0", archive_target):
@@ -246,6 +253,103 @@ class ReleaseAssetsTests(unittest.TestCase):
     def test_macos_packages_are_disk_images(self):
         for target in ["aarch64-apple-darwin", "x86_64-apple-darwin"]:
             self.assertEqual(packaging.archive_name("0.1.0", target), f"SwitchX-0.1.0-{target}.dmg")
+
+    def generate(self, *extra):
+        arguments = ["package-release.py", "--verify-dir", str(self.root), "--tag", "v0.1.0",
+                     "--repository", "example-fork/switchx", "--notes-input", str(self.notes_input),
+                     "--notes-output", str(self.notes_output), *extra]
+        with mock.patch.object(sys, "argv", arguments), \
+                mock.patch.object(packaging, "check", return_value="0.1.0"), \
+                mock.patch.object(packaging, "output", return_value="synthetic"), \
+                contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
+            packaging.main()
+
+    def test_release_body_links_to_every_verified_package_and_preserves_changelog(self):
+        self.generate()
+        body = self.notes_output.read_text(encoding="utf-8")
+        links = re.findall(r"\]\((https://github.com/[^)]+)\)", body)
+        base = "https://github.com/example-fork/switchx/releases/download/v0.1.0/"
+        packages = {path.name for path in self.root.iterdir()
+                    if not path.name.endswith(".sha256") and path.name != "SHA256SUMS"}
+        self.assertEqual(len(packages), 9)
+        self.assertEqual(set(links), {base + name for name in packages | {"SHA256SUMS"}})
+        self.assertEqual(len(links), 10)
+        self.assertTrue(body.endswith("## 更新日志\n\n" + self.notes))
+        self.assertEqual(self.notes_input.read_text(encoding="utf-8"), self.notes)
+        self.generate()
+        self.assertEqual(self.notes_output.read_text(encoding="utf-8"), body)
+
+    def test_invalid_packages_do_not_write_release_body(self):
+        target = "x86_64-unknown-linux-gnu"
+        image = self.root / packaging.package_names("0.1.0", target)[1]
+        for failure in ["missing", "checksum", "metadata"]:
+            if failure == "missing":
+                image.unlink()
+            elif failure == "checksum":
+                image.write_bytes(b"corrupted")
+            else:
+                self.write_package(image.name, target, commit="wrong-source")
+            with self.subTest(failure=failure), self.assertRaises(SystemExit) as error:
+                self.generate()
+            self.assertEqual(error.exception.code, 1)
+            self.assertFalse(self.notes_output.exists())
+            self.write_archive(target)
+
+    def test_notes_cannot_overwrite_input_or_become_a_release_asset(self):
+        for destination in [self.notes_input, self.root / "release.md"]:
+            with self.subTest(destination=destination), self.assertRaises(SystemExit):
+                self.generate("--notes-output", str(destination))
+            self.assertEqual(self.notes_input.read_text(encoding="utf-8"), self.notes)
+            self.assertFalse((self.root / "release.md").exists())
+
+
+class DownloadTableTests(unittest.TestCase):
+    def test_platforms_architectures_and_prerelease_filenames(self):
+        body = packaging.download_table("0.2.0-rc.1", "my-org/switchx-fork")
+        rows = [line for line in body.splitlines() if line.startswith("| ")][2:]
+        self.assertEqual(len(rows), 7)
+        expected = [
+            ("macOS", "Apple Silicon (ARM64)", "aarch64-apple-darwin.dmg", "DMG"),
+            ("macOS", "Intel (x64)", "x86_64-apple-darwin.dmg", "DMG"),
+            ("Windows", "ARM64", "aarch64-pc-windows-msvc.zip", "ZIP"),
+            ("Windows", "x64", "x86_64-pc-windows-msvc.zip", "ZIP"),
+            ("Linux", "ARM64", "aarch64-unknown-linux-gnu.AppImage", "AppImage"),
+            ("Linux", "x64", "x86_64-unknown-linux-gnu.AppImage", "AppImage"),
+        ]
+        for platform, architecture, suffix, label in expected:
+            row = next(row for row in rows if row.startswith(f"| {platform} | {architecture} |"))
+            self.assertIn(f"SwitchX-0.2.0-rc.1-{suffix}", row)
+            self.assertIn(f"![{platform} {architecture} {label}]", row)
+            if platform == "Linux":
+                self.assertLess(row.index("AppImage"), row.index("tar.gz"))
+        arch = next(row for row in rows if row.startswith("| Arch Linux / Omarchy | x64 |"))
+        self.assertIn("switchx-0.2.0pre.rc.1-1-x86_64.pkg.tar.zst", arch)
+        self.assertNotIn("/latest/", body)
+        links = re.findall(r"\]\((https://github.com/[^)]+)\)", body)
+        self.assertEqual(len(links), 10)
+        self.assertTrue(all(link.startswith(
+            "https://github.com/my-org/switchx-fork/releases/download/v0.2.0-rc.1/") for link in links))
+
+    def test_invalid_repositories_cannot_change_download_link_structure(self):
+        for repository in ["switchx", "https://github.com/org/repo", "org/repo/other",
+                           "org/repo?query=1", "org/repo\n", "org/repo)[unexpected](url)"]:
+            with self.subTest(repository=repository), self.assertRaisesRegex(ValueError, "OWNER/REPO"):
+                packaging.download_table("0.1.0", repository)
+
+    def test_notes_options_require_verification_and_each_other(self):
+        for arguments in [
+            ["--verify-dir", "dist", "--tag", "v0.1.0", "--repository", "org/repo"],
+            ["--target", "x86_64-unknown-linux-gnu", "--repository", "org/repo",
+             "--notes-input", "notes.md", "--notes-output", "body.md"],
+        ]:
+            with self.subTest(arguments=arguments), \
+                    mock.patch.object(sys, "argv", ["package-release.py", *arguments]), \
+                    mock.patch.object(packaging, "build") as build, \
+                    mock.patch.object(packaging, "verify_assets") as verify, \
+                    contextlib.redirect_stderr(io.StringIO()), self.assertRaises(SystemExit):
+                packaging.main()
+            build.assert_not_called()
+            verify.assert_not_called()
 
 
 @unittest.skipUnless(shutil.which("hdiutil"), "requires macOS hdiutil")

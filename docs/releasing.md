@@ -63,6 +63,17 @@ git push origin v0.1.0
 
 Release 发布前会校验标签、workspace 版本、lockfile 和 changelog，要求九个包（六个平台的八个通用包，加一个 Arch Linux x86_64 包）与各自 `.sha256` 文件齐全，核对包内版本与源提交、拒绝从有未提交改动的工作区构建的包，并生成 `SHA256SUMS`。发布 job 在 GitHub 托管的 `macos-15` runner 上用 `hdiutil` 挂载 DMG，用 Homebrew `squashfs` 提供的 `unsquashfs` 读取两个架构 AppImage 内的 `BUILD-INFO.json`，并用 Homebrew `libarchive` 的 `bsdtar` 检查 Arch 包的 `.PKGINFO` 和构建元数据，无需执行 Linux 程序。任一检查失败都会阻止发布。全部完成后先创建 draft、上传附件，再公开 Release；上传失败时 draft 可以在重跑工作流后继续。已经公开的 Release 不会被覆盖。预发布版本自动标为 prerelease，且不会成为 latest。
 
+发布页面顶部提供按平台和架构排列的下载表格，包含 macOS、Windows、Linux 及 Arch Linux / Omarchy 的安装包徽章按钮和 `SHA256SUMS` 链接，后面保留当前版本的 changelog。表格和产物校验共用 `scripts/package-release.py` 的包清单；链接使用当前仓库与固定版本标签，Arch 预发布包名沿用 pacman 版本映射。Shields.io 提供徽章图片，图片替代文字包含平台、架构和包格式。只有全部产物校验通过后才写出最终发布说明；生成不请求 Shields.io，也不依赖其服务可用性。
+
+发布 job 通过以下参数生成说明，输出放在 `dist/` 外，避免作为安装包附件上传。输入与输出必须是不同文件，重跑会重新生成表格，不会重复追加：
+
+```sh
+python3 scripts/package-release.py --verify-dir dist --tag v0.1.0 \
+  --repository VOD-Studio/switchx \
+  --notes-input target/release-notes/release-notes.md \
+  --notes-output target/release-notes/release-body.md
+```
+
 下载后可在 Linux 使用 `sha256sum -c SHA256SUMS`，macOS 使用 `shasum -a 256 -c SHA256SUMS`；如果只下载一个平台包，使用对应 `.sha256` 文件。Windows 可使用 PowerShell 的 `Get-FileHash <文件名> -Algorithm SHA256` 与校验文件比对。
 
 ## GitHub 设置

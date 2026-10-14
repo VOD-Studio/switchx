@@ -52,8 +52,12 @@ jobs:
         run: |
           brew install squashfs libarchive
           echo "$(brew --prefix libarchive)/bin" >> "$GITHUB_PATH"
-      - name: Verify artifact set, build metadata and checksums
-        run: python scripts/package-release.py --verify-dir dist --tag "$RELEASE_TAG"
+      - name: Verify packages and generate the release download table
+        run: |
+          python scripts/package-release.py --verify-dir dist --tag "$RELEASE_TAG" \
+            --repository "$GH_REPO" \
+            --notes-input target/release-notes/release-notes.md \
+            --notes-output target/release-notes/release-body.md
       - name: Stage a draft, upload assets, then publish
         run: |
           if gh release view "$RELEASE_TAG" --json isDraft --jq '.isDraft' > target/release-is-draft; then
@@ -64,11 +68,11 @@ jobs:
           else
             gh release create "$RELEASE_TAG" --verify-tag --draft \
               --target "$(git rev-parse HEAD)" --title "SwitchX $RELEASE_TAG" \
-              --notes-file target/release-notes/release-notes.md
+              --notes-file target/release-notes/release-body.md
           fi
           gh release upload "$RELEASE_TAG" dist/* --clobber
           latest=true
           if [[ "$PRERELEASE" == true ]]; then latest=false; fi
           gh release edit "$RELEASE_TAG" --draft=false --prerelease="$PRERELEASE" \
             --latest="$latest" --title "SwitchX $RELEASE_TAG" \
-            --notes-file target/release-notes/release-notes.md
+            --notes-file target/release-notes/release-body.md

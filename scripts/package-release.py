@@ -6,6 +6,7 @@ import contextlib
 import hashlib
 import json
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -14,6 +15,7 @@ import tempfile
 import time
 import zipfile
 from pathlib import Path
+from urllib.parse import quote, urlencode
 
 from release import ROOT, check
 import appimage
@@ -39,6 +41,53 @@ def package_names(version, target):
     if "linux" in target:
         names.append(f"SwitchX-{version}-{target}.AppImage")
     return names
+
+
+def release_packages(version):
+    packages = [(target, name) for target in TARGETS for name in package_names(version, target)]
+    return [*packages, (archlinux.TARGET, archlinux.package_name(version))]
+
+
+def download_table(version, repository):
+    if not re.fullmatch(r"[A-Za-z0-9_-]+/[A-Za-z0-9_.-]+", repository):
+        raise ValueError("Repository must be an OWNER/REPO name")
+    base = f"https://github.com/{repository}/releases/download/{quote(f'v{version}', safe='')}/"
+    platforms = {
+        "darwin": ("macOS", "555555", "apple"),
+        "win32": ("Windows", "0078D4", ""),
+        "linux": ("Linux", "E95420", "linux"),
+    }
+    rows = {}
+    for target, name in release_packages(version):
+        system, architecture, extension = TARGETS[target]
+        platform, color, logo = platforms[system]
+        architecture = "ARM64" if architecture == "arm64" else "x64"
+        description = architecture
+        if system == "darwin":
+            description = "Apple Silicon (ARM64)" if architecture == "ARM64" else "Intel (x64)"
+        if name.endswith(".pkg.tar.zst"):
+            platform, color, logo = "Arch Linux / Omarchy", "1793D1", "archlinux"
+            label = "pkg.tar.zst"
+        elif name.endswith(".AppImage"):
+            label = "AppImage"
+        else:
+            label = {".dmg": "DMG", ".zip": "ZIP", ".tar.gz": "tar.gz"}[extension]
+        badge = f"https://img.shields.io/badge/{label}-{architecture}-{color}"
+        if logo:
+            badge += "?" + urlencode({"logo": logo})
+        link = f"[![{platform} {description} {label}]({badge})]({base}{quote(name, safe='')})"
+        row = rows.setdefault((platform, description), [])
+        if label == "AppImage":
+            row.insert(0, link)
+        else:
+            row.append(link)
+    lines = ["## 下载", "", "请选择与你的系统和处理器架构对应的安装包。", "",
+             "| 平台 | 架构 | 下载 |", "| --- | --- | --- |"]
+    for (platform, architecture), links in rows.items():
+        lines.append(f"| {platform} | {architecture} | {' '.join(links)} |")
+    lines.extend(["", f"校验文件：[SHA256SUMS]({base}SHA256SUMS)。"
+                  "各安装包的 `.sha256` 文件也可在下方 Assets 中下载。", ""])
+    return "\n".join(lines)
 
 
 def digest(path):
@@ -140,8 +189,7 @@ def build(target, destination):
 
 
 def verify_assets(directory, version, commit):
-    packages = [(target, name) for target in TARGETS for name in package_names(version, target)]
-    packages.append((archlinux.TARGET, archlinux.package_name(version)))
+    packages = release_packages(version)
     expected = {name for _, name in packages}
     expected |= {f"{name}.sha256" for name in expected}
     present = {item.name for item in directory.iterdir()} - {"SHA256SUMS"}
@@ -187,13 +235,34 @@ def main():
     action.add_argument("--verify-dir", type=Path)
     parser.add_argument("--output-dir", type=Path, default=ROOT / "dist")
     parser.add_argument("--tag")
+    parser.add_argument("--repository", help="OWNER/REPO used in release download links")
+    parser.add_argument("--notes-input", type=Path,
+                        help="changelog notes to include after the download table")
+    parser.add_argument("--notes-output", type=Path,
+                        help="write the release body after verifying all packages")
     args = parser.parse_args()
     try:
+        notes_options = (args.repository, args.notes_input, args.notes_output)
+        if any(notes_options) and (not all(notes_options) or not args.verify_dir):
+            raise ValueError("--repository, --notes-input and --notes-output "
+                             "require each other and --verify-dir")
         if args.verify_dir:
             if not args.tag:
                 raise ValueError("--verify-dir requires --tag")
-            verify_assets(args.verify_dir, check(ROOT, args.tag), output("git", "rev-parse", "HEAD"))
-            print("Verified all eight native packages and wrote SHA256SUMS")
+            version = check(ROOT, args.tag)
+            if args.notes_output:
+                if args.notes_output.resolve().is_relative_to(args.verify_dir.resolve()):
+                    raise ValueError("Release notes must be written outside the package directory")
+                if args.notes_output.resolve() == args.notes_input.resolve():
+                    raise ValueError("Release notes input and output must be different files")
+                body = (download_table(version, args.repository) + "\n## 更新日志\n\n"
+                        + args.notes_input.read_text(encoding="utf-8"))
+            verify_assets(args.verify_dir, version, output("git", "rev-parse", "HEAD"))
+            print(f"Verified all {len(release_packages(version))} packages and wrote SHA256SUMS")
+            if args.notes_output:
+                args.notes_output.parent.mkdir(parents=True, exist_ok=True)
+                args.notes_output.write_text(body, encoding="utf-8")
+                print(f"Wrote release download table and changelog to {args.notes_output}")
         else:
             build(args.target, args.output_dir.resolve())
     except (ValueError, OSError, subprocess.CalledProcessError, KeyError) as error:
