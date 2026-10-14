@@ -257,7 +257,16 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .prepare(&data, &home, 0, &selected.public_id, &binary)
         .await?;
     check(
-        preview.contains("工作区 synthetic-workspace · https://chatgpt.com"),
+        preview.bindings.iter().any(|binding| {
+            binding
+                .facts
+                .iter()
+                .any(|fact| fact.value == "synthetic-workspace")
+                && binding
+                    .facts
+                    .iter()
+                    .any(|fact| fact.value == "https://chatgpt.com")
+        }),
         "production preflight discarded native workspace routing",
     )?;
     preflight.discard_preview();

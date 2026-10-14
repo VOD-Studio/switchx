@@ -10,9 +10,9 @@ use switchx::{
         direct_switch::{self, PreparedDirectSwitch},
         route_switch,
     },
-    route_session::RouteSession,
+    route_session::{RoutePreview, RouteSession},
     storage::{ModelRecord, ProviderKind, Store},
-    ui::AppWindow,
+    ui::{AppWindow, PreviewBindingRow, PreviewFact, PreviewMappingRow, RoutePreviewData},
     upstream,
 };
 use tokio::sync::mpsc;
@@ -30,6 +30,57 @@ pub(super) fn codex_home(text: &str) -> Result<PathBuf, String> {
     let path = PathBuf::from(text);
     client::config_path(&path)?;
     Ok(path)
+}
+
+pub(super) fn route_preview_data(preview: &RoutePreview) -> RoutePreviewData {
+    let strings = |items: &[String]| {
+        ModelRc::new(VecModel::from(
+            items.iter().map(|item| item.into()).collect::<Vec<_>>(),
+        ))
+    };
+    RoutePreviewData {
+        client: preview.client_version.as_str().into(),
+        endpoint: preview.endpoint.as_str().into(),
+        target: preview.target.to_string_lossy().as_ref().into(),
+        mappings: ModelRc::new(VecModel::from(
+            preview
+                .mappings
+                .iter()
+                .map(|mapping| {
+                    let fallback = mapping.fallback.as_ref();
+                    PreviewMappingRow {
+                        model: mapping.model.as_str().into(),
+                        provider: mapping.destination.name.as_str().into(),
+                        origin: mapping.destination.origin.as_str().into(),
+                        fallback: fallback.map_or("", |it| it.name.as_str()).into(),
+                        fallback_origin: fallback.map_or("", |it| it.origin.as_str()).into(),
+                    }
+                })
+                .collect::<Vec<_>>(),
+        )),
+        changes: strings(&preview.changed_fields),
+        bindings: ModelRc::new(VecModel::from(
+            preview
+                .bindings
+                .iter()
+                .map(|binding| PreviewBindingRow {
+                    provider: binding.provider.as_str().into(),
+                    grok: binding.grok,
+                    facts: ModelRc::new(VecModel::from(
+                        binding
+                            .facts
+                            .iter()
+                            .map(|fact| PreviewFact {
+                                label: fact.label.as_str().into(),
+                                value: fact.value.as_str().into(),
+                            })
+                            .collect::<Vec<_>>(),
+                    )),
+                })
+                .collect::<Vec<_>>(),
+        )),
+        notes: strings(&preview.notes),
+    }
 }
 
 pub(super) fn route_port(text: &str) -> Result<u16, String> {
@@ -119,7 +170,7 @@ pub(super) fn connect(app: &AppWindow, sender: &mpsc::Sender<Command>) {
     app.on_inspect_route(queue_on(app, sender, |app| {
         // Invalidate the previous result before the worker begins checking again.
         app.set_route_preview_ready(false);
-        app.set_route_preview("".into());
+        app.set_route_preview(Default::default());
         app.set_action_message("".into());
         app.set_error_code("".into());
         app.set_error_message("".into());
@@ -367,14 +418,14 @@ impl Worker {
             app.set_route_preview_ready(result.is_ok());
             match result {
                 Ok(summary) => {
-                    app.set_route_preview(summary.into());
+                    app.set_route_preview(route_preview_data(&summary));
                     show_action(
                         &app,
                         Ok("发布预览已准备；确认启用后点击“启动 Codex”，在新会话选择模型".into()),
                     );
                 }
                 Err(error) => {
-                    app.set_route_preview("".into());
+                    app.set_route_preview(Default::default());
                     show_action(&app, Err(error));
                 }
             }
@@ -427,7 +478,7 @@ impl Worker {
         self.route_session.discard_preview();
         let _ = self.weak.upgrade_in_event_loop(|app| {
             app.set_route_preview_ready(false);
-            app.set_route_preview("".into());
+            app.set_route_preview(Default::default());
             show_action(&app, Ok("已取消发布预览".into()));
         });
     }

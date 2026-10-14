@@ -30,6 +30,7 @@ import {
     UsageDetailRow,
     UsageSyncState,
     UsagePriceRow,
+    RoutePreviewData,
 } from "view-models.slint";
 import { AccountsPage } from "pages/accounts.slint";
 import { ProviderEditor } from "editors/provider-editor.slint";
@@ -83,6 +84,10 @@ export {
     UsageDetailRow,
     UsageSyncState,
     UsagePriceRow,
+    PreviewFact,
+    PreviewMappingRow,
+    PreviewBindingRow,
+    RoutePreviewData,
 } from "view-models.slint";
 export { SyntaxHighlighting, CodeSpan } from "code-editor.slint";
 
@@ -338,7 +343,7 @@ export component AppWindow inherits Window {
     in-out property <string> route-status: "路由未启用";
     in-out property <string> route-port: "18731";
     in-out property <string> default-model: "";
-    in-out property <string> route-preview: "";
+    in-out property <RoutePreviewData> route-preview;
     in-out property <bool> route-preview-ready: false;
     in-out property <string> route-preview-model: "";
     in-out property <bool> model-editor-open: false;
@@ -1808,8 +1813,7 @@ export component AppWindow inherits Window {
         open: root.publish-drawer-open;
         title: "准备启用模型";
         subtitle: "你的模型工作空间，即将就绪。";
-        centered: true;
-        panel-width: 680px;
+        panel-width: 620px;
         busy: root.busy;
         error-message: root.error-code == "" ? "" : root.error-message + " · " + root.error-action;
         dismissed => {

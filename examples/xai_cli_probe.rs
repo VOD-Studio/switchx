@@ -202,7 +202,7 @@ async fn main() -> Result<()> {
     let mut session = RouteSession::with_xai_probe(&data, &origin, address)?;
     let result: Result<()> = async {
         let preview = session.prepare(&data,&home,0,&model,&executable).await?;
-        if preview.contains("synthetic-refresh") { return Err("OAuth leaked into preview".into()); }
+        if preview.to_string().contains("synthetic-refresh") { return Err("OAuth leaked into preview".into()); }
         session.apply(&data,&home,0,&model).await?;
         let published: toml_edit::DocumentMut = std::fs::read_to_string(home.join("config.toml"))?.parse()?;
         if published["model_reasoning_effort"].as_str() != Some("high") { return Err("unsupported original reasoning effort was not normalized for Grok".into()); }
