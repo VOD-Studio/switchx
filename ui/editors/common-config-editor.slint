@@ -404,12 +404,10 @@ export component CommonConfigEditor inherits SurfaceCard {
             min-height: 128px;
             Rectangle {
                 border-radius: 14px;
-                border-width: 1px;
-                border-color: code.has-focus ? Theme.brand.with-alpha(0.75) : Theme.border;
                 background: Theme.inset;
                 drop-shadow-blur: code.has-focus ? 16px : 0px;
                 drop-shadow-color: Theme.brand.with-alpha(0.06);
-                animate border-color, drop-shadow-blur { duration: Theme.page-motion; }
+                animate drop-shadow-blur { duration: Theme.page-motion; }
                 VerticalLayout {
                     spacing: 0px;
                     Rectangle {
@@ -564,6 +562,15 @@ export component CommonConfigEditor inherits SurfaceCard {
                             }
                         }
                     }
+                }
+
+                // The card outline is drawn above the header, editor, and footer,
+                // whose backgrounds would otherwise cover the border.
+                Rectangle {
+                    border-radius: 14px;
+                    border-width: 1px;
+                    border-color: code.has-focus ? Theme.brand.with-alpha(0.75) : Theme.border;
+                    animate border-color { duration: Theme.page-motion; }
                 }
             }
         }
