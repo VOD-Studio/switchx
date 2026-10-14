@@ -1,10 +1,52 @@
 use std::{path::Path, time::Duration};
 
-use rusqlite::{Connection, OpenFlags, Result, params};
+use rusqlite::{Connection, OpenFlags, Result, Transaction, TransactionBehavior, params};
 
 use crate::{credentials::Secret, usage::TokenUsage};
 
 const SCHEMA_VERSION: i64 = 14;
+
+/// Usage, log import and price tables; every statement is safe to repeat.
+const USAGE_SCHEMA: &str = "CREATE TABLE IF NOT EXISTS usage_records (
+        id TEXT PRIMARY KEY NOT NULL,
+        source TEXT NOT NULL CHECK (source IN ('router', 'codex_log')),
+        started_at_ms INTEGER NOT NULL,
+        provider_id TEXT,
+        codex_provider TEXT,
+        public_model TEXT,
+        model TEXT NOT NULL,
+        input_tokens INTEGER NOT NULL,
+        cached_input_tokens INTEGER NOT NULL,
+        cache_write_tokens INTEGER NOT NULL,
+        output_tokens INTEGER NOT NULL,
+        reasoning_tokens INTEGER NOT NULL,
+        duration_ms INTEGER,
+        first_event_ms INTEGER,
+        response_id TEXT,
+        session_id TEXT
+    );
+    CREATE INDEX IF NOT EXISTS usage_records_time ON usage_records(started_at_ms);
+    CREATE INDEX IF NOT EXISTS usage_records_response
+        ON usage_records(response_id) WHERE response_id IS NOT NULL;
+    CREATE TABLE IF NOT EXISTS usage_log_files (
+        path TEXT PRIMARY KEY NOT NULL,
+        size INTEGER NOT NULL,
+        modified_ms INTEGER NOT NULL,
+        read_offset INTEGER NOT NULL,
+        state TEXT NOT NULL
+    );
+    CREATE TABLE IF NOT EXISTS model_prices (
+        provider_id TEXT NOT NULL DEFAULT '',
+        model TEXT NOT NULL,
+        currency TEXT NOT NULL CHECK (currency IN ('USD', 'CNY')),
+        input_micros INTEGER NOT NULL,
+        cached_input_micros INTEGER NOT NULL,
+        output_micros INTEGER NOT NULL,
+        updated_at_ms INTEGER NOT NULL,
+        PRIMARY KEY (provider_id, model)
+    );
+    INSERT OR IGNORE INTO app_settings (key, value)
+        VALUES ('usage_router_since_ms', CAST(CAST(unixepoch('subsec') * 1000 AS INTEGER) AS TEXT));";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ProviderKind {
@@ -418,59 +460,27 @@ impl Store {
         if version < 13 {
             // Routed usage starts with this version; earlier routed Codex sessions
             // may still be imported from their logs.
-            connection.execute_batch(
-                "BEGIN IMMEDIATE;
-                 CREATE TABLE IF NOT EXISTS usage_records (
-                    id TEXT PRIMARY KEY NOT NULL,
-                    source TEXT NOT NULL CHECK (source IN ('router', 'codex_log')),
-                    started_at_ms INTEGER NOT NULL,
-                    provider_id TEXT,
-                    codex_provider TEXT,
-                    public_model TEXT,
-                    model TEXT NOT NULL,
-                    input_tokens INTEGER NOT NULL,
-                    cached_input_tokens INTEGER NOT NULL,
-                    cache_write_tokens INTEGER NOT NULL,
-                    output_tokens INTEGER NOT NULL,
-                    reasoning_tokens INTEGER NOT NULL,
-                    duration_ms INTEGER,
-                    first_event_ms INTEGER,
-                    response_id TEXT,
-                    session_id TEXT
-                 );
-                 CREATE INDEX IF NOT EXISTS usage_records_time ON usage_records(started_at_ms);
-                 CREATE INDEX IF NOT EXISTS usage_records_response
-                    ON usage_records(response_id) WHERE response_id IS NOT NULL;
-                 CREATE TABLE IF NOT EXISTS usage_log_files (
-                    path TEXT PRIMARY KEY NOT NULL,
-                    size INTEGER NOT NULL,
-                    modified_ms INTEGER NOT NULL,
-                    read_offset INTEGER NOT NULL,
-                    state TEXT NOT NULL
-                 );
-                 CREATE TABLE IF NOT EXISTS model_prices (
-                    provider_id TEXT NOT NULL DEFAULT '',
-                    model TEXT NOT NULL,
-                    currency TEXT NOT NULL CHECK (currency IN ('USD', 'CNY')),
-                    input_micros INTEGER NOT NULL,
-                    cached_input_micros INTEGER NOT NULL,
-                    output_micros INTEGER NOT NULL,
-                    updated_at_ms INTEGER NOT NULL,
-                    PRIMARY KEY (provider_id, model)
-                 );
-                 INSERT OR IGNORE INTO app_settings (key, value)
-                    VALUES ('usage_router_since_ms', CAST(CAST(unixepoch('subsec') * 1000 AS INTEGER) AS TEXT));
-                 PRAGMA user_version = 13;
-                 COMMIT;",
-            )?;
+            connection.execute_batch(&format!(
+                "BEGIN IMMEDIATE; {USAGE_SCHEMA} PRAGMA user_version = 13; COMMIT;"
+            ))?;
         }
         if version < 14 {
-            connection.execute_batch(
-                "BEGIN IMMEDIATE;
-                 ALTER TABLE published_models ADD COLUMN request_overrides TEXT NOT NULL DEFAULT '{}';
-                 PRAGMA user_version = 14;
-                 COMMIT;",
-            )?;
+            let transaction =
+                Transaction::new_unchecked(&connection, TransactionBehavior::Immediate)?;
+            // Pre-release request customization builds added this column as version 13,
+            // before the usage tables; keep their overrides and add only what they lack.
+            if transaction
+                .prepare("SELECT request_overrides FROM published_models LIMIT 0")
+                .is_ok()
+            {
+                transaction.execute_batch(USAGE_SCHEMA)?;
+            } else {
+                transaction.execute_batch(
+                    "ALTER TABLE published_models ADD COLUMN request_overrides TEXT NOT NULL DEFAULT '{}';",
+                )?;
+            }
+            transaction.pragma_update(None, "user_version", 14)?;
+            transaction.commit()?;
         }
         Ok(Self { connection })
     }
@@ -1360,6 +1370,72 @@ mod tests {
         assert_eq!(store.models().unwrap(), [model]);
         drop(store);
         std::fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    fn pre_release_request_customization_databases_reach_current_schema() {
+        let usage_tables =
+            "DROP TABLE usage_records; DROP TABLE usage_log_files; DROP TABLE model_prices;
+             DELETE FROM app_settings WHERE key = 'usage_router_since_ms';";
+        for (name, downgrade) in [
+            // The request customization branch stored its column as version 13.
+            (
+                "branch-v13",
+                format!("{usage_tables} PRAGMA user_version = 13;"),
+            ),
+            // A later build then created the usage tables at version 13 and stopped.
+            ("partial-v13", "PRAGMA user_version = 13;".into()),
+            // Rolling back to a version 12 build left the column behind.
+            (
+                "rolled-back-v12",
+                format!("{usage_tables} PRAGMA user_version = 12;"),
+            ),
+        ] {
+            let path = std::env::temp_dir().join(format!(
+                "switchx-{name}-migration-{}.sqlite",
+                crate::id::new_id().unwrap()
+            ));
+            let store = Store::open(&path).unwrap();
+            let provider = api_provider();
+            store.put_provider(&provider).unwrap();
+            let model = ModelRecord {
+                provider_id: provider.id,
+                public_id: "sx-pre-release".into(),
+                display_name: "Pre-release".into(),
+                upstream_model: "model".into(),
+                metadata: "{}".into(),
+                enabled: true,
+                fallback_provider_id: None,
+                request_overrides: crate::request_overrides::RequestOverrides::parse(
+                    "synthetic-agent/1.0",
+                    "{}",
+                    "{}",
+                )
+                .unwrap(),
+            };
+            store.put_model(&model).unwrap();
+            store.connection.execute_batch(&downgrade).unwrap();
+            drop(store);
+            let store = Store::open(&path).unwrap();
+            assert_eq!(store.models().unwrap(), [model], "{name}");
+            assert!(store.usage_router_since_ms().is_ok(), "{name}");
+            for table in ["usage_records", "usage_log_files", "model_prices"] {
+                store
+                    .connection
+                    .prepare(&format!("SELECT * FROM {table} LIMIT 0"))
+                    .unwrap();
+            }
+            assert_eq!(
+                store
+                    .connection
+                    .query_row("PRAGMA user_version", [], |row| row.get::<_, i64>(0))
+                    .unwrap(),
+                SCHEMA_VERSION,
+                "{name}"
+            );
+            drop(store);
+            std::fs::remove_file(path).unwrap();
+        }
     }
 
     #[test]
