@@ -9,6 +9,7 @@
 //! Shared workspace menu and operation feedback: add --workspace-feedback.
 //! Activity timeline: add --activity-design (entry, arrivals, pause, details, filter).
 //! Usage page: add --usage-design (entry, metric and period changes, hover, filter, empty).
+//! Usage period picker: add --usage-range (open, picks, month motion, live end, apply).
 //! API connection editor: add --provider-editor-design.
 //! Add-connection navigation: add --connection-picker-motion (frames and back actions).
 //! ChatGPT subscription editor: add --subscription-editor-design.
@@ -147,6 +148,10 @@ fn main() -> Result<(), Box<dyn Error>> {
     if flag("--usage-design") {
         app.show()?;
         return usage::render_usage_design(&app, &window, output);
+    }
+    if flag("--usage-range") {
+        app.show()?;
+        return usage::render_usage_range(&app, &window, output);
     }
     if flag("--workspace-feedback") {
         app.show()?;

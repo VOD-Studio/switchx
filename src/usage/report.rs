@@ -11,19 +11,29 @@ use crate::storage::{Currency, PriceRecord, ProviderKind, ProviderRecord, UsageF
 pub enum Period {
     #[default]
     Today,
+    Hours24,
     Days7,
+    Days14,
     Days30,
     Days90,
     All,
+    /// A local-time range; an open end follows the current time.
+    Custom {
+        from_ms: i64,
+        to_ms: Option<i64>,
+    },
 }
 
 impl Period {
+    /// The page's preset order; custom ranges have no index.
     pub fn from_index(index: i32) -> Self {
         match index {
-            1 => Self::Days7,
-            2 => Self::Days30,
-            3 => Self::Days90,
-            4 => Self::All,
+            1 => Self::Hours24,
+            2 => Self::Days7,
+            3 => Self::Days14,
+            4 => Self::Days30,
+            5 => Self::Days90,
+            6 => Self::All,
             _ => Self::Today,
         }
     }
@@ -48,6 +58,7 @@ pub struct Bucket {
 /// The local-time range a report covers and the slots its trend is drawn in.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Window {
+    pub period: Period,
     pub from_ms: i64,
     pub to_ms: i64,
     pub now_ms: i64,
@@ -56,6 +67,8 @@ pub struct Window {
     /// The same elapsed span immediately before, for comparison.
     pub previous: Option<(i64, i64)>,
 }
+
+const HOUR_MS: i64 = 3_600_000;
 
 fn midnight(date: NaiveDate) -> DateTime<Local> {
     let time = date.and_hms_opt(0, 0, 0).unwrap_or_default();
@@ -88,80 +101,180 @@ fn next_month(date: NaiveDate) -> NaiveDate {
     NaiveDate::from_ymd_opt(year, month, 1).unwrap_or(date)
 }
 
+fn local(ms: i64, fallback: DateTime<Local>) -> DateTime<Local> {
+    Local.timestamp_millis_opt(ms).single().unwrap_or(fallback)
+}
+
+/// Local hours from the one containing `from` until `to_ms`; skipped hours have no slot.
+fn hour_buckets(from: DateTime<Local>, to_ms: i64) -> Vec<Bucket> {
+    let mut hour = from
+        .date_naive()
+        .and_hms_opt(from.hour(), 0, 0)
+        .unwrap_or_default();
+    let mut starts = Vec::new();
+    loop {
+        if let Some(start) = Local.from_local_datetime(&hour).earliest() {
+            let start_ms = start.timestamp_millis();
+            if start_ms >= to_ms && !starts.is_empty() {
+                break;
+            }
+            starts.push((hour, start_ms));
+        }
+        hour += chrono::Duration::hours(1);
+    }
+    let ends = starts
+        .iter()
+        .skip(1)
+        .map(|(_, start)| *start)
+        .chain(starts.last().map(|(_, start)| start + HOUR_MS))
+        .collect::<Vec<_>>();
+    starts
+        .iter()
+        .zip(ends)
+        .enumerate()
+        .map(|(index, ((hour, start_ms), end_ms))| Bucket {
+            key: hour.format("%Y-%m-%d %H").to_string(),
+            // Midnight names its day once a range crosses into it.
+            label: if index > 0 && hour.hour() == 0 {
+                format!("{}/{}", hour.month(), hour.day())
+            } else {
+                hour.format("%H:00").to_string()
+            },
+            start_ms: *start_ms,
+            end_ms,
+        })
+        .collect()
+}
+
+/// Days, weeks, or months from `start` until the day `end` begins.
+fn date_buckets(start: NaiveDate, end: NaiveDate, granularity: Granularity) -> Vec<Bucket> {
+    let mut buckets = Vec::new();
+    let mut day = start;
+    while day < end {
+        let next = match granularity {
+            Granularity::Week => day + Days::new(7),
+            Granularity::Month => next_month(day),
+            _ => day + Days::new(1),
+        };
+        let (key, label) = match granularity {
+            Granularity::Month => (
+                day.format("%Y-%m").to_string(),
+                format!("{}年{}月", day.year(), day.month()),
+            ),
+            _ => (
+                day.format("%Y-%m-%d").to_string(),
+                format!("{}/{}", day.month(), day.day()),
+            ),
+        };
+        buckets.push(Bucket {
+            key,
+            label,
+            start_ms: midnight(day).timestamp_millis(),
+            end_ms: midnight(next).timestamp_millis(),
+        });
+        day = next;
+    }
+    buckets
+}
+
+/// Hours up to two days, then days, weeks, and months as a custom span grows.
+fn custom_granularity(first: NaiveDate, last: NaiveDate, span_ms: i64) -> Granularity {
+    let days = (last - first).num_days();
+    if span_ms <= 48 * HOUR_MS {
+        Granularity::Hour
+    } else if days < 62 {
+        Granularity::Day
+    } else if days < 26 * 7 {
+        Granularity::Week
+    } else {
+        Granularity::Month
+    }
+}
+
 impl Window {
     pub fn new(period: Period, now: DateTime<Local>, first_ms: Option<i64>) -> Self {
         let today = now.date_naive();
         let tomorrow = today + Days::new(1);
-        let (start, granularity) = match period {
-            Period::Today => (today, Granularity::Hour),
-            Period::Days7 => (today - Days::new(6), Granularity::Day),
-            Period::Days30 => (today - Days::new(29), Granularity::Day),
-            Period::Days90 => (monday(today - Days::new(89)), Granularity::Week),
+        let now_ms = now.timestamp_millis();
+        let days_back = |days: u64| {
+            let start = today - Days::new(days);
+            (midnight(start).timestamp_millis(), start)
+        };
+        // Presets and open custom ends cover the current slot; a fixed end stops where it says.
+        let (from_ms, fixed_end, granularity, start) = match period {
+            Period::Today => (days_back(0).0, None, Granularity::Hour, today),
+            Period::Hours24 => (now_ms - 24 * HOUR_MS, None, Granularity::Hour, today),
+            Period::Days7 | Period::Days14 | Period::Days30 => {
+                let days = match period {
+                    Period::Days7 => 6,
+                    Period::Days14 => 13,
+                    _ => 29,
+                };
+                let (from_ms, start) = days_back(days);
+                (from_ms, None, Granularity::Day, start)
+            }
+            Period::Days90 => {
+                let start = monday(today - Days::new(89));
+                (
+                    midnight(start).timestamp_millis(),
+                    None,
+                    Granularity::Week,
+                    start,
+                )
+            }
             Period::All => {
                 let first = first_ms
-                    .and_then(|ms| Local.timestamp_millis_opt(ms).single())
-                    .map_or(today, |time| time.date_naive().min(today));
+                    .map(|ms| local(ms, now).date_naive().min(today))
+                    .unwrap_or(today);
                 let span = (today - first).num_days();
-                if span < 31 {
+                let (start, granularity) = if span < 31 {
                     (first, Granularity::Day)
                 } else if span < 26 * 7 {
                     (monday(first), Granularity::Week)
                 } else {
                     (month_start(first), Granularity::Month)
-                }
+                };
+                (midnight(start).timestamp_millis(), None, granularity, start)
+            }
+            Period::Custom { from_ms, to_ms } => {
+                let end = to_ms.unwrap_or(now_ms).max(from_ms + 1);
+                let first = local(from_ms, now).date_naive();
+                let last = local(end - 1, now).date_naive();
+                let granularity = custom_granularity(first, last, end - from_ms);
+                let start = match granularity {
+                    Granularity::Week => monday(first),
+                    Granularity::Month => month_start(first),
+                    _ => first,
+                };
+                (from_ms, to_ms.map(|_| end), granularity, start)
             }
         };
-        let mut buckets = Vec::new();
-        match granularity {
-            Granularity::Hour => {
-                for hour in 0..24 {
-                    let time = today.and_hms_opt(hour, 0, 0).unwrap_or_default();
-                    let start = Local
-                        .from_local_datetime(&time)
-                        .earliest()
-                        .map_or(midnight(today).timestamp_millis(), |t| t.timestamp_millis());
-                    buckets.push(Bucket {
-                        key: format!("{} {hour:02}", today.format("%Y-%m-%d")),
-                        label: format!("{hour:02}:00"),
-                        start_ms: start,
-                        end_ms: start + 3_600_000,
-                    });
-                }
+        let buckets = match (granularity, fixed_end) {
+            (Granularity::Hour, end) => hour_buckets(
+                local(from_ms, now),
+                end.unwrap_or(if period == Period::Today {
+                    midnight(tomorrow).timestamp_millis()
+                } else {
+                    now_ms + 1
+                }),
+            ),
+            (_, end) => {
+                let last = end.map_or(today, |end| local(end - 1, now).date_naive());
+                date_buckets(start, last + Days::new(1), granularity)
             }
-            _ => {
-                let mut day = start;
-                while day < tomorrow {
-                    let next = match granularity {
-                        Granularity::Week => day + Days::new(7),
-                        Granularity::Month => next_month(day),
-                        _ => day + Days::new(1),
-                    };
-                    let (key, label) = match granularity {
-                        Granularity::Month => (
-                            day.format("%Y-%m").to_string(),
-                            format!("{}年{}月", day.year(), day.month()),
-                        ),
-                        _ => (
-                            day.format("%Y-%m-%d").to_string(),
-                            format!("{}/{}", day.month(), day.day()),
-                        ),
-                    };
-                    buckets.push(Bucket {
-                        key,
-                        label,
-                        start_ms: midnight(day).timestamp_millis(),
-                        end_ms: midnight(next).timestamp_millis(),
-                    });
-                    day = next;
-                }
-            }
-        }
-        let from_ms = midnight(start).timestamp_millis();
-        let now_ms = now.timestamp_millis();
-        let elapsed = now_ms - from_ms;
+        };
+        let to_ms = fixed_end.unwrap_or_else(|| {
+            buckets
+                .last()
+                .map_or(midnight(tomorrow).timestamp_millis(), |bucket| {
+                    bucket.end_ms
+                })
+        });
+        let elapsed = to_ms.min(now_ms) - from_ms;
         Self {
+            period,
             from_ms,
-            to_ms: midnight(tomorrow).timestamp_millis(),
+            to_ms,
             now_ms,
             granularity,
             buckets,
@@ -693,6 +806,84 @@ mod tests {
             Window::new(Period::All, now(), None).buckets.len(),
             1,
             "an empty history still shows today"
+        );
+    }
+
+    #[test]
+    fn rolling_and_custom_windows_choose_slots_by_span() {
+        let at = |year, month, day, hour, minute| {
+            Local
+                .with_ymd_and_hms(year, month, day, hour, minute, 0)
+                .unwrap()
+                .timestamp_millis()
+        };
+        let custom = |from_ms, to_ms| Window::new(Period::Custom { from_ms, to_ms }, now(), None);
+        let keys = |window: &Window| {
+            (
+                window.buckets.len(),
+                window.buckets[0].key.clone(),
+                window.buckets.last().unwrap().key.clone(),
+            )
+        };
+
+        // 16:04 yesterday until now; the first hour holds only its remainder.
+        let rolling = Window::new(Period::Hours24, now(), None);
+        assert_eq!(rolling.granularity, Granularity::Hour);
+        assert_eq!(rolling.from_ms, at(2026, 10, 12, 16, 4));
+        assert_eq!(
+            keys(&rolling),
+            (25, "2026-10-12 16".into(), "2026-10-13 16".into())
+        );
+        assert_eq!(rolling.buckets[7].label, "23:00");
+        assert_eq!(rolling.buckets[8].label, "10/13", "midnight names its day");
+        assert_eq!(rolling.to_ms, at(2026, 10, 13, 17, 0));
+        assert_eq!(
+            rolling.previous,
+            Some((at(2026, 10, 11, 16, 4), rolling.from_ms))
+        );
+        let fortnight = Window::new(Period::Days14, now(), None);
+        assert_eq!(
+            keys(&fortnight),
+            (14, "2026-09-30".into(), "2026-10-13".into())
+        );
+
+        // A fixed end stops exactly there and compares with an equally long span.
+        let (from, to) = (at(2026, 10, 1, 9, 30), at(2026, 10, 1, 18, 0));
+        let evening = custom(from, Some(to));
+        assert_eq!((evening.from_ms, evening.to_ms), (from, to));
+        assert_eq!(
+            keys(&evening),
+            (9, "2026-10-01 09".into(), "2026-10-01 17".into())
+        );
+        assert_eq!(evening.previous, Some((from - (to - from), from)));
+
+        let week = custom(from, Some(at(2026, 10, 7, 17, 8)));
+        assert_eq!(week.granularity, Granularity::Day);
+        assert_eq!(keys(&week), (7, "2026-10-01".into(), "2026-10-07".into()));
+
+        // An open end follows the clock and covers the current day.
+        let open = custom(at(2026, 10, 10, 0, 0), None);
+        assert_eq!(keys(&open), (4, "2026-10-10".into(), "2026-10-13".into()));
+        assert_eq!(open.to_ms, at(2026, 10, 14, 0, 0));
+        assert_eq!(
+            open.previous.map(|(from, to)| to - from),
+            Some(open.now_ms - open.from_ms)
+        );
+
+        let quarter = custom(at(2026, 7, 1, 0, 0), Some(at(2026, 10, 1, 0, 0)));
+        assert_eq!(quarter.granularity, Granularity::Week);
+        assert_eq!(
+            keys(&quarter),
+            (14, "2026-06-29".into(), "2026-09-28".into())
+        );
+        let long = custom(at(2025, 1, 15, 8, 0), None);
+        assert_eq!(long.granularity, Granularity::Month);
+        assert_eq!(keys(&long), (22, "2025-01".into(), "2026-10".into()));
+
+        assert_eq!(
+            custom(at(2026, 10, 20, 0, 0), Some(at(2026, 10, 21, 0, 0))).previous,
+            None,
+            "a range that has not begun has nothing to compare"
         );
     }
 

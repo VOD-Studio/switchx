@@ -1,19 +1,19 @@
 //! Usage report view models. Pure conversions, shared with the synthetic
 //! UI preview, so the page and its previews render the same figures.
 
-use chrono::{Local, TimeZone};
+use chrono::{DateTime, Datelike, Duration, Local, NaiveDate, TimeZone, Timelike};
 use slint::{Image, SharedString};
 use switchx::{
     app::{self, UsageRow},
     provider_icons,
     storage::{Currency, ProviderKind, ProviderRecord},
     ui::{
-        UsageDetailRow, UsageHeatCell, UsagePoint, UsagePriceRow, UsageScale, UsageShareRow,
-        UsageSummary,
+        UsageDetailRow, UsageHeatCell, UsageMoment, UsagePoint, UsagePriceRow, UsageRange,
+        UsageScale, UsageShareRow, UsageSummary,
     },
     usage::{
         TokenUsage,
-        report::{Granularity, GroupKind, Money, Report, Share, Totals},
+        report::{Granularity, GroupKind, Money, Period, Report, Share, Totals, Window},
     },
 };
 
@@ -58,6 +58,107 @@ fn cost_text(totals: &Totals) -> String {
     }
 }
 
+/// A local instant as the range picker shows it, to the minute.
+pub fn moment(time: DateTime<Local>) -> UsageMoment {
+    UsageMoment {
+        year: time.year(),
+        month: time.month() as i32,
+        day: time.day() as i32,
+        hour: time.hour() as i32,
+        minute: time.minute() as i32,
+    }
+}
+
+/// The instant a picked local minute starts; a minute skipped by a clock change moves an hour on.
+pub fn moment_ms(moment: &UsageMoment) -> Option<i64> {
+    let part = |value: i32| u32::try_from(value).ok();
+    let time = NaiveDate::from_ymd_opt(moment.year, part(moment.month)?, part(moment.day)?)?
+        .and_hms_opt(part(moment.hour)?, part(moment.minute)?, 0)?;
+    Local
+        .from_local_datetime(&time)
+        .earliest()
+        .or_else(|| {
+            Local
+                .from_local_datetime(&(time + Duration::hours(1)))
+                .earliest()
+        })
+        .map(|time| time.timestamp_millis())
+}
+
+fn local(ms: i64, fallback: DateTime<Local>) -> DateTime<Local> {
+    Local.timestamp_millis_opt(ms).single().unwrap_or(fallback)
+}
+
+/// Where a preset starts, and now, to seed the picker. "All" reaches back to the first
+/// record, which the calendar cannot show usefully, so it starts thirty days back.
+pub fn preset_range(index: i32, now: DateTime<Local>) -> UsageRange {
+    let period = match Period::from_index(index) {
+        Period::All => Period::Days30,
+        period => period,
+    };
+    UsageRange {
+        start: moment(local(Window::new(period, now, None).from_ms, now)),
+        end: moment(now),
+    }
+}
+
+/// A picked range as a report period. The end minute is included; a live end follows the clock.
+pub fn custom_period(start: &UsageMoment, end: &UsageMoment, live: bool) -> Option<Period> {
+    let from_ms = moment_ms(start)?;
+    let to_ms = if live {
+        None
+    } else {
+        Some((moment_ms(end)? + 60_000).max(from_ms + 60_000))
+    };
+    Some(Period::Custom { from_ms, to_ms })
+}
+
+/// `M/D HH:MM`, with the year when it is not the current one.
+fn stamp(time: DateTime<Local>, now: DateTime<Local>) -> String {
+    format!("{} {}", day_text(time, now), time.format("%H:%M"))
+}
+
+fn day_text(time: DateTime<Local>, now: DateTime<Local>) -> String {
+    if time.year() == now.year() {
+        format!("{}/{}", time.month(), time.day())
+    } else {
+        format!("{}/{}/{}", time.year(), time.month(), time.day())
+    }
+}
+
+/// How the period button and trend title name a custom range.
+pub fn custom_label(period: Period, now: DateTime<Local>) -> String {
+    let Period::Custom { from_ms, to_ms } = period else {
+        return String::new();
+    };
+    format!(
+        "{} – {}",
+        stamp(local(from_ms, now), now),
+        to_ms.map_or_else(
+            || "现在".to_owned(),
+            |to| stamp(local(to - 60_000, now), now)
+        )
+    )
+}
+
+/// The span a report covers and how its trend is sliced.
+fn range_text(window: &Window) -> String {
+    let now = local(window.now_ms, Local::now());
+    let span = match window.period {
+        Period::Today => "今天".to_owned(),
+        Period::Hours24 => format!("{} – 现在", stamp(local(window.from_ms, now), now)),
+        Period::Custom { .. } => custom_label(window.period, now),
+        _ => format!("{} – 今天", day_text(local(window.from_ms, now), now)),
+    };
+    let slices = match window.granularity {
+        Granularity::Hour => "按小时",
+        Granularity::Day => "按天",
+        Granularity::Week => "按周",
+        Granularity::Month => "按月",
+    };
+    format!("{span} · {slices}")
+}
+
 pub fn summary(report: &Report) -> UsageSummary {
     let totals = &report.totals;
     let usage = totals.usage;
@@ -93,13 +194,7 @@ pub fn summary(report: &Report) -> UsageSummary {
         ([], true) if totals.requests == 0 => ("—".to_owned(), String::new()),
         ([], true) => ("未定价".to_owned(), String::new()),
     };
-    let window = &report.window;
-    let range_text = match window.granularity {
-        Granularity::Hour => "今天 · 按小时".to_owned(),
-        Granularity::Day => format!("{} 天 · 按天", window.buckets.len()),
-        Granularity::Week => format!("{} 周 · 按周", window.buckets.len()),
-        Granularity::Month => format!("{} 个月 · 按月", window.buckets.len()),
-    };
+    let range_text = range_text(&report.window);
     UsageSummary {
         tokens: total as f32,
         requests: totals.requests as f32,
@@ -634,5 +729,59 @@ mod tests {
         assert_eq!(percent(1, 3), "33%");
         assert_eq!(letter("custom_provider"), "C");
         assert_eq!(letter("——"), "·");
+    }
+
+    #[test]
+    fn picked_minutes_resolve_to_periods_and_labels() {
+        let now = Local.with_ymd_and_hms(2026, 10, 14, 17, 7, 30).unwrap();
+        let picked = |year, month, day, hour, minute| UsageMoment {
+            year,
+            month,
+            day,
+            hour,
+            minute,
+        };
+        let start = picked(2026, 10, 1, 9, 30);
+        let end = picked(2026, 10, 7, 17, 7);
+        assert_eq!(moment(now), picked(2026, 10, 14, 17, 7));
+        let from = moment_ms(&start).unwrap();
+        assert_eq!(moment(local(from, now)), start);
+        assert_eq!(moment_ms(&picked(2026, 2, 30, 0, 0)), None);
+        assert_eq!(moment_ms(&picked(2026, 10, 1, 24, 0)), None);
+
+        // The end minute is included, so the range closes a minute after it starts.
+        let fixed = custom_period(&start, &end, false).unwrap();
+        assert_eq!(
+            fixed,
+            Period::Custom {
+                from_ms: from,
+                to_ms: Some(moment_ms(&end).unwrap() + 60_000)
+            }
+        );
+        assert_eq!(custom_label(fixed, now), "10/1 09:30 – 10/7 17:07");
+        let live = custom_period(&picked(2025, 12, 30, 8, 0), &end, true).unwrap();
+        assert_eq!(custom_label(live, now), "2025/12/30 08:00 – 现在");
+        assert_eq!(
+            range_text(&Window::new(live, now, None)),
+            "2025/12/30 08:00 – 现在 · 按月"
+        );
+        assert_eq!(
+            range_text(&Window::new(Period::Days7, now, None)),
+            "10/8 – 今天 · 按天"
+        );
+        assert_eq!(
+            range_text(&Window::new(Period::Hours24, now, None)),
+            "10/13 17:07 – 现在 · 按小时"
+        );
+
+        // Presets seed the picker from where they start until now.
+        assert_eq!(
+            preset_range(2, now),
+            UsageRange {
+                start: picked(2026, 10, 8, 0, 0),
+                end: picked(2026, 10, 14, 17, 7),
+            }
+        );
+        assert_eq!(preset_range(6, now).start, picked(2026, 9, 15, 0, 0));
     }
 }

@@ -217,6 +217,20 @@ export struct UsageSummary {
     empty: bool,
 }
 
+// A local date and minute as the range picker edits it; Rust resolves it to an instant.
+export struct UsageMoment {
+    year: int,
+    month: int,
+    day: int,
+    hour: int,
+    minute: int,
+}
+
+export struct UsageRange {
+    start: UsageMoment,
+    end: UsageMoment,
+}
+
 export struct UsagePoint {
     key: string,
     label: string,

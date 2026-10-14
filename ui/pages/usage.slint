@@ -1,6 +1,6 @@
 import { Theme } from "../tokens.slint";
 import { ButtonSheen } from "../button-sheen.slint";
-import { QuietButton, QuietSegmented } from "../components.slint";
+import { QuietButton } from "../components.slint";
 import { QuietScrollView as ScrollView } from "../scroll-view.slint";
 import { QuotaSpinner } from "../quota-loading.slint";
 import {
@@ -11,6 +11,7 @@ import {
     UsageHeatCell,
     UsageDetailRow,
     UsageSyncState,
+    UsageMoment,
 } from "../view-models.slint";
 import {
     CacheRing,
@@ -23,6 +24,7 @@ import { UsageTrend } from "../usage/usage-trend.slint";
 import { UsageRank } from "../usage/usage-rank.slint";
 import { UsageHeat } from "../usage/usage-heat.slint";
 import { UsageDetails } from "../usage/usage-details.slint";
+import { UsageRangePicker } from "../usage/usage-range.slint";
 
 component Divider inherits Rectangle {
     width: 1px;
@@ -371,7 +373,12 @@ export component UsagePage inherits VerticalLayout {
     in property <string> group-filter;
     in property <string> group-filter-label;
     in property <string> model-filter;
+    // An index into periods, or periods.length for the custom range.
     in-out property <int> period;
+    in-out property <UsageMoment> range-start;
+    in-out property <UsageMoment> range-end;
+    in-out property <bool> range-live;
+    in property <string> range-label;
     in-out property <int> metric;
     callback select-period(int);
     callback filter-group(string);
@@ -380,7 +387,15 @@ export component UsagePage inherits VerticalLayout {
     callback refresh();
     callback open-sources();
     callback open-prices();
-    private property <[string]> periods: ["今天", "7 天", "30 天", "90 天", "全部"];
+    private property <[string]> periods: [
+        "今天",
+        "近 24 小时",
+        "近 7 天",
+        "近 14 天",
+        "近 30 天",
+        "近 90 天",
+        "全部"
+    ];
     spacing: 14px;
     init => { root.refresh(); }
     Timer {
@@ -392,13 +407,23 @@ export component UsagePage inherits VerticalLayout {
     HorizontalLayout {
         height: 32px;
         spacing: 10px;
-        QuietSegmented {
-            width: 320px;
-            options: root.periods;
-            current-index: root.period;
-            selected(index) => {
+        UsageRangePicker {
+            period: root.period;
+            presets: root.periods;
+            range-start: root.range-start;
+            range-end: root.range-end;
+            range-live: root.range-live;
+            range-label: root.range-label;
+            choose-preset(index) => {
                 root.period = index;
                 root.select-period(index);
+            }
+            apply-range(start, end, live) => {
+                root.range-start = start;
+                root.range-end = end;
+                root.range-live = live;
+                root.period = root.periods.length;
+                root.select-period(root.period);
             }
         }
 
@@ -458,7 +483,7 @@ export component UsagePage inherits VerticalLayout {
             UsageTrend {
                 points: root.points;
                 scale: root.scale;
-                title: "趋势 · " + root.periods[root.period];
+                title: "趋势 · " + (root.period < root.periods.length ? root.periods[root.period] : root.range-label);
                 metric <=> root.metric;
             }
 

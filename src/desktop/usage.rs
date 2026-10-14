@@ -19,15 +19,21 @@ use slint::{ComponentHandle, Model, ModelRc, SharedString, VecModel, Weak};
 use switchx::{
     app::{self, PriceInput, USAGE_PAGE, USAGE_ROW_LIMIT, UsageQuery, UsageView},
     storage::UsageFilter,
-    ui::{AppWindow, UsageSyncState},
+    ui::{AppWindow, UsageClock, UsageSyncState},
     usage::report::Period,
 };
 
 use super::{
     icon_picker,
     rows::sync_rows,
-    usage_view::{detail_row, heat, points, price_rows, scale, share_rows, summary},
+    usage_view::{
+        custom_label, custom_period, detail_row, heat, moment, points, preset_range, price_rows,
+        scale, share_rows, summary,
+    },
 };
+
+/// The page's period index for a custom range, just past its presets.
+const CUSTOM_PERIOD: i32 = 7;
 
 // Session logs are append-only, so an unchanged scan costs a few milliseconds.
 const SYNC_INTERVAL: Duration = Duration::from_secs(60);
@@ -349,8 +355,19 @@ fn post_error(weak: &Weak<AppWindow>, message: &'static str) {
 /// The page's current query, rebuilt from the window so every trigger agrees.
 fn current_query(app: &AppWindow, rows: usize) -> UsageQuery {
     let text = |value: SharedString| Some(value.to_string()).filter(|value| !value.is_empty());
+    let index = app.get_usage_period();
+    let period = if index == CUSTOM_PERIOD {
+        custom_period(
+            &app.get_usage_range_start(),
+            &app.get_usage_range_end(),
+            app.get_usage_range_live(),
+        )
+        .unwrap_or_default()
+    } else {
+        Period::from_index(index)
+    };
     UsageQuery {
-        period: Period::from_index(app.get_usage_period()),
+        period,
         filter: UsageFilter {
             group: text(app.get_usage_group_filter()),
             model: text(app.get_usage_model_filter()),
@@ -378,8 +395,18 @@ pub(super) fn connect(app: &AppWindow, service: &UsageService) {
             service.load(current_query(&app, rows.get()));
         })
     };
+    let clock = app.global::<UsageClock>();
+    clock.on_now(|| moment(Local::now()));
+    clock.on_preset(|index| preset_range(index, Local::now()));
     let load = request.clone();
-    app.on_usage_select_period(move |_| load(true));
+    let weak = app.as_weak();
+    app.on_usage_select_period(move |_| {
+        if let Some(app) = weak.upgrade() {
+            let period = current_query(&app, 0).period;
+            app.set_usage_range_label(custom_label(period, Local::now()).into());
+        }
+        load(true);
+    });
     let load = request.clone();
     let weak = app.as_weak();
     app.on_usage_filter_group(move |key| {
@@ -836,5 +863,112 @@ mod tests {
         assert!(accessible_descendants(&rows[1]).is_empty());
         drop(store);
         std::fs::remove_dir_all(data).unwrap();
+    }
+
+    #[test]
+    fn the_range_picker_drafts_checks_and_applies_custom_periods() {
+        use chrono::TimeZone;
+        use i_slint_backend_testing::ElementHandle;
+        use switchx::ui::UsageMoment;
+        let window = headless::install_with_manual_time();
+        let app = AppWindow::new().unwrap();
+        let now = Local.with_ymd_and_hms(2026, 10, 14, 17, 7, 0).unwrap();
+        let clock = app.global::<UsageClock>();
+        clock.on_now(move || moment(now));
+        clock.on_preset(move |index| preset_range(index, now));
+        let selected = Rc::new(Cell::new(-1));
+        let seen = selected.clone();
+        app.on_usage_select_period(move |index| seen.set(index));
+        app.show().unwrap();
+        app.set_active_page(2);
+        window.set_size(slint::PhysicalSize::new(1200, 820));
+        // Timers start on one frame and fire on a later one.
+        let settle = || {
+            for _ in 0..3 {
+                headless::advance(200);
+                headless::render(&window);
+            }
+        };
+        let control = |label: &str| {
+            ElementHandle::find_by_accessible_label(&app, label)
+                .next()
+                .unwrap_or_else(|| panic!("missing range control: {label}"))
+        };
+        let open = || {
+            control("时间范围").invoke_accessible_default_action();
+            settle();
+        };
+        let at = |day, hour, minute| UsageMoment {
+            year: 2026,
+            month: 10,
+            day,
+            hour,
+            minute,
+        };
+        settle();
+        assert_eq!(control("时间范围").accessible_value().unwrap(), "今天");
+
+        // Today's draft runs from midnight to now; two picks set the start, then the end.
+        open();
+        control("2026 年 10 月 3 日").invoke_accessible_default_action();
+        control("2026 年 10 月 9 日").invoke_accessible_default_action();
+        settle();
+        control("应用").invoke_accessible_default_action();
+        settle();
+        assert_eq!(selected.get(), CUSTOM_PERIOD);
+        assert_eq!(app.get_usage_period(), CUSTOM_PERIOD);
+        assert_eq!(
+            (app.get_usage_range_start(), app.get_usage_range_end()),
+            (at(3, 0, 0), at(9, 17, 7))
+        );
+        let local = |day, hour, minute| {
+            Local
+                .with_ymd_and_hms(2026, 10, day, hour, minute, 0)
+                .unwrap()
+                .timestamp_millis()
+        };
+        assert_eq!(
+            current_query(&app, USAGE_PAGE).period,
+            Period::Custom {
+                from_ms: local(3, 0, 0),
+                to_ms: Some(local(9, 17, 8)),
+            }
+        );
+
+        // A typed start after the end blocks applying until the end follows the clock.
+        open();
+        control("开始日期").set_accessible_value("28");
+        settle();
+        assert_eq!(control("应用").accessible_enabled(), Some(false));
+        let live = control("结束时间跟随当前时刻");
+        live.invoke_accessible_default_action();
+        settle();
+        assert_eq!(live.accessible_checked(), Some(true));
+        assert_eq!(control("应用").accessible_enabled(), Some(false));
+        control("开始日期").set_accessible_value("10");
+        settle();
+        control("应用").invoke_accessible_default_action();
+        settle();
+        assert!(app.get_usage_range_live());
+        assert_eq!(app.get_usage_range_start(), at(10, 0, 0));
+        assert_eq!(
+            current_query(&app, USAGE_PAGE).period,
+            Period::Custom {
+                from_ms: local(10, 0, 0),
+                to_ms: None,
+            }
+        );
+
+        // Presets apply at once and close the picker.
+        open();
+        control("近 14 天").invoke_accessible_default_action();
+        settle();
+        assert_eq!(app.get_usage_period(), 3);
+        assert_eq!(current_query(&app, USAGE_PAGE).period, Period::Days14);
+        assert!(
+            ElementHandle::find_by_accessible_label(&app, "应用")
+                .next()
+                .is_none()
+        );
     }
 }

@@ -1,0 +1,1130 @@
+import { Theme } from "../tokens.slint";
+import { ButtonSheen } from "../button-sheen.slint";
+import {
+    QuietButton,
+    QuietCheckBox,
+    DropdownViewport,
+} from "../components.slint";
+import { UsageMoment, UsageRange } from "../view-models.slint";
+
+// Rust supplies the local clock and where each preset begins.
+export global UsageClock {
+    callback now() -> UsageMoment;
+    callback preset(int) -> UsageRange;
+}
+
+// Proleptic Gregorian arithmetic on day serials, days since 1970-01-01.
+global Calendar {
+    public pure function days-in(year: int, month: int) -> int {
+        if month == 2 {
+            return Math.mod(year, 4) == 0 && (Math.mod(year, 100) != 0 || Math.mod(year, 400) == 0) ? 29 : 28;
+        }
+        return month == 4 || month == 6 || month == 9 || month == 11 ? 30 : 31;
+    }
+    // Howard Hinnant's days_from_civil.
+    public pure function serial(year: int, month: int, day: int) -> int {
+        let y = month <= 2 ? year - 1 : year;
+        let era = Math.floor(y / 400);
+        let yoe = y - era * 400;
+        let doy = Math.floor((153 * (month > 2 ? month - 3 : month + 9) + 2) / 5) + day - 1;
+        return era * 146097 + yoe * 365 + Math.floor(yoe / 4) - Math.floor(yoe / 100) + doy - 719468;
+    }
+    public pure function of(moment: UsageMoment) -> int {
+        return Calendar.serial(moment.year, moment.month, moment.day);
+    }
+    // The date of a serial, at the given time of day.
+    public pure function date(serial: int, hour: int, minute: int) -> UsageMoment {
+        let z = serial + 719468;
+        let era = Math.floor(z / 146097);
+        let doe = z - era * 146097;
+        let yoe = Math.floor((doe - Math.floor(doe / 1460) + Math.floor(doe / 36524) - Math.floor(doe / 146096)) / 365);
+        let doy = doe - (365 * yoe + Math.floor(yoe / 4) - Math.floor(yoe / 100));
+        let mp = Math.floor((5 * doy + 2) / 153);
+        let month = mp < 10 ? mp + 3 : mp - 9;
+        return {
+            year: yoe + era * 400 + (month <= 2 ? 1 : 0),
+            month: month,
+            day: doy - Math.floor((153 * mp + 2) / 5) + 1,
+            hour: hour,
+            minute: minute,
+        };
+    }
+    // Monday is 0.
+    public pure function weekday(serial: int) -> int {
+        return Math.mod(serial + 3, 7);
+    }
+    public pure function weekday-name(serial: int) -> string {
+        return ["周一", "周二", "周三", "周四", "周五", "周六", "周日"][Calendar.weekday(serial)];
+    }
+    public pure function minutes(moment: UsageMoment) -> int {
+        return Calendar.of(moment) * 1440 + moment.hour * 60 + moment.minute;
+    }
+    public pure function pad(value: int) -> string {
+        return value < 10 ? "0" + value : "" + value;
+    }
+    // A range length, its last minute included.
+    public pure function span(minutes: int) -> string {
+        let days = Math.floor(minutes / 1440);
+        let hours = Math.floor(Math.mod(minutes, 1440) / 60);
+        let rest = Math.mod(minutes, 60);
+        return "共" + (days > 0 ? " " + days + " 天" : "") + (hours > 0 ? " " + hours + " 小时" : "") + (rest > 0 || minutes == 0 ? " " + rest + " 分钟" : "");
+    }
+}
+
+// One number in a date or time. Arrow keys step it, digits type over it, and
+// a complete entry moves on to the next number.
+component Segment inherits Rectangle {
+    in property <int> value;
+    in property <int> minimum;
+    in property <int> maximum;
+    in property <int> digits: 2;
+    in property <bool> enabled: true;
+    in property <string> name;
+    callback edited(int);
+    callback entered();
+    callback filled();
+    out property <bool> focused: keys.has-focus;
+    private property <string> typed;
+    function commit() {
+        if root.typed != "" {
+            root.edited(max(root.minimum, min(root.maximum, Math.round(root.typed.to-float()))));
+            root.typed = "";
+        }
+    }
+    // Years stop at their limits; other numbers wrap like a clock.
+    function step(delta: int) {
+        root.commit();
+        if root.digits == 4 {
+            root.edited(max(root.minimum, min(root.maximum, root.value + delta)));
+        } else {
+            let span = root.maximum - root.minimum + 1;
+            root.edited(root.minimum + Math.mod(root.value - root.minimum + delta + span, span));
+        }
+    }
+
+    width: label.preferred-width + 8px;
+    height: 26px;
+    border-radius: 6px;
+    background: keys.has-focus ? Theme.brand.with-alpha(0.24) : touch.has-hover && root.enabled ? Theme.raised : transparent;
+    animate background { duration: Theme.fast; }
+    forward-focus: keys;
+    accessible-role: spinbox;
+    accessible-label: root.name;
+    accessible-value: root.value;
+    accessible-value-minimum: root.minimum;
+    accessible-value-maximum: root.maximum;
+    accessible-value-step: 1;
+    accessible-enabled: root.enabled;
+    accessible-action-increment => { root.step(1); }
+    accessible-action-decrement => { root.step(-1); }
+    accessible-action-set-value(text) => {
+        if text.is-float() { root.edited(max(root.minimum, min(root.maximum, Math.round(text.to-float())))); }
+    }
+
+    label := Text {
+        text: root.typed != "" ? root.typed : root.digits == 4 ? "" + root.value : Calendar.pad(root.value);
+        color: root.typed != "" ? Theme.brand : Theme.primary-text;
+        font-size: 15px;
+        font-weight: 500;
+        horizontal-alignment: center;
+        vertical-alignment: center;
+        accessible-role: none;
+    }
+
+    touch := TouchArea {
+        enabled: root.enabled;
+        mouse-cursor: text;
+        clicked => { keys.focus(); }
+    }
+
+    keys := FocusScope {
+        enabled: root.enabled;
+        key-pressed(event) => {
+            if event.modifiers.control || event.modifiers.meta || event.modifiers.alt { return reject; }
+            if event.text == Key.UpArrow { root.step(1); return accept; }
+            if event.text == Key.DownArrow { root.step(-1); return accept; }
+            if event.text == Key.Backspace || event.text == Key.Delete { root.typed = ""; return accept; }
+            if event.text.character-count == 1 && event.text.is-float() {
+                root.typed = root.typed + event.text;
+                if root.typed.character-count >= root.digits || root.typed.to-float() * 10 > root.maximum {
+                    root.commit();
+                    root.filled();
+                }
+                return accept;
+            }
+            if event.text == Key.Return { root.commit(); }
+            return reject;
+        }
+        changed has-focus => {
+            if self.has-focus { root.entered(); } else { root.commit(); }
+        }
+    }
+}
+
+component Separator inherits Text {
+    color: Theme.muted-text.with-alpha(0.7);
+    font-size: 14px;
+    vertical-alignment: center;
+    accessible-role: none;
+}
+
+// A steady dot inside a ring that breathes while the end follows the clock.
+component LiveDot inherits Rectangle {
+    private property <bool> motion: Theme.animations-enabled && !Theme.system-reduced-motion;
+    private property <float> pulse: root.motion ? Math.mod(animation-tick() / 1ms, 1600) / 1600 : 0;
+    width: 14px;
+    height: 14px;
+    Rectangle {
+        x: (parent.width - self.width) / 2;
+        y: (parent.height - self.height) / 2;
+        width: 6px + 8px * root.pulse;
+        height: self.width;
+        border-radius: self.width / 2;
+        background: Theme.success.with-alpha(0.45 * (1 - root.pulse));
+    }
+
+    Rectangle {
+        x: 4px;
+        y: 4px;
+        width: 6px;
+        height: 6px;
+        border-radius: 3px;
+        background: Theme.success;
+    }
+}
+
+// A range end: date and time numbers, or "now" while the end follows the clock.
+component MomentField inherits Rectangle {
+    in property <string> title;
+    in property <UsageMoment> moment;
+    in property <bool> active;
+    in property <bool> live;
+    callback edited(UsageMoment);
+    callback activated();
+    private property <int> serial: Calendar.of(root.moment);
+    private property <bool> lit: root.active && !root.live;
+    function set(year: int, month: int, day: int, hour: int, minute: int) {
+        root.edited({
+            year: year,
+            month: month,
+            day: min(day, Calendar.days-in(year, month)),
+            hour: hour,
+            minute: minute,
+        });
+    }
+
+    height: 72px;
+    border-radius: 12px;
+    border-width: 1px;
+    border-color: root.lit ? Theme.brand : card-touch.has-hover && !root.live ? Theme.muted-text.with-alpha(0.55) : Theme.border;
+    background: root.lit ? Theme.brand-surface : Theme.inset;
+    animate border-color, background { duration: Theme.fast; }
+    accessible-role: groupbox;
+    accessible-label: root.title;
+
+    // A soft halo marks the end the calendar edits next.
+    Rectangle {
+        x: -3px;
+        y: -3px;
+        width: parent.width + 6px;
+        height: parent.height + 6px;
+        border-radius: 15px;
+        border-width: 3px;
+        border-color: Theme.brand.with-alpha(0.16);
+        opacity: root.lit ? 1 : 0;
+        animate opacity { duration: Theme.page-motion; }
+    }
+
+    card-touch := TouchArea {
+        enabled: !root.live;
+        mouse-cursor: root.live ? default : pointer;
+        clicked => { root.activated(); }
+    }
+
+    Rectangle {
+        x: 14px;
+        y: 15px;
+        width: 6px;
+        height: 6px;
+        border-radius: 3px;
+        background: root.lit ? Theme.brand : Theme.muted-text.with-alpha(0.5);
+        animate background { duration: Theme.fast; }
+    }
+
+    Text {
+        x: 26px;
+        y: 9px;
+        height: 18px;
+        text: root.title;
+        color: root.lit ? Theme.brand : Theme.muted-text;
+        font-size: 11px;
+        font-weight: 600;
+        vertical-alignment: center;
+        animate color { duration: Theme.fast; }
+    }
+
+    Text {
+        x: parent.width - self.width - 14px;
+        y: 9px;
+        height: 18px;
+        text: root.live ? "跟随当前时刻" : Calendar.weekday-name(root.serial);
+        color: Theme.muted-text;
+        font-size: 11px;
+        vertical-alignment: center;
+    }
+
+    if !root.live: HorizontalLayout {
+        x: 9px;
+        y: 34px;
+        height: 28px;
+        alignment: start;
+        spacing: 0px;
+        year := Segment {
+            y: 1px;
+            digits: 4;
+            value: root.moment.year;
+            minimum: 1970;
+            maximum: 2099;
+            name: root.title + "年份";
+            entered => { root.activated(); }
+            edited(value) => { root.set(value, root.moment.month, root.moment.day, root.moment.hour, root.moment.minute); }
+            filled => { month.focus(); }
+        }
+
+        Separator {
+            text: "/";
+        }
+
+        month := Segment {
+            y: 1px;
+            value: root.moment.month;
+            minimum: 1;
+            maximum: 12;
+            name: root.title + "月份";
+            entered => { root.activated(); }
+            edited(value) => { root.set(root.moment.year, value, root.moment.day, root.moment.hour, root.moment.minute); }
+            filled => { day.focus(); }
+        }
+
+        Separator {
+            text: "/";
+        }
+
+        day := Segment {
+            y: 1px;
+            value: root.moment.day;
+            minimum: 1;
+            maximum: Calendar.days-in(root.moment.year, root.moment.month);
+            name: root.title + "日期";
+            entered => { root.activated(); }
+            edited(value) => { root.set(root.moment.year, root.moment.month, value, root.moment.hour, root.moment.minute); }
+            filled => { hour.focus(); }
+        }
+
+        Rectangle {
+            width: 14px;
+        }
+
+        hour := Segment {
+            y: 1px;
+            value: root.moment.hour;
+            minimum: 0;
+            maximum: 23;
+            name: root.title + "小时";
+            entered => { root.activated(); }
+            edited(value) => { root.set(root.moment.year, root.moment.month, root.moment.day, value, root.moment.minute); }
+            filled => { minute.focus(); }
+        }
+
+        Separator {
+            text: ":";
+        }
+
+        minute := Segment {
+            y: 1px;
+            value: root.moment.minute;
+            minimum: 0;
+            maximum: 59;
+            name: root.title + "分钟";
+            entered => { root.activated(); }
+            edited(value) => { root.set(root.moment.year, root.moment.month, root.moment.day, root.moment.hour, value); }
+        }
+    }
+
+    if root.live: HorizontalLayout {
+        x: 14px;
+        y: 34px;
+        height: 28px;
+        alignment: start;
+        spacing: 8px;
+        LiveDot {
+            y: (parent.height - self.height) / 2;
+        }
+
+        Text {
+            text: "现在";
+            color: Theme.primary-text;
+            font-size: 15px;
+            font-weight: 600;
+            vertical-alignment: center;
+        }
+
+        Text {
+            text: Calendar.pad(root.moment.hour) + ":" + Calendar.pad(root.moment.minute);
+            color: Theme.muted-text;
+            font-size: 13px;
+            vertical-alignment: center;
+        }
+    }
+}
+
+// A calendar day. Neighboring days share the range band, so it reads as one
+// stroke; the ends sit on discs that pop in when chosen.
+component DayCell inherits Rectangle {
+    in property <int> serial;
+    in property <int> column;
+    in property <int> month;
+    in property <int> band-from;
+    in property <int> band-to;
+    in property <int> start;
+    in property <int> end;
+    in property <bool> preview;
+    in property <bool> today;
+    in property <bool> hovered;
+    in property <bool> cursor;
+    // A new month swaps every day at once; its discs must not fade across the slide.
+    in property <bool> snap;
+    private property <UsageMoment> date: Calendar.date(root.serial, 0, 0);
+    private property <bool> outside: root.date.month != root.month;
+    private property <bool> is-end: root.serial == (root.preview ? root.band-to : root.end);
+    private property <bool> endpoint: root.serial == root.start || root.is-end;
+    private property <bool> left-band: root.serial > root.band-from && root.serial <= root.band-to;
+    private property <bool> right-band: root.serial >= root.band-from && root.serial < root.band-to;
+    private property <color> band: root.preview ? Theme.brand-surface.with-alpha(0.7) : Theme.brand-surface;
+    private property <bool> motion: Theme.animations-enabled && !Theme.system-reduced-motion;
+    private property <length> disc: min(30px, root.width - 4px, root.height - 4px);
+    accessible-role: none;
+
+    Rectangle {
+        x: 0px;
+        y: (parent.height - root.disc) / 2;
+        width: parent.width / 2;
+        height: root.disc;
+        border-top-left-radius: root.column == 0 ? root.disc / 2 : 0px;
+        border-bottom-left-radius: self.border-top-left-radius;
+        background: root.band;
+        opacity: root.left-band ? 1 : 0;
+        animate opacity { duration: root.snap ? 0ms : Theme.fast; }
+    }
+
+    Rectangle {
+        x: parent.width / 2;
+        y: (parent.height - root.disc) / 2;
+        width: parent.width / 2;
+        height: root.disc;
+        border-top-right-radius: root.column == 6 ? root.disc / 2 : 0px;
+        border-bottom-right-radius: self.border-top-right-radius;
+        background: root.band;
+        opacity: root.right-band ? 1 : 0;
+        animate opacity { duration: root.snap ? 0ms : Theme.fast; }
+    }
+
+    Rectangle {
+        x: (parent.width - self.width) / 2;
+        y: (parent.height - self.height) / 2;
+        width: root.disc;
+        height: root.disc;
+        border-radius: self.width / 2;
+        background: root.hovered && !root.endpoint ? Theme.raised : transparent;
+        border-width: root.cursor ? 2px : 0px;
+        border-color: Theme.brand;
+        animate background { duration: root.snap ? 0ms : Theme.fast; }
+    }
+
+    Rectangle {
+        x: (parent.width - self.width) / 2;
+        y: (parent.height - self.height) / 2;
+        width: root.disc;
+        height: root.disc;
+        border-radius: self.width / 2;
+        background: root.preview && root.is-end && root.serial != root.start ? Theme.brand.with-alpha(0.55) : Theme.brand;
+        opacity: root.endpoint ? 1 : 0;
+        transform-scale: root.endpoint ? 1 : 0.55;
+        transform-origin: { x: self.width / 2, y: self.height / 2 };
+        animate opacity { duration: root.snap ? 0ms : Theme.fast; }
+        animate transform-scale {
+            duration: root.motion && !root.snap ? 320ms : 0ms;
+            easing: cubic-bezier(0.34, 1.56, 0.64, 1);
+        }
+        animate background { duration: root.snap ? 0ms : Theme.fast; }
+    }
+
+    Text {
+        text: root.date.day;
+        color: root.endpoint ? Theme.on-brand : root.outside ? Theme.muted-text.with-alpha(0.5) : root.left-band || root.right-band ? Theme.primary-text : Theme.primary-text.with-alpha(0.9);
+        font-size: 13px;
+        font-weight: root.endpoint || root.today ? 600 : 400;
+        horizontal-alignment: center;
+        vertical-alignment: center;
+        animate color { duration: root.snap ? 0ms : Theme.fast; }
+    }
+
+    if root.today: Rectangle {
+        x: (parent.width - self.width) / 2;
+        y: parent.height / 2 + 8px;
+        width: 4px;
+        height: 4px;
+        border-radius: 2px;
+        background: root.endpoint ? Theme.on-brand : Theme.brand;
+    }
+}
+
+// A month of days, Monday first. Months slide in from the side they come from.
+component RangeCalendar inherits Rectangle {
+    in property <int> year;
+    in property <int> month;
+    in property <UsageMoment> start;
+    in property <UsageMoment> end;
+    in property <UsageMoment> today;
+    // The next pick sets the end, so hovering previews the range it would make.
+    in property <bool> choosing-end;
+    in property <length> shift;
+    in property <float> fade: 1;
+    in-out property <int> cursor;
+    callback navigate(int);
+    callback picked(int);
+    private property <int> first: Calendar.serial(root.year, root.month, 1);
+    private property <int> grid-start: root.first - Calendar.weekday(root.first);
+    private property <int> start-serial: Calendar.of(root.start);
+    private property <int> end-serial: Calendar.of(root.end);
+    private property <int> today-serial: Calendar.of(root.today);
+    private property <length> cell-width: grid.width / 7;
+    private property <length> cell-height: 36px;
+    private property <int> hovered: grid-touch.has-hover && grid-touch.mouse-x >= 0px && grid-touch.mouse-y >= 0px ? root.grid-start + min(5, Math.floor(grid-touch.mouse-y / root.cell-height)) * 7 + min(6, Math.floor(grid-touch.mouse-x / root.cell-width)) : -1;
+    // The keyboard cursor shows, and previews, only until the pointer moves again.
+    private property <bool> keyed;
+    private property <int> pointing: root.keyed && keys.has-focus ? root.cursor : root.hovered;
+    private property <bool> previewing: root.choosing-end && root.pointing >= root.start-serial && root.pointing != root.end-serial;
+    private property <bool> current-month: root.year == root.today.year && root.month == root.today.month;
+    function move-cursor(serial: int) {
+        let date = Calendar.date(serial, 0, 0);
+        let delta = (date.year * 12 + date.month) - (root.year * 12 + root.month);
+        root.keyed = true;
+        root.cursor = serial;
+        if delta != 0 { root.navigate(delta); }
+    }
+    // The same day a month away, or that month's last day.
+    function shift-month(delta: int) {
+        let date = Calendar.date(root.cursor, 0, 0);
+        let index = date.year * 12 + date.month - 1 + delta;
+        let year = Math.floor(index / 12);
+        let month = Math.mod(index, 12) + 1;
+        root.move-cursor(Calendar.serial(year, month, min(date.day, Calendar.days-in(year, month))));
+    }
+    changed hovered => {
+        if root.hovered >= 0 { root.keyed = false; }
+    }
+
+    height: 40px + 26px + 6 * root.cell-height;
+    border-radius: 14px;
+    border-width: 1px;
+    border-color: Theme.border;
+    background: Theme.inset;
+    animate background, border-color { duration: Theme.page-motion; }
+
+    HorizontalLayout {
+        x: 14px;
+        y: 8px;
+        width: parent.width - 22px;
+        height: 30px;
+        spacing: 4px;
+        Text {
+            text: root.year + " 年 " + root.month + " 月";
+            color: Theme.primary-text;
+            font-size: 14px;
+            font-weight: 600;
+            vertical-alignment: center;
+            horizontal-stretch: 1;
+        }
+
+        Rectangle {
+            width: today-label.preferred-width + 20px;
+            opacity: root.current-month ? 0 : 1;
+            animate opacity { duration: Theme.fast; }
+            Rectangle {
+                y: 3px;
+                height: parent.height - 6px;
+                border-radius: self.height / 2;
+                background: today-touch.has-hover ? Theme.brand-surface : transparent;
+                border-width: 1px;
+                border-color: Theme.brand.with-alpha(0.4);
+                animate background { duration: Theme.fast; }
+            }
+
+            today-label := Text {
+                text: "本月";
+                color: Theme.brand;
+                font-size: 11px;
+                font-weight: 600;
+                horizontal-alignment: center;
+                vertical-alignment: center;
+            }
+
+            today-touch := TouchArea {
+                enabled: !root.current-month;
+                mouse-cursor: pointer;
+                clicked => { root.navigate((root.today.year * 12 + root.today.month) - (root.year * 12 + root.month)); }
+            }
+
+            accessible-role: button;
+            accessible-label: "回到本月";
+            accessible-enabled: !root.current-month;
+            accessible-action-default => { root.navigate((root.today.year * 12 + root.today.month) - (root.year * 12 + root.month)); }
+        }
+
+        QuietButton {
+            width: 30px;
+            height: 30px;
+            text: "上个月";
+            icon-only: true;
+            ghost: true;
+            icon: @image-url("../../assets/ui/chevron-left.svg");
+            icon-width: 14px;
+            icon-height: 14px;
+            icon-color: Theme.muted-text;
+            clicked => { root.navigate(-1); }
+        }
+
+        QuietButton {
+            width: 30px;
+            height: 30px;
+            text: "下个月";
+            icon-only: true;
+            ghost: true;
+            icon: @image-url("../../assets/ui/chevron-right.svg");
+            icon-width: 14px;
+            icon-height: 14px;
+            icon-color: Theme.muted-text;
+            clicked => { root.navigate(1); }
+        }
+    }
+
+    for name[column] in ["一", "二", "三", "四", "五", "六", "日"]: Text {
+        x: grid.x + column * root.cell-width;
+        y: 42px;
+        width: root.cell-width;
+        height: 20px;
+        text: name;
+        color: column >= 5 ? Theme.muted-text.with-alpha(0.65) : Theme.muted-text;
+        font-size: 11px;
+        horizontal-alignment: center;
+        vertical-alignment: center;
+        accessible-role: none;
+    }
+
+    grid := Rectangle {
+        x: 8px;
+        y: 66px;
+        width: parent.width - 16px;
+        height: 6 * root.cell-height;
+        clip: true;
+        Rectangle {
+            x: root.shift;
+            opacity: root.fade;
+            for index in 42: DayCell {
+                x: Math.mod(index, 7) * root.cell-width;
+                y: Math.floor(index / 7) * root.cell-height;
+                width: root.cell-width;
+                height: root.cell-height;
+                serial: root.grid-start + index;
+                column: Math.mod(index, 7);
+                month: root.month;
+                start: root.start-serial;
+                end: root.end-serial;
+                band-from: root.start-serial;
+                band-to: root.previewing ? root.pointing : root.end-serial;
+                preview: root.previewing;
+                today: root.grid-start + index == root.today-serial;
+                hovered: root.grid-start + index == root.hovered;
+                // Hidden cells are not evaluated until the grid fades back in.
+                snap: root.fade < 1;
+                cursor: root.keyed && keys.has-focus && root.grid-start + index == root.cursor;
+                accessible-role: button;
+                accessible-label: Calendar.date(root.grid-start + index, 0, 0).year + " 年 " + Calendar.date(root.grid-start + index, 0, 0).month + " 月 " + Calendar.date(root.grid-start + index, 0, 0).day + " 日";
+                accessible-item-selected: root.grid-start + index == root.start-serial || root.grid-start + index == root.end-serial;
+                accessible-action-default => { root.picked(root.grid-start + index); }
+            }
+        }
+
+        grid-touch := TouchArea {
+            mouse-cursor: pointer;
+            clicked => {
+                if root.hovered >= 0 {
+                    keys.focus();
+                    root.cursor = root.hovered;
+                    root.picked(root.hovered);
+                }
+            }
+        }
+    }
+
+    // Arrow keys move a cursor across days and months; Return picks it.
+    keys := FocusScope {
+        x: grid.x;
+        y: grid.y;
+        width: grid.width;
+        height: grid.height;
+        // Focusing on click would swallow the first pick.
+        focus-on-click: false;
+        key-pressed(event) => {
+            if event.text == Key.LeftArrow { root.move-cursor(root.cursor - 1); return accept; }
+            if event.text == Key.RightArrow { root.move-cursor(root.cursor + 1); return accept; }
+            if event.text == Key.UpArrow { root.move-cursor(root.cursor - 7); return accept; }
+            if event.text == Key.DownArrow { root.move-cursor(root.cursor + 7); return accept; }
+            if event.text == Key.PageUp { root.shift-month(-1); return accept; }
+            if event.text == Key.PageDown { root.shift-month(1); return accept; }
+            if event.text == Key.Space || event.text == Key.Return { root.picked(root.cursor); return accept; }
+            return reject;
+        }
+    }
+}
+
+// A preset that applies at once.
+component PresetChip inherits Rectangle {
+    in property <string> label;
+    in property <bool> selected;
+    callback clicked();
+    height: 30px;
+    width: chip-label.preferred-width + 24px;
+    border-radius: 15px;
+    border-width: 1px;
+    border-color: root.selected ? Theme.brand.with-alpha(0.55) : chip-touch.has-hover ? Theme.muted-text.with-alpha(0.55) : Theme.border;
+    background: root.selected ? Theme.brand-surface : chip-touch.has-hover ? Theme.raised : Theme.panel;
+    animate border-color, background { duration: Theme.fast; }
+    accessible-role: button;
+    accessible-label: root.label;
+    accessible-item-selected: root.selected;
+    accessible-action-default => { root.clicked(); }
+    chip-label := Text {
+        text: root.label;
+        color: root.selected ? Theme.brand : Theme.primary-text;
+        font-size: 12px;
+        font-weight: root.selected ? 600 : 400;
+        horizontal-alignment: center;
+        vertical-alignment: center;
+        accessible-role: none;
+    }
+
+    ButtonSheen {
+        hovered: chip-touch.has-hover;
+        enabled: true;
+        border-radius: 15px;
+    }
+
+    chip-touch := TouchArea {
+        mouse-cursor: pointer;
+        clicked => { root.clicked(); }
+    }
+}
+
+component Rule inherits Rectangle {
+    height: 1px;
+    background: Theme.border;
+}
+
+// The usage period: presets apply at once; a custom range is drafted, checked, then applied.
+export component UsageRangePicker inherits Rectangle {
+    // An index into presets, or presets.length for the custom range.
+    in property <int> period;
+    in property <[string]> presets;
+    in property <UsageMoment> range-start;
+    in property <UsageMoment> range-end;
+    in property <bool> range-live;
+    in property <string> range-label;
+    callback choose-preset(int);
+    callback apply-range(UsageMoment, UsageMoment, bool);
+    private property <string> label: root.period < root.presets.length ? root.presets[root.period] : root.range-label;
+    private property <bool> open: false;
+    private property <bool> entered: false;
+    private property <bool> mounted: popup.is-open;
+    private property <float> reveal: root.open && root.entered ? 1 : 0;
+    animate reveal {
+        duration: root.open ? Theme.page-motion : Theme.fast;
+        easing: cubic-bezier(0.22, 1, 0.36, 1);
+    }
+    // The draft is edited in the popup and only applied on confirmation.
+    private property <UsageMoment> draft-start;
+    private property <UsageMoment> draft-end;
+    private property <bool> draft-live;
+    // 0 while the calendar sets the start, 1 while it sets the end.
+    private property <int> active;
+    private property <UsageMoment> today;
+    private property <int> shown-year;
+    private property <int> shown-month;
+    private property <int> cursor;
+    private property <int> length: Calendar.minutes(root.draft-end) - Calendar.minutes(root.draft-start);
+    private property <bool> valid: root.length >= 0;
+    // Months slide: jump to an offset without animation, then glide home.
+    private property <bool> sliding;
+    private property <length> shift;
+    private property <float> fade: 1;
+    private property <bool> motion: Theme.animations-enabled && !Theme.system-reduced-motion;
+    animate shift, fade {
+        duration: root.sliding || !root.motion ? 0ms : 300ms;
+        easing: cubic-bezier(0.22, 1, 0.36, 1);
+    }
+
+    function show-month(year: int, month: int) {
+        let delta = (year * 12 + month) - (root.shown-year * 12 + root.shown-month);
+        if delta != 0 {
+            root.sliding = true;
+            root.shift = delta > 0 ? 28px : -28px;
+            root.fade = 0;
+            root.shown-year = year;
+            root.shown-month = month;
+        }
+    }
+    function navigate(delta: int) {
+        let index = root.shown-year * 12 + root.shown-month - 1 + delta;
+        root.show-month(Math.floor(index / 12), Math.mod(index, 12) + 1);
+    }
+    public function open-popup() {
+        if !root.mounted {
+            root.today = UsageClock.now();
+            if root.period >= root.presets.length {
+                root.draft-start = root.range-start;
+                root.draft-end = root.range-live ? root.today : root.range-end;
+                root.draft-live = root.range-live;
+            } else {
+                let range = UsageClock.preset(root.period);
+                root.draft-start = range.start;
+                root.draft-end = range.end;
+                root.draft-live = false;
+            }
+            root.active = 0;
+            root.shown-year = root.draft-start.year;
+            root.shown-month = root.draft-start.month;
+            root.cursor = Calendar.of(root.draft-start);
+            root.shift = 0;
+            root.fade = 1;
+            root.entered = !root.motion;
+            popup.show();
+        }
+        root.open = true;
+    }
+    public function close-popup() {
+        root.open = false;
+        if Theme.fast == 0ms { popup.close(); }
+    }
+    // Picks follow the field being edited; a start past the end pulls the end
+    // along, and an end before the start becomes the new start.
+    function pick(serial: int) {
+        if root.draft-live {
+            root.draft-start = Calendar.date(serial, root.draft-start.hour, root.draft-start.minute);
+        } else if root.active == 0 {
+            root.draft-start = Calendar.date(serial, root.draft-start.hour, root.draft-start.minute);
+            if Calendar.minutes(root.draft-start) > Calendar.minutes(root.draft-end) { root.draft-end = root.draft-start; }
+            root.active = 1;
+        } else {
+            let next = Calendar.date(serial, root.draft-end.hour, root.draft-end.minute);
+            if Calendar.minutes(next) < Calendar.minutes(root.draft-start) {
+                root.draft-start = next;
+            } else {
+                root.draft-end = next;
+            }
+        }
+        root.cursor = serial;
+        let date = Calendar.date(serial, 0, 0);
+        root.show-month(date.year, date.month);
+    }
+    function set-live(live: bool) {
+        root.draft-live = live;
+        if live {
+            root.today = UsageClock.now();
+            root.draft-end = root.today;
+            root.active = 0;
+        }
+    }
+    function apply() {
+        if root.valid {
+            root.apply-range(root.draft-start, root.draft-end, root.draft-live);
+            root.close-popup();
+        }
+    }
+    changed mounted => {
+        if !root.mounted { root.open = false; root.entered = false; }
+    }
+    Timer {
+        interval: 16ms;
+        running: root.open && !root.entered;
+        triggered => { root.entered = true; }
+    }
+
+    Timer {
+        interval: 16ms;
+        running: root.sliding;
+        triggered => {
+            root.sliding = false;
+            root.shift = 0;
+            root.fade = 1;
+        }
+    }
+
+    Timer {
+        interval: max(1ms, Theme.fast);
+        running: root.mounted && !root.open;
+        triggered => { popup.close(); }
+    }
+
+    // A following end keeps time with the clock while the draft is open.
+    Timer {
+        interval: 1s;
+        running: root.mounted;
+        triggered => {
+            root.today = UsageClock.now();
+            if root.draft-live { root.draft-end = root.today; }
+        }
+    }
+
+    height: 32px;
+    width: min(360px, trigger-layout.preferred-width);
+    border-radius: 9px;
+    border-width: 1px;
+    border-color: root.open || keyboard.has-focus ? Theme.brand : touch.has-hover ? Theme.muted-text.with-alpha(0.6) : Theme.border;
+    background: root.open ? Theme.brand-surface : touch.has-hover ? Theme.raised : Theme.panel;
+    animate border-color, background { duration: Theme.fast; }
+    forward-focus: keyboard;
+    accessible-role: combobox;
+    accessible-label: "时间范围";
+    accessible-value: root.label;
+    accessible-expandable: true;
+    accessible-expanded: root.open;
+    accessible-action-default => { root.open-popup(); }
+    accessible-action-expand => { root.open-popup(); }
+
+    trigger-layout := HorizontalLayout {
+        padding-left: 11px;
+        padding-right: 10px;
+        spacing: 8px;
+        Image {
+            y: (parent.height - self.height) / 2;
+            width: 14px;
+            height: 14px;
+            source: @image-url("../../assets/ui/calendar.svg");
+            colorize: root.open ? Theme.brand : Theme.muted-text;
+            animate colorize { duration: Theme.fast; }
+        }
+
+        Text {
+            text: root.label;
+            color: Theme.primary-text;
+            font-size: 12px;
+            font-weight: 600;
+            vertical-alignment: center;
+            overflow: elide;
+        }
+
+        Image {
+            y: (parent.height - self.height) / 2;
+            width: 12px;
+            height: 12px;
+            source: @image-url("../../assets/ui/chevron-down.svg");
+            colorize: root.open ? Theme.brand : Theme.muted-text;
+            transform-rotation: root.open ? 180deg : 0deg;
+            animate transform-rotation {
+                duration: Theme.page-motion;
+                easing: cubic-bezier(0.22, 1, 0.36, 1);
+            }
+        }
+    }
+
+    ButtonSheen {
+        hovered: touch.has-hover;
+        enabled: true;
+        border-radius: root.border-radius;
+    }
+
+    touch := TouchArea {
+        mouse-cursor: pointer;
+        clicked => {
+            keyboard.focus();
+            if root.open { root.close-popup(); } else { root.open-popup(); }
+        }
+    }
+
+    keyboard := FocusScope {
+        width: 0px;
+        key-pressed(event) => {
+            if event.text == Key.Space || event.text == Key.Return || event.text == Key.DownArrow {
+                root.open-popup();
+                return accept;
+            }
+            return reject;
+        }
+    }
+
+    popup := PopupWindow {
+        x: -root.absolute-position.x;
+        y: -root.absolute-position.y;
+        width: DropdownViewport.size.x;
+        height: DropdownViewport.size.y;
+        property <Point> viewport: DropdownViewport.size;
+        changed viewport => { self.width = self.viewport.x; self.height = self.viewport.y; }
+        close-policy: no-auto-close;
+        forward-focus: popup-keys;
+        popup-keys := FocusScope {
+            key-pressed(event) => {
+                if event.text == Key.Escape { root.close-popup(); return accept; }
+                if event.text == Key.Return { root.apply(); return accept; }
+                return reject;
+            }
+            TouchArea {
+                clicked => { root.close-popup(); }
+            }
+
+            panel := Rectangle {
+                width: min(640px, parent.width - 24px);
+                height: panel-layout.preferred-height;
+                x: max(12px, min(root.absolute-position.x, parent.width - self.width - 12px));
+                property <bool> above: root.absolute-position.y + root.height + 8px + self.height > parent.height - 12px;
+                y: (self.above ? max(12px, root.absolute-position.y - self.height - 8px) : root.absolute-position.y + root.height + 8px) + (self.above ? 10px : -10px) * (1 - root.reveal);
+                opacity: root.reveal;
+                transform-scale: 0.97 + 0.03 * root.reveal;
+                transform-origin: { x: root.absolute-position.x - self.x + 20px, y: self.above ? self.height : 0px };
+                background: Theme.panel;
+                border-radius: 16px;
+                border-width: 1px;
+                border-color: Theme.border;
+                drop-shadow-blur: 32px;
+                drop-shadow-offset-y: 12px;
+                drop-shadow-color: Theme.dark ? #00000080 : #18221a2a;
+                // Consume clicks inside the panel so they never close it.
+                TouchArea { }
+
+                panel-layout := VerticalLayout {
+                    padding: 16px;
+                    spacing: 14px;
+                    HorizontalLayout {
+                        spacing: 6px;
+                        alignment: start;
+                        for preset[index] in root.presets: PresetChip {
+                            label: preset;
+                            selected: index == root.period;
+                            clicked => {
+                                root.choose-preset(index);
+                                root.close-popup();
+                            }
+                        }
+                    }
+
+                    Rule { }
+
+                    HorizontalLayout {
+                        spacing: 16px;
+                        VerticalLayout {
+                            width: 236px;
+                            spacing: 10px;
+                            alignment: start;
+                            VerticalLayout {
+                                spacing: 3px;
+                                Text {
+                                    text: "自定义范围";
+                                    color: Theme.primary-text;
+                                    font-size: 13px;
+                                    font-weight: 600;
+                                }
+
+                                Text {
+                                    text: root.draft-live ? "在日历中选开始日期" : root.active == 0 ? "在日历中选开始日期，或直接输入" : "再选结束日期，或直接输入";
+                                    color: Theme.muted-text;
+                                    font-size: 11px;
+                                    overflow: elide;
+                                }
+                            }
+
+                            MomentField {
+                                title: "开始";
+                                moment: root.draft-start;
+                                active: root.active == 0 || root.draft-live;
+                                activated => { root.active = 0; }
+                                edited(moment) => {
+                                    root.draft-start = moment;
+                                    root.cursor = Calendar.of(moment);
+                                    root.show-month(moment.year, moment.month);
+                                }
+                            }
+
+                            MomentField {
+                                title: "结束";
+                                moment: root.draft-end;
+                                active: root.active == 1;
+                                live: root.draft-live;
+                                activated => { root.active = 1; }
+                                edited(moment) => {
+                                    root.draft-end = moment;
+                                    root.cursor = Calendar.of(moment);
+                                    root.show-month(moment.year, moment.month);
+                                }
+                            }
+
+                            QuietCheckBox {
+                                text: "结束时间跟随当前时刻";
+                                checked: root.draft-live;
+                                auto-toggle: false;
+                                toggled => { root.set-live(!root.draft-live); }
+                            }
+                        }
+
+                        RangeCalendar {
+                            horizontal-stretch: 1;
+                            year: root.shown-year;
+                            month: root.shown-month;
+                            start: root.draft-start;
+                            end: root.draft-end;
+                            today: root.today;
+                            choosing-end: root.active == 1 && !root.draft-live;
+                            shift: root.shift;
+                            fade: root.fade;
+                            cursor <=> root.cursor;
+                            navigate(delta) => { root.navigate(delta); }
+                            picked(serial) => { root.pick(serial); }
+                        }
+                    }
+
+                    Rule { }
+
+                    HorizontalLayout {
+                        height: 32px;
+                        spacing: 8px;
+                        Text {
+                            text: root.valid ? Calendar.span(root.length + 1) + (root.draft-live ? "，结束随时间延长" : "") : "开始时间不能晚于结束时间";
+                            color: root.valid ? Theme.muted-text : Theme.error;
+                            font-size: 12px;
+                            vertical-alignment: center;
+                            horizontal-stretch: 1;
+                            overflow: elide;
+                            animate color { duration: Theme.fast; }
+                        }
+
+                        QuietButton {
+                            width: 76px;
+                            height: 32px;
+                            text: "取消";
+                            ghost: true;
+                            clicked => { root.close-popup(); }
+                        }
+
+                        QuietButton {
+                            width: 92px;
+                            height: 32px;
+                            text: "应用";
+                            primary: true;
+                            enabled: root.valid;
+                            clicked => { root.apply(); }
+                        }
+                    }
+                }
+            }
+        }
+    }
+}

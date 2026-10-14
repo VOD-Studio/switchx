@@ -5,7 +5,8 @@ use std::{
     rc::Rc,
 };
 
-use chrono::{Duration, Local, Timelike};
+use chrono::{Datelike, Duration, Local, NaiveDate, Timelike};
+use i_slint_backend_testing::ElementHandle;
 use slint::platform::{WindowEvent, software_renderer::MinimalSoftwareWindow};
 use slint::{ComponentHandle, LogicalPosition, Model, ModelRc, PhysicalSize, VecModel};
 use switchx::{
@@ -15,7 +16,7 @@ use switchx::{
         AccountBinding, Currency, PriceRecord, ProviderKind, ProviderRecord, Store, UsageFilter,
         UsageLogFile, UsageRecord, UsageSource,
     },
-    ui::{AppWindow, Theme, UsageSyncState},
+    ui::{AppWindow, Theme, UsageClock, UsageSyncState},
     usage::{TokenUsage, report::Period},
 };
 
@@ -429,5 +430,142 @@ pub(super) fn render_usage_design(
     app.set_active_page(2);
     play(window, output, "usage-empty-dark-1000x680", &[896])?;
     println!("Synthetic usage page frames: {}", output.display());
+    Ok(())
+}
+
+fn range_control(app: &AppWindow, label: &str) -> LogicalPosition {
+    let element = ElementHandle::find_by_accessible_label(app, label)
+        .next()
+        .unwrap_or_else(|| panic!("missing range control: {label}"));
+    let (position, size) = (element.absolute_position(), element.size());
+    LogicalPosition::new(
+        position.x + size.width / 2.0,
+        position.y + size.height / 2.0,
+    )
+}
+
+fn press(window: &MinimalSoftwareWindow, app: &AppWindow, label: &str) {
+    let at = range_control(app, label);
+    headless::click(window, at.x, at.y);
+}
+
+fn day_label(date: NaiveDate) -> String {
+    format!("{} 年 {} 月 {} 日", date.year(), date.month(), date.day())
+}
+
+/// The period picker: presets, a drafted custom range, month motion, a live end, and apply.
+pub(super) fn render_usage_range(
+    app: &AppWindow,
+    window: &MinimalSoftwareWindow,
+    output: &Path,
+) -> Result<(), Box<dyn Error>> {
+    let data = Rc::new(seed(false)?);
+    app.on_usage_refresh(|| {});
+    let clock = app.global::<UsageClock>();
+    clock.on_now(|| usage_view::moment(Local::now()));
+    clock.on_preset(|index| usage_view::preset_range(index, Local::now()));
+    // Applying loads the chosen period the way the window does.
+    let weak = app.as_weak();
+    let source = data.clone();
+    app.on_usage_select_period(move |index| {
+        let app = weak.upgrade().unwrap();
+        let period = if index == 7 {
+            usage_view::custom_period(
+                &app.get_usage_range_start(),
+                &app.get_usage_range_end(),
+                app.get_usage_range_live(),
+            )
+            .unwrap()
+        } else {
+            Period::from_index(index)
+        };
+        app.set_usage_range_label(usage_view::custom_label(period, Local::now()).into());
+        show(
+            &app,
+            &load(&source.0, period, UsageFilter::default()).unwrap(),
+        );
+    });
+    let week = load(&data.0, Period::Days7, UsageFilter::default())?;
+    let shown = (Local::now() - Duration::days(6)).date_naive();
+    let (first, second) = (shown.with_day(3).unwrap(), shown.with_day(9).unwrap());
+    for (width, height, dark) in [(1200, 820, true), (1200, 820, false), (1000, 680, true)] {
+        let suffix = format!("{}-{width}x{height}", if dark { "dark" } else { "light" });
+        app.window().set_size(PhysicalSize::new(width, height));
+        set_theme(app, window, dark);
+        app.global::<Theme>().set_animations_enabled(true);
+        app.set_usage_period(2);
+        show(app, &week);
+        app.set_active_page(2);
+        frame(1_200);
+        headless::render(window);
+
+        press(window, app, "时间范围");
+        play(
+            window,
+            output,
+            &format!("range-open-{suffix}"),
+            &[0, 48, 112, 208, 400],
+        )?;
+
+        // The first pick sets the start; hovering then previews the end.
+        press(window, app, &day_label(first));
+        frame(400);
+        let hover = range_control(app, &day_label(second));
+        window.dispatch_event(WindowEvent::PointerMoved { position: hover });
+        frame(200);
+        snapshot_now(window, output, &format!("range-preview-{suffix}"))?;
+        press(window, app, &day_label(second));
+        play(
+            window,
+            output,
+            &format!("range-picked-{suffix}"),
+            &[0, 96, 400],
+        )?;
+
+        // Months slide in from the side they come from.
+        press(window, app, "上个月");
+        play(
+            window,
+            output,
+            &format!("range-month-{suffix}"),
+            &[0, 48, 112, 320],
+        )?;
+        press(window, app, "下个月");
+        frame(400);
+
+        // Typing a start day past the end explains why the range cannot apply.
+        press(window, app, "开始日期");
+        headless::key(window, "2");
+        headless::key(window, "8");
+        frame(300);
+        snapshot_now(window, output, &format!("range-invalid-{suffix}"))?;
+        press(window, app, "开始日期");
+        headless::key(window, "0");
+        headless::key(window, "3");
+        frame(200);
+
+        press(window, app, "结束时间跟随当前时刻");
+        frame(500);
+        snapshot_now(window, output, &format!("range-live-{suffix}"))?;
+        press(window, app, "结束时间跟随当前时刻");
+        frame(300);
+
+        press(window, app, "应用");
+        play(
+            window,
+            output,
+            &format!("range-applied-{suffix}"),
+            &[0, 96, 600, 1_200],
+        )?;
+        assert_eq!(app.get_usage_period(), 7);
+        let label = app.get_usage_range_label();
+        assert!(
+            label.starts_with(&format!("{}/{} ", first.month(), first.day())),
+            "{label}"
+        );
+        app.set_active_page(0);
+        frame(400);
+    }
+    println!("Synthetic range picker frames: {}", output.display());
     Ok(())
 }
