@@ -191,7 +191,8 @@ export component ProviderEditor inherits SurfaceCard {
                             label: "默认模型 ID";
                             ModelPicker {
                                 text <=> root.edit-model;
-                                model: root.discovery-scope == 0 ? root.fetched-models : [];
+                                // A new connection's directory fetches (scope 2) for this same draft.
+                                model: root.discovery-scope == 0 || (root.edit-id == "" && root.discovery-scope == 2) ? root.fetched-models : [];
                                 placeholder-text: "上游实际模型 ID";
                                 accessible-label: "上游模型 ID";
                                 enabled: root.editor-open && !root.busy && !root.config-managed && !root.preview-expanded;

@@ -17,7 +17,7 @@ use super::{
     codex_config::codex_home,
     command::{Command, ProviderForm, queue},
     common_config::common_config_for_home,
-    connection_models::directory_draft,
+    connection_models::{directory_draft, first_directory_model},
     feedback::show_action,
     grok::{show_xai_accounts, xai_account_view},
     icon_picker::set_editor_provider_icon,
@@ -233,6 +233,14 @@ pub(super) fn connect(app: &AppWindow, sender: &mpsc::Sender<Command>) {
     let weak = app.as_weak();
     app.on_save_provider(move |id, name, url, model, key| {
         if let Some(app) = weak.upgrade() {
+            // A new connection saved from its directory may not have picked a default yet.
+            let model = match directory_draft(&app).and(first_directory_model(&app)) {
+                Some(first) if id.is_empty() && model.trim().is_empty() => {
+                    app.set_edit_model(first.as_str().into());
+                    first.into()
+                }
+                _ => model,
+            };
             let options = match editor_codex_options(&app) {
                 Ok(options) => options,
                 Err(error) => {

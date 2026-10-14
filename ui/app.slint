@@ -143,7 +143,9 @@ export component AppWindow inherits Window {
     in-out property <int> connection-models-tone: 0;
     changed connection-models-open => {
         if root.connection-models-open { connection-drawer.focus(); }
-        else { root.reset-model-discovery(); }
+        // A new connection keeps its fetched models for the default model picker;
+        // reset-connection-draft clears them when the draft ends.
+        else if !root.connection-models-draft { root.reset-model-discovery(); }
     }
     callback begin-connection-models(string);
     callback switch-connection-tab(int);

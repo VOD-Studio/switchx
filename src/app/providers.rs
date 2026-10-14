@@ -158,6 +158,9 @@ fn save_provider_inner(
     directory: Option<&[super::ConnectionModel]>,
 ) -> Result<Vec<String>, String> {
     ensure_editable(data_dir)?;
+    if model_id.trim().is_empty() {
+        return Err("请在连接设置中填写默认模型 ID".into());
+    }
     let url = validate_provider(name, base_url, model_id)?;
     let store = open_store(data_dir).map_err(|error| error.message())?;
     let old = match id {

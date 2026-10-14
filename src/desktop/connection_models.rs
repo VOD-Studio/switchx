@@ -164,6 +164,25 @@ fn edited_directory(app: &AppWindow) -> Vec<app::ConnectionModel> {
         .collect()
 }
 
+pub(super) fn first_directory_model(app: &AppWindow) -> Option<String> {
+    app.get_connection_models()
+        .iter()
+        .filter(|row| !row.removing)
+        .map(|row| row.upstream_model.trim().to_owned())
+        .find(|id| !id.is_empty())
+}
+
+// A new API connection needs a default model ID; until one is chosen, use the
+// directory's first model, else the first fetched one.
+fn fill_draft_default_model(app: &AppWindow, fetched: &[String]) {
+    if !app.get_edit_model().trim().is_empty() {
+        return;
+    }
+    if let Some(id) = first_directory_model(app).or_else(|| fetched.first().cloned()) {
+        app.set_edit_model(id.into());
+    }
+}
+
 fn show_draft_directory(app: &AppWindow, provider: &ProviderRecord) {
     let name = if provider.name.trim().is_empty() {
         "新连接"
@@ -755,6 +774,12 @@ impl Worker {
                     });
                     show_batch_candidates(&app, candidates);
                     lock_batch_rows(&app);
+                    if draft
+                        .as_ref()
+                        .is_some_and(|draft| draft.kind == ProviderKind::ApiKey)
+                    {
+                        fill_draft_default_model(&app, &models);
+                    }
                     if draft.is_some() {
                         if scope == 0 {
                             app.invoke_begin_connection_models("".into());
@@ -926,6 +951,73 @@ mod tests {
                 assert!(!app.get_connection_models_draft());
             }
         }
+    }
+
+    #[test]
+    fn new_connection_default_model_offers_and_fills_from_directory_discovery() {
+        let window = headless::install();
+        let app = AppWindow::new().unwrap();
+        app.global::<Theme>().set_animations_enabled(false);
+        app.set_loading(false);
+        app.set_active_page(1);
+        app.window().set_size(slint::PhysicalSize::new(1200, 820));
+        let (sender, mut receiver) = mpsc::channel(8);
+        connect(&app, &sender);
+        connect_discovery(&app, &sender);
+        crate::desktop::provider_editor::connect(&app, &sender);
+        super::super::batch_picker::connect(&app, &sender);
+        app.show().unwrap();
+        show_provider_editor(&app, None, CodexOptions::default(), String::new());
+        app.set_edit_name("Podlink".into());
+        app.set_edit_url("https://example.invalid/v1".into());
+        app.set_edit_key("synthetic-key".into());
+        headless::render(&window);
+        click_control(&window, &app, "模型目录");
+        headless::render(&window);
+        click_control(&window, &app, "获取模型列表");
+        let Command::FetchModels { scope: 2, .. } = receiver.try_recv().unwrap() else {
+            panic!("expected draft directory discovery");
+        };
+        app.set_busy(false);
+        app.set_fetching_models(false);
+        let fetched = vec!["coder-pro".to_owned(), "coder-mini".to_owned()];
+        fill_draft_default_model(&app, &fetched);
+        app.set_fetched_models(ModelRc::new(VecModel::from(
+            fetched
+                .iter()
+                .map(slint::SharedString::from)
+                .collect::<Vec<_>>(),
+        )));
+        assert_eq!(app.get_edit_model(), "coder-pro");
+        click_control(&window, &app, "连接设置");
+        headless::render(&window);
+        let picker =
+            i_slint_backend_testing::ElementHandle::find_by_accessible_label(&app, "上游模型 ID")
+                .find(|control| {
+                    control.accessible_role() != Some(i_slint_backend_testing::AccessibleRole::Text)
+                })
+                .expect("default model picker");
+        assert_eq!(
+            picker.accessible_expandable(),
+            Some(true),
+            "fetched models must stay selectable after returning from the directory"
+        );
+
+        // Saving from the directory without a default falls back to its first model.
+        app.set_edit_model("".into());
+        app.set_connection_models(ModelRc::new(VecModel::from(vec![ConnectionModelRow {
+            display_name: "coder-mini/Podlink".into(),
+            upstream_model: "coder-mini".into(),
+            ..Default::default()
+        }])));
+        click_control(&window, &app, "模型目录");
+        headless::render(&window);
+        click_control(&window, &app, "保存连接与目录");
+        let Command::Save(form) = receiver.try_recv().unwrap() else {
+            panic!("expected combined save");
+        };
+        assert_eq!(form.model, "coder-mini");
+        assert_eq!(app.get_edit_model(), "coder-mini");
     }
 
     #[test]
