@@ -261,6 +261,8 @@ export component AppWindow inherits Window {
     in-out property <bool> delete-account-confirm: false;
     property <string> delete-account-label: "";
     property <string> delete-account-references: "";
+    property <string> delete-account-initial: "";
+    property <bool> delete-account-active: false;
     in-out property <bool> chatgpt-login-pending: false;
     in-out property <string> chatgpt-login-id: "";
     in-out property <string> route-auth-error: "";
@@ -1159,6 +1161,8 @@ export component AppWindow inherits Window {
                                                         root.delete-account-grok = true;
                                                         root.delete-account-id = account.id;
                                                         root.delete-account-label = account.label;
+                                                        root.delete-account-initial = account.initial;
+                                                        root.delete-account-active = account.is-active;
                                                         root.delete-account-references = account.bound-provider-names;
                                                         root.error-code = "";
                                                         root.error-message = "";
@@ -1171,6 +1175,8 @@ export component AppWindow inherits Window {
                                                         root.delete-account-grok = false;
                                                         root.delete-account-id = account.id;
                                                         root.delete-account-label = account.label;
+                                                        root.delete-account-initial = account.initial;
+                                                        root.delete-account-active = account.is-active;
                                                         root.delete-account-references = account.bound-provider-names;
                                                         root.error-code = "";
                                                         root.error-message = "";
@@ -1775,18 +1781,20 @@ export component AppWindow inherits Window {
 
     Drawer {
         open: root.delete-account-confirm;
+        centered: true;
         title: "移除订阅账号";
-        subtitle: "";
-        panel-width: 580px;
+        subtitle: root.delete-account-references == "" ? "从 SwitchX 中移除保存的登录。" : "此账号仍在使用中，暂时无法移除。";
+        panel-width: 480px;
         busy: root.busy;
         error-message: root.error-code == "" ? "" : root.error-message + " · " + root.error-action;
         dismissed => { root.delete-account-confirm = false; root.delete-account-id = ""; }
         AccountRemovalConfirm {
+            open: root.delete-account-confirm;
             grok: root.delete-account-grok;
             label: root.delete-account-label;
+            initial: root.delete-account-initial;
+            codex-linked: root.delete-account-active;
             references: root.delete-account-references;
-            has-error: root.error-code != "";
-            error-message: root.error-message;
             busy: root.busy;
             can-remove: !root.config-managed && !root.chatgpt-login-pending && !root.xai-pending && root.delete-account-id != "";
             cancel => {
