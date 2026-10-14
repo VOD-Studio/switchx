@@ -509,6 +509,8 @@ export component MappingSection inherits Rectangle {
         duration: Theme.page-motion;
         easing: cubic-bezier(0.22, 1, 0.36, 1);
     }
+    // The header band grows to fill the whole card while it is collapsed.
+    private property <length> header-height: 54px + max(0px, root.height - 54px) * (1 - root.open);
     function toggle() {
         if root.collapsible {
             root.expanded = !root.expanded;
@@ -636,7 +638,7 @@ export component MappingSection inherits Rectangle {
         }
 
         ButtonSheen {
-            height: 54px;
+            height: root.header-height;
             border-radius: 14px;
             hovered: header-touch.has-hover;
             enabled: root.collapsible;
@@ -644,7 +646,7 @@ export component MappingSection inherits Rectangle {
 
         header-touch := TouchArea {
             y: 0px;
-            height: 14px + 32px + 8px;
+            height: root.header-height;
             enabled: root.collapsible;
             mouse-cursor: root.collapsible ? pointer : default;
             clicked => { header-keys.focus(); root.toggle(); }
@@ -663,7 +665,7 @@ export component MappingSection inherits Rectangle {
             x: 2px;
             y: 2px;
             width: parent.width - 4px;
-            height: 50px;
+            height: root.header-height - 4px;
             border-radius: 12px;
             border-width: 2px;
             border-color: Theme.brand;
@@ -674,7 +676,7 @@ export component MappingSection inherits Rectangle {
 
         if root.collapsible: Rectangle {
             y: 0px;
-            height: 54px;
+            height: root.header-height;
             accessible-role: button;
             accessible-label: root.title;
             accessible-expandable: true;

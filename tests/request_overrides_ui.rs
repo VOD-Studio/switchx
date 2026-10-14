@@ -260,6 +260,8 @@ fn connection_editor_card_replaces_the_preview_validates_and_clears_on_close() {
             assert_eq!(saves.get(), previous + 1);
             click(&window, &app, "请求定制", AccessibleRole::Button);
             assert!(preview_shown(&app), "collapsing restores the preview");
+            // The keyboard focus ring outlines the whole collapsed card.
+            draw(&window, &format!("connection-focused-collapsed-{suffix}"));
             app.set_editor_open(false);
             settle(&window);
             assert!(app.get_edit_user_agent().is_empty());
