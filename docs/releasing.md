@@ -45,7 +45,7 @@ git push origin v0.1.0
 
 在 [Release 工作流](https://github.com/VOD-Studio/switchx/actions/workflows/release.yml) 中确认所有检查与构建成功，再到 [Releases](https://github.com/VOD-Studio/switchx/releases) 核对附件。普通分支推送、PR 和手动 CI 只运行检查与测试；版本标签推送才会构建六个平台的产物并发布。
 
-检查任务使用 GitHub 托管的 `ubuntu-24.04` x64 runner，在 Ubuntu 24.04 容器内安装 Git LFS、Python 3.12、仓库固定的 Rust 工具链和 Slint 格式化工具，再运行 `make check`。普通 CI、发版前置检查和六个平台构建均使用 GitHub 托管 runner。
+检查任务使用 GitHub 托管的 `ubuntu-24.04` x64 runner，在 Ubuntu 24.04 容器内安装 Git LFS、Python 3.12、仓库固定的 Rust 工具链和 Slint 格式化工具，再运行 `make check`。默认情况下，普通 CI、发版前置检查和六个平台构建均使用 GitHub 托管 runner；检查任务可通过下文的仓库变量切换到自托管 runner。
 
 ## 构建矩阵与附件
 
@@ -67,6 +67,23 @@ Release 发布前会校验标签、workspace 版本、lockfile 和 changelog，�
 ## GitHub 设置
 
 工作流使用 GitHub 自动提供的 `GITHUB_TOKEN`；只有发布 job 请求 `contents: write`，其他 job 为只读。无需个人访问令牌或发布密钥。仓库需启用 GitHub Actions，并允许发布 job 的写权限。actions 固定到完整提交 SHA；更新时一起核对版本注释与 SHA。
+
+### 自托管 runner 开关
+
+仅检查任务（Linux x64，`build.yml` 的 `check`）支持切换；六个平台构建和发布 job 始终使用 GitHub 托管 runner。在仓库 Settings → Secrets and variables → Actions → Variables 中配置：
+
+| 变量 | 取值 | 作用 |
+| --- | --- | --- |
+| `USE_SELF_HOSTED_RUNNER` | `true` 启用；未设置或其他值为关闭 | 检查任务改用自托管 runner |
+| `SELF_HOSTED_RUNNER_LABELS` | JSON 数组，可选，默认 `["self-hosted","linux","x64"]` | 自托管 runner 的标签 |
+
+```sh
+gh variable set USE_SELF_HOSTED_RUNNER --body true
+gh variable set SELF_HOSTED_RUNNER_LABELS --body '["self-hosted","linux","x64","switchx"]'
+gh variable delete USE_SELF_HOSTED_RUNNER   # 回退到 GitHub 托管 runner
+```
+
+仓库是公开的，来自 fork 的 PR 会忽略该开关，始终使用 GitHub 托管 runner，避免外部代码在自托管机器上运行。检查任务使用 `ubuntu:24.04` 容器，自托管 runner 需要 Linux x64 并安装 Docker；建议使用临时（ephemeral）runner，并在 Settings → Actions → General 中要求外部协作者的 PR 先经批准再运行工作流。若启用后没有匹配标签的在线 runner，任务会一直排队，需删除变量回退。
 
 macOS 当前使用 ad-hoc 签名，未做 Developer ID 签名与公证，DMG 本身不签名；用户首次打开需在「系统设置 → 隐私与安全性」中允许。Windows 未做 Authenticode 签名。正式签名需要另行配置相应证书与账号；当前工作流提供可下载的原生包。
 
