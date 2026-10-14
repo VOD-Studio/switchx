@@ -75,6 +75,16 @@ pub(super) fn activity_row(index: usize, stamp: i32) -> RequestRow {
         } else {
             "".into()
         },
+        tokens: if kind == 1 {
+            "".into()
+        } else {
+            format!("{:.1}K Token", 20.0 + (index % 7) as f64 * 6.5).into()
+        },
+        token_detail: if kind == 1 {
+            "".into()
+        } else {
+            "输入 41.2K（缓存 36.0K）· 输出 1.4K（推理 320）".into()
+        },
         stamp,
     }
 }

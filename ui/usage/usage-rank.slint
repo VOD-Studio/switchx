@@ -1,0 +1,199 @@
+import { Theme } from "../tokens.slint";
+import { ButtonSheen } from "../button-sheen.slint";
+import { UsageShareRow } from "../view-models.slint";
+import { UsageAvatar } from "usage-parts.slint";
+
+component RankRow inherits Rectangle {
+    in property <UsageShareRow> entry;
+    in property <int> index;
+    in property <bool> selected;
+    in property <bool> dimmed;
+    in property <bool> show-avatar;
+    callback toggle();
+    private property <bool> motion: Theme.animations-enabled && !Theme.system-reduced-motion;
+    private property <bool> entered: !root.motion;
+    private property <float> fill: root.entered ? root.entry.level : 0;
+    animate fill {
+        duration: root.motion ? 700ms : 0ms;
+        delay: root.motion ? 140ms + root.index * 50ms : 0ms;
+        easing: cubic-bezier(0.22, 1, 0.36, 1);
+    }
+    Timer {
+        interval: 32ms;
+        running: !root.entered;
+        triggered => { root.entered = true; }
+    }
+
+    height: 42px;
+    border-radius: 9px;
+    background: root.selected ? Theme.brand-surface : touch.has-hover && root.entry.selectable ? Theme.raised : transparent;
+    opacity: root.dimmed ? 0.42 : 1;
+    animate background { duration: Theme.fast; }
+    animate opacity {
+        duration: Theme.page-motion;
+        easing: ease-out;
+    }
+    accessible-role: button;
+    accessible-enabled: root.entry.selectable;
+    accessible-label: root.entry.name + "，" + root.entry.value + "，" + root.entry.percent + (root.entry.cost == "" ? "" : "，" + root.entry.cost);
+    accessible-item-selected: root.selected;
+    accessible-action-default => { if (root.entry.selectable) { root.toggle(); } }
+
+    HorizontalLayout {
+        padding-left: 8px;
+        padding-right: 10px;
+        spacing: 10px;
+        if root.show-avatar: UsageAvatar {
+            y: (parent.height - self.height) / 2;
+            icon: root.entry.icon;
+            has-icon: root.entry.has-icon;
+            monochrome: root.entry.monochrome;
+            letter: root.entry.letter;
+        }
+        VerticalLayout {
+            width: 128px;
+            alignment: center;
+            spacing: 2px;
+            Text {
+                text: root.entry.name;
+                color: Theme.primary-text;
+                font-size: 12px;
+                font-weight: root.selected ? 600 : 500;
+                overflow: elide;
+            }
+
+            if root.entry.detail != "": Text {
+                text: root.entry.detail;
+                color: Theme.muted-text;
+                font-size: 10px;
+                overflow: elide;
+            }
+        }
+
+        Rectangle {
+            horizontal-stretch: 1;
+            min-width: 40px;
+            track := Rectangle {
+                y: (parent.height - self.height) / 2;
+                height: 6px;
+                border-radius: 3px;
+                background: Theme.raised;
+                clip: true;
+                Rectangle {
+                    x: 0px;
+                    width: track.width * root.fill;
+                    border-radius: 3px;
+                    background: root.selected ? Theme.usage-input : Theme.brand.with-alpha(root.entry.selectable ? 0.85 : 0.4);
+                    animate background { duration: Theme.fast; }
+                }
+            }
+        }
+
+        VerticalLayout {
+            width: 64px;
+            alignment: center;
+            spacing: 2px;
+            Text {
+                text: root.entry.value;
+                color: Theme.primary-text;
+                font-size: 12px;
+                font-weight: 500;
+                horizontal-alignment: right;
+            }
+
+            if root.entry.cost != "": Text {
+                text: root.entry.cost;
+                color: Theme.muted-text;
+                font-size: 10px;
+                horizontal-alignment: right;
+                overflow: elide;
+            }
+        }
+
+        Text {
+            width: 40px;
+            text: root.entry.percent;
+            color: Theme.muted-text;
+            font-size: 11px;
+            horizontal-alignment: right;
+            vertical-alignment: center;
+        }
+    }
+
+    ButtonSheen {
+        hovered: touch.has-hover && root.entry.selectable;
+        enabled: root.entry.selectable;
+        border-radius: 9px;
+    }
+
+    touch := TouchArea {
+        enabled: root.entry.selectable;
+        mouse-cursor: root.entry.selectable ? pointer : default;
+        clicked => { root.toggle(); }
+    }
+}
+
+// A ranked share list that doubles as a filter: choosing a row narrows the
+// rest of the page, and choosing it again clears the filter.
+export component UsageRank inherits Rectangle {
+    in property <string> title;
+    in property <string> hint;
+    in property <[UsageShareRow]> rows;
+    in property <string> selected;
+    in property <bool> show-avatar: true;
+    callback toggle(string);
+    border-radius: 14px;
+    border-width: 1px;
+    border-color: Theme.border;
+    background: Theme.panel;
+    animate background, border-color { duration: Theme.page-motion; }
+
+    VerticalLayout {
+        padding: 16px;
+        padding-top: 14px;
+        spacing: 2px;
+        HorizontalLayout {
+            height: 28px;
+            padding-left: 4px;
+            padding-right: 4px;
+            Text {
+                text: root.title;
+                color: Theme.primary-text;
+                font-size: 14px;
+                font-weight: 600;
+                vertical-alignment: center;
+            }
+
+            Rectangle {
+                horizontal-stretch: 1;
+            }
+
+            Text {
+                text: root.selected != "" ? "再次点击取消筛选" : root.hint;
+                color: Theme.muted-text;
+                font-size: 11px;
+                vertical-alignment: center;
+            }
+        }
+
+        for row[index] in root.rows: RankRow {
+            entry: row;
+            index: index;
+            show-avatar: root.show-avatar;
+            selected: root.selected != "" && row.key == root.selected;
+            dimmed: root.selected != "" && row.key != root.selected;
+            toggle => { root.toggle(row.key == root.selected ? "" : row.key); }
+        }
+        if root.rows.length == 0: Text {
+            height: 64px;
+            text: "这段时间没有用量";
+            color: Theme.muted-text;
+            font-size: 12px;
+            horizontal-alignment: center;
+            vertical-alignment: center;
+        }
+        Rectangle {
+            vertical-stretch: 1;
+        }
+    }
+}

@@ -2,9 +2,9 @@ use std::{path::Path, time::Duration};
 
 use rusqlite::{Connection, OpenFlags, Result, params};
 
-use crate::credentials::Secret;
+use crate::{credentials::Secret, usage::TokenUsage};
 
-const SCHEMA_VERSION: i64 = 13;
+const SCHEMA_VERSION: i64 = 14;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ProviderKind {
@@ -142,6 +142,9 @@ pub struct RequestRecord {
     pub error_code: Option<String>,
     // Set only when a connect error before sending caused one explicit fallback.
     pub fallback_from: Option<String>,
+    // Counts from the upstream's terminal response; never its content.
+    pub usage: Option<TokenUsage>,
+    pub response_id: Option<String>,
 }
 
 pub struct Store {
@@ -176,7 +179,7 @@ impl Store {
     fn open_compatible(path: &Path, flags: OpenFlags) -> Result<Self> {
         let connection = Connection::open_with_flags(path, flags)?;
         let version: i64 = connection.query_row("PRAGMA user_version", [], |row| row.get(0))?;
-        if !matches!(version, 8 | 9 | 10 | 11 | 12 | SCHEMA_VERSION) {
+        if !matches!(version, 8 | 9 | 10 | 11 | 12 | 13 | SCHEMA_VERSION) {
             return Err(rusqlite::Error::InvalidQuery);
         }
         connection.prepare("SELECT settings_config FROM providers LIMIT 0")?;
@@ -413,10 +416,59 @@ impl Store {
             )?;
         }
         if version < 13 {
+            // Routed usage starts with this version; earlier routed Codex sessions
+            // may still be imported from their logs.
+            connection.execute_batch(
+                "BEGIN IMMEDIATE;
+                 CREATE TABLE IF NOT EXISTS usage_records (
+                    id TEXT PRIMARY KEY NOT NULL,
+                    source TEXT NOT NULL CHECK (source IN ('router', 'codex_log')),
+                    started_at_ms INTEGER NOT NULL,
+                    provider_id TEXT,
+                    codex_provider TEXT,
+                    public_model TEXT,
+                    model TEXT NOT NULL,
+                    input_tokens INTEGER NOT NULL,
+                    cached_input_tokens INTEGER NOT NULL,
+                    cache_write_tokens INTEGER NOT NULL,
+                    output_tokens INTEGER NOT NULL,
+                    reasoning_tokens INTEGER NOT NULL,
+                    duration_ms INTEGER,
+                    first_event_ms INTEGER,
+                    response_id TEXT,
+                    session_id TEXT
+                 );
+                 CREATE INDEX IF NOT EXISTS usage_records_time ON usage_records(started_at_ms);
+                 CREATE INDEX IF NOT EXISTS usage_records_response
+                    ON usage_records(response_id) WHERE response_id IS NOT NULL;
+                 CREATE TABLE IF NOT EXISTS usage_log_files (
+                    path TEXT PRIMARY KEY NOT NULL,
+                    size INTEGER NOT NULL,
+                    modified_ms INTEGER NOT NULL,
+                    read_offset INTEGER NOT NULL,
+                    state TEXT NOT NULL
+                 );
+                 CREATE TABLE IF NOT EXISTS model_prices (
+                    provider_id TEXT NOT NULL DEFAULT '',
+                    model TEXT NOT NULL,
+                    currency TEXT NOT NULL CHECK (currency IN ('USD', 'CNY')),
+                    input_micros INTEGER NOT NULL,
+                    cached_input_micros INTEGER NOT NULL,
+                    output_micros INTEGER NOT NULL,
+                    updated_at_ms INTEGER NOT NULL,
+                    PRIMARY KEY (provider_id, model)
+                 );
+                 INSERT OR IGNORE INTO app_settings (key, value)
+                    VALUES ('usage_router_since_ms', CAST(CAST(unixepoch('subsec') * 1000 AS INTEGER) AS TEXT));
+                 PRAGMA user_version = 13;
+                 COMMIT;",
+            )?;
+        }
+        if version < 14 {
             connection.execute_batch(
                 "BEGIN IMMEDIATE;
                  ALTER TABLE published_models ADD COLUMN request_overrides TEXT NOT NULL DEFAULT '{}';
-                 PRAGMA user_version = 13;
+                 PRAGMA user_version = 14;
                  COMMIT;",
             )?;
         }
@@ -453,7 +505,8 @@ impl Store {
     }
 
     pub fn put_request(&self, record: &RequestRecord) -> Result<()> {
-        self.connection.execute(
+        let transaction = self.connection.unchecked_transaction()?;
+        transaction.execute(
             "INSERT INTO request_records
              (id, started_at_ms, public_model, provider_id, upstream_model, generation,
               http_status, headers_ms, first_event_ms, duration_ms, status, error_code, fallback_from)
@@ -474,7 +527,10 @@ impl Store {
                 record.fallback_from
             ],
         )?;
-        Ok(())
+        if let Some(usage) = record.usage.filter(|usage| !usage.is_empty()) {
+            Self::put_routed_usage(&transaction, record, usage)?;
+        }
+        transaction.commit()
     }
 
     /// Clears persisted history, including records outside the UI's recent window.
@@ -485,9 +541,13 @@ impl Store {
 
     pub fn requests(&self, limit: usize) -> Result<Vec<RequestRecord>> {
         let mut statement = self.connection.prepare(
-            "SELECT id, started_at_ms, public_model, provider_id, upstream_model, generation,
-                    http_status, headers_ms, first_event_ms, duration_ms, status, error_code, fallback_from
-             FROM request_records ORDER BY started_at_ms DESC, rowid DESC LIMIT ?1",
+            "SELECT r.id, r.started_at_ms, r.public_model, r.provider_id, r.upstream_model, r.generation,
+                    r.http_status, r.headers_ms, r.first_event_ms, r.duration_ms, r.status, r.error_code,
+                    r.fallback_from, u.input_tokens, u.cached_input_tokens, u.cache_write_tokens,
+                    u.output_tokens, u.reasoning_tokens, u.response_id
+             FROM request_records r
+             LEFT JOIN usage_records u ON u.id = r.id AND u.source = 'router'
+             ORDER BY r.started_at_ms DESC, r.rowid DESC LIMIT ?1",
         )?;
         statement
             .query_map([limit.min(1000) as i64], |row| {
@@ -512,6 +572,8 @@ impl Store {
                     },
                     error_code: row.get(11)?,
                     fallback_from: row.get(12)?,
+                    usage: usage_columns(row, 13)?,
+                    response_id: row.get(18)?,
                 })
             })?
             .collect()
@@ -1246,6 +1308,14 @@ fn validate_api_key(key: &str) -> Result<()> {
     Ok(())
 }
 
+mod usage;
+
+use usage::usage_columns;
+pub use usage::{
+    Currency, PriceRecord, UsageBucket, UsageFact, UsageFilter, UsageLogFile, UsageRecord,
+    UsageSource,
+};
+
 fn settings_with_key(settings: &str, key: &Secret) -> Result<String> {
     validate_api_key(key.expose())?;
     let mut settings = provider_settings(settings)?;
@@ -1265,7 +1335,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn v12_migration_keeps_models_and_initializes_empty_request_customization() {
+    fn v13_migration_keeps_models_and_initializes_empty_request_customization() {
         let path = std::env::temp_dir().join(format!(
             "switchx-override-migration-{}.sqlite",
             crate::id::new_id().unwrap()
@@ -1284,7 +1354,7 @@ mod tests {
             request_overrides: Default::default(),
         };
         store.put_model(&model).unwrap();
-        store.connection.execute_batch("ALTER TABLE published_models DROP COLUMN request_overrides; PRAGMA user_version = 12;").unwrap();
+        store.connection.execute_batch("ALTER TABLE published_models DROP COLUMN request_overrides; PRAGMA user_version = 13;").unwrap();
         drop(store);
         let store = Store::open(&path).unwrap();
         assert_eq!(store.models().unwrap(), [model]);
@@ -2811,6 +2881,8 @@ mod tests {
             status: RequestStatus::Completed,
             error_code: None,
             fallback_from: None,
+            usage: None,
+            response_id: None,
         };
         store.put_request(&record).unwrap();
         record.id = "second".into();
@@ -2827,6 +2899,117 @@ mod tests {
         assert_eq!(rows[1].id, "first");
         assert_eq!(store.request_time(rows[1].started_at_ms).unwrap().len(), 19);
         assert!(store.requests(0).unwrap().is_empty());
+        drop(store);
+        std::fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    fn routed_usage_round_trips_and_replaces_the_same_logged_response() {
+        let store = Store::open(Path::new(":memory:")).unwrap();
+        let since: String = store
+            .connection
+            .query_row(
+                "SELECT value FROM app_settings WHERE key = 'usage_router_since_ms'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert!(since.parse::<i64>().unwrap() > 1_700_000_000_000);
+        store
+            .connection
+            .execute_batch(
+                "INSERT INTO usage_records (id, source, started_at_ms, model, input_tokens,
+                    cached_input_tokens, cache_write_tokens, output_tokens, reasoning_tokens, response_id)
+                 VALUES ('codex:logged', 'codex_log', 1, 'model', 5, 0, 0, 1, 0, 'resp_same'),
+                        ('codex:other', 'codex_log', 1, 'model', 5, 0, 0, 1, 0, 'resp_other');",
+            )
+            .unwrap();
+        let usage = TokenUsage {
+            input: 1_000,
+            cached_input: 800,
+            cache_write: 0,
+            output: 50,
+            reasoning: 10,
+        };
+        let record = RequestRecord {
+            id: "routed".into(),
+            started_at_ms: 2,
+            public_model: Some("显示名称".into()),
+            provider_id: Some("one".into()),
+            upstream_model: Some("actual".into()),
+            generation: "generation".into(),
+            http_status: Some(200),
+            headers_ms: Some(10),
+            first_event_ms: Some(20),
+            duration_ms: 500,
+            status: RequestStatus::Completed,
+            error_code: None,
+            fallback_from: None,
+            usage: Some(usage),
+            response_id: Some("resp_same".into()),
+        };
+        store.put_request(&record).unwrap();
+        let empty = RequestRecord {
+            id: "no-usage".into(),
+            started_at_ms: 1,
+            usage: Some(TokenUsage::default()),
+            response_id: None,
+            ..record.clone()
+        };
+        store.put_request(&empty).unwrap();
+        let rows = store.requests(10).unwrap();
+        assert_eq!(rows[0], record);
+        assert_eq!(
+            (rows[1].usage, rows[1].response_id.as_deref()),
+            (None, None)
+        );
+        let ids = store
+            .connection
+            .prepare("SELECT id || ':' || source || ':' || model FROM usage_records ORDER BY id")
+            .unwrap()
+            .query_map([], |row| row.get::<_, String>(0))
+            .unwrap()
+            .collect::<Result<Vec<_>>>()
+            .unwrap();
+        assert_eq!(ids, ["codex:other:codex_log:model", "routed:router:actual"]);
+    }
+
+    #[test]
+    fn v12_migration_adds_usage_tables_and_keeps_requests() {
+        let path = std::env::temp_dir().join(format!(
+            "switchx-usage-migration-{}.sqlite",
+            crate::id::new_id().unwrap()
+        ));
+        let store = Store::open(&path).unwrap();
+        store
+            .connection
+            .execute_batch(
+                "INSERT INTO request_records (id, started_at_ms, generation, duration_ms, status)
+                    VALUES ('v12-request', 1, 'old-generation', 3, 'completed');
+                 DROP TABLE usage_records; DROP TABLE usage_log_files; DROP TABLE model_prices;
+                 DELETE FROM app_settings WHERE key = 'usage_router_since_ms';
+                 ALTER TABLE published_models DROP COLUMN request_overrides;
+                 PRAGMA user_version = 12;",
+            )
+            .unwrap();
+        drop(store);
+        Store::open_credentials_read_only(&path).unwrap();
+        let store = Store::open(&path).unwrap();
+        let old = store.requests(1).unwrap().remove(0);
+        assert_eq!((old.id.as_str(), old.usage), ("v12-request", None));
+        for table in ["usage_records", "usage_log_files", "model_prices"] {
+            store
+                .connection
+                .prepare(&format!("SELECT * FROM {table} LIMIT 0"))
+                .unwrap();
+        }
+        assert_eq!(
+            store
+                .connection
+                .query_row("PRAGMA user_version", [], |row| row.get::<_, i64>(0))
+                .unwrap(),
+            SCHEMA_VERSION
+        );
         drop(store);
         std::fs::remove_file(path).unwrap();
     }

@@ -1,0 +1,236 @@
+import { Theme } from "../tokens.slint";
+
+// Number formats matching the Rust side, so animated figures land on the same text.
+export global UsageInk {
+    public pure function compact(value: float) -> string {
+        return value >= 1000000000 ? (value / 1000000000).to-fixed(value >= 100000000000 ? 0 : 1) + "B"
+            : value >= 1000000 ? (value / 1000000).to-fixed(value >= 100000000 ? 0 : 1) + "M"
+            : value >= 1000 ? (value / 1000).to-fixed(value >= 100000 ? 0 : 1) + "K"
+            : round(value) + "";
+    }
+    public pure function pad3(value: float) -> string {
+        return value < 10 ? "00" + value : value < 100 ? "0" + value : "" + value;
+    }
+    public pure function grouped(value: float) -> string {
+        return value < 1000 ? round(value) + ""
+            : value < 1000000 ? floor(round(value) / 1000) + "," + UsageInk.pad3(mod(round(value), 1000))
+            : floor(round(value) / 1000000) + "," + UsageInk.pad3(mod(floor(round(value) / 1000), 1000)) + "," + UsageInk.pad3(mod(round(value), 1000));
+    }
+}
+
+// A figure that rises from zero on entry and glides between refreshes.
+// Formats: 0 compact tokens, 1 grouped count, 2 percent of a 0–1 ratio.
+export component UsageFigure inherits Text {
+    in property <float> value;
+    in property <int> format;
+    in property <int> order;
+    private property <bool> motion: Theme.animations-enabled && !Theme.system-reduced-motion;
+    private property <bool> entered: !root.motion;
+    private property <float> shown: root.entered ? max(0, root.value) : 0;
+    animate shown {
+        duration: root.motion ? 900ms : 0ms;
+        easing: cubic-bezier(0.22, 1, 0.36, 1);
+    }
+    Timer {
+        interval: 80ms + 70ms * root.order;
+        running: !root.entered;
+        triggered => { root.entered = true; }
+    }
+
+    text: root.value < 0 ? "—" : root.format == 0 ? UsageInk.compact(root.shown) : root.format == 1 ? UsageInk.grouped(root.shown) : (root.shown * 100).to-fixed(1) + "%";
+    color: Theme.primary-text;
+    vertical-alignment: center;
+    accessible-role: text;
+}
+
+// Cache hit rate as an arc that sweeps clockwise from twelve o'clock.
+export component CacheRing inherits Rectangle {
+    in property <float> rate;
+    in property <int> order;
+    private property <bool> motion: Theme.animations-enabled && !Theme.system-reduced-motion;
+    private property <bool> entered: !root.motion;
+    private property <float> shown: root.entered && root.rate > 0 ? min(root.rate, 0.9999) : 0;
+    animate shown {
+        duration: root.motion ? 1100ms : 0ms;
+        easing: cubic-bezier(0.22, 1, 0.36, 1);
+    }
+    Timer {
+        interval: 120ms + 70ms * root.order;
+        running: !root.entered;
+        triggered => { root.entered = true; }
+    }
+
+    width: 78px;
+    height: 78px;
+    accessible-role: text;
+    accessible-label: root.rate < 0 ? "缓存命中率：无数据" : "缓存命中率 " + (root.rate * 100).to-fixed(1) + "%";
+    Rectangle {
+        border-radius: self.width / 2;
+        border-width: 7px;
+        border-color: Theme.usage-cache.with-alpha(Theme.dark ? 0.7 : 0.6);
+        animate border-color { duration: Theme.page-motion; }
+    }
+
+    Path {
+        width: parent.width;
+        height: parent.height;
+        viewbox-width: 78;
+        viewbox-height: 78;
+        fill: transparent;
+        stroke: Theme.usage-input;
+        stroke-width: 7px;
+        stroke-line-cap: round;
+        visible: root.shown > 0.002;
+        commands: "M 39 3.5 A 35.5 35.5 0 " + (root.shown > 0.5 ? 1 : 0) + " 1 " + (39 + 35.5 * sin(root.shown * 360deg)) + " " + (39 - 35.5 * cos(root.shown * 360deg));
+    }
+
+    VerticalLayout {
+        alignment: center;
+        spacing: 1px;
+        Text {
+            text: root.rate < 0 ? "—" : (root.shown * 100).to-fixed(root.rate >= 0.995 ? 1 : 0) + "%";
+            color: Theme.primary-text;
+            font-size: 15px;
+            font-weight: 600;
+            horizontal-alignment: center;
+        }
+
+        Text {
+            text: "缓存命中";
+            color: Theme.muted-text;
+            font-size: 10px;
+            horizontal-alignment: center;
+        }
+    }
+}
+
+// Fresh input, output, and cache reads as one ribbon whose segments grow left to right.
+export component CompositionRibbon inherits Rectangle {
+    in property <float> fresh;
+    in property <float> output;
+    in property <float> cache;
+    private property <bool> motion: Theme.animations-enabled && !Theme.system-reduced-motion;
+    private property <bool> entered: !root.motion;
+    private property <float> grow: root.entered ? 1 : 0;
+    animate grow {
+        duration: root.motion ? 820ms : 0ms;
+        easing: cubic-bezier(0.22, 1, 0.36, 1);
+    }
+    Timer {
+        interval: 180ms;
+        running: !root.entered;
+        triggered => { root.entered = true; }
+    }
+
+    // Animate the shares, not the derived widths, so refreshes and entry compose.
+    private property <float> fresh-share: root.fresh;
+    private property <float> output-share: root.output;
+    private property <float> cache-share: root.cache;
+    animate fresh-share, output-share, cache-share {
+        duration: Theme.page-motion * 2;
+        easing: cubic-bezier(0.22, 1, 0.36, 1);
+    }
+    private property <length> gap: 2px;
+    private property <length> usable: max(0px, root.width - 2 * root.gap) * root.grow;
+    private property <length> fresh-width: root.usable * root.fresh-share;
+    private property <length> output-width: root.usable * root.output-share;
+    private property <length> cache-width: root.usable * root.cache-share;
+    height: 8px;
+    border-radius: 4px;
+    clip: true;
+    background: Theme.raised;
+    accessible-role: none;
+    Rectangle {
+        x: 0px;
+        width: root.fresh-width;
+        background: Theme.usage-input;
+    }
+
+    Rectangle {
+        x: root.fresh-width + (root.fresh-width > 0px ? root.gap : 0px);
+        width: root.output-width;
+        background: Theme.usage-output;
+    }
+
+    Rectangle {
+        x: root.fresh-width + root.output-width + (root.fresh-width > 0px ? root.gap : 0px) + (root.output-width > 0px ? root.gap : 0px);
+        width: root.cache-width;
+        background: Theme.usage-cache;
+    }
+}
+
+export component LegendKey inherits HorizontalLayout {
+    in property <color> ink;
+    in property <string> label;
+    in property <string> value;
+    spacing: 6px;
+    alignment: start;
+    horizontal-stretch: 0;
+    Rectangle {
+        y: (parent.height - self.height) / 2;
+        width: 9px;
+        height: 9px;
+        border-radius: 2px;
+        background: root.ink;
+    }
+
+    Text {
+        text: root.label;
+        color: Theme.muted-text;
+        font-size: 11px;
+        vertical-alignment: center;
+    }
+
+    if root.value != "": Text {
+        text: root.value;
+        color: Theme.primary-text;
+        font-size: 11px;
+        font-weight: 500;
+        vertical-alignment: center;
+    }
+}
+
+// A provider icon, or a lettered tile for connections without one.
+export component UsageAvatar inherits Rectangle {
+    in property <image> icon;
+    in property <bool> has-icon;
+    in property <bool> monochrome;
+    in property <string> letter;
+    width: 22px;
+    height: 22px;
+    border-radius: 6px;
+    background: root.has-icon ? Theme.raised : Theme.brand-surface;
+    accessible-role: none;
+    if root.has-icon: Image {
+        x: 4px;
+        y: 4px;
+        width: parent.width - 8px;
+        height: parent.height - 8px;
+        source: root.icon;
+        image-fit: contain;
+        colorize: root.monochrome ? Theme.primary-text : transparent;
+    }
+    if !root.has-icon: Text {
+        text: root.letter;
+        color: Theme.brand;
+        font-size: 11px;
+        font-weight: 600;
+        horizontal-alignment: center;
+        vertical-alignment: center;
+    }
+}
+
+// A placeholder bar with a light sweep while the first report loads.
+export component UsageShimmer inherits Rectangle {
+    in property <bool> active: true;
+    private property <float> phase: Theme.fast > 0ms && root.active ? mod(animation-tick(), 1400ms) / 1400ms : 0;
+    border-radius: 4px;
+    background: Theme.raised;
+    clip: true;
+    accessible-role: none;
+    if root.active && Theme.fast > 0ms: Rectangle {
+        width: max(40px, parent.width * 0.35);
+        x: -self.width + (parent.width + self.width) * root.phase;
+        background: @linear-gradient(90deg, Theme.brand.with-alpha(0) 0%, Theme.brand.with-alpha(Theme.dark ? 0.14 : 0.1) 50%, Theme.brand.with-alpha(0) 100%);
+    }
+}

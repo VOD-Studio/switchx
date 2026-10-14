@@ -1,0 +1,111 @@
+import { Theme } from "../tokens.slint";
+import { UsageHeatCell } from "../view-models.slint";
+
+component HeatCell inherits Rectangle {
+    in property <float> level;
+    in property <int> wave;
+    in property <bool> hovered;
+    private property <bool> motion: Theme.animations-enabled && !Theme.system-reduced-motion;
+    private property <bool> entered: !root.motion;
+    private property <float> reveal: root.entered ? 1 : 0;
+    animate reveal {
+        duration: root.motion ? 420ms : 0ms;
+        delay: root.motion ? root.wave * 11ms : 0ms;
+        easing: ease-out;
+    }
+    Timer {
+        interval: 32ms;
+        running: !root.entered;
+        triggered => { root.entered = true; }
+    }
+
+    border-radius: 3px;
+    // One hue, light to dark: magnitude never needs a second color.
+    background: root.level <= 0 ? Theme.raised : Theme.usage-input.with-alpha(0.14 + 0.86 * root.level);
+    opacity: root.reveal;
+    border-width: root.hovered ? 1.5px : 0px;
+    border-color: Theme.primary-text.with-alpha(0.6);
+    animate background { duration: Theme.page-motion * 2; }
+    accessible-role: none;
+}
+
+// Tokens by local weekday and hour; cells fade in along a diagonal wave.
+export component UsageHeat inherits Rectangle {
+    in property <[UsageHeatCell]> cells;
+    in property <string> caption;
+    private property <length> label-width: 22px;
+    private property <length> gap: 3px;
+    private property <length> cell: max(6px, (root.width - 40px - root.label-width - 23 * root.gap) / 24);
+    private property <length> cell-height: min(16px, root.cell);
+    private property <length> grid-y: 54px;
+    private property <int> hovered: grid-touch.has-hover ? min(6, max(0, floor(grid-touch.mouse-y / (root.cell-height + root.gap)))) * 24 + min(23, max(0, floor(grid-touch.mouse-x / (root.cell + root.gap)))) : -1;
+    height: root.grid-y + 7 * (root.cell-height + root.gap) + 34px;
+    border-radius: 14px;
+    border-width: 1px;
+    border-color: Theme.border;
+    background: Theme.panel;
+    animate background, border-color { duration: Theme.page-motion; }
+
+    HorizontalLayout {
+        x: 20px;
+        y: 14px;
+        width: parent.width - 40px;
+        height: 28px;
+        Text {
+            text: "活跃时段";
+            color: Theme.primary-text;
+            font-size: 14px;
+            font-weight: 600;
+            vertical-alignment: center;
+        }
+
+        Rectangle {
+            horizontal-stretch: 1;
+        }
+
+        Text {
+            text: root.hovered >= 0 && root.hovered < root.cells.length ? root.cells[root.hovered].tip : root.caption;
+            color: root.hovered >= 0 ? Theme.primary-text : Theme.muted-text;
+            font-size: 11px;
+            vertical-alignment: center;
+            animate color { duration: Theme.fast; }
+        }
+    }
+
+    for day[row] in ["一", "二", "三", "四", "五", "六", "日"]: Text {
+        x: 20px;
+        y: root.grid-y + row * (root.cell-height + root.gap);
+        width: root.label-width - 6px;
+        height: root.cell-height;
+        text: day;
+        color: Theme.muted-text;
+        font-size: 10px;
+        vertical-alignment: center;
+    }
+    for hour in [0, 6, 12, 18, 23]: Text {
+        x: 20px + root.label-width + hour * (root.cell + root.gap) + root.cell / 2 - 12px;
+        y: root.grid-y + 7 * (root.cell-height + root.gap) + 4px;
+        width: 24px;
+        text: hour;
+        color: Theme.muted-text;
+        font-size: 10px;
+        horizontal-alignment: center;
+    }
+
+    grid := Rectangle {
+        x: 20px + root.label-width;
+        y: root.grid-y;
+        width: 24 * root.cell + 23 * root.gap;
+        height: 7 * root.cell-height + 6 * root.gap;
+        for cell[index] in root.cells: HeatCell {
+            x: mod(index, 24) * (root.cell + root.gap);
+            y: floor(index / 24) * (root.cell-height + root.gap);
+            width: root.cell;
+            height: root.cell-height;
+            level: cell.level;
+            wave: mod(index, 24) + floor(index / 24) * 2;
+            hovered: index == root.hovered;
+        }
+        grid-touch := TouchArea { }
+    }
+}

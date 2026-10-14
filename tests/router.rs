@@ -76,7 +76,7 @@ async fn records_real_terminal_signals_and_safe_errors_without_changing_stream_b
             "complete",
             "text/event-stream; charset=utf-8",
             200,
-            "\u{feff}: keepalive\r\n\r\ndata: {\"type\":\"response.output_text.delta\",\"delta\":\"私密正文\"}\r\n\r\nevent: response.completed\r\ndata: {\"type\":\"response.completed\",\r\ndata: \"response\":{\"status\":\"completed\"}}\r\n\r\n",
+            "\u{feff}: keepalive\r\n\r\ndata: {\"type\":\"response.output_text.delta\",\"delta\":\"私密正文\"}\r\n\r\nevent: response.completed\r\ndata: {\"type\":\"response.completed\",\r\ndata: \"response\":{\"id\":\"resp_routed\",\"status\":\"completed\",\"usage\":{\"input_tokens\":1200,\"input_tokens_details\":{\"cached_tokens\":1000},\"output_tokens\":64,\"output_tokens_details\":{\"reasoning_tokens\":16}}}}\r\n\r\n",
             RequestStatus::Completed,
             None,
         ),
@@ -189,6 +189,20 @@ async fn records_real_terminal_signals_and_safe_errors_without_changing_stream_b
             case.1.starts_with("text/event-stream")
         );
         assert_eq!(records.store().requests(100).unwrap().len(), index + 1);
+        let usage = record.usage.map(|usage| {
+            (
+                usage.input,
+                usage.cached_input,
+                usage.output,
+                usage.reasoning,
+            )
+        });
+        if case.0 == "complete" {
+            assert_eq!(usage, Some((1_200, 1_000, 64, 16)));
+            assert_eq!(record.response_id.as_deref(), Some("resp_routed"));
+        } else {
+            assert_eq!(usage, None, "{}", case.0);
+        }
     }
     let rejected = request(&client, address, json!({"model":"sx-unknown"}))
         .send()

@@ -296,6 +296,8 @@ mod tests {
             status: RequestStatus::Completed,
             error_code: None,
             fallback_from: None,
+            usage: None,
+            response_id: None,
         };
         assert!(!valid_records(std::slice::from_ref(&record), &model, 2));
         assert!(valid_records(&[record.clone(), record.clone()], &model, 2));

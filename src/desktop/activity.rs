@@ -48,6 +48,29 @@ pub(super) fn request_row(record: app::RequestView, stamp: i32) -> RequestRow {
         generation: record.generation.into(),
         error: record.error.into(),
         fallback: record.fallback.into(),
+        tokens: record
+            .usage
+            .filter(|usage| !usage.is_empty())
+            .map(|usage| format!("{} Token", app::format_tokens(usage.total())))
+            .unwrap_or_default()
+            .into(),
+        token_detail: record
+            .usage
+            .filter(|usage| !usage.is_empty())
+            .map(|usage| {
+                let mut detail = format!(
+                    "输入 {}（缓存 {}）· 输出 {}",
+                    app::format_tokens(usage.input),
+                    app::format_tokens(usage.cached_input),
+                    app::format_tokens(usage.output)
+                );
+                if usage.reasoning > 0 {
+                    detail += &format!("（推理 {}）", app::format_tokens(usage.reasoning));
+                }
+                detail
+            })
+            .unwrap_or_default()
+            .into(),
         stamp,
     }
 }
@@ -389,6 +412,13 @@ mod tests {
             status,
             error: String::new(),
             fallback: String::new(),
+            usage: Some(switchx::usage::TokenUsage {
+                input: 12_000,
+                cached_input: 9_000,
+                cache_write: 0,
+                output: 300,
+                reasoning: 0,
+            }),
         };
         let done = RequestStatus::Completed;
         let ids = |app: &AppWindow| {
@@ -410,6 +440,10 @@ mod tests {
             ("09:47:47", "1.6 s", "200")
         );
         assert_eq!((first.headers_ms, first.first_event_ms), (120, -1));
+        assert_eq!(
+            (first.tokens.as_str(), first.token_detail.as_str()),
+            ("12.3K Token", "输入 12.0K（缓存 9.0K）· 输出 300")
+        );
         let model = app.get_requests();
 
         show_requests(

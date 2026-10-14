@@ -23,6 +23,14 @@ import {
     RequestStats,
     RequestBar,
     ConnectionModelRow,
+    UsageSummary,
+    UsagePoint,
+    UsageScale,
+    UsageShareRow,
+    UsageHeatCell,
+    UsageDetailRow,
+    UsageSyncState,
+    UsagePriceRow,
 } from "view-models.slint";
 import { AccountsPage } from "pages/accounts.slint";
 import { ProviderEditor } from "editors/provider-editor.slint";
@@ -40,6 +48,8 @@ import { SubscriptionEditor } from "editors/subscription-editor.slint";
 import { CommonConfigEditor } from "editors/common-config-editor.slint";
 import { RoutingPage } from "pages/routing.slint";
 import { ActivityPage } from "pages/activity.slint";
+import { UsagePage } from "pages/usage.slint";
+import { UsageSourcesSheet, UsagePricesSheet } from "usage/usage-sheets.slint";
 import { ClearHistoryConfirm } from "pages/activity-clear.slint";
 import { ConfigPage } from "pages/config.slint";
 import { ConnectionStatusDialog } from "connection-status.slint";
@@ -66,6 +76,14 @@ export {
     RequestStats,
     RequestBar,
     ConnectionModelRow,
+    UsageSummary,
+    UsagePoint,
+    UsageScale,
+    UsageShareRow,
+    UsageHeatCell,
+    UsageDetailRow,
+    UsageSyncState,
+    UsagePriceRow,
 } from "view-models.slint";
 export { SyntaxHighlighting, CodeSpan } from "code-editor.slint";
 
@@ -270,6 +288,45 @@ export component AppWindow inherits Window {
     in-out property <bool> request-erasing;
     in-out property <bool> request-cleared;
     in-out property <string> request-clear-error;
+    // Usage page: Rust formats every figure; the page animates between reports.
+    in-out property <UsageSummary> usage-summary: { cache-rate: -1 };
+    in-out property <[UsagePoint]> usage-points: [];
+    in-out property <UsageScale> usage-scale;
+    in-out property <[UsageShareRow]> usage-connections: [];
+    in-out property <[UsageShareRow]> usage-models: [];
+    in-out property <[UsageHeatCell]> usage-heat: [];
+    in-out property <string> usage-heat-caption;
+    in-out property <[UsageDetailRow]> usage-rows: [];
+    in-out property <string> usage-rows-summary;
+    in-out property <bool> usage-rows-more: false;
+    in-out property <int> usage-rows-arrival: 0;
+    in-out property <UsageSyncState> usage-sync: { enabled: true, text: "尚未同步" };
+    in-out property <bool> usage-loading: false;
+    in-out property <bool> usage-loaded: false;
+    in-out property <string> usage-error;
+    in-out property <int> usage-period: 0;
+    in-out property <int> usage-metric: 0;
+    in-out property <string> usage-group-filter;
+    in-out property <string> usage-group-filter-label;
+    in-out property <string> usage-model-filter;
+    in-out property <string> usage-today;
+    in-out property <bool> usage-sources-open: false;
+    in-out property <bool> usage-prices-open: false;
+    in-out property <[UsagePriceRow]> usage-prices: [];
+    in-out property <string> usage-price-saving;
+    in-out property <string> usage-price-error;
+    callback usage-set-log-import(bool);
+    callback usage-sync-now();
+    callback usage-rebuild();
+    callback usage-save-price(string, string, string, string, string);
+    callback usage-delete-price(string);
+    callback usage-select-period(int);
+    callback usage-filter-group(string);
+    callback usage-filter-model(string);
+    callback usage-load-more();
+    callback usage-refresh();
+    callback usage-open-sources();
+    callback usage-open-prices();
     in-out property <bool> window-visible: true;
     in-out property <int> selected-model-count: 0;
     in-out property <int> selected-connection-count: 0;
@@ -352,6 +409,7 @@ export component AppWindow inherits Window {
         }
         if (root.active-page != 1) { root.connection-models-open = false; }
         if (root.active-page != 0) { root.model-editor-open = false; root.fallback-editor-open = false; }
+        if (root.active-page != 2) { root.usage-sources-open = false; root.usage-prices-open = false; }
     }
     changed subscription-editor-open => {
         if (!root.subscription-editor-open) {
@@ -599,9 +657,9 @@ export component AppWindow inherits Window {
         triggered => { root.departing-connection-form = 0; }
     }
 
-    property <bool> modal-open: root.request-clear-open || root.workspace-open || root.account-removing-id != "" || root.account-login-confirm-open || root.drawer-open || root.connection-picker-open || root.connection-models-open || root.xai-editor-open || root.editor-open || root.subscription-editor-open || root.common-config-editor-open || root.icon-picker-open || root.model-editor-open || root.fallback-editor-open || root.publish-drawer-open || root.direct-drawer-open || root.delete-account-confirm;
-    property <string> page-title: root.active-page == 0 ? "模型，随手可用。" : root.active-page == 1 ? "连接" : root.active-page == 3 ? "每次请求，有迹可循。" : root.active-page == 4 ? "让工作流更顺手。" : "设置";
-    property <string> page-subtitle: root.active-page == 0 ? "配好连接，整组模型随手可用。" : root.active-page == 1 ? "账号与上游，集中管理。" : root.active-page == 3 ? "查看模型、耗时与结果。" : root.active-page == 4 ? "MCP 与 Skills，独立于模型连接。" : "把工作空间调成你喜欢的样子。";
+    property <bool> modal-open: root.request-clear-open || root.usage-sources-open || root.usage-prices-open || root.workspace-open || root.account-removing-id != "" || root.account-login-confirm-open || root.drawer-open || root.connection-picker-open || root.connection-models-open || root.xai-editor-open || root.editor-open || root.subscription-editor-open || root.common-config-editor-open || root.icon-picker-open || root.model-editor-open || root.fallback-editor-open || root.publish-drawer-open || root.direct-drawer-open || root.delete-account-confirm;
+    property <string> page-title: root.active-page == 0 ? "模型，随手可用。" : root.active-page == 1 ? "连接" : root.active-page == 2 ? "用量，心中有数。" : root.active-page == 3 ? "每次请求，有迹可循。" : root.active-page == 4 ? "让工作流更顺手。" : "设置";
+    property <string> page-subtitle: root.active-page == 0 ? "配好连接，整组模型随手可用。" : root.active-page == 1 ? "账号与上游，集中管理。" : root.active-page == 2 ? "Token、缓存与估算费用，按连接和模型细看。" : root.active-page == 3 ? "查看模型、耗时与结果。" : root.active-page == 4 ? "MCP 与 Skills，独立于模型连接。" : "把工作空间调成你喜欢的样子。";
     animate background { duration: Theme.page-motion; }
     Timer {
         interval: 16ms;
@@ -618,7 +676,7 @@ export component AppWindow inherits Window {
                 spacing: 0px;
                 Rectangle {
                     // Measured from the first item so titlebar padding changes never animate.
-                    property <length> nav-offset: (root.active-page == 0 ? nav-workbench.y : root.active-page == 1 ? nav-connections.y : root.active-page == 3 ? nav-activity.y : root.active-page == 4 ? nav-toolbox.y : nav-settings.y) - nav-workbench.y;
+                    property <length> nav-offset: (root.active-page == 0 ? nav-workbench.y : root.active-page == 1 ? nav-connections.y : root.active-page == 2 ? nav-usage.y : root.active-page == 3 ? nav-activity.y : root.active-page == 4 ? nav-toolbox.y : nav-settings.y) - nav-workbench.y;
                     width: 180px;
                     background: Theme.sidebar;
                     animate background { duration: Theme.page-motion; }
@@ -707,6 +765,33 @@ export component AppWindow inherits Window {
                             left-aligned: true;
                             height: 40px;
                             clicked => { root.active-page = 3; }
+                        }
+
+                        nav-usage := Rectangle {
+                            height: 40px;
+                            QuietButton {
+                                width: parent.width;
+                                height: parent.height;
+                                text: "用量";
+                                icon: @image-url("../assets/ui/usage.svg");
+                                icon-color: Theme.muted-text;
+                                navigation: true;
+                                selected: root.active-page == 2;
+                                left-aligned: true;
+                                clicked => { root.active-page = 2; }
+                            }
+
+                            // Today's usage rides along the item without taking its clicks.
+                            Text {
+                                x: parent.width - self.width - 10px;
+                                height: parent.height;
+                                text: root.usage-today;
+                                color: Theme.muted-text;
+                                font-size: 10px;
+                                vertical-alignment: center;
+                                accessible-role: none;
+                                animate color { duration: Theme.fast; }
+                            }
                         }
 
                         Rectangle {
@@ -811,14 +896,14 @@ export component AppWindow inherits Window {
                         padding-bottom: 16px;
                         spacing: 18px;
                         HorizontalLayout {
-                            height: root.active-page == 1 || root.active-page == 3 ? 52px : 65px;
+                            height: root.active-page == 1 || root.active-page == 2 || root.active-page == 3 ? 52px : 65px;
                             spacing: 16px;
                             VerticalLayout {
                                 spacing: 7px;
                                 Text {
                                     text: root.page-title;
                                     color: Theme.primary-text;
-                                    font-size: root.active-page == 1 || root.active-page == 3 ? 24px : 28px;
+                                    font-size: root.active-page == 1 || root.active-page == 2 || root.active-page == 3 ? 24px : 28px;
                                     font-weight: 600;
                                 }
 
@@ -1113,6 +1198,36 @@ export component AppWindow inherits Window {
                                         }
                                     }
                                 }
+                                if root.active-page == 2: UsagePage {
+                                    summary: root.usage-summary;
+                                    points: root.usage-points;
+                                    scale: root.usage-scale;
+                                    connections: root.usage-connections;
+                                    models: root.usage-models;
+                                    heat: root.usage-heat;
+                                    heat-caption: root.usage-heat-caption;
+                                    rows: root.usage-rows;
+                                    rows-summary: root.usage-rows-summary;
+                                    rows-more: root.usage-rows-more;
+                                    rows-arrival: root.usage-rows-arrival;
+                                    sync: root.usage-sync;
+                                    loading: root.usage-loading;
+                                    loaded: root.usage-loaded;
+                                    error: root.usage-error;
+                                    live: root.window-visible;
+                                    group-filter: root.usage-group-filter;
+                                    group-filter-label: root.usage-group-filter-label;
+                                    model-filter: root.usage-model-filter;
+                                    period <=> root.usage-period;
+                                    metric <=> root.usage-metric;
+                                    select-period(index) => { root.usage-select-period(index); }
+                                    filter-group(key) => { root.usage-filter-group(key); }
+                                    filter-model(key) => { root.usage-filter-model(key); }
+                                    load-more => { root.usage-load-more(); }
+                                    refresh => { root.usage-refresh(); }
+                                    open-sources => { root.usage-open-sources(); }
+                                    open-prices => { root.usage-open-prices(); }
+                                }
                                 if root.active-page == 3: ActivityPage {
                                     requests: root.requests;
                                     stats: root.request-stats;
@@ -1233,6 +1348,36 @@ export component AppWindow inherits Window {
         configure => { root.workspace-open = false; root.active-page = 5; }
         switch-api => { root.workspace-open = false; root.subscription-action(4); }
         details => { root.workspace-open = false; root.drawer-open = true; }
+    }
+
+    Drawer {
+        open: root.usage-sources-open;
+        title: "数据来源";
+        subtitle: "路由记录实时计入，Codex 会话日志补齐其他用量。";
+        panel-width: 520px;
+        dismissed => { root.usage-sources-open = false; }
+        UsageSourcesSheet {
+            sync: root.usage-sync;
+            sessions-path: root.config-home == "" ? "未设置 Codex 配置目录" : root.config-home + "/sessions";
+            set-log-import(enabled) => { root.usage-set-log-import(enabled); }
+            sync-now => { root.usage-sync-now(); }
+            rebuild => { root.usage-rebuild(); }
+        }
+    }
+
+    Drawer {
+        open: root.usage-prices-open;
+        title: "定价";
+        subtitle: "按每百万 Token 填写，缓存输入留空时按输入价计算。订阅连接与原生登录显示等效 API 价格。";
+        panel-width: 640px;
+        dismissed => { root.usage-prices-open = false; }
+        UsagePricesSheet {
+            prices: root.usage-prices;
+            saving: root.usage-price-saving;
+            error: root.usage-price-error;
+            save(model, currency, input, cached, output) => { root.usage-save-price(model, currency, input, cached, output); }
+            clear(model) => { root.usage-delete-price(model); }
+        }
     }
 
     connection-drawer := Drawer {

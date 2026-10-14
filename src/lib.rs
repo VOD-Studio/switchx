@@ -19,4 +19,5 @@ pub mod router;
 pub mod storage;
 pub use switchx_ui as ui;
 pub mod upstream;
+pub mod usage;
 pub mod xai;

@@ -18,6 +18,8 @@ mod provider_editor;
 mod quota;
 mod rows;
 mod subscription_editor;
+mod usage;
+pub(crate) mod usage_view;
 mod workbench;
 mod worker;
 
@@ -97,6 +99,10 @@ pub fn run() -> Result<(), Box<dyn std::error::Error>> {
             }
         })?;
     }
+    let usage_service = usage::UsageService::start(app.as_weak());
+    usage::connect(&app, &usage_service);
+    // Read new session-log usage at launch; the usage thread repeats it each minute.
+    usage_service.sync(&app.get_config_home(), false);
     workbench::connect(&app, &sender);
     activity::connect(&app, &sender);
     provider_editor::connect(&app, &sender);
@@ -129,6 +135,7 @@ pub fn run() -> Result<(), Box<dyn std::error::Error>> {
         slint::CloseRequestResponse::HideWindow
     });
     let result = app.run();
+    usage_service.stop();
     #[cfg(target_os = "macos")]
     macos::clear_quit_handler();
     drop(app);

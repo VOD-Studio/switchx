@@ -28,6 +28,11 @@ export global Theme {
     out property <color> warning-surface: dark ? #3a3125 : #f8efdf;
     out property <color> error: dark ? #e7a19b : #ae534d;
     out property <color> scrim: dark ? #00000070 : #18221a30;
+    // Usage charts: billed input and output carry color; cheap cache reads recede.
+    // Validated for lightness, chroma, and color-vision separation in both themes.
+    out property <color> usage-input: dark ? #2a774a : #2f8552;
+    out property <color> usage-output: dark ? #c28428 : #d68a24;
+    out property <color> usage-cache: dark ? #4a524c : #cdd2cb;
     out property <color> code-key: dark ? #8cc8ff : #155d91;
     out property <color> code-string: dark ? #a9d69c : #326c2a;
     out property <color> code-number: dark ? #f0c987 : #83560b;
