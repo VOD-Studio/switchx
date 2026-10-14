@@ -337,6 +337,7 @@ impl Worker {
                     &options,
                     Some(&icon_id),
                     directory,
+                    None,
                 );
             }
             app::save_provider_with_mappings(
@@ -349,6 +350,7 @@ impl Worker {
                 &options,
                 Some(&icon_id),
                 &picked,
+                None,
             )
         });
         if result.is_ok() {

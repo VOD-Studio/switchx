@@ -63,6 +63,7 @@ fn new_api_connection_saves_the_edited_directory_atomically_without_readding_pre
         &CodexOptions::default(),
         None,
         &[edited.clone()],
+        None,
     )
     .unwrap();
     let store = fixture.store();
@@ -94,6 +95,7 @@ fn new_api_connection_saves_the_edited_directory_atomically_without_readding_pre
             &CodexOptions::default(),
             None,
             &[edited.clone()],
+            None,
         )
         .is_err()
     );
@@ -112,6 +114,7 @@ fn new_api_connection_saves_the_edited_directory_atomically_without_readding_pre
             &CodexOptions::default(),
             None,
             &[edited],
+            None,
         )
         .is_err()
     );

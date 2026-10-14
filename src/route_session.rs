@@ -1021,6 +1021,21 @@ fn selected_inputs(state_dir: &Path) -> Result<(Vec<ModelRecord>, Vec<ProviderRe
         .into_iter()
         .filter(|provider| required.contains(&provider.id))
         .collect();
+    // Each model's own customization layers over its connection's defaults.
+    for provider in &providers {
+        let defaults = store
+            .provider_request_overrides(&provider.id)
+            .map_err(|_| "无法读取连接的请求定制")?;
+        if defaults.is_empty() {
+            continue;
+        }
+        for model in models
+            .iter_mut()
+            .filter(|model| model.provider_id == provider.id)
+        {
+            model.request_overrides = defaults.layered(&model.request_overrides);
+        }
+    }
     for model in &models {
         let provider = providers
             .iter()
@@ -1503,6 +1518,115 @@ mod tests {
                 .filter_map(|mapping| mapping.fallback.as_ref())
                 .collect::<Vec<_>>(),
             [&destination("backup")]
+        );
+        drop(store);
+        std::fs::remove_dir_all(path).unwrap();
+    }
+
+    #[test]
+    fn published_routes_layer_model_customization_over_each_connection() {
+        use crate::request_overrides::RequestOverrides;
+        let path = std::env::temp_dir().join(format!(
+            "switchx-connection-overrides-{}",
+            crate::id::new_id().unwrap()
+        ));
+        let store = app::open_store(&path).unwrap();
+        for (id, user_agent) in [("primary", "primary-connection/1"), ("backup", "")] {
+            store
+                .put_api_provider(
+                    &ProviderRecord {
+                        kind: crate::storage::ProviderKind::ApiKey,
+                        account_binding: None,
+                        icon_id: None,
+                        id: id.into(),
+                        name: id.into(),
+                        base_url: "https://example.invalid/v1".into(),
+                        model_id: "model-a".into(),
+                        credential_ref: None,
+                    },
+                    &[],
+                    None,
+                    Some(&Secret::new(format!("synthetic-{id}-key"))),
+                    Some(
+                        &RequestOverrides::parse(
+                            user_agent,
+                            &format!(r#"{{"x-connection":"{id}"}}"#),
+                            r#"{"temperature":0.1}"#,
+                        )
+                        .unwrap(),
+                    ),
+                )
+                .unwrap();
+        }
+        let primary = ModelRecord {
+            request_overrides: RequestOverrides::parse("", "", r#"{"temperature":0.7}"#).unwrap(),
+            provider_id: "primary".into(),
+            public_id: "sx-first".into(),
+            display_name: "First".into(),
+            upstream_model: "model-a".into(),
+            metadata: catalog::mapping_metadata(
+                "model-a",
+                "Model A",
+                &catalog::MappingSettings {
+                    context_window: "128000",
+                    reasoning_levels: Some(""),
+                    default_reasoning: Some(""),
+                },
+                None,
+            )
+            .unwrap()
+            .to_string(),
+            enabled: true,
+            fallback_provider_id: Some("backup".into()),
+        };
+        store.put_model(&primary).unwrap();
+        store
+            .put_model(&ModelRecord {
+                request_overrides: RequestOverrides::parse("backup-model/2", "", "").unwrap(),
+                provider_id: "backup".into(),
+                public_id: "sx-backup".into(),
+                display_name: "Backup".into(),
+                enabled: false,
+                fallback_provider_id: None,
+                ..primary.clone()
+            })
+            .unwrap();
+        let (models, _) = selected_inputs(&path).unwrap();
+        let route = catalog::publish_saved(&models).unwrap().routes["First"].clone();
+        assert_eq!(
+            route.request_overrides,
+            RequestOverrides::parse(
+                "primary-connection/1",
+                r#"{"x-connection":"primary"}"#,
+                r#"{"temperature":0.7}"#,
+            )
+            .unwrap()
+        );
+        assert_eq!(
+            route.fallback_request_overrides,
+            RequestOverrides::parse(
+                "backup-model/2",
+                r#"{"x-connection":"backup"}"#,
+                r#"{"temperature":0.1}"#,
+            )
+            .unwrap()
+        );
+        // Saving the connection without a customization draft keeps its defaults.
+        let provider = store.provider("primary").unwrap().unwrap();
+        store
+            .put_api_provider(&provider, &[], None, None, None)
+            .unwrap();
+        assert_eq!(
+            store
+                .provider_request_overrides("primary")
+                .unwrap()
+                .user_agent(),
+            "primary-connection/1"
+        );
+        // Saved model rows keep only their own settings.
+        assert_eq!(
+            store.models().unwrap()[1].request_overrides,
+            primary.request_overrides
         );
         drop(store);
         std::fs::remove_dir_all(path).unwrap();

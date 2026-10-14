@@ -4,7 +4,7 @@ use rusqlite::{Connection, OpenFlags, Result, Transaction, TransactionBehavior, 
 
 use crate::{credentials::Secret, usage::TokenUsage};
 
-const SCHEMA_VERSION: i64 = 14;
+const SCHEMA_VERSION: i64 = 15;
 
 /// Usage, log import and price tables; every statement is safe to repeat.
 const USAGE_SCHEMA: &str = "CREATE TABLE IF NOT EXISTS usage_records (
@@ -221,7 +221,7 @@ impl Store {
     fn open_compatible(path: &Path, flags: OpenFlags) -> Result<Self> {
         let connection = Connection::open_with_flags(path, flags)?;
         let version: i64 = connection.query_row("PRAGMA user_version", [], |row| row.get(0))?;
-        if !matches!(version, 8 | 9 | 10 | 11 | 12 | 13 | SCHEMA_VERSION) {
+        if !matches!(version, 8 | 9 | 10 | 11 | 12 | 13 | 14 | SCHEMA_VERSION) {
             return Err(rusqlite::Error::InvalidQuery);
         }
         connection.prepare("SELECT settings_config FROM providers LIMIT 0")?;
@@ -482,6 +482,14 @@ impl Store {
             transaction.pragma_update(None, "user_version", 14)?;
             transaction.commit()?;
         }
+        if version < 15 {
+            connection.execute_batch(
+                "BEGIN IMMEDIATE;
+                 ALTER TABLE providers ADD COLUMN request_overrides TEXT NOT NULL DEFAULT '{}';
+                 PRAGMA user_version = 15;
+                 COMMIT;",
+            )?;
+        }
         Ok(Self { connection })
     }
 
@@ -606,7 +614,7 @@ impl Store {
         provider: &ProviderRecord,
         models: &[ModelRecord],
     ) -> Result<()> {
-        self.write_provider_with_models(provider, models, None, None, false)
+        self.write_provider_with_models(provider, models, None, None, false, None)
     }
 
     pub fn put_provider_with_models_and_options(
@@ -615,7 +623,7 @@ impl Store {
         models: &[ModelRecord],
         options: &str,
     ) -> Result<()> {
-        self.write_provider_with_models(provider, models, Some(options), None, false)
+        self.write_provider_with_models(provider, models, Some(options), None, false, None)
     }
 
     /// Store CC Switch-style API credentials alongside metadata and model edits.
@@ -627,7 +635,7 @@ impl Store {
         options: Option<&str>,
         key: &Secret,
     ) -> Result<()> {
-        self.write_provider_with_models(provider, models, options, Some(key), false)
+        self.write_provider_with_models(provider, models, options, Some(key), false, None)
     }
 
     /// Edit a saved API provider without reading and rewriting its existing key.
@@ -637,7 +645,43 @@ impl Store {
         models: &[ModelRecord],
         options: Option<&str>,
     ) -> Result<()> {
-        self.write_provider_with_models(provider, models, options, None, true)
+        self.write_provider_with_models(provider, models, options, None, true, None)
+    }
+
+    /// Save an API connection with its connection-wide request customization.
+    /// A missing key preserves the saved one; None keeps the saved customization.
+    pub fn put_api_provider(
+        &self,
+        provider: &ProviderRecord,
+        models: &[ModelRecord],
+        options: Option<&str>,
+        key: Option<&Secret>,
+        request_overrides: Option<&crate::request_overrides::RequestOverrides>,
+    ) -> Result<()> {
+        if provider.kind != ProviderKind::ApiKey {
+            return Err(rusqlite::Error::InvalidQuery);
+        }
+        self.write_provider_with_models(
+            provider,
+            models,
+            options,
+            key,
+            key.is_none(),
+            request_overrides,
+        )
+    }
+
+    /// Connection-wide defaults beneath each model's own request customization.
+    pub fn provider_request_overrides(
+        &self,
+        id: &str,
+    ) -> Result<crate::request_overrides::RequestOverrides> {
+        let saved: String = self.connection.query_row(
+            "SELECT request_overrides FROM providers WHERE id = ?1",
+            [id],
+            |row| row.get(0),
+        )?;
+        serde_json::from_str(&saved).map_err(|_| rusqlite::Error::InvalidQuery)
     }
 
     fn write_provider_with_models(
@@ -647,6 +691,7 @@ impl Store {
         options: Option<&str>,
         key: Option<&Secret>,
         require_existing_key: bool,
+        request_overrides: Option<&crate::request_overrides::RequestOverrides>,
     ) -> Result<()> {
         let binding = match (provider.kind, &provider.account_binding) {
             (ProviderKind::ApiKey, None) => None,
@@ -733,6 +778,17 @@ impl Store {
             transaction.execute(
                 "UPDATE providers SET codex_options = ?1 WHERE id = ?2",
                 params![options, provider.id],
+            )?;
+        }
+        if let Some(overrides) = request_overrides {
+            overrides
+                .validate()
+                .map_err(|_| rusqlite::Error::InvalidQuery)?;
+            let overrides =
+                serde_json::to_string(overrides).map_err(|_| rusqlite::Error::InvalidQuery)?;
+            transaction.execute(
+                "UPDATE providers SET request_overrides = ?1 WHERE id = ?2",
+                params![overrides, provider.id],
             )?;
         }
         if key.is_some() || require_existing_key {
@@ -1364,10 +1420,59 @@ mod tests {
             request_overrides: Default::default(),
         };
         store.put_model(&model).unwrap();
-        store.connection.execute_batch("ALTER TABLE published_models DROP COLUMN request_overrides; PRAGMA user_version = 13;").unwrap();
+        store.connection.execute_batch("ALTER TABLE providers DROP COLUMN request_overrides; ALTER TABLE published_models DROP COLUMN request_overrides; PRAGMA user_version = 13;").unwrap();
         drop(store);
         let store = Store::open(&path).unwrap();
         assert_eq!(store.models().unwrap(), [model]);
+        drop(store);
+        std::fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    fn v14_migration_initializes_empty_connection_request_customization() {
+        let path = std::env::temp_dir().join(format!(
+            "switchx-v14-migration-{}.sqlite",
+            crate::id::new_id().unwrap()
+        ));
+        let store = Store::open(&path).unwrap();
+        let provider = api_provider();
+        store.put_provider(&provider).unwrap();
+        store
+            .connection
+            .execute_batch(
+                "ALTER TABLE providers DROP COLUMN request_overrides; PRAGMA user_version = 14;",
+            )
+            .unwrap();
+        drop(store);
+        Store::open_credentials_read_only(&path).unwrap();
+        let store = Store::open(&path).unwrap();
+        assert_eq!(store.providers().unwrap(), std::slice::from_ref(&provider));
+        assert!(
+            store
+                .provider_request_overrides(&provider.id)
+                .unwrap()
+                .is_empty()
+        );
+        let overrides =
+            crate::request_overrides::RequestOverrides::parse("synthetic-agent/1", "", "").unwrap();
+        // A failed save without a stored key leaves the customization untouched.
+        store
+            .put_api_provider(&provider, &[], None, None, Some(&overrides))
+            .unwrap_err();
+        assert!(
+            store
+                .provider_request_overrides(&provider.id)
+                .unwrap()
+                .is_empty()
+        );
+        let key = Secret::new("synthetic-key".into());
+        store
+            .put_api_provider(&provider, &[], None, Some(&key), Some(&overrides))
+            .unwrap();
+        assert_eq!(
+            store.provider_request_overrides(&provider.id).unwrap(),
+            overrides
+        );
         drop(store);
         std::fs::remove_file(path).unwrap();
     }
@@ -1414,7 +1519,12 @@ mod tests {
                 .unwrap(),
             };
             store.put_model(&model).unwrap();
-            store.connection.execute_batch(&downgrade).unwrap();
+            store
+                .connection
+                .execute_batch(&format!(
+                    "ALTER TABLE providers DROP COLUMN request_overrides; {downgrade}"
+                ))
+                .unwrap();
             drop(store);
             let store = Store::open(&path).unwrap();
             assert_eq!(store.models().unwrap(), [model], "{name}");
@@ -1516,7 +1626,7 @@ mod tests {
         store.put_model(&model).unwrap();
         store
             .connection
-            .execute_batch("DROP TABLE model_aliases; ALTER TABLE published_models DROP COLUMN request_overrides; PRAGMA user_version = 11;")
+            .execute_batch("DROP TABLE model_aliases; ALTER TABLE providers DROP COLUMN request_overrides; ALTER TABLE published_models DROP COLUMN request_overrides; PRAGMA user_version = 11;")
             .unwrap();
         drop(store);
         // Old journals can still read credentials without schema migration.
@@ -1554,7 +1664,7 @@ mod tests {
         store
             .connection
             .execute_batch(
-                "ALTER TABLE providers DROP COLUMN icon_id; ALTER TABLE providers DROP COLUMN account_binding;
+                "ALTER TABLE providers DROP COLUMN request_overrides; ALTER TABLE providers DROP COLUMN icon_id; ALTER TABLE providers DROP COLUMN account_binding;
              ALTER TABLE providers DROP COLUMN kind;
              DROP TABLE session_bindings;
              DROP TABLE IF EXISTS model_aliases; ALTER TABLE published_models DROP COLUMN request_overrides; PRAGMA user_version = 8;",
@@ -1601,6 +1711,7 @@ mod tests {
                 codex_options TEXT NOT NULL DEFAULT '', settings_config TEXT NOT NULL DEFAULT '{}',
                 kind TEXT NOT NULL DEFAULT 'api_key' CHECK (kind IN ('api_key', 'chatgpt')),
                 account_binding TEXT CHECK ((kind = 'api_key' AND account_binding IS NULL) OR (kind = 'chatgpt' AND account_binding IS NOT NULL)), icon_id TEXT);
+             ALTER TABLE providers DROP COLUMN request_overrides;
              INSERT INTO old_providers SELECT * FROM providers;
              DROP TABLE providers;
              ALTER TABLE old_providers RENAME TO providers;
@@ -3065,6 +3176,7 @@ mod tests {
                  DROP TABLE usage_records; DROP TABLE usage_log_files; DROP TABLE model_prices;
                  DELETE FROM app_settings WHERE key = 'usage_router_since_ms';
                  ALTER TABLE published_models DROP COLUMN request_overrides;
+                 ALTER TABLE providers DROP COLUMN request_overrides;
                  PRAGMA user_version = 12;",
             )
             .unwrap();

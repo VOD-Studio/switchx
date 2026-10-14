@@ -8,6 +8,7 @@ use crate::{
     codex::provider_config::{self, CodexOptions},
     credentials::Secret,
     id::new_id,
+    request_overrides::RequestOverrides,
     storage::{ModelRecord, ProviderRecord},
     upstream::validate_provider,
 };
@@ -30,6 +31,7 @@ pub fn save_provider(
         None,
         None,
         &[],
+        None,
         None,
     )
     .map(drop)
@@ -71,12 +73,14 @@ pub fn save_provider_with_codex_options_and_icon(
         options,
         icon_id,
         &[],
+        None,
     )
     .map(drop)
 }
 
 /// Also adds mappings for models picked from discovery in the same transaction.
 /// Returns the public IDs of every mapping this save created, presets included.
+/// None preserves the connection's request customization; Some(empty) clears it.
 #[allow(clippy::too_many_arguments)]
 pub fn save_provider_with_mappings(
     data_dir: &Path,
@@ -88,6 +92,7 @@ pub fn save_provider_with_mappings(
     options: &CodexOptions,
     icon_id: Option<&str>,
     picked: &[String],
+    request_overrides: Option<&RequestOverrides>,
 ) -> Result<Vec<String>, String> {
     options.validate()?;
     save_provider_inner(
@@ -101,6 +106,7 @@ pub fn save_provider_with_mappings(
         icon_id,
         picked,
         None,
+        request_overrides,
     )
 }
 
@@ -115,6 +121,7 @@ pub fn save_provider_with_directory(
     options: &CodexOptions,
     icon_id: Option<&str>,
     directory: &[super::ConnectionModel],
+    request_overrides: Option<&RequestOverrides>,
 ) -> Result<Vec<String>, String> {
     options.validate()?;
     save_provider_inner(
@@ -128,6 +135,7 @@ pub fn save_provider_with_directory(
         icon_id,
         &[],
         Some(directory),
+        request_overrides,
     )
 }
 
@@ -156,8 +164,12 @@ fn save_provider_inner(
     icon_id: Option<&str>,
     picked: &[String],
     directory: Option<&[super::ConnectionModel]>,
+    request_overrides: Option<&RequestOverrides>,
 ) -> Result<Vec<String>, String> {
     ensure_editable(data_dir)?;
+    if let Some(overrides) = request_overrides {
+        overrides.validate()?;
+    }
     if model_id.trim().is_empty() {
         return Err("请在连接设置中填写默认模型 ID".into());
     }
@@ -214,15 +226,13 @@ fn save_provider_inner(
         .map(serde_json::to_string)
         .transpose()
         .map_err(|_| "无法序列化 Codex 选项")?;
-    let saved = match &key {
-        Some(key) => store.put_provider_with_models_options_and_key(
-            &record,
-            &defaults,
-            options.as_deref(),
-            key,
-        ),
-        None => store.update_provider_preserving_key(&record, &defaults, options.as_deref()),
-    };
+    let saved = store.put_api_provider(
+        &record,
+        &defaults,
+        options.as_deref(),
+        key.as_ref(),
+        request_overrides,
+    );
     saved.map_err(|_| {
         if key.is_none() && store.has_provider_api_key(&id).is_ok_and(|exists| !exists) {
             "上游未配置 API Key，请重新输入"
@@ -311,6 +321,17 @@ pub fn load_provider(data_dir: &Path, id: &str) -> Result<ProviderRecord, String
         .ok_or_else(|| "上游不存在，请刷新后重试".into())
 }
 
+/// Load a connection's private request defaults only when opening its editor.
+pub fn load_provider_request_overrides(
+    data_dir: &Path,
+    id: &str,
+) -> Result<RequestOverrides, String> {
+    open_store(data_dir)
+        .map_err(|error| error.message())?
+        .provider_request_overrides(id)
+        .map_err(|_| "无法读取连接的请求定制".into())
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ProviderConfigState {
     pub options: Option<CodexOptions>,
@@ -364,6 +385,7 @@ mod tests {
                 &options,
                 None,
                 &picked.iter().map(|id| id.to_string()).collect::<Vec<_>>(),
+                None,
             )
         };
         assert!(save(None, "custom-chat", &["custom-chat", "bad id"]).is_err());

@@ -1,4 +1,4 @@
-//! Per-model, local-only customization of the final upstream request.
+//! Per-connection and per-model, local-only customization of the final upstream request.
 
 use std::{collections::BTreeMap, fmt};
 
@@ -112,6 +112,26 @@ impl RequestOverrides {
         } else {
             serde_json::to_string_pretty(&self.body).unwrap()
         }
+    }
+
+    /// Layer `top` over these defaults, matching the result of applying both in order.
+    pub fn layered(&self, top: &Self) -> Self {
+        let mut layered = self.clone();
+        if !top.user_agent.is_empty() {
+            // A lower User-Agent header would otherwise win over the upper UA field.
+            layered
+                .headers
+                .retain(|name, _| !name.eq_ignore_ascii_case("user-agent"));
+            layered.user_agent = top.user_agent.clone();
+        }
+        layered.headers.extend(top.headers.clone());
+        let mut body = Value::Object(layered.body);
+        merge(&mut body, &Value::Object(top.body.clone()));
+        let Value::Object(body) = body else {
+            unreachable!("objects merge into an object")
+        };
+        layered.body = body;
+        layered
     }
 
     pub(crate) fn apply(&self, headers: &mut HeaderMap, body: &mut Value) {
@@ -249,6 +269,40 @@ mod tests {
         assert_eq!(headers["user-agent"], "header/2");
         assert_eq!(config.user_agent(), "client/1");
         assert!(!format!("{config:?}").contains("private"));
+    }
+
+    #[test]
+    fn layering_matches_applying_connection_then_model() {
+        let connection = RequestOverrides::parse(
+            "connection/1",
+            r#"{"User-Agent":"connection-header/1","X-Tenant":"base","X-Team":"base"}"#,
+            r#"{"reasoning":{"effort":"low","summary":"auto"},"tags":["base"],"top_p":0.9}"#,
+        )
+        .unwrap();
+        let model = RequestOverrides::parse(
+            "model/2",
+            r#"{"X-Team":"model"}"#,
+            r#"{"reasoning":{"effort":"high"},"tags":["model"],"top_p":null}"#,
+        )
+        .unwrap();
+        let request = json!({"model":"actual","reasoning":{"effort":"medium"},"tags":["old"]});
+        let (mut sequential_headers, mut sequential) = (HeaderMap::new(), request.clone());
+        connection.apply(&mut sequential_headers, &mut sequential);
+        model.apply(&mut sequential_headers, &mut sequential);
+        let layered = connection.layered(&model);
+        let (mut headers, mut body) = (HeaderMap::new(), request);
+        layered.apply(&mut headers, &mut body);
+        assert_eq!(body, sequential);
+        assert_eq!(headers, sequential_headers);
+        assert_eq!(headers["user-agent"], "model/2");
+        assert_eq!(headers["x-tenant"], "base");
+        assert_eq!(headers["x-team"], "model");
+        assert_eq!(
+            body,
+            json!({"model":"actual","reasoning":{"effort":"high","summary":"auto"},"tags":["model"],"top_p":null})
+        );
+        assert_eq!(RequestOverrides::default().layered(&model), model);
+        assert_eq!(connection.layered(&RequestOverrides::default()), connection);
     }
 
     #[test]

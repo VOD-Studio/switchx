@@ -33,8 +33,9 @@ pub(crate) use models::{connection_model_records, save_mapping_from, save_mappin
 pub use presets::{ModelPreset, PROVIDER_PRESETS, ProviderPreset, provider_preset};
 pub(crate) use providers::resolve_provider_icon_id;
 pub use providers::{
-    ProviderConfigState, delete_provider, load_provider, load_provider_config, provider_credential,
-    save_provider, save_provider_with_codex_options, save_provider_with_codex_options_and_icon,
+    ProviderConfigState, delete_provider, load_provider, load_provider_config,
+    load_provider_request_overrides, provider_credential, save_provider,
+    save_provider_with_codex_options, save_provider_with_codex_options_and_icon,
     save_provider_with_directory, save_provider_with_mappings,
 };
 pub use snapshot::{ModelView, ProviderView, Snapshot, load_snapshot};
