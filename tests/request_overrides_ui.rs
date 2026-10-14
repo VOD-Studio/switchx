@@ -201,3 +201,71 @@ fn request_editor_validates_preserves_tabs_clears_on_close_and_animates_in_both_
     assert_eq!(app.get_model_user_agent(), "batch-client/1");
     assert_eq!(app.get_model_body_overrides(), "{\"temperature\":0.2}");
 }
+
+#[test]
+fn connection_editor_card_replaces_the_preview_validates_and_clears_on_close() {
+    let window = headless::install_with_manual_time();
+    let app = AppWindow::new().unwrap();
+    switchx::request_overrides::connect(&app);
+    switchx::code_highlight::connect(&app);
+    app.set_loading(false);
+    let saves = Rc::new(Cell::new(0));
+    let saved = saves.clone();
+    app.on_save_provider(move |_, _, _, _, _| saved.set(saved.get() + 1));
+    app.show().unwrap();
+    let open = |app: &AppWindow| {
+        app.set_active_page(1);
+        app.set_edit_id("synthetic-api".into());
+        app.set_edit_name("示例连接".into());
+        app.set_edit_url("https://api.example.invalid/v1".into());
+        app.set_edit_model("synthetic-coder".into());
+        app.set_edit_config_preview("model = \"synthetic-coder\"\n".into());
+        app.set_editor_open(true);
+    };
+    let preview_shown = |app: &AppWindow| {
+        ElementHandle::find_by_accessible_label(app, "Codex config.toml 配置预览")
+            .next()
+            .is_some()
+    };
+    for (width, height) in [(1200, 820), (1000, 680)] {
+        app.window().set_size(PhysicalSize::new(width, height));
+        for dark in [false, true] {
+            app.global::<Theme>().set_animations_enabled(false);
+            app.invoke_set_appearance(dark);
+            open(&app);
+            settle(&window);
+            let suffix = format!("{}-{width}x{height}", if dark { "dark" } else { "light" });
+            assert!(preview_shown(&app));
+            draw(&window, &format!("connection-collapsed-{suffix}"));
+            click(&window, &app, "请求定制", AccessibleRole::Button);
+            assert!(app.get_edit_request_open());
+            assert!(
+                !preview_shown(&app),
+                "the opened card takes the preview's place"
+            );
+            app.set_edit_user_agent("claude-cli/2.1.161 (external, cli)".into());
+            app.set_edit_header_overrides("{\n  \"x-provider\": \"switchx\"\n}".into());
+            settle(&window);
+            draw(&window, &format!("connection-open-{suffix}"));
+            app.set_edit_header_overrides("{\"Authorization\":\"synthetic\"}".into());
+            settle(&window);
+            assert_eq!(
+                control(&app, "保存连接", AccessibleRole::Button).accessible_enabled(),
+                Some(false)
+            );
+            app.set_edit_header_overrides("{\"x-provider\":\"switchx\"}".into());
+            settle(&window);
+            let previous = saves.get();
+            click(&window, &app, "保存连接", AccessibleRole::Button);
+            assert_eq!(saves.get(), previous + 1);
+            click(&window, &app, "请求定制", AccessibleRole::Button);
+            assert!(preview_shown(&app), "collapsing restores the preview");
+            app.set_editor_open(false);
+            settle(&window);
+            assert!(app.get_edit_user_agent().is_empty());
+            assert!(app.get_edit_header_overrides().is_empty());
+            assert!(app.get_edit_body_overrides().is_empty());
+            assert!(!app.get_edit_request_open());
+        }
+    }
+}

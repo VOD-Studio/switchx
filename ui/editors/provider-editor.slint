@@ -13,6 +13,7 @@ import { FeedbackBanner } from "../feedback-banner.slint";
 import { ModelQuickPicker } from "model-quick-picker.slint";
 import { ModelPicker } from "model-picker.slint";
 import { BatchModelRow, BatchSummary } from "../view-models.slint";
+import { RequestOverridesEditor, RequestRules } from "request-overrides.slint";
 
 export component ProviderEditor inherits SurfaceCard {
     in property <bool> busy;
@@ -28,6 +29,10 @@ export component ProviderEditor inherits SurfaceCard {
     in-out property <bool> edit-use-common-config;
     in-out property <bool> edit-context-1m;
     in-out property <string> edit-compact-limit;
+    in-out property <string> edit-user-agent;
+    in-out property <string> edit-header-overrides;
+    in-out property <string> edit-body-overrides;
+    in-out property <bool> edit-request-open;
     in property <string> edit-config-preview;
     in property <string> edit-config-error;
     in property <string> edit-preset-id;
@@ -58,6 +63,8 @@ export component ProviderEditor inherits SurfaceCard {
     private property <bool> preview-expanded: false;
     private property <bool> options-expanded: false;
     private property <bool> models-visible: false;
+    private property <bool> request-shown: root.edit-request-open && !root.preview-expanded;
+    private property <string> request-error: RequestRules.validate(root.edit-user-agent, root.edit-header-overrides, root.edit-body-overrides);
     private property <float> side-reveal: root.preview-expanded ? 0 : 1;
     animate side-reveal {
         duration: Theme.drawer-motion;
@@ -337,7 +344,7 @@ export component ProviderEditor inherits SurfaceCard {
                     }
 
                     options := AnimatedSection {
-                        expanded: root.options-expanded && !root.preview-expanded && !root.models-visible;
+                        expanded: root.options-expanded && !root.preview-expanded && !root.models-visible && !root.edit-request-open;
                         content-height: 106px + threshold.height;
                         VerticalLayout {
                             height: options.content-height;
@@ -442,7 +449,7 @@ export component ProviderEditor inherits SurfaceCard {
                             }
                         }
                     }
-                    if !root.models-visible: Rectangle {
+                    if !root.models-visible && !root.request-shown: Rectangle {
                         vertical-stretch: 1;
                         min-height: 160px;
                         border-radius: 12px;
@@ -523,6 +530,25 @@ export component ProviderEditor inherits SurfaceCard {
                             }
                         }
                     }
+                    // Collapsed under the preview; opened, it takes the preview's place.
+                    if !root.models-visible && !root.preview-expanded: ScrollView {
+                        vertical-stretch: root.edit-request-open ? 1 : 0;
+                        min-height: root.edit-request-open ? 160px : requests.preferred-height;
+                        max-height: root.edit-request-open ? 100000px : requests.preferred-height;
+                        vertical-scrollbar-policy: root.edit-request-open ? ScrollBarPolicy.as-needed : ScrollBarPolicy.always-off;
+                        horizontal-scrollbar-policy: always-off;
+                        VerticalLayout {
+                            alignment: start;
+                            requests := RequestOverridesEditor {
+                                connection: true;
+                                user-agent <=> root.edit-user-agent;
+                                headers <=> root.edit-header-overrides;
+                                body <=> root.edit-body-overrides;
+                                expanded <=> root.edit-request-open;
+                                enabled: !root.busy && !root.config-managed;
+                            }
+                        }
+                    }
                     config-banner := FeedbackBanner {
                         tone: 3;
                         title: "配置无法生成";
@@ -575,7 +601,7 @@ export component ProviderEditor inherits SurfaceCard {
                 primary: true;
                 icon: @image-url("../../assets/ui/check.svg");
                 icon-color: Theme.on-brand;
-                enabled: !root.busy && !root.config-managed && root.edit-config-error == "";
+                enabled: !root.busy && !root.config-managed && root.edit-config-error == "" && root.request-error == "";
                 clicked => {
                     root.save-provider(root.edit-id, root.edit-name, root.edit-url, root.edit-model, root.edit-key);
                     root.edit-key = "";

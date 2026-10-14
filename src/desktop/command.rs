@@ -163,6 +163,8 @@ pub(super) struct ProviderForm {
     pub icon_id: String,
     pub picked: Vec<String>,
     pub directory: Option<Vec<app::ConnectionModel>>,
+    /// Connection-wide User-Agent, header JSON and body JSON drafts.
+    pub request_overrides: (String, String, String),
 }
 
 pub(super) struct SubscriptionForm {

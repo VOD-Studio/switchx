@@ -20,6 +20,8 @@ export component RequestOverridesEditor inherits Rectangle {
     in-out property <bool> expanded;
     in property <bool> enabled: true;
     in property <bool> batch;
+    // Connection-wide defaults; each model's own settings take precedence.
+    in property <bool> connection;
     in property <int> replay;
     out property <float> reveal: section.reveal;
     out property <string> error: RequestRules.validate(root.user-agent, root.headers, root.body);
@@ -39,7 +41,7 @@ export component RequestOverridesEditor inherits Rectangle {
 
     card := MappingSection {
         title: "请求定制";
-        caption: root.batch ? "应用到本次添加的模型 · 仅本地路由生效" : "自定义客户端标识与上游参数 · 仅本地路由生效";
+        caption: root.batch ? "应用到本次添加的模型 · 仅本地路由生效" : root.connection ? "此连接所有模型的默认值 · 模型设置优先 · 仅本地路由生效" : "自定义客户端标识与上游参数 · 仅本地路由生效";
         icon: @image-url("../../assets/ui/settings.svg");
         badge: root.error != "" ? "待修正" : root.configured ? "已定制" : "可选";
         collapsible: true;

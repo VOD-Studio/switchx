@@ -15,7 +15,7 @@ SwitchX 把 API 供应商、ChatGPT 订阅和 Grok 订阅放进同一个模型�
 
 - **连接**：兼容 Responses 的 API 上游（内置 DeepSeek、Kimi、MiniMax、小米 MiMo 预设）、ChatGPT 订阅与 Grok 订阅。
 - **模型目录**：获取上游模型列表并批量添加，为每个模型设置全局唯一的显示名称、上下文窗口和思考等级。
-- **请求定制**：添加或编辑模型时展开「请求定制」，设置 User-Agent 预设、自定义 Header 和 Body；批量添加可统一应用，保存后下次发布路由生效。
+- **请求定制**：添加或编辑模型时展开「请求定制」，设置 User-Agent 预设、自定义 Header 和 Body；批量添加可统一应用。API 连接编辑器也有同一张卡片，作为该连接所有模型的默认值。保存后下次发布路由生效。
 - **本地路由**：多个连接的模型同时出现在 Codex 的 `/model` 菜单中，按显示名称精确转发，各上游凭据互相隔离。内部稳定 ID 和改名前的名称保留为兼容别名，不出现在模型菜单中；历史名称由原模型保留，删除模型后释放。直连目录使用上游实际模型 ID。
 - **直连**：把 Codex 直接指向单个 API 上游，不需要 SwitchX 常驻。
 - **账号**：管理多个 ChatGPT 与 Grok 账号，支持设备码登录，并显示官方额度。
@@ -61,7 +61,7 @@ sh scripts/bundle-macos.sh --release  # target/release/SwitchX.app
 
 已有的 Codex 会话不会切换到 SwitchX 路由，启用或恢复后请新建会话。
 
-模型的「请求定制」只作用于 SwitchX 转发给该上游的请求，直连与模型发现不使用它。Header 必须是字符串值的 JSON 对象，同名字段不区分大小写，其中的 `User-Agent` 优先于单独设置。Body 必须是 JSON 对象，在协议转换后递归合并；数组整体替换，`null` 作为值保留。认证、会话和 HTTP 传输头，以及 `model`、`stream`、`input`、`tools`、`tool_choice`、`background` 与会话续接字段不能覆盖。留空或清空后保存即可恢复默认行为。
+模型的「请求定制」只作用于 SwitchX 转发给该上游的请求，直连与模型发现不使用它。Header 必须是字符串值的 JSON 对象，同名字段不区分大小写，其中的 `User-Agent` 优先于单独设置。Body 必须是 JSON 对象，在协议转换后递归合并；数组整体替换，`null` 作为值保留。认证、会话和 HTTP 传输头，以及 `model`、`stream`、`input`、`tools`、`tool_choice`、`background` 与会话续接字段不能覆盖。留空或清空后保存即可恢复默认行为。API 连接上的请求定制是该连接所有模型的默认值：发布路由时先应用连接设置，再合并模型自己的设置，同名 Header、Body 字段和 User-Agent 以模型为准；备用上游使用备用连接自己的默认值。
 
 定制内容仅保存在本地 SQLite，不写入 Codex TOML、模型目录、恢复日志或请求记录。主备模型分别使用自己的定制配置；修改连接目录会保留已有模型的定制。单项定制总大小上限为 32 KiB。
 

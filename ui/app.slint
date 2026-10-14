@@ -223,6 +223,11 @@ export component AppWindow inherits Window {
     in-out property <bool> edit-use-common-config: true;
     in-out property <bool> edit-context-1m: false;
     in-out property <string> edit-compact-limit: "900000";
+    // Connection-wide request customization, beneath each model's own.
+    in-out property <string> edit-user-agent;
+    in-out property <string> edit-header-overrides;
+    in-out property <string> edit-body-overrides;
+    in-out property <bool> edit-request-open;
     in-out property <string> edit-config-preview: "";
     in-out property <string> edit-config-error: "";
     in-out property <bool> common-config-editor-open: false;
@@ -523,7 +528,13 @@ export component AppWindow inherits Window {
     changed edit-compact-limit => { if (root.editor-open) { root.update-provider-config-preview(); } }
     changed edit-key => { root.reset-model-discovery(); }
     changed editor-open => {
-        if (!root.editor-open) { root.edit-key = ""; }
+        if (!root.editor-open) {
+            root.edit-key = "";
+            root.edit-user-agent = "";
+            root.edit-header-overrides = "";
+            root.edit-body-overrides = "";
+            root.edit-request-open = false;
+        }
         root.reset-model-discovery();
         if (root.editor-open) { root.update-provider-config-preview(); }
     }
@@ -1531,6 +1542,10 @@ export component AppWindow inherits Window {
                             edit-use-common-config <=> root.edit-use-common-config;
                             edit-context-1m <=> root.edit-context-1m;
                             edit-compact-limit <=> root.edit-compact-limit;
+                            edit-user-agent <=> root.edit-user-agent;
+                            edit-header-overrides <=> root.edit-header-overrides;
+                            edit-body-overrides <=> root.edit-body-overrides;
+                            edit-request-open <=> root.edit-request-open;
                             edit-config-preview: root.edit-config-preview;
                             edit-config-error: root.edit-config-error;
                             edit-preset-id: root.edit-preset-id;

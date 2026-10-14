@@ -1195,6 +1195,7 @@ mod tests {
                 icon_id: String::new(),
                 picked: Vec::new(),
                 directory: Some(directory.to_vec()),
+                request_overrides: Default::default(),
             }))
             .await
             .unwrap();

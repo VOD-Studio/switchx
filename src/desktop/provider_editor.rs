@@ -7,6 +7,7 @@ use switchx::{
         client,
         provider_config::{self, CodexOptions},
     },
+    request_overrides::RequestOverrides,
     storage::{ProviderKind, ProviderRecord},
     ui::AppWindow,
 };
@@ -174,6 +175,7 @@ pub(super) fn show_provider_editor(
     app.set_edit_context_1m(options.context_1m);
     app.set_edit_compact_limit(options.compact_limit.to_string().into());
     app.set_edit_config_error("".into());
+    show_request_overrides(app, &RequestOverrides::default());
     app.set_delete_confirm(false);
     app.set_busy(false);
     app.set_editor_open(true);
@@ -182,6 +184,21 @@ pub(super) fn show_provider_editor(
         apply_provider_preset(app, &preset);
     }
     update_provider_config_preview(app);
+}
+
+fn show_request_overrides(app: &AppWindow, overrides: &RequestOverrides) {
+    app.set_edit_user_agent(overrides.user_agent().into());
+    app.set_edit_header_overrides(overrides.headers_json().into());
+    app.set_edit_body_overrides(overrides.body_json().into());
+    app.set_edit_request_open(!overrides.is_empty());
+}
+
+fn request_draft(app: &AppWindow) -> (String, String, String) {
+    (
+        app.get_edit_user_agent().into(),
+        app.get_edit_header_overrides().into(),
+        app.get_edit_body_overrides().into(),
+    )
 }
 
 pub(super) fn connect(app: &AppWindow, sender: &mpsc::Sender<Command>) {
@@ -262,6 +279,7 @@ pub(super) fn connect(app: &AppWindow, sender: &mpsc::Sender<Command>) {
                     icon_id: app.get_edit_icon_id().into(),
                     picked: picked_provider_models(&app),
                     directory: directory_draft(&app),
+                    request_overrides: request_draft(&app),
                 }),
             );
         }
@@ -287,8 +305,8 @@ impl Worker {
         let result = (|| {
             let data_dir = self.data_dir.path()?;
             let common = common_config_for_home(data_dir, &target)?;
-            let (provider, options) = if id.is_empty() {
-                (None, CodexOptions::for_common(&common)?)
+            let (provider, options, overrides) = if id.is_empty() {
+                (None, CodexOptions::for_common(&common)?, Default::default())
             } else {
                 let provider = app::load_provider(data_dir, &id)?;
                 if provider.kind != ProviderKind::ApiKey {
@@ -299,13 +317,15 @@ impl Worker {
                     .options
                     .map(Ok)
                     .unwrap_or_else(|| CodexOptions::for_common(&common))?;
-                (Some(provider), options)
+                let overrides = app::load_provider_request_overrides(data_dir, &id)?;
+                (Some(provider), options, overrides)
             };
-            Ok::<_, String>((provider, options, common))
+            Ok::<_, String>((provider, options, common, overrides))
         })();
         let _ = self.weak.upgrade_in_event_loop(move |app| match result {
-            Ok((provider, options, common)) => {
-                show_provider_editor(&app, provider, options, common)
+            Ok((provider, options, common, overrides)) => {
+                show_provider_editor(&app, provider, options, common);
+                show_request_overrides(&app, &overrides);
             }
             Err(error) => show_action(&app, Err(error)),
         });
@@ -322,8 +342,11 @@ impl Worker {
             icon_id,
             picked,
             directory,
+            request_overrides,
         } = form;
         let result = self.data_dir.path().and_then(|path| {
+            let (user_agent, headers, body) = &request_overrides;
+            let overrides = RequestOverrides::parse(user_agent, headers, body)?;
             if let Some(directory) = &directory {
                 if !id.is_empty() {
                     return Err("已保存连接请使用模型目录编辑器".into());
@@ -337,7 +360,7 @@ impl Worker {
                     &options,
                     Some(&icon_id),
                     directory,
-                    None,
+                    Some(&overrides),
                 );
             }
             app::save_provider_with_mappings(
@@ -350,7 +373,7 @@ impl Worker {
                 &options,
                 Some(&icon_id),
                 &picked,
-                None,
+                Some(&overrides),
             )
         });
         if result.is_ok() {
