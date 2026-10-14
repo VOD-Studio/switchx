@@ -12,12 +12,14 @@ global Columns {
     out property <length> speed: 70px;
 }
 
+// The row announces its cells as one label, so cells stay out of the accessibility tree.
 component Cell inherits Text {
     color: Theme.primary-text;
     font-size: 12px;
     vertical-alignment: center;
     horizontal-alignment: right;
     overflow: elide;
+    accessible-role: none;
 }
 
 component Fact inherits VerticalLayout {
@@ -64,7 +66,13 @@ component DetailRow inherits Rectangle {
 
     height: 42px + details.height;
     clip: true;
-    accessible-role: none;
+    // One node per row: every node in the scrolling page is rebuilt on each scroll step.
+    accessible-role: list-item;
+    accessible-label: root.entry.clock + "，" + root.entry.connection + "，" + root.entry.model + "，新输入 " + root.entry.fresh + "，缓存 " + root.entry.cached + "，输出 " + root.entry.output + "，" + root.entry.cost;
+    accessible-expandable: true;
+    accessible-expanded: root.expanded;
+    accessible-action-default => { root.toggle(); }
+    accessible-action-expand => { root.toggle(); }
     Rectangle {
         y: 0px;
         height: parent.height - 1px;
@@ -92,6 +100,7 @@ component DetailRow inherits Rectangle {
             font-size: 12px;
             vertical-alignment: center;
             overflow: elide;
+            accessible-role: none;
         }
 
         HorizontalLayout {
@@ -113,6 +122,7 @@ component DetailRow inherits Rectangle {
                 font-size: 12px;
                 vertical-alignment: center;
                 overflow: elide;
+                accessible-role: none;
             }
         }
 
@@ -125,6 +135,7 @@ component DetailRow inherits Rectangle {
             font-family: "Menlo";
             vertical-alignment: center;
             overflow: elide;
+            accessible-role: none;
         }
 
         Cell {
@@ -168,7 +179,8 @@ component DetailRow inherits Rectangle {
         y: 42px;
         expanded: root.expanded;
         content-height: 96px;
-        VerticalLayout {
+        // Mounted only while shown, so collapsed rows stay light to lay out and traverse.
+        if details.reveal > 0: VerticalLayout {
             padding-left: 12px;
             padding-right: 12px;
             padding-bottom: 12px;

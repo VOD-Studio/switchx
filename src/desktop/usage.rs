@@ -762,4 +762,79 @@ mod tests {
         drop(store);
         std::fs::remove_dir_all(data).unwrap();
     }
+
+    // AccessKit rebuilds every node of the scrolling page on each scroll step,
+    // so a detail row must stay one node until it is expanded.
+    #[test]
+    fn detail_rows_are_single_accessible_nodes_until_expanded() {
+        use i_slint_backend_testing::{AccessibleRole, ElementHandle, ElementQuery};
+        let accessible_descendants = |row: &ElementHandle| {
+            row.query_descendants()
+                .match_predicate(|element| {
+                    element
+                        .accessible_role()
+                        .is_some_and(|role| role != AccessibleRole::None)
+                })
+                .find_all()
+        };
+        let window = headless::install_with_manual_time();
+        let app = AppWindow::new().unwrap();
+        app.show().unwrap();
+        app.set_active_page(2);
+        let data = std::env::temp_dir().join(format!(
+            "switchx-usage-nodes-{}",
+            switchx::id::new_id().unwrap()
+        ));
+        std::fs::create_dir_all(&data).unwrap();
+        let store = Store::open(&data.join("switchx.sqlite")).unwrap();
+        let file = UsageLogFile {
+            path: "synthetic".into(),
+            size: 0,
+            modified_ms: 0,
+            read_offset: 0,
+            state: "{}".into(),
+        };
+        let now = Local::now().timestamp_millis();
+        let records = (0..USAGE_PAGE as i64 + 5)
+            .map(|index| record(&format!("r{index}"), now - index * 60_000, "m1"))
+            .collect::<Vec<_>>();
+        store.put_imported_usage(&records, &file).unwrap();
+        let query = UsageQuery {
+            rows: USAGE_PAGE,
+            ..Default::default()
+        };
+        show_usage(&app, &query, app::load_usage(&data, &query).unwrap());
+        // Tall enough that every row is on screen and instantiated.
+        window.set_size(slint::PhysicalSize::new(1200, 8000));
+        headless::render(&window);
+
+        let rows = ElementQuery::from_root(&app)
+            .match_type_name("DetailRow")
+            .find_all();
+        assert_eq!(rows.len(), USAGE_PAGE);
+        for row in &rows {
+            assert_eq!(row.accessible_role(), Some(AccessibleRole::ListItem));
+            assert_eq!(row.accessible_expandable(), Some(true));
+            assert_eq!(row.accessible_expanded(), Some(false));
+            let label = row.accessible_label().unwrap();
+            assert!(label.contains("Codex 原生登录，m1，新输入 "), "{label}");
+            assert!(accessible_descendants(row).is_empty(), "{label}");
+        }
+
+        rows[0].invoke_accessible_expand_action();
+        headless::advance(1_000);
+        headless::render(&window);
+        assert_eq!(rows[0].accessible_expanded(), Some(true));
+        let details = accessible_descendants(&rows[0])
+            .iter()
+            .filter_map(ElementHandle::accessible_label)
+            .collect::<Vec<_>>();
+        assert!(
+            details.iter().any(|label| label == "Codex 中的名称"),
+            "{details:?}"
+        );
+        assert!(accessible_descendants(&rows[1]).is_empty());
+        drop(store);
+        std::fs::remove_dir_all(data).unwrap();
+    }
 }
