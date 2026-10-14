@@ -314,3 +314,33 @@ export struct UsagePriceRow {
     priced: bool,
     reference: string,
 }
+
+export struct PreviewFact {
+    label: string,
+    value: string,
+}
+
+export struct PreviewMappingRow {
+    model: string,
+    provider: string,
+    origin: string,
+    fallback: string,
+    fallback-origin: string,
+}
+
+export struct PreviewBindingRow {
+    provider: string,
+    grok: bool,
+    facts: [PreviewFact],
+}
+
+// Grouped route publication review; it never carries credentials.
+export struct RoutePreviewData {
+    client: string,
+    endpoint: string,
+    target: string,
+    mappings: [PreviewMappingRow],
+    changes: [string],
+    bindings: [PreviewBindingRow],
+    notes: [string],
+}

@@ -385,7 +385,12 @@ async fn fallback_probe(
         .prepare(data, home, 0, "sx-mock-alpha", helper)
         .await?;
     check(
-        preview.contains("备用") && preview.contains(&backup.name),
+        preview.mappings.iter().any(|mapping| {
+            mapping
+                .fallback
+                .as_ref()
+                .is_some_and(|fallback| fallback.name == backup.name)
+        }),
         "preview omitted the backup destination",
     )?;
     let mut changed = backup.clone();
