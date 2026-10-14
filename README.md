@@ -26,7 +26,9 @@ SwitchX 把 API 供应商、ChatGPT 订阅和 Grok 订阅放进同一个模型�
 
 ## 安装
 
-在 [GitHub Releases](https://github.com/VOD-Studio/switchx/releases) 下载对应平台与架构的包；macOS 打开 `.dmg` 后将 `SwitchX.app` 拖到「应用程序」，Windows 运行 `switchx.exe`。Linux 提供 `.AppImage` 与 `.tar.gz`：AppImage 添加执行权限后直接运行，tar.gz 解压后运行 `./switchx`。每个版本提供 macOS、Windows、Linux 的 x64 与 ARM64 包，以及 `SHA256SUMS` 校验文件。Linux 包在 Ubuntu 24.04 构建，需要兼容的 glibc、Fontconfig、XKB 和 OpenGL 库，以及 X11 或 Wayland 桌面；AppImage 随包携带非系统基础依赖，仍使用宿主的图形驱动与桌面环境。
+在 [GitHub Releases](https://github.com/VOD-Studio/switchx/releases) 下载对应平台与架构的包；macOS 打开 `.dmg` 后将 `SwitchX.app` 拖到「应用程序」，Windows 运行 `switchx.exe`。Linux 提供 `.AppImage` 与 `.tar.gz`：AppImage 添加执行权限后直接运行，tar.gz 解压后运行 `./switchx`。每个版本提供 macOS、Windows、Linux 的 x64 与 ARM64 包，以及 `SHA256SUMS` 校验文件。Linux 通用包在 Ubuntu 24.04 构建，需要兼容的 glibc、Fontconfig、XKB 和 OpenGL 库，以及 X11 或 Wayland 桌面；AppImage 随包携带非系统基础依赖，仍使用宿主的图形驱动与桌面环境。
+
+Arch Linux / Omarchy x86_64 另有原生 `.pkg.tar.zst` 包，在 Arch 环境构建。下载后用 `sudo pacman -U ./switchx-<版本>-1-x86_64.pkg.tar.zst` 安装，随后可从应用菜单或终端运行 `switchx`；程序安装在 `/usr/bin/switchx`，用户数据仍保存在原来的数据目录。卸载使用 `sudo pacman -R switchx`。从 AppImage 或源码运行切换过来时，请先恢复原有直连或路由，再从已安装的程序重新启用，使凭据 helper 使用新的固定路径。
 
 ```sh
 chmod +x SwitchX-0.1.0-x86_64-unknown-linux-gnu.AppImage
@@ -58,6 +60,8 @@ sh scripts/bundle-macos.sh --release  # target/release/SwitchX.app
 生成的应用采用 ad-hoc 签名，未使用 Developer ID 签名或公证。打包脚本也支持 `--target TRIPLE` 和 `CARGO_TARGET_DIR`。需要与发布版相同的 DMG 时，运行 `python3 scripts/package-release.py --target aarch64-apple-darwin`（target 须与本机 Rust host 一致），结果写入 `dist/`。
 
 在 Linux 上运行 `make appimage`，会构建本机架构的 release 程序并在 `dist/` 生成 `.AppImage`、`.tar.gz` 及各自的校验文件。除 Rust、Git LFS 和原生 GUI 构建依赖外，还需 Python 3.11+、binutils、ImageMagick、`desktop-file-validate`（desktop-file-utils）和 `unsquashfs`（squashfs-tools）。首次打包会从官方 GitHub Releases 下载固定版本的 linuxdeploy、appimagetool 和 AppImage runtime，校验 SHA-256 后缓存到 `target/appimage-tools/`。完整步骤与兼容范围见 [发布指南](docs/releasing.md#linux-appimage)。
+
+在 Arch Linux / Omarchy x86_64 上运行 `make arch-package`，会通过 `makepkg` 从源码构建，在 `dist/arch/` 生成原生包、SHA-256 校验文件以及对应的源码包、`PKGBUILD` 和 `.SRCINFO`。依赖安装、固定 Rust 工具链及验证方式见 [Arch 打包指南](docs/releasing.md#arch-linux)。
 
 ## 使用
 
@@ -100,6 +104,7 @@ sh scripts/bundle-macos.sh --release  # target/release/SwitchX.app
 | `make check-lib`   | 检查业务库                                   |
 | `make check-app`   | 检查桌面程序                                 |
 | `make test-router` | 运行路由集成测试                             |
+| `make arch-package` | 在 Arch Linux x86_64 构建 pacman 包 |
 | `make check`       | 检查格式（含 Slint）、运行 Clippy 和全部测试 |
 | `make release-check` | 检查 workspace、lockfile 和 changelog 版本 |
 | `make prepare-release VERSION=0.1.0` | 更新版本并整理待发布 changelog |
@@ -107,7 +112,7 @@ sh scripts/bundle-macos.sh --release  # target/release/SwitchX.app
 `make format` 与 `make check` 需要 `slint-lsp` 1.18.1：`cargo install slint-lsp --version 1.18.1 --locked`。
 版本与发布脚本需要 Python 3.11 以上；如果系统默认 Python 较旧，可使用 `make check PYTHON=python3.12`，其他 Make 命令也接受 `PYTHON`。
 
-每次分支推送、PR 和手动运行 CI 都会在 GitHub 托管 Linux x64 runner 的 Ubuntu 24.04 容器中检查版本、Rust/Slint 格式，运行 Clippy 与全部测试。只有推送 `vX.Y.Z` 标签时，才会在 GitHub 托管的 macOS、Windows、Linux x64 与 ARM64 原生 runner 上检查、测试并构建 release 包，再自动创建包含全部构建的 GitHub Release。版本规则、changelog 与发版步骤见 [发布指南](docs/releasing.md)。
+每次分支推送、PR 和手动运行 CI 都会在 GitHub 托管 Linux x64 runner 的 Ubuntu 24.04 容器中检查版本、Rust/Slint 格式，运行 Clippy 与全部测试。只有推送 `vX.Y.Z` 标签时，才会在 GitHub 托管的 macOS、Windows、Linux x64 与 ARM64 原生 runner 上检查、测试并构建 release 包，同时在 Arch 容器内构建并验证 x86_64 pacman 包，再自动创建包含全部构建的 GitHub Release。版本规则、changelog 与发版步骤见 [发布指南](docs/releasing.md)。
 
 测试只使用本地 mock 和合成数据，不需要账号或 API Key。手动试验配置流程时，请使用隔离的 `SWITCHX_DATA_DIR` 和 `CODEX_HOME`。`deepseek_live_probe`、`direct_live_probe` 和 `routed_live_probe` 会发起真实模型请求，可能产生费用。
 
@@ -123,5 +128,7 @@ scripts/            版本管理、多平台发布与 macOS 打包脚本
 ```
 
 ## 致谢
+
+SwitchX 采用 [MIT 许可证](LICENSE)。第三方资源保留各自的许可声明。
 
 供应商预设和图标参考了 [CC Switch](https://github.com/farion1231/cc-switch)，图标来源与许可见 [assets/providers/NOTICE.md](assets/providers/NOTICE.md)。

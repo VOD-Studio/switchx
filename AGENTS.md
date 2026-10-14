@@ -12,6 +12,7 @@ SwitchX is a Rust 2024 desktop app with a Slint interface. `src/main.rs` either 
 - `make check-lib`: check business-library changes without generating machine code.
 - `make check-app`: check the desktop binary during development.
 - `make test-router`: run the focused routing integration tests.
+- `make arch-package`: build the native x86_64 pacman package on Arch Linux; see `docs/releasing.md` for dependencies. Newly added source files must be staged before packaging.
 - During iteration, use the focused target relevant to the change; run `make check` for the complete formatting, Clippy, and test checks before committing a completed feature.
 - `cargo test`: run unit and integration tests.
 - `cargo test --test router`: check exact model routing, streaming, and credential isolation against local mock upstreams.
@@ -34,7 +35,7 @@ Commit each completed feature point separately after verification. Follow the hi
 
 ## Versioning & Releases
 
-Use `Cargo.toml` `[workspace.package].version` as the single version source; workspace crates inherit it. Record user-visible changes under `CHANGELOG.md` `Unreleased`. Run `make prepare-release VERSION=X.Y.Z` (Python 3.11+) to update the workspace, local lockfile entries, and dated changelog section, then run `make check`. See `docs/releasing.md` for the delivery steps. Branch pushes and PRs run CI; pushing `vX.Y.Z` runs all six native builds and publishes their packages to GitHub Release only after every check succeeds. Creating or pushing a release tag is separate from implementing or committing a feature, and requires a release request. Never move a published tag or overwrite a published release.
+Use `Cargo.toml` `[workspace.package].version` as the single version source; workspace crates inherit it. Record user-visible changes under `CHANGELOG.md` `Unreleased`. Run `make prepare-release VERSION=X.Y.Z` (Python 3.11+) to update the workspace, local lockfile entries, and dated changelog section, then run `make check`. See `docs/releasing.md` for the delivery steps. Branch pushes and PRs run CI; pushing `vX.Y.Z` runs all six native builds plus the Arch Linux x86_64 package build and publishes their packages to GitHub Release only after every check succeeds. Creating or pushing a release tag is separate from implementing or committing a feature, and requires a release request. Never move a published tag or overwrite a published release.
 
 ## Security & Configuration
 

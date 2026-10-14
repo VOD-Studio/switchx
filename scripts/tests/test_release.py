@@ -144,8 +144,13 @@ class ReleaseAssetsTests(unittest.TestCase):
                                    lambda path: json.loads(path.read_bytes()))
         reader.start()
         self.addCleanup(reader.stop)
+        arch_reader = mock.patch.object(packaging.archlinux, "read_build_info",
+                                        lambda path: json.loads(path.read_bytes()))
+        arch_reader.start()
+        self.addCleanup(arch_reader.stop)
         for target in packaging.TARGETS:
             self.write_archive(target)
+        self.write_package(packaging.archlinux.package_name("0.1.0"), packaging.archlinux.TARGET)
 
     def write_archive(self, archive_target, **overrides):
         for name in packaging.package_names("0.1.0", archive_target):
@@ -156,7 +161,7 @@ class ReleaseAssetsTests(unittest.TestCase):
         info_path = f"SwitchX-0.1.0-{archive_target}/BUILD-INFO.json"
         payload = json.dumps({"version": "0.1.0", "target": archive_target, "commit": "synthetic",
                               "dirty": False, **overrides}).encode()
-        if name.endswith((".dmg", ".AppImage")):
+        if name.endswith((".dmg", ".AppImage", ".pkg.tar.zst")):
             archive.write_bytes(payload)
         elif name.endswith(".zip"):
             with zipfile.ZipFile(archive, "w") as destination:
@@ -172,7 +177,7 @@ class ReleaseAssetsTests(unittest.TestCase):
     def test_complete_asset_set_produces_repeatable_checksums(self):
         packaging.verify_assets(self.root, "0.1.0", "synthetic")
         sums = (self.root / "SHA256SUMS").read_text(encoding="utf-8")
-        self.assertEqual(len(sums.splitlines()), 8)
+        self.assertEqual(len(sums.splitlines()), 9)
         packaging.verify_assets(self.root, "0.1.0", "synthetic")
         self.assertEqual((self.root / "SHA256SUMS").read_text(encoding="utf-8"), sums)
 
@@ -191,6 +196,19 @@ class ReleaseAssetsTests(unittest.TestCase):
         next(self.root.glob("*.AppImage")).unlink()
         with self.assertRaisesRegex(ValueError, "missing"):
             packaging.verify_assets(self.root, "0.1.0", "synthetic")
+
+    def test_missing_arch_package_blocks_release(self):
+        next(self.root.glob("*.pkg.tar.zst")).unlink()
+        with self.assertRaisesRegex(ValueError, "missing"):
+            packaging.verify_assets(self.root, "0.1.0", "synthetic")
+
+    def test_arch_package_must_match_release_commit_and_be_clean(self):
+        name = packaging.archlinux.package_name("0.1.0")
+        for metadata, error in [({"commit": "stale"}, "Build metadata mismatch"),
+                                ({"dirty": True}, "uncommitted working tree")]:
+            self.write_package(name, packaging.archlinux.TARGET, **metadata)
+            with self.subTest(metadata=metadata), self.assertRaisesRegex(ValueError, error):
+                packaging.verify_assets(self.root, "0.1.0", "synthetic")
 
     def test_appimage_metadata_is_verified_independently_of_tarball(self):
         target = "aarch64-unknown-linux-gnu"

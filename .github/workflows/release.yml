@@ -48,8 +48,10 @@ jobs:
         with:
           name: release-notes
           path: target/release-notes
-      - name: Install AppImage inspection tools
-        run: brew install squashfs
+      - name: Install Linux package inspection tools
+        run: |
+          brew install squashfs libarchive
+          echo "$(brew --prefix libarchive)/bin" >> "$GITHUB_PATH"
       - name: Verify artifact set, build metadata and checksums
         run: python scripts/package-release.py --verify-dir dist --tag "$RELEASE_TAG"
       - name: Stage a draft, upload assets, then publish

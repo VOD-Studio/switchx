@@ -43,6 +43,7 @@ with open(sys.argv[2], 'wb') as destination:
     plistlib.dump(info, destination, sort_keys=False)
 PY
 cp "$target_dir/$profile/switchx" "$bundle/Contents/MacOS/switchx"
+cp "$repo_root/LICENSE" "$bundle/Contents/Resources/LICENSE"
 cp "$repo_root/assets/providers/NOTICE.md" "$bundle/Contents/Resources/Provider-Icons-NOTICE.md"
 
 icon_tmp="$bundle_tmp"

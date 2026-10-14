@@ -17,6 +17,7 @@ from pathlib import Path
 
 from release import ROOT, check
 import appimage
+import archlinux
 
 
 TARGETS = {
@@ -101,7 +102,7 @@ def build(target, destination):
     with tempfile.TemporaryDirectory(prefix="switchx-package-") as temporary:
         staging = Path(temporary) / f"SwitchX-{version}-{target}"
         staging.mkdir()
-        for document in ["README.md", "CHANGELOG.md"]:
+        for document in ["README.md", "CHANGELOG.md", "LICENSE"]:
             shutil.copy2(ROOT / document, staging)
         shutil.copy2(ROOT / "assets/providers/NOTICE.md", staging / "Provider-Icons-NOTICE.md")
         if "apple-darwin" in target:
@@ -140,6 +141,7 @@ def build(target, destination):
 
 def verify_assets(directory, version, commit):
     packages = [(target, name) for target in TARGETS for name in package_names(version, target)]
+    packages.append((archlinux.TARGET, archlinux.package_name(version)))
     expected = {name for _, name in packages}
     expected |= {f"{name}.sha256" for name in expected}
     present = {item.name for item in directory.iterdir()} - {"SHA256SUMS"}
@@ -157,6 +159,8 @@ def verify_assets(directory, version, commit):
             # The image's root is the package folder, so metadata sits at the volume root.
             with mounted(archive) as volume:
                 info = json.loads((volume / "BUILD-INFO.json").read_text(encoding="utf-8"))
+        elif name.endswith(".pkg.tar.zst"):
+            info = archlinux.read_build_info(archive)
         elif name.endswith(".AppImage"):
             info = appimage.read_build_info(archive)
         elif name.endswith(".zip"):

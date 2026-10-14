@@ -132,3 +132,49 @@ jobs:
           if-no-files-found: error
           compression-level: 0
           retention-days: 7
+
+  archlinux:
+    name: Arch Linux x86_64 package
+    if: inputs.release-tag != ''
+    needs: check
+    runs-on: ubuntu-24.04
+    container: archlinux:base-devel
+    timeout-minutes: 90
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - name: Prepare the Arch build environment
+        run: |
+          pacman -Syu --noconfirm --needed git git-lfs python rustup cmake pkgconf \
+            imagemagick desktop-file-utils fontconfig libxkbcommon libxkbcommon-x11 \
+            libx11 libxcb libxcursor libxi libxrandr libglvnd wayland dbus hicolor-icon-theme
+          useradd --create-home builder
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          lfs: true
+          persist-credentials: false
+      - name: Build and check with makepkg as an ordinary user
+        run: |
+          chown -R builder:builder "$GITHUB_WORKSPACE"
+          runuser -u builder -- make -C "$GITHUB_WORKSPACE" arch-package
+      - name: Check the installed package with synthetic credentials
+        env:
+          SWITCHX_VERSION: ${{ needs.check.outputs.version }}
+        run: |
+          # The base image excludes documentation; include our installed build metadata.
+          sed -i 's|usr/share/doc/\*||g' /etc/pacman.conf
+          pacman -U --noconfirm dist/arch/*.pkg.tar.zst
+          runuser -u builder -- python scripts/package_smoke.py /usr/bin/switchx "$SWITCHX_VERSION"
+          desktop-file-validate /usr/share/applications/switchx.desktop
+          pacman -Qkk switchx
+      - name: Upload Arch package and checksum
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: package-archlinux-x86_64
+          path: |
+            dist/arch/*.pkg.tar.zst
+            dist/arch/*.pkg.tar.zst.sha256
+          if-no-files-found: error
+          compression-level: 0
+          retention-days: 7
