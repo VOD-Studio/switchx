@@ -42,6 +42,10 @@ switchx-ui = { path = "crates/switchx-ui", features = ["test-debug-info"] }
 objc2 = "0.6.4"
 slint = { workspace = true, features = ["unstable-winit-030"] }
 
+[lints.rust]
+# Large Slint-generated binaries exceed ld64's 16MB compact-unwind offset limit; the notice is harmless.
+linker_messages = "allow"
+
 [profile.dev]
 debug = "line-tables-only"
 
