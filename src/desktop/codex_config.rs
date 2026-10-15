@@ -186,9 +186,6 @@ pub(super) fn connect(app: &AppWindow, sender: &mpsc::Sender<Command>) {
         port: app.get_route_port().into(),
         model: app.get_default_model().into(),
     }));
-    app.on_launch_codex(queue_on(app, sender, |app| Command::LaunchCodex {
-        home: app.get_config_home().into(),
-    }));
     app.on_cancel_route_preview(queue_on(app, sender, |_| Command::CancelRoutePreview));
 }
 
@@ -420,7 +417,10 @@ impl Worker {
                     app.set_route_preview(route_preview_data(&summary));
                     show_action(
                         &app,
-                        Ok("发布预览已准备；确认启用后点击“启动 Codex”，在新会话选择模型".into()),
+                        Ok(
+                            "发布预览已准备；确认启用后运行 codex --no-daemon 新建会话，再选择模型"
+                                .into(),
+                        ),
                     );
                 }
                 Err(error) => {
@@ -451,26 +451,10 @@ impl Worker {
             show_action(
                 &app,
                 result.map(|()| {
-                    "模型路由已开启；点击“启动 Codex”或运行 codex --no-daemon 新建会话。已有会话的连接不会随 /model 切换。".into()
+                    "模型路由已开启；运行 codex --no-daemon 新建会话。已有会话的连接不会随 /model 切换。".into()
                 }),
             );
         });
-    }
-
-    pub(super) async fn launch_codex(&mut self, target: String) {
-        let result = async {
-            let data_dir = self.data_dir.path()?;
-            let path = self
-                .route_session
-                .codex_launcher(data_dir, &codex_home(&target)?)
-                .await?;
-            client::open_codex_launcher(&path)?;
-            Ok("已打开新的 Codex 会话；输入 /model 选择已发布模型".into())
-        }
-        .await;
-        let _ = self
-            .weak
-            .upgrade_in_event_loop(move |app| show_action(&app, result));
     }
 
     pub(super) fn cancel_route_preview(&mut self) {

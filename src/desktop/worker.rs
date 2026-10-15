@@ -246,7 +246,6 @@ impl Worker {
                 self.inspect_route(home, port, model).await
             }
             Command::ApplyRoute { home, port, model } => self.apply_route(home, port, model).await,
-            Command::LaunchCodex { home } => self.launch_codex(home).await,
             Command::CancelRoutePreview => self.cancel_route_preview(),
             Command::Quit => return self.quit().await,
         }

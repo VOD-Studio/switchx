@@ -501,68 +501,6 @@ pub async fn check_catalog_using(catalog: &Value, executable: &Path) -> Result<S
     Ok(version.trim().into())
 }
 
-fn shell_quote(path: &Path) -> Result<String, String> {
-    let path = path.to_str().ok_or("启动路径不是 UTF-8")?;
-    Ok(format!("'{}'", path.replace('\'', "'\\''")))
-}
-
-pub async fn write_codex_launcher(
-    state_dir: &Path,
-    home: &Path,
-    executable: &Path,
-) -> Result<PathBuf, String> {
-    config_path(home)?;
-    validate_executable(executable)?;
-    if !state_dir.is_absolute() || !state_dir.is_dir() || !home.is_dir() {
-        return Err("启动器需要已存在的绝对配置和数据目录".into());
-    }
-    let check_home = CheckHome::new()?;
-    let help = isolated_output(executable, &check_home.0, "--help").await?;
-    if !help.split_whitespace().any(|word| word == "--no-daemon") {
-        return Err("当前 Codex CLI 不支持 --no-daemon；请更新 CLI 后启动路由会话".into());
-    }
-    let script = format!(
-        "#!/bin/sh\ncd {} || exit 1\nexec /usr/bin/env -u OPENAI_API_KEY -u CODEX_API_KEY -u CODEX_ACCESS_TOKEN -u OPENAI_BASE_URL -u SWITCHX_LOCAL_TOKEN CODEX_HOME={} {} --no-daemon\n",
-        shell_quote(home)?,
-        shell_quote(home)?,
-        shell_quote(executable)?
-    );
-    let path = state_dir.join("launch-codex.command");
-    let expected = read_config(&path)?;
-    #[cfg(unix)]
-    let permissions = {
-        use std::os::unix::fs::PermissionsExt;
-        Some(fs::Permissions::from_mode(0o700))
-    };
-    #[cfg(not(unix))]
-    let permissions = None;
-    route_switch::replace(&path, script.as_bytes(), permissions, &expected)?;
-    Ok(path)
-}
-
-pub fn open_codex_launcher(path: &Path) -> Result<(), String> {
-    if !path.is_absolute() || !path.is_file() {
-        return Err("Codex 启动器不存在或不是绝对路径".into());
-    }
-    #[cfg(target_os = "macos")]
-    {
-        let status = std::process::Command::new("/usr/bin/open")
-            .args(["-a", "Terminal"])
-            .arg(path)
-            .status()
-            .map_err(|_| "无法打开 Terminal；可手动运行 Codex 启动器")?;
-        if status.success() {
-            Ok(())
-        } else {
-            Err("Terminal 未打开 Codex 启动器".into())
-        }
-    }
-    #[cfg(not(target_os = "macos"))]
-    {
-        Err("此平台暂不支持打开 Codex 启动器".into())
-    }
-}
-
 fn classify_login_output(success: bool, text: &str) -> &'static str {
     if !success {
         "Codex 未报告有效登录；可用官方 Codex 完成登录后重试"
@@ -680,57 +618,6 @@ printf '%s\n' "$#" "$1" "$CODEX_HOME" "$PWD" "${OPENAI_API_KEY-unset}" "${CODEX_
 
     #[cfg(unix)]
     #[tokio::test]
-    async fn launcher_preserves_exact_home_and_argv_without_inherited_provider_environment() {
-        use std::os::unix::fs::PermissionsExt;
-        let root = CheckHome::new().unwrap();
-        let home = root.0.join("home ' space $(printf injected)");
-        fs::create_dir(&home).unwrap();
-        let executable = mock_cli(&root.0, "fake codex ' executable", "");
-        let path = write_codex_launcher(&root.0, &home, &executable)
-            .await
-            .unwrap();
-        assert_eq!(
-            fs::metadata(&path).unwrap().permissions().mode() & 0o777,
-            0o700
-        );
-        let output = Command::new(&path)
-            .env("CODEX_HOME", "wrong-home")
-            .env("OPENAI_API_KEY", "synthetic-key")
-            .env("CODEX_API_KEY", "synthetic-key")
-            .env("CODEX_ACCESS_TOKEN", "synthetic-token")
-            .env("OPENAI_BASE_URL", "http://127.0.0.1:1")
-            .env("SWITCHX_LOCAL_TOKEN", "synthetic-token")
-            .output()
-            .await
-            .unwrap();
-        assert!(output.status.success());
-        let text = String::from_utf8(output.stdout).unwrap();
-        let lines: Vec<_> = text.lines().collect();
-        assert_eq!(
-            lines,
-            [
-                "1",
-                "--no-daemon",
-                home.to_str().unwrap(),
-                home.to_str().unwrap(),
-                "unset",
-                "unset",
-                "unset",
-                "unset",
-                "unset"
-            ]
-        );
-        assert!(!fs::read_to_string(&path).unwrap().contains("synthetic-key"));
-        assert_eq!(
-            write_codex_launcher(&root.0, &home, &executable)
-                .await
-                .unwrap(),
-            path
-        );
-    }
-
-    #[cfg(unix)]
-    #[tokio::test]
     async fn catalog_check_uses_paginated_visible_models_and_rejects_stale_ids_or_cursors() {
         let root = CheckHome::new().unwrap();
         let catalog = json!({"models":[
@@ -768,24 +655,6 @@ printf '%s\n' "$#" "$1" "$CODEX_HOME" "$PWD" "${OPENAI_API_KEY-unset}" "${CODEX_
                 .unwrap_err()
                 .contains("分页")
         );
-    }
-
-    #[cfg(unix)]
-    #[tokio::test]
-    async fn launcher_rejects_a_cli_without_the_no_daemon_flag() {
-        let root = CheckHome::new().unwrap();
-        let executable = mock_cli(&root.0, "old-codex", "");
-        let script = fs::read_to_string(&executable)
-            .unwrap()
-            .replace("Usage: codex --no-daemon", "Usage: codex");
-        fs::write(&executable, script).unwrap();
-        assert!(
-            write_codex_launcher(&root.0, &root.0, &executable)
-                .await
-                .unwrap_err()
-                .contains("--no-daemon")
-        );
-        assert!(!root.0.join("launch-codex.command").exists());
     }
 
     #[test]

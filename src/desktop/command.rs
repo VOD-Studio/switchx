@@ -114,9 +114,6 @@ pub(super) enum Command {
         port: String,
         model: String,
     },
-    LaunchCodex {
-        home: String,
-    },
     CancelRoutePreview,
     Quit,
 }
@@ -129,7 +126,6 @@ impl Command {
             | Self::Subscription { home, .. }
             | Self::InspectRoute { home, .. }
             | Self::ApplyRoute { home, .. }
-            | Self::LaunchCodex { home }
             | Self::InspectDirect { home, .. }
             | Self::BeginProviderEditor { home, .. }
             | Self::FetchModels { home, .. }

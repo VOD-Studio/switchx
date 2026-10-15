@@ -37,7 +37,7 @@ chmod +x SwitchX-0.1.0-x86_64-unknown-linux-gnu.AppImage
 
 请把 AppImage 保存在固定位置后再启用直连或路由，Codex 凭据配置会记录这个文件的绝对路径。移动或重命名后需重新预览并启用配置。没有可用 FUSE 的环境可以运行 `APPIMAGE_EXTRACT_AND_RUN=1 ./SwitchX-0.1.0-x86_64-unknown-linux-gnu.AppImage`，此模式每次启动会解压文件；Codex 调用凭据程序时也需要这个变量，请在同一终端中先 `export APPIMAGE_EXTRACT_AND_RUN=1`，再启动 SwitchX 和 Codex。
 
-macOS 包采用 ad-hoc 签名，尚未使用 Developer ID 签名或 Apple 公证；Windows 包尚未进行代码签名。macOS 首次打开时如提示无法验证开发者，先关闭提示，再到「系统设置 → 隐私与安全性」点击「仍要打开」；也可以在终端运行 `xattr -dr com.apple.quarantine /Applications/SwitchX.app`。请从「应用程序」启动 SwitchX，不要直接在磁盘映像中运行：Codex 配置会记录应用路径，推出映像后路由将无法取得本地凭据。应用内「启动 Codex」目前仅支持 macOS；其他平台请自行在终端启动新的 Codex 会话。
+macOS 包采用 ad-hoc 签名，尚未使用 Developer ID 签名或 Apple 公证；Windows 包尚未进行代码签名。macOS 首次打开时如提示无法验证开发者，先关闭提示，再到「系统设置 → 隐私与安全性」点击「仍要打开」；也可以在终端运行 `xattr -dr com.apple.quarantine /Applications/SwitchX.app`。请从「应用程序」启动 SwitchX，不要直接在磁盘映像中运行：Codex 配置会记录应用路径，推出映像后路由将无法取得本地凭据。请自行在终端运行 `codex --no-daemon` 启动新的 Codex 会话。
 
 从源码运行需要 [rust-toolchain.toml](rust-toolchain.toml) 中指定的 Rust（rustup 会自动安装）与 Git LFS。发布路由前，SwitchX 会调用本机的 Codex CLI 检查模型目录。
 
@@ -69,7 +69,7 @@ sh scripts/bundle-macos.sh --release  # target/release/SwitchX.app
 2. 在「连接」中添加 API 上游或订阅连接；订阅账号在「连接 → 订阅账号」中登录。
 3. 在「工作台」中选择要发布的模型和默认模型。
 4. 点击「预览并启用」，核对改动后「确认启用」。
-5. 点击「启动 Codex」打开新会话，用 `/model` 切换模型。
+5. 在终端运行 `codex --no-daemon` 打开新会话，用 `/model` 切换模型。
 6. 点击「恢复并停止」，还原启用前的配置。
 
 已有的 Codex 会话不会切换到 SwitchX 路由，启用或恢复后请新建会话。

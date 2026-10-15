@@ -42,7 +42,6 @@ export component RoutingPage inherits Rectangle {
     callback select-models(bool, bool);
     callback edit-fallback(string);
     callback inspect-route();
-    callback launch-codex();
     callback show-direct();
     callback restore-config(string);
     vertical-stretch: 1;
@@ -267,14 +266,14 @@ export component RoutingPage inherits Rectangle {
                 }
 
                 Text {
-                    text: root.route-running ? "请用“启动 Codex”或 codex --no-daemon 新建会话。" : root.config-managed ? (root.direct-active ? "当前使用单一上游；恢复后可发布模型菜单。" : "恢复后可编辑模型与连接。") : root.direct-mode ? "点击连接卡片的“预览直连”，查看变更后启用。" : "默认 · " + (root.default-model == "" ? "尚未选择" : root.default-model-label) + "，在新会话生效。";
+                    text: root.route-running ? "请用 codex --no-daemon 新建会话。" : root.config-managed ? (root.direct-active ? "当前使用单一上游；恢复后可发布模型菜单。" : "恢复后可编辑模型与连接。") : root.direct-mode ? "点击连接卡片的“预览直连”，查看变更后启用。" : "默认 · " + (root.default-model == "" ? "尚未选择" : root.default-model-label) + "，在新会话生效。";
                     color: Theme.muted-text;
                     font-size: 11px;
                     overflow: elide;
                 }
             }
 
-            if root.config-managed: QuietButton {
+            if root.config-managed && !root.route-running: QuietButton {
                 width: 112px;
                 text: "恢复并停止";
                 ghost: true;
@@ -283,12 +282,12 @@ export component RoutingPage inherits Rectangle {
             }
             QuietButton {
                 width: 154px;
-                text: root.busy ? "正在处理…" : root.route-running ? "启动 Codex" : root.direct-active ? "查看直连配置" : root.direct-mode ? "选择连接预览直连" : "预览并启用";
-                icon: @image-url("../../assets/ui/arrow.svg");
+                text: root.busy ? "正在处理…" : root.route-running ? "恢复并停止" : root.direct-active ? "查看直连配置" : root.direct-mode ? "选择连接预览直连" : "预览并启用";
+                icon: root.route-running ? @image-url("") : @image-url("../../assets/ui/arrow.svg");
                 icon-color: Theme.on-brand;
                 primary: true;
                 enabled: !root.busy && (root.route-running || root.direct-active || (!root.direct-mode && !root.config-managed && !root.chatgpt-login-pending && root.selected-model-count > 0));
-                clicked => { if (root.route-running) { root.launch-codex(); } else if (root.direct-active) { root.show-direct(); } else { root.inspect-route(); } }
+                clicked => { if (root.route-running) { root.restore-config(root.config-home); } else if (root.direct-active) { root.show-direct(); } else { root.inspect-route(); } }
             }
         }
     }

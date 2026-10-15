@@ -148,6 +148,6 @@ sudo pacman -U ./dist/arch/switchx-0.1.0-1-x86_64.pkg.tar.zst
 
 工作区版本自动生成 `pkgver`，不另维护一个版本号。预发布 `0.2.0-rc.1` 映射为 `0.2.0pre.rc.1`，确保 pacman 将正式 `0.2.0` 视为升级；程序自身仍报告完整 SemVer。打包修订号位于 `scripts/archlinux.py` 的 `PKGREL`，初始为 1。
 
-包安装 `/usr/bin/switchx`、桌面入口、512 像素图标、项目与图标许可、README、changelog 及 `/usr/share/doc/switchx/BUILD-INFO.json`。不安装服务、不创建账号数据，也不改写用户的 Codex 配置。已有 AppImage 或源码版本启用的连接需先恢复，再从安装后的程序启用，以更新凭据 helper 路径。Linux 的「启动 Codex」限制仍适用，需手动打开 Codex 会话。
+包安装 `/usr/bin/switchx`、桌面入口、512 像素图标、项目与图标许可、README、changelog 及 `/usr/share/doc/switchx/BUILD-INFO.json`。不安装服务、不创建账号数据，也不改写用户的 Codex 配置。已有 AppImage 或源码版本启用的连接需先恢复，再从安装后的程序启用，以更新凭据 helper 路径。需手动打开 Codex 会话。
 
 `makepkg` 的 `check()` 验证桌面文件、版本、API Key helper 和路由令牌 helper，使用含空格的数据目录及含中文的程序路径；数据库只含合成凭据，检查后确认数据库未变化且未创建 Codex 配置。检查不访问真实账号或模型上游。可用 `namcap dist/arch/*.pkg.tar.zst` 辅助检查包；图形后端的动态加载依赖可能被它误报为未使用。`make check` 另覆盖源码导出、LFS 检查、版本映射、包元数据与发布产物集合的回归测试。

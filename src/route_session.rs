@@ -147,12 +147,7 @@ struct ActiveRoute {
     address: SocketAddr,
     target: PathBuf,
     state_dir: PathBuf,
-    catalog_path: PathBuf,
-    public_models: HashSet<String>,
-    cli_path: PathBuf,
-    provider_config: Secret,
     token_reference: String,
-    uses_chatgpt: bool,
 }
 
 #[derive(Default)]
@@ -773,17 +768,6 @@ impl RouteSession {
             .unwrap()
             .to_string_lossy()
             .into_owned();
-        let catalog_path = prepared.switch.catalog_path().to_path_buf();
-        let public_models = prepared.publication.model_names().cloned().collect();
-        let document: toml_edit::DocumentMut = prepared
-            .switch
-            .preview
-            .proposed
-            .parse()
-            .map_err(|_| "待发布的 Codex 配置无效")?;
-        let provider_config = Secret::new(
-            document["model_providers"][crate::codex::route_config::PROVIDER_ID].to_string(),
-        );
         let state = RouterState::new(
             prepared.address,
             local_token.expose().into(),
@@ -827,12 +811,7 @@ impl RouteSession {
             address: prepared.address,
             target: prepared.target,
             state_dir: prepared.state_dir,
-            catalog_path,
-            public_models,
-            cli_path: prepared.cli_path,
-            provider_config,
             token_reference: prepared.token_reference,
-            uses_chatgpt,
         });
         if let Err(error) = prepared.switch.apply() {
             // An error after journal publication may follow a successful rename.
@@ -845,54 +824,6 @@ impl RouteSession {
             ));
         }
         Ok(())
-    }
-
-    pub async fn codex_launcher(
-        &self,
-        state_dir: &Path,
-        config_home: &Path,
-    ) -> Result<PathBuf, String> {
-        let active = self
-            .active
-            .as_ref()
-            .filter(|active| active.server.is_running())
-            .ok_or("请先开启模型路由，再启动 Codex")?;
-        if active.state_dir != state_dir {
-            return Err("路由数据目录已变化，请使用当前路由的数据目录启动 Codex".into());
-        }
-        let target = client::config_path(config_home)?;
-        let recovery =
-            route_switch::recovery(state_dir)?.ok_or("路由恢复记录已变化，请检查配置后重新发布")?;
-        if target != active.target || recovery.config_path != active.target {
-            return Err("目标配置目录已变化，请使用当前路由的配置目录启动 Codex".into());
-        }
-        let bytes = route_switch::read_config(&target)?.ok_or("路由配置文件已不存在")?;
-        let document: toml_edit::DocumentMut = std::str::from_utf8(&bytes)
-            .map_err(|_| "Codex 配置不是 UTF-8")?
-            .parse()
-            .map_err(|_| "Codex 配置 TOML 无效")?;
-        let field = |name: &str| document.get(name).and_then(toml_edit::Item::as_str);
-        let provider = document
-            .get("model_providers")
-            .and_then(|providers| providers.get(crate::codex::route_config::PROVIDER_ID));
-        if field("model_provider") != Some(crate::codex::route_config::PROVIDER_ID)
-            || field("model_catalog_json") != active.catalog_path.to_str()
-            || !provider
-                .is_some_and(|provider| provider.to_string() == active.provider_config.expose())
-            || !field("model").is_some_and(|model| active.public_models.contains(model))
-            || !active.catalog_path.is_file()
-        {
-            return Err("路由配置已被外部修改，请检查配置并重新发布后再启动 Codex".into());
-        }
-        if active.uses_chatgpt {
-            if let Some(probe) = &self.local_probe {
-                chatgpt::workspace_using_mock(config_home, &active.cli_path, probe.discovery)
-                    .await?;
-            } else {
-                chatgpt::workspace_using(config_home, &active.cli_path).await?;
-            }
-        }
-        client::write_codex_launcher(state_dir, config_home, &active.cli_path).await
     }
 
     pub async fn restore(&mut self, state_dir: &Path, config_home: &Path) -> Result<(), String> {
@@ -1113,7 +1044,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn launcher_requires_the_running_routes_unchanged_target_and_catalog() {
+    async fn restore_requires_the_running_routes_unchanged_target_and_closes_admission() {
         let root = std::env::temp_dir().join(format!(
             "switchx-launch-guard-{}",
             crate::id::new_id().unwrap()
@@ -1123,13 +1054,6 @@ mod tests {
         std::fs::create_dir_all(&home).unwrap();
         std::fs::create_dir(&data).unwrap();
         let mut session = RouteSession::default();
-        assert!(
-            session
-                .codex_launcher(&data, &home)
-                .await
-                .unwrap_err()
-                .contains("开启模型路由")
-        );
 
         let templates =
             serde_json::from_str(include_str!("../tests/fixtures/synthetic-models.json")).unwrap();
@@ -1153,7 +1077,6 @@ mod tests {
             "sx-test",
         )
         .unwrap();
-        let catalog_path = switch.catalog_path().to_path_buf();
         switch.apply().unwrap();
         let mut upstreams = HashMap::new();
         upstreams.insert(
@@ -1174,26 +1097,8 @@ mod tests {
             address,
             target: home.join("config.toml"),
             state_dir: data.clone(),
-            catalog_path,
-            public_models: HashSet::from(["sx-test".into()]),
-            cli_path: root.join("must-not-be-executed"),
-            provider_config: Secret::new(
-                std::fs::read_to_string(home.join("config.toml"))
-                    .unwrap()
-                    .parse::<toml_edit::DocumentMut>()
-                    .unwrap()["model_providers"][crate::codex::route_config::PROVIDER_ID]
-                    .to_string(),
-            ),
             token_reference: String::new(),
-            uses_chatgpt: false,
         });
-        assert!(
-            session
-                .codex_launcher(&root.join("another-data"), &home)
-                .await
-                .unwrap_err()
-                .contains("数据目录")
-        );
         assert!(
             session
                 .restore(&root.join("another-data"), &home)
@@ -1203,36 +1108,7 @@ mod tests {
         );
         assert!(session.is_running());
         assert!(route_switch::recovery(&data).unwrap().is_some());
-        assert!(
-            session
-                .codex_launcher(&data, &root.join("another-home"))
-                .await
-                .unwrap_err()
-                .contains("目标配置目录")
-        );
         let original = std::fs::read_to_string(home.join("config.toml")).unwrap();
-        for changed in [
-            original.replace("switchx_router", "external-provider"),
-            original.replace("sx-test", "unpublished-model"),
-            original.replace("catalog-", "another-catalog-"),
-            original.replace(&address.to_string(), "127.0.0.1:1"),
-            original.replace("SWITCHX_LOCAL_TOKEN", "EXTERNAL_KEY"),
-            original.replace(
-                "requires_openai_auth = false",
-                "requires_openai_auth = true",
-            ),
-            original.replace("wire_api = \"responses\"", "wire_api = \"chat\""),
-        ] {
-            std::fs::write(home.join("config.toml"), changed).unwrap();
-            assert!(
-                session
-                    .codex_launcher(&data, &home)
-                    .await
-                    .unwrap_err()
-                    .contains("外部修改")
-            );
-            assert!(!data.join("launch-codex.command").exists());
-        }
         std::fs::write(home.join("config.toml"), original).unwrap();
         // Exit must close admission even when the journal disappeared externally.
         let journal_path = data.join(crate::codex::ROUTE_JOURNAL);

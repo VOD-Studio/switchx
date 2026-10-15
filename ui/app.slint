@@ -636,7 +636,6 @@ export component AppWindow inherits Window {
     callback save-fallback();
     callback inspect-route();
     callback apply-route();
-    callback launch-codex();
     callback cancel-route-preview();
     callback poll-route-status();
     callback refresh-system-appearance();
@@ -998,7 +997,6 @@ export component AppWindow inherits Window {
                                     select-models(selected, selected-only) => { root.select-models(selected, selected-only); }
                                     edit-fallback(id) => { root.edit-fallback(id); }
                                     inspect-route() => { root.publish-drawer-open = true; root.inspect-route(); }
-                                    launch-codex() => { root.launch-codex(); }
                                     show-direct() => { root.direct-drawer-open = true; }
                                     restore-config(home) => { root.restore-config(home); }
                                 }
