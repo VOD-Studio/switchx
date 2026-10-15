@@ -518,6 +518,21 @@ fn remove_generated_catalog(state_dir: &Path, path: Option<&Path>) -> Result<(),
 }
 
 pub fn active_target(state_dir: &Path) -> Result<Option<PathBuf>, String> {
+    Ok(active_journal(state_dir)?.map(|journal| journal.config_path))
+}
+
+/// The SwitchX connection the active direct switch points Codex at.
+pub fn active_provider(state_dir: &Path) -> Result<Option<String>, String> {
+    Ok(active_journal(state_dir)?.and_then(|journal| {
+        journal
+            .provider_id
+            .strip_prefix("switchx_direct_")
+            .filter(|id| valid_id(id))
+            .map(str::to_owned)
+    }))
+}
+
+fn active_journal(state_dir: &Path) -> Result<Option<Journal>, String> {
     let path = state_dir.join(DIRECT_JOURNAL);
     match fs::read(path) {
         Ok(bytes) => {
@@ -526,7 +541,7 @@ pub fn active_target(state_dir: &Path) -> Result<Option<PathBuf>, String> {
             if journal.version != 1 || !journal.config_path.is_absolute() {
                 return Err("SwitchX direct journal has an unsupported version or target".into());
             }
-            Ok(Some(journal.config_path))
+            Ok(Some(journal))
         }
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
         Err(error) => Err(error.to_string()),
@@ -673,7 +688,12 @@ mod tests {
         let prepared =
             PreparedDirectSwitch::inspect(&home.config(), &home.state(), &provider(), &helper)
                 .unwrap();
+        assert_eq!(active_provider(&home.state()).unwrap(), None);
         prepared.apply().unwrap();
+        assert_eq!(
+            active_provider(&home.state()).unwrap().as_deref(),
+            Some("test-id")
+        );
         let active = fs::read_to_string(home.config())
             .unwrap()
             .replace("model = \"mock-model\"", "model = \"external\"");

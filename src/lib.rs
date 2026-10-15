@@ -9,6 +9,7 @@ pub mod headless;
 pub mod id;
 #[cfg(target_os = "macos")]
 pub mod macos;
+pub mod mcp;
 pub mod model_picker;
 pub mod provider_icons;
 pub mod reasoning_picker;

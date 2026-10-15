@@ -3,7 +3,7 @@
 use std::path::Path;
 
 use super::{AppError, open_store};
-use crate::storage::RequestStatus;
+use crate::storage::{RequestStatus, Store};
 
 pub struct RequestView {
     pub id: String,
@@ -83,7 +83,10 @@ pub fn clear_requests(data_dir: &Path) -> Result<usize, AppError> {
 }
 
 pub fn load_requests(data_dir: &Path) -> Result<Vec<RequestView>, AppError> {
-    let store = open_store(data_dir)?;
+    requests_from(&open_store(data_dir)?, 100)
+}
+
+pub(crate) fn requests_from(store: &Store, limit: usize) -> Result<Vec<RequestView>, AppError> {
     let providers = store.providers().map_err(|_| AppError::Database)?;
     let provider_name = |id: &String| {
         providers
@@ -93,7 +96,7 @@ pub fn load_requests(data_dir: &Path) -> Result<Vec<RequestView>, AppError> {
             .unwrap_or_else(|| id.clone())
     };
     store
-        .requests(100)
+        .requests(limit)
         .map_err(|_| AppError::Database)?
         .into_iter()
         .map(|record| {

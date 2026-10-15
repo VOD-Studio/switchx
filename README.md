@@ -78,6 +78,30 @@ sh scripts/bundle-macos.sh --release  # target/release/SwitchX.app
 
 定制内容仅保存在本地 SQLite，不写入 Codex TOML、模型目录、恢复日志或请求记录。主备模型分别使用自己的定制配置；修改连接目录会保留已有模型的定制。单项定制总大小上限为 32 KiB。
 
+## 供 AI Agent 读取（MCP）
+
+`switchx mcp` 在标准输入输出上运行一个只读的 [MCP](https://modelcontextprotocol.io) 服务，Codex、Claude Code 等 agent 可以直接查询 SwitchX：
+
+| 工具             | 内容                                                                     |
+| ---------------- | ------------------------------------------------------------------------ |
+| `get_status`     | Codex 配置是否由 SwitchX 托管（路由 / 直连）、连接与模型数量、最近请求和今日用量 |
+| `list_providers` | 连接的名称、类型、服务地址、默认模型、凭据是否已配置与账号绑定           |
+| `list_models`    | 模型映射：公开模型 ID、实际上游模型、上下文窗口、推理档位、启用状态与备用连接 |
+| `get_usage`      | 按预设或自定义时间段的 Token 用量、估算费用、按连接 / 模型分布与明细     |
+| `list_requests`  | 最近经路由的请求：状态、耗时、错误原因、备用切换与 Token 数              |
+
+服务以只读方式打开现有数据库，不会创建、迁移或修改数据，也不会返回 API Key、OAuth token、本地路由令牌或凭据引用。首次安装或升级后请先打开一次应用完成数据库初始化。路由进程是否在运行、账号额度等实时状态仍需在应用中查看。
+
+```sh
+codex mcp add switchx -- /Applications/SwitchX.app/Contents/MacOS/switchx mcp
+```
+
+```sh
+claude mcp add switchx -- /Applications/SwitchX.app/Contents/MacOS/switchx mcp
+```
+
+Linux 包使用 `/usr/bin/switchx` 或 tar.gz 解压出的 `switchx`，Windows 使用 `switchx.exe` 的完整路径。设置 `SWITCHX_DATA_DIR` 时，MCP 服务读取同一数据目录。
+
 ## 数据与凭据
 
 | 平台    | 默认数据目录                                            |

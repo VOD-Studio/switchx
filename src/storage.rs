@@ -232,6 +232,7 @@ impl Store {
     /// Inspect current metadata without creating, migrating or writing the source database.
     pub fn open_read_only(path: &Path) -> Result<Self> {
         let connection = Connection::open_with_flags(path, OpenFlags::SQLITE_OPEN_READ_ONLY)?;
+        connection.busy_timeout(Duration::from_secs(5))?;
         let version: i64 = connection.query_row("PRAGMA user_version", [], |row| row.get(0))?;
         if version != SCHEMA_VERSION {
             return Err(rusqlite::Error::InvalidQuery);

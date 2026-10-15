@@ -4,6 +4,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- 新增 `switchx mcp` 只读 MCP 服务，Codex、Claude Code 等 agent 可查询托管状态、连接、模型映射、用量与请求记录；服务以只读方式打开数据库，不创建或迁移数据，输出不含 API Key、OAuth token、本地路由令牌或凭据引用。
+
 ### Changed
 
 - 模型路由启用后，路由页主按钮改为「恢复并停止」，不再提供「启动 Codex」；请在终端运行 `codex --no-daemon` 新建会话。

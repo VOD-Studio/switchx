@@ -9,7 +9,9 @@ use chrono::Local;
 
 use super::{AppError, open_store};
 use crate::{
-    storage::{Currency, PriceRecord, ProviderRecord, UsageBucket, UsageFilter, UsageSource},
+    storage::{
+        Currency, PriceRecord, ProviderRecord, Store, UsageBucket, UsageFilter, UsageSource,
+    },
     usage::{
         TokenUsage,
         codex_logs::{self, ImportError, ImportProgress, ImportSummary},
@@ -59,7 +61,10 @@ pub struct UsageView {
 }
 
 pub fn load_usage(data_dir: &Path, query: &UsageQuery) -> Result<UsageView, AppError> {
-    let store = open_store(data_dir)?;
+    usage_from(&open_store(data_dir)?, query)
+}
+
+pub(crate) fn usage_from(store: &Store, query: &UsageQuery) -> Result<UsageView, AppError> {
     let database = |_| AppError::Database;
     let now = Local::now();
     let first = if query.period == Period::All {

@@ -16,6 +16,7 @@ mod providers;
 mod snapshot;
 mod usage;
 
+pub(crate) use activity::requests_from;
 pub use activity::{
     RequestStats, RequestView, clear_requests, format_duration, load_requests, request_stats,
 };
@@ -38,7 +39,9 @@ pub use providers::{
     save_provider_with_codex_options, save_provider_with_codex_options_and_icon,
     save_provider_with_directory, save_provider_with_mappings,
 };
+pub(crate) use snapshot::snapshot_from;
 pub use snapshot::{ModelView, ProviderView, Snapshot, load_snapshot};
+pub(crate) use usage::usage_from;
 pub use usage::{
     PriceInput, PriceView, USAGE_PAGE, USAGE_ROW_LIMIT, UsageQuery, UsageRow, UsageView,
     delete_price, format_amounts, format_count, format_money, format_tokens, load_prices,
@@ -128,6 +131,29 @@ pub fn ensure_editable(data_dir: &Path) -> Result<(), String> {
         return Err("SwitchX 正在管理配置，请先恢复原配置再编辑上游或模型".into());
     }
     Ok(())
+}
+
+/// Opens an existing current-schema database without creating, migrating, or
+/// writing it; a database the app has not yet upgraded is unavailable.
+pub(crate) fn open_store_read_only(data_dir: &Path) -> Result<Store, AppError> {
+    let regular = |path: &Path, directory: bool| {
+        fs::symlink_metadata(path).is_ok_and(|metadata| {
+            !metadata.file_type().is_symlink()
+                && if directory {
+                    metadata.is_dir()
+                } else {
+                    metadata.is_file()
+                }
+        })
+    };
+    if !data_dir.is_absolute() || !regular(data_dir, true) {
+        return Err(AppError::DataDirectory);
+    }
+    let database = data_dir.join("switchx.sqlite");
+    if !regular(&database, false) {
+        return Err(AppError::Database);
+    }
+    Store::open_read_only(&database).map_err(|_| AppError::Database)
 }
 
 pub(crate) fn open_store(data_dir: &Path) -> Result<Store, AppError> {

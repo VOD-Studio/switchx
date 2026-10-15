@@ -50,7 +50,10 @@ pub struct ModelView {
 }
 
 pub fn load_snapshot(data_dir: &Path, check_credentials: bool) -> Result<Snapshot, AppError> {
-    let store = open_store(data_dir)?;
+    snapshot_from(&open_store(data_dir)?, check_credentials)
+}
+
+pub(crate) fn snapshot_from(store: &Store, check_credentials: bool) -> Result<Snapshot, AppError> {
     let providers = store.providers().map_err(|_| AppError::Database)?;
     let models = store.models().map_err(|_| AppError::Database)?;
     let mut views = Vec::new();
@@ -73,7 +76,7 @@ pub fn load_snapshot(data_dir: &Path, check_credentials: bool) -> Result<Snapsho
         models: views,
         providers: providers
             .into_iter()
-            .map(|provider| provider_view(provider, &store, check_credentials))
+            .map(|provider| provider_view(provider, store, check_credentials))
             .collect(),
         credentials_checked: check_credentials,
     })
