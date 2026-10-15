@@ -4,7 +4,7 @@ use rusqlite::{Connection, OpenFlags, Result, Transaction, TransactionBehavior, 
 
 use crate::{credentials::Secret, usage::TokenUsage};
 
-const SCHEMA_VERSION: i64 = 16;
+const SCHEMA_VERSION: i64 = 17;
 
 /// Usage, log import and price tables; every statement is safe to repeat.
 const USAGE_SCHEMA: &str = "CREATE TABLE IF NOT EXISTS usage_records (
@@ -223,7 +223,7 @@ impl Store {
         let version: i64 = connection.query_row("PRAGMA user_version", [], |row| row.get(0))?;
         if !matches!(
             version,
-            8 | 9 | 10 | 11 | 12 | 13 | 14 | 15 | SCHEMA_VERSION
+            8 | 9 | 10 | 11 | 12 | 13 | 14 | 15 | 16 | SCHEMA_VERSION
         ) {
             return Err(rusqlite::Error::InvalidQuery);
         }
@@ -511,6 +511,34 @@ impl Store {
                      ALTER TABLE model_prices ADD COLUMN cache_write_1h_micros INTEGER NOT NULL DEFAULT 0;
                      UPDATE model_prices SET cache_write_micros = input_micros, cache_write_1h_micros = input_micros;"
                 )?;
+                }
+                Ok(())
+            })?;
+        }
+        if version < 17 {
+            Self::migrate_step(&connection, 17, |transaction, _| {
+                if transaction
+                    .prepare(
+                        "SELECT reported_cost_micros, request_count FROM usage_records LIMIT 0",
+                    )
+                    .is_err()
+                {
+                    transaction.execute_batch("ALTER TABLE usage_records RENAME TO usage_records_v16;
+                        CREATE TABLE usage_records (
+                            id TEXT PRIMARY KEY NOT NULL,
+                            source TEXT NOT NULL CHECK (source IN ('router','codex_log','claude_log','session_log')),
+                            started_at_ms INTEGER NOT NULL, provider_id TEXT, codex_provider TEXT, public_model TEXT, model TEXT NOT NULL,
+                            input_tokens INTEGER NOT NULL, cached_input_tokens INTEGER NOT NULL, cache_write_tokens INTEGER NOT NULL,
+                            output_tokens INTEGER NOT NULL, reasoning_tokens INTEGER NOT NULL, duration_ms INTEGER, first_event_ms INTEGER,
+                            response_id TEXT, session_id TEXT, cache_write_1h_tokens INTEGER NOT NULL DEFAULT 0,
+                            client TEXT NOT NULL DEFAULT 'unknown' CHECK (client IN ('codex','claude_code','gemini','opencode','grokbuild','pi','mcode','unknown')),
+                            reported_cost_micros INTEGER, request_count INTEGER NOT NULL DEFAULT 1
+                        );
+                        INSERT INTO usage_records SELECT *, NULL, 1 FROM usage_records_v16;
+                        DROP TABLE usage_records_v16;
+                        CREATE INDEX usage_records_time ON usage_records(started_at_ms);
+                        CREATE INDEX usage_records_response ON usage_records(response_id) WHERE response_id IS NOT NULL;")?;
+                    // Rebuilding the table preserves older log and route records verbatim.
                 }
                 Ok(())
             })?;
@@ -1464,6 +1492,33 @@ fn settings_with_key(settings: &str, key: &Secret) -> Result<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn usage_v16_migration_keeps_claude_history_and_source_settings() {
+        let dir =
+            std::env::temp_dir().join(format!("switchx-v16-{}", crate::id::new_id().unwrap()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("switchx.sqlite");
+        let store = Store::open(&path).unwrap();
+        store.connection.execute_batch("ALTER TABLE usage_records DROP COLUMN reported_cost_micros; ALTER TABLE usage_records DROP COLUMN request_count;
+            INSERT INTO usage_records (id,source,client,started_at_ms,model,input_tokens,cached_input_tokens,cache_write_tokens,cache_write_1h_tokens,output_tokens,reasoning_tokens)
+            VALUES ('claude:old','claude_log','claude_code',1,'claude',1000,500,200,100,50,0);
+            INSERT INTO app_settings(key,value) VALUES ('usage_claude_home','/synthetic/claude'); PRAGMA user_version=16;").unwrap();
+        drop(store);
+        assert!(Store::open_credentials_read_only(&path).is_ok());
+        let store = Store::open(&path).unwrap();
+        let row = &store.usage_records(0, 2).unwrap()[0];
+        assert_eq!(row.client, UsageClient::ClaudeCode);
+        assert_eq!(row.usage.cache_write_1h, 100);
+        assert_eq!(row.request_count, 1);
+        assert_eq!(row.reported_cost_micros, None);
+        assert_eq!(
+            store.usage_claude_home().unwrap().as_deref(),
+            Some("/synthetic/claude")
+        );
+        drop(store);
+        std::fs::remove_dir_all(dir).unwrap();
+    }
 
     #[test]
     fn usage_v15_migration_preserves_rows_cursors_and_existing_estimates() {
@@ -3306,6 +3361,8 @@ mod tests {
             .unwrap();
         assert_eq!(ids, ["codex:other:codex_log:model", "routed:router:actual"]);
         let logged = UsageRecord {
+            reported_cost_micros: None,
+            request_count: 1,
             id: "codex:later".into(),
             source: UsageSource::CodexLog,
             client: UsageClient::Codex,

@@ -40,10 +40,26 @@ const SYNC_INTERVAL: Duration = Duration::from_secs(60);
 
 enum Job {
     Load(UsageQuery),
-    Sync { home: PathBuf, force: bool },
-    SetImport { enabled: bool, home: PathBuf },
-    SetClaude { enabled: bool, home: String },
-    Rebuild { home: PathBuf },
+    Sync {
+        home: PathBuf,
+        force: bool,
+    },
+    SetImport {
+        enabled: bool,
+        home: PathBuf,
+    },
+    SetClaude {
+        enabled: bool,
+        home: String,
+    },
+    SetClient {
+        client: String,
+        path: String,
+        enabled: bool,
+    },
+    Rebuild {
+        home: PathBuf,
+    },
     Prices,
     Reload,
     SavePrice(PriceInput),
@@ -153,6 +169,17 @@ fn run(receiver: mpsc::Receiver<Job>, weak: Weak<AppWindow>, cancel: Arc<AtomicB
                 } => {
                     reload = true;
                     match app::save_usage_claude_source(data_dir, &path, enabled) {
+                        Ok(()) => sync = Some(false),
+                        Err(error) => post_sync(&weak, SyncOutcome::Failed(error)),
+                    }
+                }
+                Job::SetClient {
+                    client,
+                    path,
+                    enabled,
+                } => {
+                    reload = true;
+                    match app::save_usage_client_source(data_dir, &client, &path, enabled) {
                         Ok(()) => sync = Some(false),
                         Err(error) => post_sync(&weak, SyncOutcome::Failed(error)),
                     }
@@ -407,12 +434,11 @@ fn current_query(app: &AppWindow, rows: usize) -> UsageQuery {
     UsageQuery {
         period,
         filter: UsageFilter {
-            client: match app.get_usage_client_filter() {
-                1 => Some(UsageClient::Codex),
-                2 => Some(UsageClient::ClaudeCode),
-                3 => Some(UsageClient::Unknown),
-                _ => None,
-            },
+            client: usize::try_from(app.get_usage_client_filter())
+                .ok()
+                .and_then(|i| UsageClient::FILTERS.get(i))
+                .copied()
+                .flatten(),
             group: text(app.get_usage_group_filter()),
             model: text(app.get_usage_model_filter()),
         },
@@ -544,6 +570,14 @@ pub(super) fn connect(app: &AppWindow, service: &UsageService) {
                 home: home.into(),
             });
         }
+    });
+    let client_service = service.clone();
+    app.on_usage_save_client_source(move |client, path, enabled| {
+        client_service.send(Job::SetClient {
+            client: client.into(),
+            path: path.into(),
+            enabled,
+        });
     });
     let weak = app.as_weak();
     let sync_service = service.clone();
@@ -705,12 +739,30 @@ pub(super) fn show_usage(app: &AppWindow, query: &UsageQuery, view: UsageView) {
     } else {
         format!("今日 {}", app::format_tokens(view.today.usage.total())).into()
     });
+    let sources = view
+        .sources
+        .iter()
+        .map(|source| switchx::ui::UsageSourceRow {
+            key: source.client.as_str().into(),
+            name: source.client.label().into(),
+            path: source.path.to_string_lossy().as_ref().into(),
+            enabled: source.enabled,
+            hint: source.hint.into(),
+        })
+        .collect::<Vec<_>>();
+    app.set_usage_other_logs_enabled(view.sources.iter().any(|s| s.enabled));
+    sync_rows(
+        app.get_usage_client_sources(),
+        sources,
+        |row| row.key.clone(),
+        |model| app.set_usage_client_sources(model),
+    );
     app.set_usage_claude_enabled(view.claude_import);
     app.set_usage_claude_home(view.claude_home.to_string_lossy().as_ref().into());
     let mut sync = app.get_usage_sync();
     if sync.enabled != view.log_import && !sync.running {
         sync.enabled = view.log_import;
-        if !view.log_import && !view.claude_import {
+        if !view.log_import && !view.claude_import && !view.sources.iter().any(|s| s.enabled) {
             sync.text = "仅路由记录".into();
         }
         app.set_usage_sync(sync);
@@ -771,6 +823,29 @@ mod tests {
         assert_eq!(query.filter.client, Some(UsageClient::ClaudeCode));
         assert!(query.filter.group.is_none() && query.filter.model.is_none());
         assert_eq!(query.rows, USAGE_PAGE);
+        for (index, client) in UsageClient::EXTERNAL.into_iter().enumerate() {
+            app.invoke_usage_filter_client(index as i32 + 4);
+            let Job::Load(query) = receiver.try_recv().unwrap() else {
+                panic!("expected client query")
+            };
+            assert_eq!(query.filter.client, Some(client));
+            app.invoke_usage_save_client_source(
+                client.as_str().into(),
+                "/synthetic/source".into(),
+                false,
+            );
+            let Job::SetClient {
+                client: key,
+                path,
+                enabled,
+            } = receiver.try_recv().unwrap()
+            else {
+                panic!("expected source save")
+            };
+            assert_eq!(key, client.as_str());
+            assert_eq!(path, "/synthetic/source");
+            assert!(!enabled);
+        }
         app.invoke_usage_save_price(
             "claude-test".into(),
             "USD".into(),
@@ -796,8 +871,44 @@ mod tests {
         assert!(!app.get_usage_claude_enabled());
     }
 
+    #[test]
+    fn client_dropdown_exposes_and_selects_the_last_client() {
+        use i_slint_backend_testing::ElementQuery;
+        let window = headless::install_with_manual_time();
+        let app = AppWindow::new().unwrap();
+        app.window().set_size(slint::PhysicalSize::new(1200, 820));
+        app.set_active_page(2);
+        app.show().unwrap();
+        let selected = Rc::new(Cell::new(-1));
+        let seen = selected.clone();
+        app.on_usage_filter_client(move |index| seen.set(index));
+        headless::advance(500);
+        headless::render(&window);
+        let control = |label: &str| {
+            let wanted = label.to_owned();
+            ElementQuery::from_root(&app)
+                .match_predicate(move |e| e.accessible_label().as_deref() == Some(wanted.as_str()))
+                .find_all()
+                .into_iter()
+                .next()
+                .unwrap_or_else(|| panic!("missing control: {label}"))
+        };
+        control("客户端筛选").invoke_accessible_expand_action();
+        headless::advance(300);
+        headless::render(&window);
+        let key: slint::SharedString = slint::platform::Key::End.into();
+        window.dispatch_event(slint::platform::WindowEvent::KeyPressed { text: key.clone() });
+        window.dispatch_event(slint::platform::WindowEvent::KeyReleased { text: key });
+        headless::advance(300);
+        headless::render(&window);
+        assert_eq!(selected.get(), 8);
+        assert_eq!(app.get_usage_client_filter(), 8);
+    }
+
     fn record(id: &str, at: i64, model: &str) -> UsageRecord {
         UsageRecord {
+            reported_cost_micros: None,
+            request_count: 1,
             client: switchx::storage::UsageClient::Codex,
             id: id.into(),
             source: UsageSource::CodexLog,
@@ -976,7 +1087,7 @@ mod tests {
             .filter_map(ElementHandle::accessible_label)
             .collect::<Vec<_>>();
         assert!(
-            details.iter().any(|label| label == "Codex 中的名称"),
+            details.iter().any(|label| label == "请求中的模型"),
             "{details:?}"
         );
         assert!(accessible_descendants(&rows[1]).is_empty());

@@ -54,6 +54,7 @@ fn cost_text(totals: &Totals) -> String {
         (false, true) => api,
         (true, false) => format!("等效 {subscription}"),
         (false, false) => format!("{api} · 等效 {subscription}"),
+        (true, true) if totals.requests > totals.cost.unpriced_requests => "0.00".into(),
         (true, true) => String::new(),
     }
 }
@@ -192,6 +193,9 @@ pub fn summary(report: &Report) -> UsageSummary {
             String::new(),
         ),
         ([], true) if totals.requests == 0 => ("—".to_owned(), String::new()),
+        ([], true) if totals.requests > totals.cost.unpriced_requests => {
+            ("0.00".to_owned(), String::new())
+        }
         ([], true) => ("未定价".to_owned(), String::new()),
     };
     let range_text = range_text(&report.window);
@@ -624,7 +628,9 @@ pub fn detail_row(
         clock: row.clock.clone().into(),
         time: time.into(),
         connection: row.connection.clone().into(),
-        kind: if row.kind.subscription() {
+        kind: if row.request_count > 1 {
+            format!("{} · {} 次模型调用", row.kind.label(), row.request_count)
+        } else if row.kind.subscription() {
             format!("{}（等效 API 价格）", row.kind.label())
         } else {
             row.kind.label().to_owned()
@@ -667,11 +673,20 @@ pub fn detail_row(
             .map(app::format_duration)
             .unwrap_or_else(|| "—".into())
             .into(),
-        source: match row.source {
-            switchx::storage::UsageSource::Router => "SwitchX 路由",
-            switchx::storage::UsageSource::CodexLog => "Codex 会话日志",
-            switchx::storage::UsageSource::ClaudeLog => "Claude Code 会话日志",
-        }
+        source: format!(
+            "{}{}",
+            match row.source {
+                switchx::storage::UsageSource::Router => "SwitchX 路由",
+                switchx::storage::UsageSource::CodexLog => "Codex 会话日志",
+                switchx::storage::UsageSource::ClaudeLog => "Claude Code 会话日志",
+                switchx::storage::UsageSource::SessionLog => "本地会话用量",
+            },
+            if row.reported_cost {
+                " · 客户端上报费用"
+            } else {
+                ""
+            }
+        )
         .into(),
         client: row.client.label().into(),
         cache_write: if usage.cache_write > 0 {
@@ -727,6 +742,39 @@ pub fn price_rows(prices: Vec<app::PriceView>) -> Vec<UsagePriceRow> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn explicit_zero_cost_is_distinct_from_missing_pricing() {
+        use switchx::usage::{
+            TokenUsage,
+            report::{self, Cost, Inputs},
+        };
+        let mut report = report::build(
+            Window::new(Period::Today, Local::now(), None),
+            &switchx::storage::UsageFilter::default(),
+            Inputs {
+                facts: &[],
+                previous: None,
+                heat: &[],
+                speeds: &[],
+                prices: &[],
+                providers: &[],
+            },
+        );
+        report.totals = Totals {
+            requests: 1,
+            usage: TokenUsage {
+                input: 100,
+                ..Default::default()
+            },
+            cost: Cost::reported(0, GroupKind::Session),
+        };
+        assert_eq!(summary(&report).cost_text, "0.00");
+        assert_eq!(cost_text(&report.totals), "0.00");
+        report.totals.cost.unpriced_requests = 1;
+        assert_eq!(summary(&report).cost_text, "未定价");
+        assert_eq!(cost_text(&report.totals), "");
+    }
 
     #[test]
     fn scales_and_labels_stay_round_and_readable() {

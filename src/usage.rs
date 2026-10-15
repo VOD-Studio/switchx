@@ -6,6 +6,7 @@ use serde_json::Value;
 pub mod claude_logs;
 pub mod codex_logs;
 pub mod report;
+pub mod session_logs;
 
 /// Counts for one model response. `input` includes `cached_input`, and
 /// `output` includes `reasoning`, following the Responses usage object.

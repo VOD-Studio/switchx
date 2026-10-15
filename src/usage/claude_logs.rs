@@ -54,6 +54,8 @@ fn record(line: &[u8]) -> Option<UsageRecord> {
         .ok()?
         .timestamp_millis();
     Some(UsageRecord {
+        reported_cost_micros: None,
+        request_count: 1,
         // Message IDs survive copied/forked transcripts and are shared by all blocks.
         id: format!("claude:{id}"),
         source: UsageSource::ClaudeLog,

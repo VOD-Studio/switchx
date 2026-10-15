@@ -7,7 +7,11 @@ import {
 } from "../components.slint";
 import { QuietScrollView as ScrollView } from "../scroll-view.slint";
 import { QuotaSpinner } from "../quota-loading.slint";
-import { UsagePriceRow, UsageSyncState } from "../view-models.slint";
+import {
+    UsagePriceRow,
+    UsageSyncState,
+    UsageSourceRow,
+} from "../view-models.slint";
 
 component Switch inherits Rectangle {
     in property <bool> on;
@@ -110,8 +114,52 @@ component ImportBar inherits Rectangle {
     }
 }
 
+component ClientSourceCard inherits Section {
+    in property <UsageSourceRow> entry;
+    in property <bool> busy;
+    private property <string> edited-path: root.entry.path;
+    callback save(string, string, bool);
+    VerticalLayout {
+        padding: 18px;
+        spacing: 10px;
+        Heading {
+            icon: @image-url("../../assets/ui/database.svg");
+            title: root.entry.name;
+            Switch {
+                label: "自动同步 " + root.entry.name + " 用量";
+                on: root.entry.enabled;
+                toggled => { root.save(root.entry.key, root.entry.path, !root.entry.enabled); }
+            }
+        }
+
+        Body {
+            text: root.entry.hint;
+        }
+
+        QuietLineEdit {
+            height: 32px;
+            text <=> root.edited-path;
+            placeholder-text: "绝对路径；留空恢复默认位置";
+            accepted => { root.save(root.entry.key, root.edited-path, root.entry.enabled); }
+        }
+
+        HorizontalLayout {
+            alignment: end;
+            QuietButton {
+                width: 88px;
+                height: 30px;
+                text: "保存位置";
+                enabled: !root.busy && root.edited-path != root.entry.path;
+                clicked => { root.save(root.entry.key, root.edited-path, root.entry.enabled); }
+            }
+        }
+    }
+}
+
 export component UsageSourcesSheet inherits ScrollView {
     horizontal-scrollbar-policy: always-off;
+    in property <[UsageSourceRow]> sources;
+    callback save-client-source(string, string, bool);
     in property <bool> claude-enabled;
     in property <string> claude-home;
     private property <string> edited-claude-home: root.claude-home;
@@ -263,6 +311,12 @@ export component UsageSourcesSheet inherits ScrollView {
             }
         }
 
+        for source in root.sources: ClientSourceCard {
+            entry: source;
+            busy: root.sync.running;
+            save(key, path, enabled) => { root.save-client-source(key,path,enabled); }
+        }
+
         Section {
             VerticalLayout {
                 padding: 18px;
@@ -280,7 +334,7 @@ export component UsageSourcesSheet inherits ScrollView {
                 }
 
                 Body {
-                    text: "先备份数据库，再重新导入 Codex 和 Claude Code 的全部会话日志（包括已关闭自动扫描的来源）。已删除的日志无法再导入。";
+                    text: "先备份数据库，再重新导入全部客户端的本地用量记录（包括已关闭自动扫描的来源）。已删除的日志无法再导入。";
                 }
 
                 AnimatedSection {

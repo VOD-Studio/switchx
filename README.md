@@ -22,7 +22,7 @@ SwitchX 把 API 供应商、ChatGPT 订阅和 Grok 订阅放进同一个模型�
 - **备用上游**：主上游连接失败时，改用一个预先指定的 API 上游。
 - **配置恢复**：原子写入 `config.toml` 并记录恢复日志。恢复时保留外部修改，冲突会明确报告。
 - **请求记录**：查看最近请求的结果、耗时、实际上游与 Token 用量，不保存正文与凭据。
-- **用量统计**：按今天、近 24 小时、近 7 / 14 / 30 / 90 天、全部或精确到分钟的自定义范围查看 Token、缓存命中率、请求数与估算费用，按客户端、连接和模型筛选，查看活跃时段与明细。路由请求实时计入；Codex 的直连、原生登录与其他提供方，以及 Claude Code 的主会话、子 agent 和 Workflow 用量均从本地日志增量导入。同一 Claude 回复的后续快照会补全原记录，不重复增加请求。价格按模型以美元或人民币自行填写，缓存读取、5 分钟写入与 1 小时写入分别计费；订阅连接显示等效 API 价格。
+- **用量统计**：按今天、近 24 小时、近 7 / 14 / 30 / 90 天、全部或精确到分钟的自定义范围查看 Token、缓存命中率、请求数与估算费用，按客户端、连接和模型筛选，查看活跃时段与明细。路由请求实时计入；Codex 的直连、原生登录与其他提供方，以及 Claude Code、Gemini CLI、OpenCode、Grok Build、Pi、MiniMax Code 的用量均从本地日志或只读数据库导入。同一 Claude 回复的后续快照会补全原记录，不重复增加请求。价格按模型以美元或人民币自行填写，缓存读取、5 分钟写入与 1 小时写入分别计费；订阅连接显示等效 API 价格。
 
 ## 安装
 
@@ -147,8 +147,8 @@ Linux 包使用 `/usr/bin/switchx` 或 tar.gz 解压出的 `switchx`，Windows �
 - ChatGPT 与 Grok 的 OAuth 凭据分别保存在 `codex_oauth_auth.json` 与 `xai_oauth_auth.json` 中，Unix 权限为 `0600`。
 - API Key 与 OAuth token 不会出现在 Codex 配置、界面列表、日志或恢复记录中。
 - 用量统计读取所选 Codex 目录下的 `sessions`、`archived_sessions`，以及 Claude 配置目录下的 `projects`（含子 agent 和 Workflow 日志）。Claude 目录默认使用绝对路径的 `CLAUDE_CONFIG_DIR`，否则使用 `~/.claude`；可在「用量 → 数据来源」修改目录并分别关闭自动扫描。只解析计数、模型、消息/会话 ID 和时间，不解析或保存提示词、回复与凭据。
-- 会话日志在启动及之后每分钟增量同步，未完成的尾行留到下次读取；文件替换或截断会重新读取，并按消息 ID 去重。「同步全部日志」和「重新导入」会手动读取两个来源，包括已关闭自动扫描的来源；重新导入前会备份数据库（备份同样包含凭据）。本机没有保留的日志无法补回；这不是 Claude 网页聊天或订阅剩余额度查询。
-- 客户端筛选包括全部、Codex、Claude Code、未识别客户端。路由记录只有与 Codex 会话的响应 ID 精确匹配时才归入 Codex；其余保留为未识别，不从模型或供应商推断。Claude 日志显示为「Claude Code 会话」，不自动关联连接或账号。
+- 会话日志在启动及之后每分钟增量同步，未完成的尾行留到下次读取；文件替换或截断会重新读取，并按消息 ID 去重。「同步全部日志」和「重新导入」会手动读取全部已配置来源，包括已关闭自动扫描的来源；重新导入前会备份数据库（备份同样包含凭据）。本机没有保留的日志无法补回；这不是 Claude 网页聊天或订阅剩余额度查询。
+- 客户端筛选覆盖 Codex、Claude Code、Gemini CLI、OpenCode、Grok Build、Pi、MiniMax Code，以及未识别客户端。路由记录能与日志的响应 ID 精确匹配时，会合并用量并保留客户端归属和上报费用；其余不从模型、时间或供应商猜测关联。各客户端的日志显示为独立会话分组，不自动绑定 SwitchX 连接或账号。
 - 费用按当前填写的价格估算；默认写入倍率参考 [Claude 缓存计费说明](https://platform.claude.com/docs/en/build-with-claude/prompt-caching#pricing)。缓存写入留空时，5 分钟默认按输入价的 1.25 倍、1 小时按 2 倍，可分别覆盖；缓存读取留空仍按输入价。旧定价升级后保留原来的写入价格，避免改变已有估算。没有 TTL 分项的历史缓存写入按 5 分钟计；写入总数包含 1 小时分项，统计不会重复相加。
 
 | 环境变量            | 作用                                                                       |
@@ -156,6 +156,22 @@ Linux 包使用 `/usr/bin/switchx` 或 tar.gz 解压出的 `switchx`，Windows �
 | `SWITCHX_DATA_DIR`  | 改用指定的数据目录，须为绝对路径                                           |
 | `SWITCHX_CODEX_CLI` | 指定 Codex CLI；默认依次查找 `PATH`、常见安装位置和 ChatGPT.app 内置的 CLI |
 | `HTTPS_PROXY` 等    | 出站代理，遵循 `NO_PROXY`；未设置时使用系统代理                            |
+
+五种附加来源可在「用量 → 数据来源」分别设置绝对路径和自动同步开关：
+
+| 客户端 | 默认来源 | 同步口径 |
+| --- | --- | --- |
+| Gemini CLI | `~/.gemini/tmp/*/chats/session-*.json(l)` | 兼容 JSON 与 JSONL 更新、检查点和迁移残留；思考 Token 计入输出；会话回退不撤销已发生的用量 |
+| OpenCode | `~/.local/share/opencode/opencode.db` | 只读访问 SQLite 及 WAL，优先 V2；包括完成或失败的压缩记录，未完成消息待后续写入补齐 |
+| Grok Build | `~/.grok/{sessions,archived_sessions}/…/updates.jsonl` | 按 `turn_completed` 的每轮、每模型独立总量入账；请求数使用 `modelCalls`（缺失时记 1），不做相邻轮差分 |
+| Pi | `~/.pi/agent/sessions` | 包含助手、工具结果、压缩和分支摘要用量；复制或分支中的相同条目去重 |
+| MiniMax Code | `~/.minimax/v2/sqlite/runtime-state.sqlite` | 只读访问已提交用量流水，以会话 ID 与流水 ID 去重；变化时校验已有流水的费用修订 |
+
+- OpenCode 支持绝对路径的 `OPENCODE_DB` 和 `XDG_DATA_HOME`；Pi 支持 `PI_CODING_AGENT_SESSION_DIR`、`PI_CODING_AGENT_DIR`；MiniMax Code 支持 `MINIMAX_DATA_DIR`。应用中的自定义来源路径优先。Pi 若在自身设置里配置了其他会话目录，可在这里指定相同位置。
+- JSONL 只处理完整新增行，保存非正文的解析状态与边界指纹；JSON 文件和 SQLite 在源数据变化时检查用量快照，按稳定 ID 插入或补全。源数据库不会迁移或改写，原有导入记录在来源文件删除后仍保留，直到显式重建。
+- 客户端完整上报的美元费用优先于本地估价。MiniMax Code 的显式零费用保留为零；OpenCode/Pi 的零值可能只是缺少定价，因此回退本地价格。Grok 的 `costIsPartial` 不作为完整费用；无完整金额且无模型价格时显示未定价。费用修订不会增加请求数。
+- Gemini、OpenCode、MiniMax Code 的独立思考/推理 Token 会合并进输出；Grok 的推理已包含在输出中，不重复相加。缓存与普通输入统一成现有用量页的口径。
+- 无共同响应 ID 的路由请求与按轮聚合日志无法可靠逐条对应，不按相似 Token 数或邻近时间猜测去重。若手动将额外客户端接到 SwitchX 路由，应选择适合的记录来源，避免把两种口径相加。
 
 ## 开发
 

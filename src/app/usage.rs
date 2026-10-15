@@ -7,7 +7,7 @@ use std::{
 
 use chrono::Local;
 
-use super::{AppError, open_store};
+use super::{AppError, UsageSourceView, open_store, usage_sources::usage_sources_from};
 use crate::{
     storage::{
         Currency, PriceRecord, ProviderRecord, Store, UsageBucket, UsageClient, UsageFilter,
@@ -17,6 +17,7 @@ use crate::{
         TokenUsage, claude_logs,
         codex_logs::{self, ImportError, ImportProgress, ImportSummary},
         report::{self, GroupKind, Inputs, Money, Period, Prices, Report, Totals, Window},
+        session_logs,
     },
 };
 
@@ -50,10 +51,13 @@ pub struct UsageRow {
     pub routed: bool,
     pub source: UsageSource,
     pub client: UsageClient,
+    pub reported_cost: bool,
+    pub request_count: u64,
 }
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct UsageView {
+    pub sources: Vec<UsageSourceView>,
     pub report: Report,
     pub today: Totals,
     pub rows: Vec<UsageRow>,
@@ -138,19 +142,31 @@ pub(crate) fn usage_from(store: &Store, query: &UsageQuery) -> Result<UsageView,
         .into_iter()
         .map(|record| {
             let group = match (&record.provider_id, &record.codex_provider) {
-                (None, _) if record.source == UsageSource::ClaudeLog => "client:claude_code".into(),
+                (None, _)
+                    if matches!(
+                        record.source,
+                        UsageSource::ClaudeLog | UsageSource::SessionLog
+                    ) =>
+                {
+                    format!("client:{}", record.client.as_str())
+                }
                 (Some(id), _) => format!("p:{id}"),
                 (None, Some(key)) => format!("c:{key}"),
                 (None, None) => "u".into(),
             };
             let (connection, kind) = report::group_identity(&group, &providers);
-            let cost = pricing.cost(
-                record.provider_id.as_deref(),
-                &record.model,
-                kind,
-                1,
-                record.usage,
-            );
+            let cost = record
+                .reported_cost_micros
+                .map(|n| report::Cost::reported(n as u128, kind))
+                .unwrap_or_else(|| {
+                    pricing.cost(
+                        record.provider_id.as_deref(),
+                        &record.model,
+                        kind,
+                        record.request_count,
+                        record.usage,
+                    )
+                });
             let money = if kind.subscription() {
                 cost.subscription
             } else {
@@ -167,8 +183,9 @@ pub(crate) fn usage_from(store: &Store, query: &UsageQuery) -> Result<UsageView,
             UsageRow {
                 clock: report::clock(record.started_at_ms, now),
                 started_at_ms: record.started_at_ms,
-                cost: (cost.unpriced_requests == 0 && !record.usage.is_empty())
-                    .then(|| (money.primary(), money.get(money.primary()))),
+                cost: (cost.unpriced_requests == 0
+                    && (!record.usage.is_empty() || record.reported_cost_micros.is_some()))
+                .then(|| (money.primary(), money.get(money.primary()))),
                 connection,
                 kind,
                 group,
@@ -181,11 +198,14 @@ pub(crate) fn usage_from(store: &Store, query: &UsageQuery) -> Result<UsageView,
                 routed: record.source == UsageSource::Router,
                 source: record.source,
                 client: record.client,
+                reported_cost: record.reported_cost_micros.is_some(),
+                request_count: record.request_count,
                 id: record.id,
             }
         })
         .collect();
     Ok(UsageView {
+        sources: usage_sources_from(store)?,
         report,
         today,
         rows,
@@ -223,10 +243,11 @@ pub fn sync_usage_logs(
             .usage_claude_import()
             .map_err(|_| AppError::Database.message())?;
     let codex = codex && codex_home.is_absolute();
-    if !codex && !claude {
+    let sources = usage_sources_from(&store).map_err(|e| e.message())?;
+    if !force && !codex && !claude && !sources.iter().any(|source| source.enabled) {
         return Ok(None);
     }
-    import_logs(&store, codex_home, codex, claude, cancel, progress).map(Some)
+    import_logs(&store, codex_home, codex, claude, force, cancel, progress).map(Some)
 }
 
 /// Backs up the database, forgets imported rows, and imports every log again.
@@ -248,7 +269,7 @@ pub fn rebuild_usage_logs(
     store
         .clear_imported_usage()
         .map_err(|_| AppError::Database.message().to_owned())?;
-    let summary = import_logs(&store, codex_home, true, true, cancel, progress)?;
+    let summary = import_logs(&store, codex_home, true, true, true, cancel, progress)?;
     Ok((summary, backup))
 }
 
@@ -275,17 +296,34 @@ fn import_logs(
     codex_home: &Path,
     codex: bool,
     claude: bool,
+    force: bool,
     cancel: &AtomicBool,
     mut progress: impl FnMut(ImportProgress),
 ) -> Result<ImportSummary, String> {
     let home = claude_home(store).map_err(|_| AppError::Database.message())?;
     let mut summary = ImportSummary::default();
-    if codex {
+    if codex && codex_home.is_absolute() {
         summary =
             codex_logs::import(store, codex_home, cancel, &mut progress).map_err(import_message)?;
     }
     if claude {
         let next = claude_logs::import(store, &home, cancel, |step| {
+            progress(ImportProgress {
+                done: summary.files + step.done,
+                total: summary.files + step.total,
+            })
+        })
+        .map_err(import_message)?;
+        summary.files += next.files;
+        summary.read += next.read;
+        summary.added += next.added;
+        summary.unreadable += next.unreadable;
+    }
+    for source in usage_sources_from(store).map_err(|e| e.message())? {
+        if !force && !source.enabled {
+            continue;
+        }
+        let next = session_logs::import(store, source.client, &source.path, cancel, |step| {
             progress(ImportProgress {
                 done: summary.files + step.done,
                 total: summary.files + step.total,
@@ -592,6 +630,16 @@ mod tests {
                 .collect::<String>(),
         )
         .unwrap();
+        for client in UsageClient::EXTERNAL {
+            let store = open_store(&data).unwrap();
+            store
+                .save_usage_client_source(
+                    client,
+                    root.join(client.as_str()).to_str().unwrap(),
+                    false,
+                )
+                .unwrap();
+        }
         let cancel = AtomicBool::new(false);
         assert_eq!(
             sync_usage_logs(&data, &codex, false, &cancel, |_| {})
@@ -790,6 +838,16 @@ mod tests {
             })
             .unwrap();
         drop::<Store>(store);
+        for client in UsageClient::EXTERNAL {
+            let store = open_store(&data).unwrap();
+            store
+                .save_usage_client_source(
+                    client,
+                    root.join(client.as_str()).to_str().unwrap(),
+                    false,
+                )
+                .unwrap();
+        }
         let cancel = AtomicBool::new(false);
         let summary = sync_usage_logs(&data, &home, false, &cancel, |_| {})
             .unwrap()

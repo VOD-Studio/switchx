@@ -352,6 +352,8 @@ impl FileState {
             other => (None, other.map(str::to_owned), None),
         };
         Some(UsageRecord {
+            reported_cost_micros: None,
+            request_count: 1,
             client: crate::storage::UsageClient::Codex,
             id,
             source: UsageSource::CodexLog,

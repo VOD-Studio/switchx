@@ -209,6 +209,8 @@ fn seed(empty: bool) -> Result<Data, Box<dyn Error>> {
                 let duration =
                     (output as f64 / (40.0 + noise.next() * 90.0) * 1_000.0) as i64 + 600;
                 records.push(UsageRecord {
+                    reported_cost_micros: None,
+                    request_count: 1,
                     client: source.5,
                     id: format!("preview-{day}-{hour}-{request}"),
                     source: if source.5 == UsageClient::ClaudeCode {
@@ -252,6 +254,59 @@ fn seed(empty: bool) -> Result<Data, Box<dyn Error>> {
             }
         }
     }
+    for (index, client) in UsageClient::EXTERNAL.into_iter().enumerate() {
+        let model = format!("{}-demo", client.as_str());
+        store.put_model_price(&price(
+            &model,
+            Currency::Usd,
+            [1_000_000, 100_000, 4_000_000],
+        ))?;
+        for day in 0..15i64 {
+            for hour in 9..18u32 {
+                let at = (now - Duration::days(day))
+                    .with_hour(hour)
+                    .unwrap()
+                    .with_minute(0)
+                    .unwrap();
+                if at > now {
+                    continue;
+                }
+                let input = 20_000 + (index as u64 + 1) * 3000 + (day as u64 % 5) * 2000;
+                records.push(UsageRecord {
+                    id: format!("demo-{}-{day}-{hour}", client.as_str()),
+                    source: UsageSource::SessionLog,
+                    client,
+                    started_at_ms: at.timestamp_millis(),
+                    provider_id: None,
+                    codex_provider: None,
+                    public_model: None,
+                    model: model.clone(),
+                    usage: TokenUsage {
+                        input,
+                        cached_input: input / 2,
+                        cache_write: 1000,
+                        cache_write_1h: 0,
+                        output: 1000 + hour as u64 * 100,
+                        reasoning: 100,
+                    },
+                    duration_ms: None,
+                    first_event_ms: None,
+                    response_id: None,
+                    session_id: None,
+                    reported_cost_micros: matches!(
+                        client,
+                        UsageClient::Pi | UsageClient::GrokBuild | UsageClient::Mcode
+                    )
+                    .then_some(25000 + hour as u64 * 1000),
+                    request_count: if client == UsageClient::GrokBuild {
+                        3
+                    } else {
+                        1
+                    },
+                });
+            }
+        }
+    }
     store.put_imported_usage(
         &records,
         &UsageLogFile {
@@ -276,6 +331,19 @@ fn icon(id: &str) -> Option<(slint::Image, bool)> {
 fn show(app: &AppWindow, view: &UsageView) {
     app.set_usage_claude_home("/example/.claude".into());
     app.set_usage_claude_enabled(true);
+    app.set_usage_other_logs_enabled(true);
+    app.set_usage_client_sources(ModelRc::new(VecModel::from(
+        view.sources
+            .iter()
+            .map(|source| switchx::ui::UsageSourceRow {
+                key: source.client.as_str().into(),
+                name: source.client.label().into(),
+                path: format!("/example/{}", source.client.as_str()).into(),
+                hint: source.hint.into(),
+                enabled: true,
+            })
+            .collect::<Vec<_>>(),
+    )));
     let report = &view.report;
     app.set_usage_summary(usage_view::summary(report));
     app.set_usage_scale(usage_view::scale(report));
@@ -372,12 +440,11 @@ pub(super) fn render_usage_design(
         app.set_usage_client_filter(index);
         app.set_usage_group_filter("".into());
         app.set_usage_model_filter("".into());
-        let client = match index {
-            1 => Some(UsageClient::Codex),
-            2 => Some(UsageClient::ClaudeCode),
-            3 => Some(UsageClient::Unknown),
-            _ => None,
-        };
+        let client = usize::try_from(index)
+            .ok()
+            .and_then(|i| UsageClient::FILTERS.get(i))
+            .copied()
+            .flatten();
         show(
             &app,
             &load(
@@ -489,6 +556,23 @@ pub(super) fn render_usage_design(
             headless::render(window);
         }
         snapshot_now(window, output, &format!("usage-claude-{suffix}"))?;
+        for (index, client) in UsageClient::EXTERNAL.into_iter().enumerate() {
+            app.invoke_usage_filter_client(index as i32 + 4);
+            assert_eq!(app.get_usage_connections().row_count(), 1);
+            assert_eq!(
+                app.get_usage_connections().row_data(0).unwrap().name,
+                format!("{} 会话", client.label())
+            );
+            for _ in 0..8 {
+                frame(200);
+                headless::render(window);
+            }
+            snapshot_now(
+                window,
+                output,
+                &format!("usage-{}-{suffix}", client.as_str()),
+            )?;
+        }
         app.invoke_usage_filter_client(0);
         frame(1000);
 
@@ -528,12 +612,19 @@ pub(super) fn render_usage_design(
     });
     app.set_usage_sources_open(true);
     play(window, output, "usage-sources-dark-1200x820", &[96, 400])?;
+    window.dispatch_event(WindowEvent::PointerScrolled {
+        position: LogicalPosition::new(1000.0, 500.0),
+        delta_x: 0.0,
+        delta_y: -500.0,
+    });
+    frame(400);
+    snapshot_now(window, output, "usage-client-sources-dark-1200x820")?;
     app.set_usage_sources_open(false);
     frame(500);
     app.set_usage_prices(ModelRc::new(VecModel::from(usage_view::price_rows(
         app::load_prices(&data.0).map_err(|error| error.message())?,
     ))));
-    assert_eq!(app.get_usage_prices().row_count(), 6);
+    assert_eq!(app.get_usage_prices().row_count(), 11);
     set_theme(app, window, false);
     app.set_usage_prices_open(true);
     play(window, output, "usage-prices-light-1200x820", &[400])?;

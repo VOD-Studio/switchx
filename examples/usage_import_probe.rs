@@ -1,12 +1,12 @@
-//! Import Codex or Claude Code session-log usage into a scratch database and print totals.
+//! Import supported clients' session usage into a scratch database and print totals.
 //! Reads only usage counts; never writes the SwitchX data directory or CODEX_HOME.
-//! Run: cargo run --example usage_import_probe -- /abs/client/home /abs/new-scratch.sqlite [--claude]
+//! Run: cargo run --example usage_import_probe -- /abs/client/home /abs/new-scratch.sqlite [--claude|--gemini|--opencode|--grokbuild|--pi|--mcode]
 
 use std::{collections::BTreeMap, path::Path, sync::atomic::AtomicBool, time::Instant};
 
 use switchx::{
-    storage::Store,
-    usage::{claude_logs, codex_logs},
+    storage::{Store, UsageClient},
+    usage::{claude_logs, codex_logs, session_logs},
 };
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -18,7 +18,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     if !home.is_absolute() || !database.is_absolute() {
         return Err("both paths must be absolute".into());
     }
-    let claude = args.next().is_some_and(|arg| arg == "--claude");
+    let client = match args.next().as_deref() {
+        None => UsageClient::Codex,
+        Some("--claude") => UsageClient::ClaudeCode,
+        Some(flag) => UsageClient::parse(flag.trim_start_matches("--"))
+            .filter(|c| UsageClient::EXTERNAL.contains(c))
+            .ok_or("unsupported client flag")?,
+    };
     // A probe must never overwrite an existing database, including real user data.
     if database.exists() {
         return Err("scratch database must not already exist".into());
@@ -26,10 +32,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let store = Store::open(database)?;
     for pass in ["first", "repeat"] {
         let started = Instant::now();
-        let summary = if claude {
-            claude_logs::import(&store, home, &AtomicBool::new(false), |_| {})
-        } else {
-            codex_logs::import(&store, home, &AtomicBool::new(false), |_| {})
+        let summary = match client {
+            UsageClient::ClaudeCode => {
+                claude_logs::import(&store, home, &AtomicBool::new(false), |_| {})
+            }
+            UsageClient::Codex => codex_logs::import(&store, home, &AtomicBool::new(false), |_| {}),
+            _ => session_logs::import(&store, client, home, &AtomicBool::new(false), |_| {}),
         }
         .map_err(|error| format!("{error:?}"))?;
         println!(
@@ -41,19 +49,21 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             started.elapsed()
         );
     }
-    let mut providers = BTreeMap::<String, (usize, u64)>::new();
+    let mut providers = BTreeMap::<String, (usize, u64, u64)>::new();
     for row in store.usage_records(0, i64::MAX)? {
+        let client_label = row.client.label();
         let key = row
             .provider_id
             .map(|id| format!("connection {id}"))
             .or(row.codex_provider)
-            .unwrap_or_else(|| "unknown".into());
+            .unwrap_or_else(|| client_label.into());
         let entry = providers.entry(key).or_default();
         entry.0 += 1;
-        entry.1 += row.usage.total();
+        entry.1 += row.request_count;
+        entry.2 += row.usage.total();
     }
-    for (provider, (rows, tokens)) in providers {
-        println!("{provider}: {rows} responses, {tokens} tokens");
+    for (provider, (rows, calls, tokens)) in providers {
+        println!("{provider}: {rows} records, {calls} calls, {tokens} tokens");
     }
     Ok(())
 }

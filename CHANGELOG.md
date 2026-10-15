@@ -6,6 +6,8 @@
 
 ### Added
 
+- 用量统计接入 Gemini CLI、OpenCode（V1/V2）、Grok Build、Pi 和 MiniMax Code，复用客户端筛选、趋势、排行和明细。新增独立来源路径与扫描开关，支持 JSONL 断点、SQLite WAL、未完成用量补全、稳定 ID 去重和客户端上报费用；Grok 按实际模型调用次数汇总，保留旧有 Codex/Claude 用量与价格。
+
 - 用量页支持从本地 Claude Code 会话、子 agent 和 Workflow 日志增量导入用量，按客户端筛选图表、排行与明细；新增独立扫描开关和 Claude 目录设置。同一回复按消息 ID 去重并补全后续快照，半行和文件替换可安全续读。定价支持缓存读取、5 分钟写入与 1 小时写入分别计费，旧用量与旧价格迁移保留。
 
 - 新增 `switchx mcp` 只读 MCP 服务，Codex、Claude Code 等 agent 可查询托管状态、连接、模型映射、用量与请求记录；服务以只读方式打开数据库，不创建或迁移数据，输出不含 API Key、OAuth token、本地路由令牌或凭据引用。

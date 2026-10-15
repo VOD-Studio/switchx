@@ -355,6 +355,16 @@ pub struct Cost {
 }
 
 impl Cost {
+    pub fn reported(micros: u128, kind: GroupKind) -> Self {
+        let mut cost = Self::default();
+        if kind.subscription() {
+            cost.subscription.usd = micros;
+        } else {
+            cost.api.usd = micros;
+        }
+        cost
+    }
+
     fn merge(&mut self, other: Self) {
         self.api.merge(other.api);
         self.subscription.merge(other.subscription);
@@ -392,7 +402,7 @@ pub enum GroupKind {
     RoutedLegacy,
     Other,
     Unknown,
-    ClaudeSession,
+    Session,
 }
 
 impl GroupKind {
@@ -408,15 +418,18 @@ impl GroupKind {
             Self::RoutedLegacy => "路由历史",
             Self::Other => "其他提供方",
             Self::Unknown => "未知",
-            Self::ClaudeSession => "会话 · 未关联连接",
+            Self::Session => "会话 · 未关联连接",
         }
     }
 }
 
 /// A connection group's display name and kind.
 pub fn group_identity(group: &str, providers: &[ProviderRecord]) -> (String, GroupKind) {
-    if group == "client:claude_code" {
-        return ("Claude Code 会话".into(), GroupKind::ClaudeSession);
+    if let Some(client) = group
+        .strip_prefix("client:")
+        .and_then(crate::storage::UsageClient::parse)
+    {
+        return (format!("{} 会话", client.label()), GroupKind::Session);
     }
     if let Some(id) = group.strip_prefix("p:") {
         return match providers.iter().find(|provider| provider.id == id) {
@@ -581,13 +594,18 @@ pub fn build(window: Window, filter: &UsageFilter, inputs: Inputs<'_>) -> Report
     let mut unpriced = BTreeMap::<String, u64>::new();
     for fact in inputs.facts.iter().filter(|fact| client_ok(fact)) {
         let (name, kind) = identity(&fact.group);
-        let cost = prices.cost(
-            fact.provider_id.as_deref(),
-            &fact.model,
-            kind,
-            fact.requests,
-            fact.usage,
-        );
+        let cost = fact
+            .reported_cost_micros
+            .map(|micros| Cost::reported(micros, kind))
+            .unwrap_or_else(|| {
+                prices.cost(
+                    fact.provider_id.as_deref(),
+                    &fact.model,
+                    kind,
+                    fact.requests,
+                    fact.usage,
+                )
+            });
         let (in_group, in_model) = (group_ok(fact), model_ok(fact));
         if in_model {
             connections
@@ -637,13 +655,18 @@ pub fn build(window: Window, filter: &UsageFilter, inputs: Inputs<'_>) -> Report
             .filter(|fact| client_ok(fact) && group_ok(fact) && model_ok(fact))
         {
             let (_, kind) = identity(&fact.group);
-            let cost = prices.cost(
-                fact.provider_id.as_deref(),
-                &fact.model,
-                kind,
-                fact.requests,
-                fact.usage,
-            );
+            let cost = fact
+                .reported_cost_micros
+                .map(|micros| Cost::reported(micros, kind))
+                .unwrap_or_else(|| {
+                    prices.cost(
+                        fact.provider_id.as_deref(),
+                        &fact.model,
+                        kind,
+                        fact.requests,
+                        fact.usage,
+                    )
+                });
             previous.add(fact.requests, fact.usage, cost);
         }
         previous
@@ -753,6 +776,7 @@ mod tests {
 
     fn fact(bucket: &str, group: &str, model: &str, requests: u64, usage: TokenUsage) -> UsageFact {
         UsageFact {
+            reported_cost_micros: None,
             client: crate::storage::UsageClient::Unknown,
             bucket: bucket.into(),
             group: group.into(),

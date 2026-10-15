@@ -309,6 +309,14 @@ export struct UsageDetailRow {
     stamp: int,
 }
 
+export struct UsageSourceRow {
+    key: string,
+    name: string,
+    path: string,
+    enabled: bool,
+    hint: string,
+}
+
 export struct UsageSyncState {
     running: bool,
     progress: float,

@@ -334,7 +334,7 @@ component EmptyUsage inherits Rectangle {
         }
 
         Text {
-            text: "经 SwitchX 路由的请求实时计入；Codex 与 Claude Code 用量从会话日志导入。";
+            text: "经 SwitchX 路由的请求实时计入；各客户端的用量从本地会话记录导入。";
             color: Theme.muted-text;
             font-size: 12px;
             horizontal-alignment: center;
@@ -376,6 +376,7 @@ export component UsagePage inherits VerticalLayout {
     in property <string> model-filter;
     in-out property <int> client-filter;
     in property <bool> claude-enabled;
+    in property <bool> other-logs-enabled;
     callback filter-client(int);
     // An index into periods, or periods.length for the custom range.
     in-out property <int> period;
@@ -432,9 +433,20 @@ export component UsagePage inherits VerticalLayout {
         }
 
         client-picker := QuietComboBox {
+            accessible-label: "客户端筛选";
             width: 144px;
             height: 32px;
-            model: ["全部客户端", "Codex", "Claude Code", "未识别客户端"];
+            model: [
+                "全部客户端",
+                "Codex",
+                "Claude Code",
+                "未识别客户端",
+                "Gemini CLI",
+                "OpenCode",
+                "Grok Build",
+                "Pi",
+                "MiniMax Code"
+            ];
             current-index <=> root.client-filter;
             selected(value) => { root.filter-client(self.current-index); }
         }
@@ -446,7 +458,7 @@ export component UsagePage inherits VerticalLayout {
         SyncPill {
             y: 1px;
             sync: root.sync;
-            logs-enabled: root.sync.enabled || root.claude-enabled;
+            logs-enabled: root.sync.enabled || root.claude-enabled || root.other-logs-enabled;
             clicked => { root.open-sources(); }
         }
 
@@ -553,7 +565,7 @@ export component UsagePage inherits VerticalLayout {
                 }
 
                 Text {
-                    text: "只记录 Token 数、模型与时间，不保存提示词、回复与凭据。费用按当前定价估算，订阅连接显示等效 API 价格。";
+                    text: "只记录 Token 数、模型与时间，不保存提示词、回复与凭据。费用优先采用客户端上报的完整金额，否则按当前定价估算；订阅连接显示等效 API 价格。";
                     color: Theme.muted-text;
                     font-size: 11px;
                     wrap: word-wrap;

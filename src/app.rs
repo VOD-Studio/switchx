@@ -15,6 +15,8 @@ mod presets;
 mod providers;
 mod snapshot;
 mod usage;
+mod usage_sources;
+pub use usage_sources::{UsageSourceView, save_usage_client_source};
 
 pub(crate) use activity::requests_from;
 pub use activity::{

@@ -31,13 +31,13 @@ impl super::Store {
         usage: TokenUsage,
     ) -> Result<()> {
         // Preserve an exact session-log attribution when the router arrives later.
-        let client: Option<String> = transaction.query_row(
-            "SELECT client FROM usage_records WHERE id = ?1 OR (response_id = ?2 AND source = 'codex_log') ORDER BY client = 'unknown' LIMIT 1",
-            params![record.id, record.response_id], |row| row.get(0),
+        let provenance: Option<(String, Option<i64>)> = transaction.query_row(
+            "SELECT client, reported_cost_micros FROM usage_records WHERE id = ?1 OR (response_id = ?2 AND source IN ('codex_log', 'session_log')) ORDER BY client = 'unknown' LIMIT 1",
+            params![record.id, record.response_id], |row| Ok((row.get(0)?, row.get(1)?)),
         ).optional()?;
         if let Some(response_id) = &record.response_id {
             transaction.execute(
-                "DELETE FROM usage_records WHERE source = 'codex_log' AND response_id = ?1",
+                "DELETE FROM usage_records WHERE source IN ('codex_log', 'session_log') AND response_id = ?1",
                 [response_id],
             )?;
         }
@@ -45,8 +45,8 @@ impl super::Store {
             "INSERT OR REPLACE INTO usage_records
              (id, source, started_at_ms, provider_id, codex_provider, public_model, model,
               input_tokens, cached_input_tokens, cache_write_tokens, output_tokens, reasoning_tokens,
-              duration_ms, first_event_ms, response_id, session_id, cache_write_1h_tokens, client)
-             VALUES (?1, 'router', ?2, ?3, NULL, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, NULL, ?14, ?15)",
+              duration_ms, first_event_ms, response_id, session_id, cache_write_1h_tokens, client, reported_cost_micros)
+             VALUES (?1, 'router', ?2, ?3, NULL, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, NULL, ?14, ?15, ?16)",
             params![
                 record.id,
                 record.started_at_ms,
@@ -66,7 +66,8 @@ impl super::Store {
                 record.first_event_ms,
                 record.response_id,
                 usage.cache_write_1h as i64,
-                client.as_deref().unwrap_or("unknown"),
+                provenance.as_ref().map_or("unknown", |p|p.0.as_str()),
+                provenance.as_ref().and_then(|p|p.1),
             ],
         )?;
         Ok(())
@@ -78,6 +79,7 @@ pub enum UsageSource {
     Router,
     CodexLog,
     ClaudeLog,
+    SessionLog,
 }
 
 impl UsageSource {
@@ -86,6 +88,7 @@ impl UsageSource {
             Self::Router => "router",
             Self::CodexLog => "codex_log",
             Self::ClaudeLog => "claude_log",
+            Self::SessionLog => "session_log",
         }
     }
 
@@ -94,6 +97,7 @@ impl UsageSource {
             "router" => Ok(Self::Router),
             "codex_log" => Ok(Self::CodexLog),
             "claude_log" => Ok(Self::ClaudeLog),
+            "session_log" => Ok(Self::SessionLog),
             _ => Err(rusqlite::Error::InvalidQuery),
         }
     }
@@ -104,15 +108,44 @@ impl UsageSource {
 pub enum UsageClient {
     Codex,
     ClaudeCode,
+    Gemini,
+    OpenCode,
+    GrokBuild,
+    Pi,
+    Mcode,
     #[default]
     Unknown,
 }
 
 impl UsageClient {
+    pub const EXTERNAL: [Self; 5] = [
+        Self::Gemini,
+        Self::OpenCode,
+        Self::GrokBuild,
+        Self::Pi,
+        Self::Mcode,
+    ];
+    pub const FILTERS: [Option<Self>; 9] = [
+        None,
+        Some(Self::Codex),
+        Some(Self::ClaudeCode),
+        Some(Self::Unknown),
+        Some(Self::Gemini),
+        Some(Self::OpenCode),
+        Some(Self::GrokBuild),
+        Some(Self::Pi),
+        Some(Self::Mcode),
+    ];
+
     pub fn as_str(self) -> &'static str {
         match self {
             Self::Codex => "codex",
             Self::ClaudeCode => "claude_code",
+            Self::Gemini => "gemini",
+            Self::OpenCode => "opencode",
+            Self::GrokBuild => "grokbuild",
+            Self::Pi => "pi",
+            Self::Mcode => "mcode",
             Self::Unknown => "unknown",
         }
     }
@@ -120,6 +153,11 @@ impl UsageClient {
         match value {
             "codex" => Some(Self::Codex),
             "claude_code" => Some(Self::ClaudeCode),
+            "gemini" => Some(Self::Gemini),
+            "opencode" => Some(Self::OpenCode),
+            "grokbuild" => Some(Self::GrokBuild),
+            "pi" => Some(Self::Pi),
+            "mcode" => Some(Self::Mcode),
             "unknown" => Some(Self::Unknown),
             _ => None,
         }
@@ -128,6 +166,11 @@ impl UsageClient {
         match self {
             Self::Codex => "Codex",
             Self::ClaudeCode => "Claude Code",
+            Self::Gemini => "Gemini CLI",
+            Self::OpenCode => "OpenCode",
+            Self::GrokBuild => "Grok Build",
+            Self::Pi => "Pi",
+            Self::Mcode => "MiniMax Code",
             Self::Unknown => "未识别客户端",
         }
     }
@@ -137,6 +180,8 @@ impl UsageClient {
 /// and otherwise to the Codex provider key that produced it.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct UsageRecord {
+    pub reported_cost_micros: Option<u64>,
+    pub request_count: u64,
     pub id: String,
     pub source: UsageSource,
     pub client: UsageClient,
@@ -173,6 +218,24 @@ impl super::Store {
         value.parse().map_err(|_| rusqlite::Error::InvalidQuery)
     }
 
+    pub fn usage_log_file(&self, key: &str) -> Result<Option<UsageLogFile>> {
+        self.connection
+            .query_row(
+                "SELECT path,size,modified_ms,read_offset,state FROM usage_log_files WHERE path=?1",
+                [key],
+                |row| {
+                    Ok(UsageLogFile {
+                        path: row.get(0)?,
+                        size: row.get(1)?,
+                        modified_ms: row.get(2)?,
+                        read_offset: row.get(3)?,
+                        state: row.get(4)?,
+                    })
+                },
+            )
+            .optional()
+    }
+
     pub fn usage_log_files(&self) -> Result<Vec<UsageLogFile>> {
         let mut statement = self
             .connection
@@ -204,19 +267,25 @@ impl super::Store {
                 "INSERT OR IGNORE INTO usage_records
                  (id, source, started_at_ms, provider_id, codex_provider, public_model, model,
                   input_tokens, cached_input_tokens, cache_write_tokens, output_tokens, reasoning_tokens,
-                  duration_ms, first_event_ms, response_id, session_id, cache_write_1h_tokens, client)
-                 SELECT ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18
+                  duration_ms, first_event_ms, response_id, session_id, cache_write_1h_tokens, client, reported_cost_micros, request_count)
+                 SELECT ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20
                  WHERE ?15 IS NULL
                     OR NOT EXISTS (SELECT 1 FROM usage_records WHERE response_id = ?15)",
             )?;
             for record in records {
-                if record.source == UsageSource::CodexLog {
+                if matches!(
+                    record.source,
+                    UsageSource::CodexLog | UsageSource::SessionLog
+                ) {
                     added += transaction.execute(
-                        "UPDATE usage_records SET client = 'codex' WHERE source = 'router' AND response_id = ?1 AND client = 'unknown'",
-                        [&record.response_id],
+                        "UPDATE usage_records SET client = CASE WHEN client = 'unknown' THEN ?2 ELSE client END, reported_cost_micros = COALESCE(?3, reported_cost_micros) WHERE source = 'router' AND response_id = ?1 AND (client = 'unknown' OR (?3 IS NOT NULL AND reported_cost_micros IS NOT ?3))",
+                        params![record.response_id, record.client.as_str(), record.reported_cost_micros.map(|n|n.min(i64::MAX as u64) as i64)],
                     )?;
                 }
-                if record.source == UsageSource::ClaudeLog {
+                if matches!(
+                    record.source,
+                    UsageSource::ClaudeLog | UsageSource::SessionLog
+                ) {
                     // Snapshots can span scans or be copied into another transcript. Merge
                     // counters monotonically, without turning content blocks into requests.
                     added += transaction.execute(
@@ -227,13 +296,17 @@ impl super::Store {
                             cache_write_1h_tokens = MAX(cache_write_1h_tokens, ?5),
                             output_tokens = MAX(output_tokens, ?6),
                             started_at_ms = MIN(started_at_ms, ?7),
-                            model = CASE WHEN model = '' THEN ?8 ELSE model END,
-                            session_id = COALESCE(session_id, ?9)
-                         WHERE id = ?1 AND source = 'claude_log' AND
-                            (input_tokens - cached_input_tokens - cache_write_tokens < ?2 OR cached_input_tokens < ?3 OR cache_write_tokens < ?4 OR cache_write_1h_tokens < ?5 OR output_tokens < ?6 OR started_at_ms > ?7 OR (model = '' AND ?8 != '') OR (session_id IS NULL AND ?9 IS NOT NULL))",
+                            model = CASE WHEN ?8 != '' AND ?6 >= output_tokens AND ?2 + ?3 + ?4 >= input_tokens THEN ?8 ELSE model END,
+                            session_id = COALESCE(session_id, ?9),
+                            reasoning_tokens = MAX(reasoning_tokens, ?10),
+                            reported_cost_micros = CASE WHEN ?6 >= output_tokens AND ?2 + ?3 + ?4 >= input_tokens THEN COALESCE(?11, reported_cost_micros) ELSE reported_cost_micros END,
+                            request_count = MAX(request_count, ?12),
+                            duration_ms = COALESCE(MAX(duration_ms, ?13), duration_ms, ?13)
+                         WHERE id = ?1 AND source IN ('claude_log', 'session_log') AND
+                            (input_tokens - cached_input_tokens - cache_write_tokens < ?2 OR cached_input_tokens < ?3 OR cache_write_tokens < ?4 OR cache_write_1h_tokens < ?5 OR output_tokens < ?6 OR started_at_ms > ?7 OR (model != ?8 AND ?8 != '' AND ?6 >= output_tokens AND ?2 + ?3 + ?4 >= input_tokens) OR (session_id IS NULL AND ?9 IS NOT NULL) OR reasoning_tokens < ?10 OR (?11 IS NOT NULL AND reported_cost_micros IS NOT ?11 AND ?6 >= output_tokens AND ?2 + ?3 + ?4 >= input_tokens) OR request_count < ?12 OR (?13 IS NOT NULL AND (duration_ms IS NULL OR duration_ms < ?13)))",
                         params![record.id, record.usage.fresh_input() as i64, record.usage.cached_input as i64,
                             record.usage.cache_write as i64, record.usage.cache_write_1h as i64,
-                            record.usage.output as i64, record.started_at_ms, record.model, record.session_id],
+                            record.usage.output as i64, record.started_at_ms, record.model, record.session_id, record.usage.reasoning as i64, record.reported_cost_micros.map(|v| v.min(i64::MAX as u64) as i64), record.request_count.clamp(1,1_000_000) as i64, record.duration_ms],
                     )?;
                 }
                 added += insert.execute(params![
@@ -255,6 +328,10 @@ impl super::Store {
                     record.session_id,
                     record.usage.cache_write_1h as i64,
                     record.client.as_str(),
+                    record
+                        .reported_cost_micros
+                        .map(|v| v.min(i64::MAX as u64) as i64),
+                    record.request_count.clamp(1, 1_000_000) as i64,
                 ])?;
             }
         }
@@ -280,7 +357,7 @@ impl super::Store {
     pub fn clear_imported_usage(&self) -> Result<()> {
         let transaction = self.connection.unchecked_transaction()?;
         transaction.execute(
-            "DELETE FROM usage_records WHERE source IN ('codex_log', 'claude_log')",
+            "DELETE FROM usage_records WHERE source IN ('codex_log', 'claude_log', 'session_log')",
             [],
         )?;
         transaction.execute("DELETE FROM usage_log_files", [])?;
@@ -292,7 +369,7 @@ impl super::Store {
         let mut statement = self.connection.prepare(
             "SELECT id, source, started_at_ms, provider_id, codex_provider, public_model, model,
                     input_tokens, cached_input_tokens, cache_write_tokens, output_tokens,
-                    reasoning_tokens, duration_ms, first_event_ms, response_id, session_id, cache_write_1h_tokens, client
+                    reasoning_tokens, duration_ms, first_event_ms, response_id, session_id, cache_write_1h_tokens, client, reported_cost_micros, request_count
              FROM usage_records WHERE started_at_ms >= ?1 AND started_at_ms < ?2
              ORDER BY started_at_ms DESC, id DESC",
         )?;
@@ -305,7 +382,7 @@ impl super::Store {
 /// The connection a usage row belongs to: a SwitchX connection (`p:ID`), a
 /// Codex provider key (`c:KEY`), or unknown (`u`).
 const GROUP_KEY: &str = "CASE WHEN provider_id IS NOT NULL THEN 'p:' || provider_id
-    WHEN source = 'claude_log' THEN 'client:claude_code'
+    WHEN source IN ('claude_log', 'session_log') THEN 'client:' || client
     WHEN codex_provider IS NOT NULL THEN 'c:' || codex_provider ELSE 'u' END";
 
 /// Optional single-value filters on the connection group key and model.
@@ -327,6 +404,7 @@ impl UsageFilter {
 /// Summed usage for one local-time bucket, connection group, and model.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct UsageFact {
+    pub reported_cost_micros: Option<u128>,
     pub client: UsageClient,
     pub bucket: String,
     pub group: String,
@@ -404,15 +482,16 @@ impl super::Store {
         };
         let mut statement = self.connection.prepare(&format!(
             "SELECT strftime(?3, started_at_ms / 1000, 'unixepoch', 'localtime') AS bucket,
-                    {GROUP_KEY} AS grouping, MAX(provider_id), model, COUNT(*),
+                    {GROUP_KEY} AS grouping, MAX(provider_id), model, SUM(request_count),
                     SUM(input_tokens), SUM(cached_input_tokens), SUM(cache_write_tokens),
-                    SUM(output_tokens), SUM(reasoning_tokens), SUM(cache_write_1h_tokens), client
+                    SUM(output_tokens), SUM(reasoning_tokens), SUM(cache_write_1h_tokens), client, SUM(reported_cost_micros)
              FROM usage_records WHERE started_at_ms >= ?1 AND started_at_ms < ?2
-             GROUP BY bucket, grouping, model, client"
+             GROUP BY bucket, grouping, model, client, (reported_cost_micros IS NOT NULL)"
         ))?;
         statement
             .query_map(params![from_ms, to_ms, format], |row| {
                 Ok(UsageFact {
+                    reported_cost_micros: row.get::<_, Option<i64>>(12)?.map(|n| n.max(0) as u128),
                     bucket: row.get::<_, Option<String>>(0)?.unwrap_or_default(),
                     group: row.get(1)?,
                     provider_id: row.get(2)?,
@@ -439,7 +518,7 @@ impl super::Store {
         let mut statement = self.connection.prepare(&format!(
             "SELECT CAST(strftime('%w', started_at_ms / 1000, 'unixepoch', 'localtime') AS INTEGER),
                     CAST(strftime('%H', started_at_ms / 1000, 'unixepoch', 'localtime') AS INTEGER),
-                    COUNT(*), SUM(input_tokens + output_tokens)
+                    SUM(request_count), SUM(input_tokens + output_tokens)
              FROM usage_records WHERE started_at_ms >= ?1 AND started_at_ms < ?2{}
              GROUP BY 1, 2",
             filter.clause()
@@ -515,7 +594,7 @@ impl super::Store {
         let mut statement = self.connection.prepare(&format!(
             "SELECT id, source, started_at_ms, provider_id, codex_provider, public_model, model,
                     input_tokens, cached_input_tokens, cache_write_tokens, output_tokens,
-                    reasoning_tokens, duration_ms, first_event_ms, response_id, session_id, cache_write_1h_tokens, client
+                    reasoning_tokens, duration_ms, first_event_ms, response_id, session_id, cache_write_1h_tokens, client, reported_cost_micros, request_count
              FROM usage_records WHERE started_at_ms >= ?1 AND started_at_ms < ?2{clause}
              ORDER BY started_at_ms DESC, id DESC LIMIT ?6 OFFSET ?7"
         ))?;
@@ -566,6 +645,32 @@ impl super::Store {
         Ok(())
     }
 
+    pub fn usage_client_setting(&self, client: UsageClient, name: &str) -> Result<Option<String>> {
+        self.connection
+            .query_row(
+                "SELECT value FROM app_settings WHERE key = ?1",
+                [format!("usage_{}_{}", client.as_str(), name)],
+                |row| row.get(0),
+            )
+            .optional()
+    }
+
+    pub fn save_usage_client_source(
+        &self,
+        client: UsageClient,
+        path: &str,
+        enabled: bool,
+    ) -> Result<()> {
+        let tx = self.connection.unchecked_transaction()?;
+        for (name, value) in [
+            ("path", path),
+            ("enabled", if enabled { "on" } else { "off" }),
+        ] {
+            tx.execute("INSERT INTO app_settings (key,value) VALUES (?1,?2) ON CONFLICT(key) DO UPDATE SET value=excluded.value", params![format!("usage_{}_{}",client.as_str(),name),value])?;
+        }
+        tx.commit()
+    }
+
     pub fn usage_claude_import(&self) -> Result<bool> {
         let value: Option<String> = self
             .connection
@@ -601,7 +706,7 @@ impl super::Store {
     /// Every model with recorded usage: requests and input plus output tokens.
     pub fn usage_models(&self) -> Result<Vec<(String, u64, u64)>> {
         let mut statement = self.connection.prepare(
-            "SELECT model, COUNT(*), SUM(input_tokens + output_tokens)
+            "SELECT model, SUM(request_count), SUM(input_tokens + output_tokens)
              FROM usage_records WHERE model != '' GROUP BY model",
         )?;
         statement
@@ -685,6 +790,8 @@ impl super::Store {
 fn usage_record(row: &Row<'_>) -> Result<UsageRecord> {
     let source: String = row.get(1)?;
     Ok(UsageRecord {
+        reported_cost_micros: row.get::<_, Option<i64>>(18)?.map(|n| n.max(0) as u64),
+        request_count: row.get::<_, i64>(19)?.max(1) as u64,
         id: row.get(0)?,
         source: UsageSource::parse(&source)?,
         started_at_ms: row.get(2)?,
@@ -720,6 +827,8 @@ mod tests {
         model: &str,
     ) -> UsageRecord {
         UsageRecord {
+            reported_cost_micros: None,
+            request_count: 1,
             client: crate::storage::UsageClient::Codex,
             id: id.into(),
             source: if provider.is_some() {

@@ -416,7 +416,7 @@ fn tools(access: Access) -> Value {
                     "description": "自定义终点：本地日期 YYYY-MM-DD（包含当天）或 RFC 3339 时间（不含）。\
                                     省略时到现在为止。",
                 },
-                "client": { "type": "string", "enum": ["codex", "claude_code", "unknown"], "description": "按客户端筛选；未识别的路由请求使用 unknown。" },
+                "client": { "type": "string", "enum": ["codex", "claude_code", "unknown", "gemini", "opencode", "grokbuild", "pi", "mcode"], "description": "按客户端筛选；未识别的路由请求使用 unknown。" },
                 "connection": {
                     "type": "string",
                     "description": "只统计一个连接分组，取自返回结果 connections[].key，如 p:<provider_id>。",
@@ -846,7 +846,7 @@ fn usage(store: &Store, arguments: &Map<String, Value>) -> Result<Value, String>
             client: optional_string(arguments, "client")?
                 .map(|client| {
                     UsageClient::parse(client)
-                        .ok_or_else(|| "client 必须是 codex、claude_code 或 unknown。".to_owned())
+                        .ok_or_else(|| "client 须为受支持的客户端标识。".to_owned())
                 })
                 .transpose()?,
             group: optional_string(arguments, "connection")?.map(str::to_owned),
@@ -887,6 +887,8 @@ fn usage(store: &Store, arguments: &Map<String, Value>) -> Result<Value, String>
                 "tokens": tokens(row.usage),
                 "routed": row.routed,
                 "client": row.client.as_str(),
+                "request_count": row.request_count,
+                "cost_source": if row.reported_cost {"client_reported"} else {"local_pricing"},
                 "source": row.source.as_str(),
             });
             if let Some(public) = &row.public_model {
