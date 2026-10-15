@@ -250,47 +250,44 @@ impl Store {
         if version > SCHEMA_VERSION {
             return Err(rusqlite::Error::InvalidQuery);
         }
-        if version == 0 {
-            connection.execute_batch(
-                "BEGIN IMMEDIATE;
-                 CREATE TABLE providers (
-                    id TEXT PRIMARY KEY NOT NULL,
-                    name TEXT NOT NULL,
-                    base_url TEXT NOT NULL,
-                    model_id TEXT NOT NULL DEFAULT '',
-                    credential_ref TEXT
-                 );
-                 PRAGMA user_version = 2;
-                 COMMIT;",
-            )?;
-        } else if version == 1 {
-            connection.execute_batch(
-                "BEGIN IMMEDIATE;
-                 ALTER TABLE providers ADD COLUMN model_id TEXT NOT NULL DEFAULT '';
-                 PRAGMA user_version = 2;
-                 COMMIT;",
-            )?;
+        if version < 2 {
+            Self::migrate_step(&connection, 2, |transaction, current| {
+                if current == 0 {
+                    transaction.execute_batch(
+                        "CREATE TABLE providers (
+                            id TEXT PRIMARY KEY NOT NULL,
+                            name TEXT NOT NULL,
+                            base_url TEXT NOT NULL,
+                            model_id TEXT NOT NULL DEFAULT '',
+                            credential_ref TEXT
+                         );",
+                    )
+                } else {
+                    transaction.execute_batch(
+                        "ALTER TABLE providers ADD COLUMN model_id TEXT NOT NULL DEFAULT '';",
+                    )
+                }
+            })?;
         }
         connection.execute_batch("PRAGMA foreign_keys = ON;")?;
         if version < 3 {
-            connection.execute_batch(
-                "BEGIN IMMEDIATE;
-                 CREATE TABLE published_models (
+            Self::migrate_step(&connection, 3, |transaction, _| {
+                transaction.execute_batch(
+                "CREATE TABLE published_models (
                     provider_id TEXT PRIMARY KEY NOT NULL REFERENCES providers(id) ON DELETE CASCADE,
                     public_id TEXT UNIQUE NOT NULL,
                     display_name TEXT NOT NULL,
                     upstream_model TEXT NOT NULL,
                     metadata TEXT NOT NULL,
                     enabled INTEGER NOT NULL CHECK (enabled IN (0, 1))
-                 );
-                 PRAGMA user_version = 3;
-                 COMMIT;",
-            )?;
+                 );",
+                )
+            })?;
         }
         if version < 4 {
-            connection.execute_batch(
-                "BEGIN IMMEDIATE;
-                 CREATE TABLE request_records (
+            Self::migrate_step(&connection, 4, |transaction, _| {
+                transaction.execute_batch(
+                "CREATE TABLE request_records (
                     id TEXT PRIMARY KEY NOT NULL,
                     started_at_ms INTEGER NOT NULL,
                     public_model TEXT,
@@ -304,26 +301,24 @@ impl Store {
                     status TEXT NOT NULL CHECK (status IN ('completed', 'failed', 'interrupted', 'cancelled')),
                     error_code TEXT
                  );
-                 CREATE INDEX request_records_recent ON request_records(started_at_ms DESC);
-                 PRAGMA user_version = 4;
-                 COMMIT;",
-            )?;
+                 CREATE INDEX request_records_recent ON request_records(started_at_ms DESC);",
+                )
+            })?;
         }
         if version < 5 {
-            connection.execute_batch(
-                "BEGIN IMMEDIATE;
-                 ALTER TABLE published_models ADD COLUMN fallback_provider_id TEXT
+            Self::migrate_step(&connection, 5, |transaction, _| {
+                transaction.execute_batch(
+                    "ALTER TABLE published_models ADD COLUMN fallback_provider_id TEXT
                     REFERENCES providers(id) ON DELETE SET NULL
                     CHECK (fallback_provider_id != provider_id);
-                 ALTER TABLE request_records ADD COLUMN fallback_from TEXT;
-                 PRAGMA user_version = 5;
-                 COMMIT;",
-            )?;
+                 ALTER TABLE request_records ADD COLUMN fallback_from TEXT;",
+                )
+            })?;
         }
         if version < 6 {
-            connection.execute_batch(
-                "BEGIN IMMEDIATE;
-                 CREATE TABLE model_mappings (
+            Self::migrate_step(&connection, 6, |transaction, _| {
+                transaction.execute_batch(
+                    "CREATE TABLE model_mappings (
                     public_id TEXT PRIMARY KEY NOT NULL,
                     provider_id TEXT NOT NULL REFERENCES providers(id) ON DELETE CASCADE,
                     display_name TEXT NOT NULL,
@@ -338,85 +333,78 @@ impl Store {
                     SELECT public_id, provider_id, display_name, upstream_model, metadata,
                            enabled, fallback_provider_id FROM published_models;
                  DROP TABLE published_models;
-                 ALTER TABLE model_mappings RENAME TO published_models;
-                 PRAGMA user_version = 6;
-                 COMMIT;",
-            )?;
+                 ALTER TABLE model_mappings RENAME TO published_models;",
+                )
+            })?;
         }
         if version < 7 {
-            connection.execute_batch(
-                "BEGIN IMMEDIATE;
-                 ALTER TABLE providers ADD COLUMN codex_options TEXT NOT NULL DEFAULT '';
+            Self::migrate_step(&connection, 7, |transaction, _| {
+                transaction.execute_batch(
+                    "ALTER TABLE providers ADD COLUMN codex_options TEXT NOT NULL DEFAULT '';
                  CREATE TABLE app_settings (
                     key TEXT PRIMARY KEY NOT NULL,
                     value TEXT NOT NULL
-                 );
-                 PRAGMA user_version = 7;
-                 COMMIT;",
-            )?;
+                 );",
+                )
+            })?;
         }
         if version < 8 {
-            connection.execute_batch(
-                "BEGIN IMMEDIATE;
-                 ALTER TABLE providers ADD COLUMN settings_config TEXT NOT NULL DEFAULT '{}';
-                 PRAGMA user_version = 8;
-                 COMMIT;",
-            )?;
+            Self::migrate_step(&connection, 8, |transaction, _| {
+                transaction.execute_batch(
+                    "ALTER TABLE providers ADD COLUMN settings_config TEXT NOT NULL DEFAULT '{}';",
+                )
+            })?;
         }
         if version < 9 {
             use rusqlite::OptionalExtension;
-            let legacy: Option<String> = connection
-                .query_row(
-                    "SELECT value FROM app_settings WHERE key = 'chatgpt_account_binding'",
-                    [],
-                    |row| row.get(0),
-                )
-                .optional()?;
-            let binding = match legacy.as_deref() {
-                None => AccountBinding::Native,
-                Some("default") => AccountBinding::Default,
-                Some(id) => AccountBinding::Fixed(id.into()),
-            }
-            .encode()?;
-            let transaction = connection.unchecked_transaction()?;
-            transaction.execute_batch(
-                "ALTER TABLE providers ADD COLUMN kind TEXT NOT NULL DEFAULT 'api_key'
-                    CHECK (kind IN ('api_key', 'chatgpt'));
-                 ALTER TABLE providers ADD COLUMN account_binding TEXT
-                    CHECK ((kind = 'api_key' AND account_binding IS NULL)
-                        OR (kind = 'chatgpt' AND account_binding IS NOT NULL));
-                 CREATE TABLE session_bindings (
-                    session_id TEXT PRIMARY KEY NOT NULL,
-                    context TEXT NOT NULL
-                 );",
-            )?;
-            let migrated = transaction.execute(
-                "UPDATE providers SET kind = 'chatgpt', account_binding = ?1 WHERE id = 'switchx-chatgpt'",
-                [&binding],
-            )?;
-            if migrated != 0 {
-                transaction.execute(
-                    "DELETE FROM app_settings WHERE key = 'chatgpt_account_binding'",
-                    [],
+            Self::migrate_step(&connection, 9, |transaction, _| {
+                let legacy: Option<String> = transaction
+                    .query_row(
+                        "SELECT value FROM app_settings WHERE key = 'chatgpt_account_binding'",
+                        [],
+                        |row| row.get(0),
+                    )
+                    .optional()?;
+                let binding = match legacy.as_deref() {
+                    None => AccountBinding::Native,
+                    Some("default") => AccountBinding::Default,
+                    Some(id) => AccountBinding::Fixed(id.into()),
+                }
+                .encode()?;
+                transaction.execute_batch(
+                    "ALTER TABLE providers ADD COLUMN kind TEXT NOT NULL DEFAULT 'api_key'
+                        CHECK (kind IN ('api_key', 'chatgpt'));
+                     ALTER TABLE providers ADD COLUMN account_binding TEXT
+                        CHECK ((kind = 'api_key' AND account_binding IS NULL)
+                            OR (kind = 'chatgpt' AND account_binding IS NOT NULL));
+                     CREATE TABLE session_bindings (
+                        session_id TEXT PRIMARY KEY NOT NULL,
+                        context TEXT NOT NULL
+                     );",
                 )?;
-            }
-            transaction.pragma_update(None, "user_version", 9)?;
-            transaction.commit()?;
+                let migrated = transaction.execute(
+                    "UPDATE providers SET kind = 'chatgpt', account_binding = ?1 WHERE id = 'switchx-chatgpt'",
+                    [&binding],
+                )?;
+                if migrated != 0 {
+                    transaction.execute(
+                        "DELETE FROM app_settings WHERE key = 'chatgpt_account_binding'",
+                        [],
+                    )?;
+                }
+                Ok(())
+            })?;
         }
         if version < 10 {
-            connection.execute_batch(
-                "BEGIN IMMEDIATE;
-                 ALTER TABLE providers ADD COLUMN icon_id TEXT;
-                 PRAGMA user_version = 10;
-                 COMMIT;",
-            )?;
+            Self::migrate_step(&connection, 10, |transaction, _| {
+                transaction.execute_batch("ALTER TABLE providers ADD COLUMN icon_id TEXT;")
+            })?;
         }
         if version < 11 {
             // Rebuild with foreign keys disabled outside the transaction; keep every mapping,
             // setting and existing credential byte while broadening the provider CHECK.
             connection.execute_batch("PRAGMA foreign_keys = OFF;")?;
-            let migration = (|| {
-                let transaction = connection.unchecked_transaction()?;
+            let migration = Self::migrate_step(&connection, 11, |transaction, _| {
                 transaction.execute_batch(
                     "CREATE TABLE providers_v11 (
                         id TEXT PRIMARY KEY NOT NULL, name TEXT NOT NULL, base_url TEXT NOT NULL,
@@ -441,57 +429,69 @@ impl Store {
                 if violations != 0 {
                     return Err(rusqlite::Error::InvalidQuery);
                 }
-                transaction.pragma_update(None, "user_version", 11)?;
-                transaction.commit()
-            })();
+                Ok(())
+            });
             connection.execute_batch("PRAGMA foreign_keys = ON;")?;
             migration?;
         }
         if version < 12 {
-            connection.execute_batch(
-                "BEGIN IMMEDIATE;
-                 CREATE TABLE model_aliases (
+            Self::migrate_step(&connection, 12, |transaction, _| {
+                transaction.execute_batch(
+                    "CREATE TABLE model_aliases (
                     alias TEXT PRIMARY KEY NOT NULL,
                     public_id TEXT NOT NULL REFERENCES published_models(public_id) ON DELETE CASCADE
-                 );
-                 PRAGMA user_version = 12;
-                 COMMIT;",
-            )?;
+                 );",
+                )
+            })?;
         }
         if version < 13 {
             // Routed usage starts with this version; earlier routed Codex sessions
             // may still be imported from their logs.
-            connection.execute_batch(&format!(
-                "BEGIN IMMEDIATE; {USAGE_SCHEMA} PRAGMA user_version = 13; COMMIT;"
-            ))?;
+            Self::migrate_step(&connection, 13, |transaction, _| {
+                transaction.execute_batch(USAGE_SCHEMA)
+            })?;
         }
         if version < 14 {
-            let transaction =
-                Transaction::new_unchecked(&connection, TransactionBehavior::Immediate)?;
-            // Pre-release request customization builds added this column as version 13,
-            // before the usage tables; keep their overrides and add only what they lack.
-            if transaction
-                .prepare("SELECT request_overrides FROM published_models LIMIT 0")
-                .is_ok()
-            {
-                transaction.execute_batch(USAGE_SCHEMA)?;
-            } else {
-                transaction.execute_batch(
-                    "ALTER TABLE published_models ADD COLUMN request_overrides TEXT NOT NULL DEFAULT '{}';",
-                )?;
-            }
-            transaction.pragma_update(None, "user_version", 14)?;
-            transaction.commit()?;
+            Self::migrate_step(&connection, 14, |transaction, _| {
+                // Pre-release request customization builds added this column as version 13,
+                // before the usage tables; keep their overrides and add only what they lack.
+                if transaction
+                    .prepare("SELECT request_overrides FROM published_models LIMIT 0")
+                    .is_ok()
+                {
+                    transaction.execute_batch(USAGE_SCHEMA)
+                } else {
+                    transaction.execute_batch(
+                        "ALTER TABLE published_models ADD COLUMN request_overrides TEXT NOT NULL DEFAULT '{}';",
+                    )
+                }
+            })?;
         }
         if version < 15 {
-            connection.execute_batch(
-                "BEGIN IMMEDIATE;
-                 ALTER TABLE providers ADD COLUMN request_overrides TEXT NOT NULL DEFAULT '{}';
-                 PRAGMA user_version = 15;
-                 COMMIT;",
-            )?;
+            Self::migrate_step(&connection, 15, |transaction, _| {
+                transaction.execute_batch(
+                "ALTER TABLE providers ADD COLUMN request_overrides TEXT NOT NULL DEFAULT '{}';",
+                )
+            })?;
         }
         Ok(Self { connection })
+    }
+
+    /// Runs one schema step under the write lock. The version is re-read there so a
+    /// concurrent opener that already applied the step is skipped, not repeated.
+    fn migrate_step(
+        connection: &Connection,
+        target: i64,
+        apply: impl FnOnce(&Transaction, i64) -> Result<()>,
+    ) -> Result<()> {
+        let transaction = Transaction::new_unchecked(connection, TransactionBehavior::Immediate)?;
+        let current: i64 = transaction.query_row("PRAGMA user_version", [], |row| row.get(0))?;
+        if current >= target {
+            return Ok(());
+        }
+        apply(&transaction, current)?;
+        transaction.pragma_update(None, "user_version", target)?;
+        transaction.commit()
     }
 
     /// The first request atomically pins a root session; later requests must match.
@@ -1400,6 +1400,37 @@ fn settings_with_key(settings: &str, key: &Secret) -> Result<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn concurrent_first_opens_of_a_new_database_all_succeed() {
+        for round in 0..20 {
+            let dir = std::env::temp_dir().join(format!(
+                "switchx-concurrent-open-{round}-{}",
+                crate::id::new_id().unwrap()
+            ));
+            std::fs::create_dir_all(&dir).unwrap();
+            let path = dir.join("switchx.sqlite");
+            let barrier = std::sync::Arc::new(std::sync::Barrier::new(4));
+            let openers: Vec<_> = (0..4)
+                .map(|_| {
+                    let (path, barrier) = (path.clone(), barrier.clone());
+                    std::thread::spawn(move || {
+                        barrier.wait();
+                        Store::open(&path).map(drop)
+                    })
+                })
+                .collect();
+            for opener in openers {
+                opener.join().unwrap().unwrap();
+            }
+            let version: i64 = Connection::open(&path)
+                .unwrap()
+                .query_row("PRAGMA user_version", [], |row| row.get(0))
+                .unwrap();
+            assert_eq!(version, SCHEMA_VERSION);
+            std::fs::remove_dir_all(dir).unwrap();
+        }
+    }
 
     #[test]
     fn v13_migration_keeps_models_and_initializes_empty_request_customization() {
