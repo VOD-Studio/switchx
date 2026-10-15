@@ -6,6 +6,8 @@
 
 ### Added
 
+- 用量页支持从本地 Claude Code 会话、子 agent 和 Workflow 日志增量导入用量，按客户端筛选图表、排行与明细；新增独立扫描开关和 Claude 目录设置。同一回复按消息 ID 去重并补全后续快照，半行和文件替换可安全续读。定价支持缓存读取、5 分钟写入与 1 小时写入分别计费，旧用量与旧价格迁移保留。
+
 - 新增 `switchx mcp` 只读 MCP 服务，Codex、Claude Code 等 agent 可查询托管状态、连接、模型映射、用量与请求记录；服务以只读方式打开数据库，不创建或迁移数据，输出不含 API Key、OAuth token、本地路由令牌或凭据引用。
 - `switchx mcp --allow-writes` 允许 agent 启用或停用模型、设置备用连接以及修改模型价格，沿用应用内的校验与托管期间的编辑锁；新增只读的 `list_prices` 工具。正在运行的 SwitchX 会在约 2 秒内自动刷新外部修改。
 - `switchx mcp --allow-control` 允许 agent 通过正在运行的 SwitchX 预览、启用模型路由或直连，并恢复原配置；应用只接受 agent 自己生成且未被界面操作作废的一次性预览。新增 `get_app_status` 查询路由与 Codex 配置的实时状态。

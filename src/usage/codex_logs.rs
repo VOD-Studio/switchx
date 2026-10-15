@@ -41,6 +41,7 @@ pub struct ImportProgress {
 pub struct ImportSummary {
     pub files: usize,
     pub read: usize,
+    /// Inserted or updated rows, including exact router/client attribution.
     pub added: usize,
     pub unreadable: usize,
 }
@@ -351,6 +352,7 @@ impl FileState {
             other => (None, other.map(str::to_owned), None),
         };
         Some(UsageRecord {
+            client: crate::storage::UsageClient::Codex,
             id,
             source: UsageSource::CodexLog,
             started_at_ms,
@@ -379,6 +381,7 @@ fn to_array(usage: TokenUsage) -> [u64; 5] {
 
 fn from_array(values: [u64; 5]) -> TokenUsage {
     TokenUsage {
+        cache_write_1h: 0,
         input: values[0],
         cached_input: values[1],
         cache_write: values[2],

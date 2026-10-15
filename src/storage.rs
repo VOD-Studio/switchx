@@ -4,7 +4,7 @@ use rusqlite::{Connection, OpenFlags, Result, Transaction, TransactionBehavior, 
 
 use crate::{credentials::Secret, usage::TokenUsage};
 
-const SCHEMA_VERSION: i64 = 15;
+const SCHEMA_VERSION: i64 = 16;
 
 /// Usage, log import and price tables; every statement is safe to repeat.
 const USAGE_SCHEMA: &str = "CREATE TABLE IF NOT EXISTS usage_records (
@@ -221,7 +221,10 @@ impl Store {
     fn open_compatible(path: &Path, flags: OpenFlags) -> Result<Self> {
         let connection = Connection::open_with_flags(path, flags)?;
         let version: i64 = connection.query_row("PRAGMA user_version", [], |row| row.get(0))?;
-        if !matches!(version, 8 | 9 | 10 | 11 | 12 | 13 | 14 | SCHEMA_VERSION) {
+        if !matches!(
+            version,
+            8 | 9 | 10 | 11 | 12 | 13 | 14 | 15 | SCHEMA_VERSION
+        ) {
             return Err(rusqlite::Error::InvalidQuery);
         }
         connection.prepare("SELECT settings_config FROM providers LIMIT 0")?;
@@ -472,6 +475,44 @@ impl Store {
                 transaction.execute_batch(
                 "ALTER TABLE providers ADD COLUMN request_overrides TEXT NOT NULL DEFAULT '{}';",
                 )
+            })?;
+        }
+        if version < 16 {
+            Self::migrate_step(&connection, 16, |transaction, _| {
+                if transaction
+                    .prepare("SELECT client, cache_write_1h_tokens FROM usage_records LIMIT 0")
+                    .is_err()
+                {
+                    transaction.execute_batch(
+                    "ALTER TABLE usage_records RENAME TO usage_records_v15;
+                     CREATE TABLE usage_records (
+                        id TEXT PRIMARY KEY NOT NULL,
+                        source TEXT NOT NULL CHECK (source IN ('router', 'codex_log', 'claude_log')),
+                        started_at_ms INTEGER NOT NULL,
+                        provider_id TEXT, codex_provider TEXT, public_model TEXT, model TEXT NOT NULL,
+                        input_tokens INTEGER NOT NULL, cached_input_tokens INTEGER NOT NULL,
+                        cache_write_tokens INTEGER NOT NULL, output_tokens INTEGER NOT NULL,
+                        reasoning_tokens INTEGER NOT NULL, duration_ms INTEGER, first_event_ms INTEGER,
+                        response_id TEXT, session_id TEXT,
+                        cache_write_1h_tokens INTEGER NOT NULL DEFAULT 0,
+                        client TEXT NOT NULL DEFAULT 'unknown' CHECK (client IN ('codex', 'claude_code', 'unknown'))
+                     );
+                     INSERT INTO usage_records
+                        SELECT *, 0, CASE source WHEN 'codex_log' THEN 'codex' ELSE 'unknown' END
+                        FROM usage_records_v15;
+                     DROP TABLE usage_records_v15;
+                     CREATE INDEX usage_records_time ON usage_records(started_at_ms);
+                     CREATE INDEX usage_records_response ON usage_records(response_id) WHERE response_id IS NOT NULL;"
+                )?;
+                }
+                if transaction.prepare("SELECT cache_write_micros, cache_write_1h_micros FROM model_prices LIMIT 0").is_err() {
+                transaction.execute_batch(
+                    "ALTER TABLE model_prices ADD COLUMN cache_write_micros INTEGER NOT NULL DEFAULT 0;
+                     ALTER TABLE model_prices ADD COLUMN cache_write_1h_micros INTEGER NOT NULL DEFAULT 0;
+                     UPDATE model_prices SET cache_write_micros = input_micros, cache_write_1h_micros = input_micros;"
+                )?;
+                }
+                Ok(())
             })?;
         }
         Ok(Self { connection })
@@ -1402,8 +1443,8 @@ mod usage;
 
 use usage::usage_columns;
 pub use usage::{
-    Currency, PriceRecord, UsageBucket, UsageFact, UsageFilter, UsageLogFile, UsageRecord,
-    UsageSource,
+    Currency, PriceRecord, UsageBucket, UsageClient, UsageFact, UsageFilter, UsageLogFile,
+    UsageRecord, UsageSource,
 };
 
 fn settings_with_key(settings: &str, key: &Secret) -> Result<String> {
@@ -1423,6 +1464,55 @@ fn settings_with_key(settings: &str, key: &Secret) -> Result<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn usage_v15_migration_preserves_rows_cursors_and_existing_estimates() {
+        let dir = std::env::temp_dir().join(format!(
+            "switchx-usage-migrate-{}",
+            crate::id::new_id().unwrap()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("switchx.sqlite");
+        let store = Store::open(&path).unwrap();
+        store
+            .connection
+            .execute_batch(
+                "DROP TABLE usage_records; DROP TABLE model_prices; DROP TABLE usage_log_files;",
+            )
+            .unwrap();
+        store.connection.execute_batch(USAGE_SCHEMA).unwrap();
+        store.connection.execute_batch(
+            "INSERT INTO usage_records (id, source, started_at_ms, model, input_tokens, cached_input_tokens, cache_write_tokens, output_tokens, reasoning_tokens, response_id)
+             VALUES ('log', 'codex_log', 1, 'model', 1000, 500, 200, 100, 20, 'response'), ('route', 'router', 2, 'model', 100, 0, 0, 10, 0, NULL);
+             INSERT INTO model_prices VALUES ('', 'model', 'USD', 4000000, 500000, 20000000, 1);
+             INSERT INTO usage_log_files VALUES ('file', 100, 1, 90, '{}');
+             PRAGMA user_version = 15;"
+        ).unwrap();
+        drop(store);
+        let store = Store::open(&path).unwrap();
+        let rows = store.usage_records(0, 3).unwrap();
+        assert_eq!(rows.len(), 2);
+        assert_eq!(rows[0].client, UsageClient::Unknown);
+        assert_eq!(rows[1].client, UsageClient::Codex);
+        assert_eq!(rows[1].response_id.as_deref(), Some("response"));
+        let price = &store.model_prices().unwrap()[0];
+        assert_eq!(
+            (price.cache_write_micros, price.cache_write_1h_micros),
+            (4_000_000, 4_000_000)
+        );
+        assert_eq!(
+            crate::usage::report::price_micros(price, rows[1].usage),
+            4250
+        );
+        assert_eq!(store.usage_log_files().unwrap()[0].read_offset, 90);
+        drop(store);
+        // Reopening a migrated database is a no-op.
+        assert_eq!(
+            Store::open(&path).unwrap().usage_records(0, 3).unwrap(),
+            rows
+        );
+        std::fs::remove_dir_all(dir).unwrap();
+    }
 
     #[test]
     fn concurrent_first_opens_of_a_new_database_all_succeed() {
@@ -3167,6 +3257,7 @@ mod tests {
             )
             .unwrap();
         let usage = TokenUsage {
+            cache_write_1h: 0,
             input: 1_000,
             cached_input: 800,
             cache_write: 0,
@@ -3214,6 +3305,48 @@ mod tests {
             .collect::<Result<Vec<_>>>()
             .unwrap();
         assert_eq!(ids, ["codex:other:codex_log:model", "routed:router:actual"]);
+        let logged = UsageRecord {
+            id: "codex:later".into(),
+            source: UsageSource::CodexLog,
+            client: UsageClient::Codex,
+            started_at_ms: 2,
+            provider_id: None,
+            codex_provider: Some("switchx_router".into()),
+            public_model: None,
+            model: "actual".into(),
+            usage,
+            duration_ms: None,
+            first_event_ms: None,
+            response_id: Some("resp_same".into()),
+            session_id: None,
+        };
+        let file = UsageLogFile {
+            path: "synthetic".into(),
+            size: 1,
+            modified_ms: 1,
+            read_offset: 1,
+            state: "{}".into(),
+        };
+        assert_eq!(store.put_imported_usage(&[logged], &file).unwrap(), 1);
+        let filter = UsageFilter {
+            client: Some(UsageClient::Codex),
+            ..Default::default()
+        };
+        let (routed, total) = store.usage_page(2, 3, &filter, 0, 10).unwrap();
+        assert_eq!(total, 1);
+        assert_eq!(routed[0].source, UsageSource::Router);
+        assert_eq!(routed[0].client, UsageClient::Codex);
+        assert_eq!(store.usage_speeds(2, 3, &filter).unwrap().len(), 1);
+        let other = UsageFilter {
+            client: Some(UsageClient::ClaudeCode),
+            ..Default::default()
+        };
+        assert!(store.usage_speeds(2, 3, &other).unwrap().is_empty());
+        // Updating routed usage cannot lose the proven client association.
+        let transaction = store.connection.unchecked_transaction().unwrap();
+        Store::put_routed_usage(&transaction, &record, usage).unwrap();
+        transaction.commit().unwrap();
+        assert_eq!(store.usage_page(2, 3, &filter, 0, 10).unwrap().1, 1);
     }
 
     #[test]

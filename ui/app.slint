@@ -334,6 +334,11 @@ export component AppWindow inherits Window {
     in-out property <string> usage-group-filter;
     in-out property <string> usage-group-filter-label;
     in-out property <string> usage-model-filter;
+    in-out property <int> usage-client-filter: 0;
+    in-out property <bool> usage-claude-enabled: true;
+    in-out property <string> usage-claude-home;
+    callback usage-filter-client(int);
+    callback usage-save-claude-source(string, bool);
     in-out property <string> usage-today;
     in-out property <bool> usage-sources-open: false;
     in-out property <bool> usage-prices-open: false;
@@ -343,7 +348,7 @@ export component AppWindow inherits Window {
     callback usage-set-log-import(bool);
     callback usage-sync-now();
     callback usage-rebuild();
-    callback usage-save-price(string, string, string, string, string);
+    callback usage-save-price(string, string, string, string, string, string, string);
     callback usage-delete-price(string);
     callback usage-select-period(int);
     callback usage-filter-group(string);
@@ -1271,6 +1276,9 @@ export component AppWindow inherits Window {
                                     group-filter: root.usage-group-filter;
                                     group-filter-label: root.usage-group-filter-label;
                                     model-filter: root.usage-model-filter;
+                                    client-filter <=> root.usage-client-filter;
+                                    claude-enabled: root.usage-claude-enabled;
+                                    filter-client(index) => { root.usage-filter-client(index); }
                                     period <=> root.usage-period;
                                     range-start <=> root.usage-range-start;
                                     range-end <=> root.usage-range-end;
@@ -1359,11 +1367,14 @@ export component AppWindow inherits Window {
     Drawer {
         open: root.usage-sources-open;
         title: "数据来源";
-        subtitle: "路由记录实时计入，Codex 会话日志补齐其他用量。";
+        subtitle: "路由记录实时计入，Codex 与 Claude Code 日志增量同步。";
         panel-width: 520px;
         dismissed => { root.usage-sources-open = false; }
         UsageSourcesSheet {
             sync: root.usage-sync;
+            claude-enabled: root.usage-claude-enabled;
+            claude-home: root.usage-claude-home;
+            save-claude-source(home, enabled) => { root.usage-save-claude-source(home, enabled); }
             sessions-path: root.config-home == "" ? "未设置 Codex 配置目录" : root.config-home + "/sessions";
             set-log-import(enabled) => { root.usage-set-log-import(enabled); }
             sync-now => { root.usage-sync-now(); }
@@ -1374,14 +1385,14 @@ export component AppWindow inherits Window {
     Drawer {
         open: root.usage-prices-open;
         title: "定价";
-        subtitle: "按每百万 Token 填写，缓存输入留空时按输入价计算。订阅连接与原生登录显示等效 API 价格。";
+        subtitle: "按每百万 Token 填写。缓存读取留空按输入价；写入留空分别按输入价的 1.25 倍（5 分钟）和 2 倍（1 小时）。费用仅为估算。";
         panel-width: 640px;
         dismissed => { root.usage-prices-open = false; }
         UsagePricesSheet {
             prices: root.usage-prices;
             saving: root.usage-price-saving;
             error: root.usage-price-error;
-            save(model, currency, input, cached, output) => { root.usage-save-price(model, currency, input, cached, output); }
+            save(model, currency, input, cached, output, write, hour) => { root.usage-save-price(model, currency, input, cached, output, write, hour); }
             clear(model) => { root.usage-delete-price(model); }
         }
     }

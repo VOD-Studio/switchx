@@ -13,8 +13,8 @@ use switchx::{
     app::{self, UsageQuery, UsageView},
     headless, provider_icons,
     storage::{
-        AccountBinding, Currency, PriceRecord, ProviderKind, ProviderRecord, Store, UsageFilter,
-        UsageLogFile, UsageRecord, UsageSource,
+        AccountBinding, Currency, PriceRecord, ProviderKind, ProviderRecord, Store, UsageClient,
+        UsageFilter, UsageLogFile, UsageRecord, UsageSource,
     },
     ui::{AppWindow, Theme, UsageClock, UsageSyncState},
     usage::{TokenUsage, report::Period},
@@ -60,6 +60,8 @@ fn provider(id: &str, name: &str, kind: ProviderKind, base_url: &str) -> Provide
 
 fn price(model: &str, currency: Currency, prices: [u64; 3]) -> PriceRecord {
     PriceRecord {
+        cache_write_micros: prices[0],
+        cache_write_1h_micros: prices[0],
         provider_id: String::new(),
         model: model.into(),
         currency,
@@ -111,17 +113,68 @@ fn seed(empty: bool) -> Result<Data, Box<dyn Error>> {
             [1_000_000, 100_000, 4_000_000],
         ),
         price("kimi-k3", Currency::Cny, [4_000_000, 1_000_000, 16_000_000]),
+        PriceRecord {
+            cache_write_micros: 5_000_000,
+            cache_write_1h_micros: 8_000_000,
+            ..price(
+                "claude-sonnet-test",
+                Currency::Usd,
+                [4_000_000, 500_000, 20_000_000],
+            )
+        },
     ] {
         store.put_model_price(&record)?;
     }
     // (provider, Codex provider key, model, weight, routed)
     let sources = [
-        (Some("chatgpt"), None, "gpt-6.1-sol", 0.38, true),
-        (Some("deepseek"), None, "deepseek-flash", 0.24, true),
-        (Some("kimi"), None, "kimi-k3", 0.1, true),
-        (None, Some("openai"), "gpt-6-luna", 0.2, false),
-        (None, Some("custom_provider"), "glm-5.3", 0.05, false),
-        (None, Some("openai"), "gpt-6-astra", 0.03, false),
+        (
+            Some("chatgpt"),
+            None,
+            "gpt-6.1-sol",
+            0.38,
+            true,
+            UsageClient::Codex,
+        ),
+        (
+            Some("deepseek"),
+            None,
+            "deepseek-flash",
+            0.24,
+            true,
+            UsageClient::Codex,
+        ),
+        (
+            Some("kimi"),
+            None,
+            "kimi-k3",
+            0.1,
+            true,
+            UsageClient::Unknown,
+        ),
+        (
+            None,
+            Some("openai"),
+            "gpt-6-luna",
+            0.2,
+            false,
+            UsageClient::Codex,
+        ),
+        (
+            None,
+            Some("custom_provider"),
+            "glm-5.3",
+            0.05,
+            false,
+            UsageClient::Codex,
+        ),
+        (
+            None,
+            None,
+            "claude-sonnet-test",
+            0.03,
+            false,
+            UsageClient::ClaudeCode,
+        ),
     ];
     let mut noise = Noise(0x5eed_1234_abcd);
     let now = Local::now();
@@ -156,8 +209,11 @@ fn seed(empty: bool) -> Result<Data, Box<dyn Error>> {
                 let duration =
                     (output as f64 / (40.0 + noise.next() * 90.0) * 1_000.0) as i64 + 600;
                 records.push(UsageRecord {
+                    client: source.5,
                     id: format!("preview-{day}-{hour}-{request}"),
-                    source: if source.4 {
+                    source: if source.5 == UsageClient::ClaudeCode {
+                        UsageSource::ClaudeLog
+                    } else if source.4 {
                         UsageSource::Router
                     } else {
                         UsageSource::CodexLog
@@ -168,11 +224,25 @@ fn seed(empty: bool) -> Result<Data, Box<dyn Error>> {
                     public_model: source.4.then(|| format!("{}/显示名称", source.2)),
                     model: source.2.into(),
                     usage: TokenUsage {
+                        cache_write_1h: if source.5 == UsageClient::ClaudeCode {
+                            400
+                        } else {
+                            0
+                        },
                         input,
-                        cached_input: (input as f64 * (0.82 + noise.next() * 0.16)) as u64,
-                        cache_write: 0,
+                        cached_input: ((input as f64 * (0.82 + noise.next() * 0.16)) as u64)
+                            .min(input - 1000),
+                        cache_write: if source.5 == UsageClient::ClaudeCode {
+                            1000
+                        } else {
+                            0
+                        },
                         output,
-                        reasoning: (output as f64 * noise.next() * 0.4) as u64,
+                        reasoning: if source.5 == UsageClient::ClaudeCode {
+                            0
+                        } else {
+                            (output as f64 * noise.next() * 0.4) as u64
+                        },
                     },
                     duration_ms: source.4.then_some(duration),
                     first_event_ms: source.4.then_some(500),
@@ -204,6 +274,8 @@ fn icon(id: &str) -> Option<(slint::Image, bool)> {
 
 /// Applies a report the way the desktop does, replacing models to replay entry motion.
 fn show(app: &AppWindow, view: &UsageView) {
+    app.set_usage_claude_home("/example/.claude".into());
+    app.set_usage_claude_enabled(true);
     let report = &view.report;
     app.set_usage_summary(usage_view::summary(report));
     app.set_usage_scale(usage_view::scale(report));
@@ -283,6 +355,7 @@ pub(super) fn render_usage_design(
         &data.0,
         Period::Days30,
         UsageFilter {
+            client: None,
             group: Some("p:deepseek".into()),
             model: None,
         },
@@ -292,7 +365,38 @@ pub(super) fn render_usage_design(
         filtered.report.connections.len(),
         month.report.connections.len()
     );
-    for (width, height, dark) in [(1200, 820, true), (1200, 820, false), (1000, 680, true)] {
+    let weak = app.as_weak();
+    let client_data = data.0.clone();
+    app.on_usage_filter_client(move |index| {
+        let app = weak.upgrade().unwrap();
+        app.set_usage_client_filter(index);
+        app.set_usage_group_filter("".into());
+        app.set_usage_model_filter("".into());
+        let client = match index {
+            1 => Some(UsageClient::Codex),
+            2 => Some(UsageClient::ClaudeCode),
+            3 => Some(UsageClient::Unknown),
+            _ => None,
+        };
+        show(
+            &app,
+            &load(
+                &client_data,
+                Period::Days30,
+                UsageFilter {
+                    client,
+                    ..Default::default()
+                },
+            )
+            .unwrap(),
+        );
+    });
+    for (width, height, dark) in [
+        (1200, 820, true),
+        (1200, 820, false),
+        (1000, 680, true),
+        (1000, 680, false),
+    ] {
         let suffix = format!("{}-{width}x{height}", if dark { "dark" } else { "light" });
         app.window().set_size(PhysicalSize::new(width, height));
         app.global::<Theme>().set_animations_enabled(false);
@@ -351,7 +455,7 @@ pub(super) fn render_usage_design(
         frame(300);
 
         // A new period replaces every bucket, so the chart grows in again.
-        app.set_usage_period(2);
+        app.set_usage_period(4);
         show(app, &month);
         play(
             window,
@@ -373,6 +477,20 @@ pub(super) fn render_usage_design(
         app.set_usage_group_filter("".into());
         show(app, &month);
         frame(1_000);
+
+        app.invoke_usage_filter_client(2);
+        assert_eq!(app.get_usage_connections().row_count(), 1);
+        assert_eq!(
+            app.get_usage_connections().row_data(0).unwrap().name,
+            "Claude Code 会话"
+        );
+        for _ in 0..8 {
+            frame(200);
+            headless::render(window);
+        }
+        snapshot_now(window, output, &format!("usage-claude-{suffix}"))?;
+        app.invoke_usage_filter_client(0);
+        frame(1000);
 
         // Lower sections: rankings, the active-hours grid, and detail rows.
         window.dispatch_event(WindowEvent::PointerScrolled {

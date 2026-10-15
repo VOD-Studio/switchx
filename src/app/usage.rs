@@ -10,10 +10,11 @@ use chrono::Local;
 use super::{AppError, open_store};
 use crate::{
     storage::{
-        Currency, PriceRecord, ProviderRecord, Store, UsageBucket, UsageFilter, UsageSource,
+        Currency, PriceRecord, ProviderRecord, Store, UsageBucket, UsageClient, UsageFilter,
+        UsageSource,
     },
     usage::{
-        TokenUsage,
+        TokenUsage, claude_logs,
         codex_logs::{self, ImportError, ImportProgress, ImportSummary},
         report::{self, GroupKind, Inputs, Money, Period, Prices, Report, Totals, Window},
     },
@@ -47,6 +48,8 @@ pub struct UsageRow {
     pub speed: Option<f64>,
     pub duration_ms: Option<i64>,
     pub routed: bool,
+    pub source: UsageSource,
+    pub client: UsageClient,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -58,6 +61,8 @@ pub struct UsageView {
     pub prices: Vec<PriceRecord>,
     pub providers: Vec<ProviderRecord>,
     pub log_import: bool,
+    pub claude_import: bool,
+    pub claude_home: PathBuf,
 }
 
 pub fn load_usage(data_dir: &Path, query: &UsageQuery) -> Result<UsageView, AppError> {
@@ -133,6 +138,7 @@ pub(crate) fn usage_from(store: &Store, query: &UsageQuery) -> Result<UsageView,
         .into_iter()
         .map(|record| {
             let group = match (&record.provider_id, &record.codex_provider) {
+                (None, _) if record.source == UsageSource::ClaudeLog => "client:claude_code".into(),
                 (Some(id), _) => format!("p:{id}"),
                 (None, Some(key)) => format!("c:{key}"),
                 (None, None) => "u".into(),
@@ -173,6 +179,8 @@ pub(crate) fn usage_from(store: &Store, query: &UsageQuery) -> Result<UsageView,
                 speed,
                 duration_ms: record.duration_ms,
                 routed: record.source == UsageSource::Router,
+                source: record.source,
+                client: record.client,
                 id: record.id,
             }
         })
@@ -185,6 +193,8 @@ pub(crate) fn usage_from(store: &Store, query: &UsageQuery) -> Result<UsageView,
         prices,
         providers,
         log_import: store.usage_log_import().map_err(database)?,
+        claude_import: store.usage_claude_import().map_err(database)?,
+        claude_home: claude_home(store).map_err(database)?,
     })
 }
 
@@ -204,16 +214,19 @@ pub fn sync_usage_logs(
     progress: impl FnMut(ImportProgress),
 ) -> Result<Option<ImportSummary>, String> {
     let store = open_store(data_dir).map_err(|error| error.message().to_owned())?;
-    if !force
-        && !store
+    let codex = force
+        || store
             .usage_log_import()
-            .map_err(|_| AppError::Database.message().to_owned())?
-    {
+            .map_err(|_| AppError::Database.message())?;
+    let claude = force
+        || store
+            .usage_claude_import()
+            .map_err(|_| AppError::Database.message())?;
+    let codex = codex && codex_home.is_absolute();
+    if !codex && !claude {
         return Ok(None);
     }
-    codex_logs::import(&store, codex_home, cancel, progress)
-        .map(Some)
-        .map_err(import_message)
+    import_logs(&store, codex_home, codex, claude, cancel, progress).map(Some)
 }
 
 /// Backs up the database, forgets imported rows, and imports every log again.
@@ -235,9 +248,68 @@ pub fn rebuild_usage_logs(
     store
         .clear_imported_usage()
         .map_err(|_| AppError::Database.message().to_owned())?;
-    let summary =
-        codex_logs::import(&store, codex_home, cancel, progress).map_err(import_message)?;
+    let summary = import_logs(&store, codex_home, true, true, cancel, progress)?;
     Ok((summary, backup))
+}
+
+fn claude_home(store: &Store) -> rusqlite::Result<PathBuf> {
+    if let Some(path) = store.usage_claude_home()?.filter(|path| !path.is_empty()) {
+        return Ok(path.into());
+    }
+    if let Some(path) = std::env::var_os("CLAUDE_CONFIG_DIR")
+        .map(PathBuf::from)
+        .filter(|path| path.is_absolute())
+    {
+        return Ok(path);
+    }
+    Ok(
+        std::env::var_os(if cfg!(windows) { "USERPROFILE" } else { "HOME" })
+            .map(PathBuf::from)
+            .unwrap_or_default()
+            .join(".claude"),
+    )
+}
+
+fn import_logs(
+    store: &Store,
+    codex_home: &Path,
+    codex: bool,
+    claude: bool,
+    cancel: &AtomicBool,
+    mut progress: impl FnMut(ImportProgress),
+) -> Result<ImportSummary, String> {
+    let home = claude_home(store).map_err(|_| AppError::Database.message())?;
+    let mut summary = ImportSummary::default();
+    if codex {
+        summary =
+            codex_logs::import(store, codex_home, cancel, &mut progress).map_err(import_message)?;
+    }
+    if claude {
+        let next = claude_logs::import(store, &home, cancel, |step| {
+            progress(ImportProgress {
+                done: summary.files + step.done,
+                total: summary.files + step.total,
+            })
+        })
+        .map_err(import_message)?;
+        summary.files += next.files;
+        summary.read += next.read;
+        summary.added += next.added;
+        summary.unreadable += next.unreadable;
+    }
+    Ok(summary)
+}
+
+pub fn save_usage_claude_source(data_dir: &Path, home: &str, enabled: bool) -> Result<(), String> {
+    let home = home.trim();
+    if !home.is_empty() && !Path::new(home).is_absolute() {
+        return Err("Claude 配置目录须为绝对路径".into());
+    }
+    let store = open_store(data_dir).map_err(|error| error.message().to_owned())?;
+    store
+        .set_usage_claude_home(home)
+        .and_then(|()| store.set_usage_claude_import(enabled))
+        .map_err(|_| AppError::Database.message().to_owned())
 }
 
 pub fn set_usage_log_import(data_dir: &Path, enabled: bool) -> Result<(), String> {
@@ -255,6 +327,8 @@ pub struct PriceInput {
     pub currency: String,
     pub input: String,
     pub cached_input: String,
+    pub cache_write: String,
+    pub cache_write_1h: String,
     pub output: String,
 }
 
@@ -294,6 +368,19 @@ pub fn save_price(data_dir: &Path, input: &PriceInput) -> Result<(), String> {
     } else {
         parse_price(&input.cached_input).ok_or("缓存输入价格须为非负数，最多 6 位小数")?
     };
+    let write_price = |text: &str, numerator: u64, denominator: u64| -> Result<u64, String> {
+        if text.trim().is_empty() {
+            input_micros
+                .checked_mul(numerator)
+                .and_then(|n| n.checked_add(denominator / 2))
+                .map(|n| n / denominator)
+                .ok_or_else(|| "缓存写入价格过大".into())
+        } else {
+            parse_price(text).ok_or_else(|| "缓存写入价格须为非负数，最多 6 位小数".into())
+        }
+    };
+    let cache_write_micros = write_price(&input.cache_write, 5, 4)?;
+    let cache_write_1h_micros = write_price(&input.cache_write_1h, 2, 1)?;
     open_store(data_dir)
         .map_err(|error| error.message().to_owned())?
         .put_model_price(&PriceRecord {
@@ -302,6 +389,8 @@ pub fn save_price(data_dir: &Path, input: &PriceInput) -> Result<(), String> {
             currency,
             input_micros,
             cached_input_micros,
+            cache_write_micros,
+            cache_write_1h_micros,
             output_micros,
         })
         .map_err(|_| AppError::Database.message().to_owned())
@@ -321,6 +410,8 @@ pub struct PriceView {
     pub currency: Option<Currency>,
     pub input: String,
     pub cached_input: String,
+    pub cache_write: String,
+    pub cache_write_1h: String,
     pub output: String,
     pub requests: u64,
     pub tokens: u64,
@@ -342,6 +433,8 @@ pub(crate) fn prices_from(store: &Store) -> Result<Vec<PriceView>, AppError> {
             currency: None,
             input: String::new(),
             cached_input: String::new(),
+            cache_write: String::new(),
+            cache_write_1h: String::new(),
             output: String::new(),
             requests,
             tokens,
@@ -356,6 +449,8 @@ pub(crate) fn prices_from(store: &Store) -> Result<Vec<PriceView>, AppError> {
                     currency: None,
                     input: String::new(),
                     cached_input: String::new(),
+                    cache_write: String::new(),
+                    cache_write_1h: String::new(),
                     output: String::new(),
                     requests: 0,
                     tokens: 0,
@@ -367,6 +462,8 @@ pub(crate) fn prices_from(store: &Store) -> Result<Vec<PriceView>, AppError> {
         view.currency = Some(price.currency);
         view.input = price_text(price.input_micros);
         view.cached_input = price_text(price.cached_input_micros);
+        view.cache_write = price_text(price.cache_write_micros);
+        view.cache_write_1h = price_text(price.cache_write_1h_micros);
         view.output = price_text(price.output_micros);
     }
     views.sort_by(|a, b| {
@@ -446,6 +543,173 @@ mod tests {
     use super::*;
 
     #[test]
+    fn claude_and_codex_share_reports_but_client_filters_apply_to_every_section() {
+        use serde_json::json;
+        use std::io::Write;
+        let root = std::env::temp_dir().join(format!(
+            "switchx-usage-clients-{}",
+            crate::id::new_id().unwrap()
+        ));
+        let data = root.join("data");
+        let codex = root.join("codex");
+        let claude = root.join("claude");
+        std::fs::create_dir_all(codex.join("sessions/2026/10/15")).unwrap();
+        std::fs::create_dir_all(claude.join("projects/project")).unwrap();
+        save_usage_claude_source(&data, claude.to_str().unwrap(), true).unwrap();
+        assert!(save_usage_claude_source(&data, "relative", false).is_err());
+        let now = Local::now();
+        let current = (now - chrono::Duration::minutes(1)).to_rfc3339();
+        let previous = (now - chrono::Duration::hours(30)).to_rfc3339();
+        let claude_line = |id: &str, stamp: &str, output: u64| {
+            json!({
+                "type":"assistant", "timestamp":stamp, "sessionId":"session", "message":{
+                    "id":id,"model":"shared-model","usage":{"input_tokens":100,"cache_read_input_tokens":1000,
+                    "cache_creation_input_tokens":500,"cache_creation":{"ephemeral_5m_input_tokens":300,"ephemeral_1h_input_tokens":200},"output_tokens":output}
+                }
+            })
+        };
+        let claude_file = claude.join("projects/project/session.jsonl");
+        std::fs::write(
+            &claude_file,
+            format!(
+                "{}\n{}\n",
+                claude_line("current", &current, 5),
+                claude_line("previous", &previous, 2)
+            ),
+        )
+        .unwrap();
+        let codex_rows = [
+            json!({"type":"session_meta","payload":{"id":"session","model_provider":"openai"}}),
+            json!({"type":"turn_context","payload":{"model":"shared-model"}}),
+            json!({"timestamp":current,"type":"token_usage_record","payload":{"response_id":"codex-current","usage":{"input_tokens":1000,"output_tokens":100}}}),
+            json!({"timestamp":previous,"type":"token_usage_record","payload":{"response_id":"codex-previous","usage":{"input_tokens":2000,"output_tokens":200}}}),
+        ];
+        std::fs::write(
+            codex.join("sessions/2026/10/15/rollout-test.jsonl"),
+            codex_rows
+                .iter()
+                .map(|row| format!("{row}\n"))
+                .collect::<String>(),
+        )
+        .unwrap();
+        let cancel = AtomicBool::new(false);
+        assert_eq!(
+            sync_usage_logs(&data, &codex, false, &cancel, |_| {})
+                .unwrap()
+                .unwrap()
+                .added,
+            4
+        );
+        save_price(
+            &data,
+            &PriceInput {
+                model: "shared-model".into(),
+                currency: "USD".into(),
+                input: "4".into(),
+                cached_input: "0.5".into(),
+                output: "20".into(),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        let price = &load_prices(&data).unwrap()[0];
+        assert_eq!((&*price.cache_write, &*price.cache_write_1h), ("5", "8"));
+        let query = UsageQuery {
+            period: Period::Hours24,
+            filter: UsageFilter {
+                client: Some(UsageClient::ClaudeCode),
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let view = load_usage(&data, &query).unwrap();
+        assert_eq!(view.claude_home, claude);
+        assert_eq!(view.report.totals.requests, 1);
+        assert_eq!(view.report.totals.usage.total(), 1605);
+        assert_eq!(view.report.totals.cost.api.usd, 4100);
+        assert_eq!(view.report.previous.unwrap().requests, 1);
+        assert_eq!(view.report.previous.unwrap().usage.output, 2);
+        assert_eq!(
+            view.report
+                .points
+                .iter()
+                .map(|point| point.totals.requests)
+                .sum::<u64>(),
+            1
+        );
+        assert_eq!(view.report.heat.iter().flatten().sum::<u64>(), 1605);
+        assert_eq!(
+            (
+                view.total_rows,
+                view.rows.len(),
+                view.report.models.len(),
+                view.report.connections.len()
+            ),
+            (1, 1, 1, 1)
+        );
+        assert_eq!(view.rows[0].connection, "Claude Code 会话");
+        assert_eq!(view.rows[0].source, UsageSource::ClaudeLog);
+        let codex_view = load_usage(
+            &data,
+            &UsageQuery {
+                filter: UsageFilter {
+                    client: Some(UsageClient::Codex),
+                    ..Default::default()
+                },
+                ..query.clone()
+            },
+        )
+        .unwrap();
+        assert_eq!(codex_view.report.totals.usage.total(), 1100);
+        assert_eq!(codex_view.report.previous.unwrap().usage.total(), 2200);
+
+        // An independent source switch stops automatic import without dropping history.
+        save_usage_claude_source(&data, claude.to_str().unwrap(), false).unwrap();
+        writeln!(
+            std::fs::OpenOptions::new()
+                .append(true)
+                .open(&claude_file)
+                .unwrap(),
+            "{}",
+            claude_line("current", &current, 4660)
+        )
+        .unwrap();
+        assert_eq!(
+            sync_usage_logs(&data, &codex, false, &cancel, |_| {})
+                .unwrap()
+                .unwrap()
+                .added,
+            0
+        );
+        set_usage_log_import(&data, false).unwrap();
+        assert!(
+            sync_usage_logs(&data, &codex, false, &cancel, |_| {})
+                .unwrap()
+                .is_none()
+        );
+        save_usage_claude_source(&data, claude.to_str().unwrap(), true).unwrap();
+        assert_eq!(
+            sync_usage_logs(&data, &codex, false, &cancel, |_| {})
+                .unwrap()
+                .unwrap()
+                .added,
+            1
+        );
+        let updated = load_usage(&data, &query).unwrap();
+        assert_eq!(
+            (updated.total_rows, updated.report.totals.usage.output),
+            (1, 4660)
+        );
+        let (_, backup) = rebuild_usage_logs(&data, &codex, &cancel, |_| {}).unwrap();
+        assert!(backup.exists());
+        assert_eq!(
+            load_usage(&data, &query).unwrap().report.totals,
+            updated.report.totals
+        );
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
     fn numbers_and_money_are_compact_and_exact() {
         assert_eq!(format_tokens(999), "999");
         assert_eq!(format_tokens(12_345), "12.3K");
@@ -498,6 +762,10 @@ mod tests {
         )
         .unwrap();
         let store = open_store(&data).unwrap();
+        store
+            .set_usage_claude_home(root.join("claude").to_str().unwrap())
+            .unwrap();
+        store.set_usage_claude_import(false).unwrap();
         store
             .put_request(&RequestRecord {
                 id: "routed".into(),

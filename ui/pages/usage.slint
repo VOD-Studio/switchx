@@ -1,6 +1,6 @@
 import { Theme } from "../tokens.slint";
 import { ButtonSheen } from "../button-sheen.slint";
-import { QuietButton } from "../components.slint";
+import { QuietButton, QuietComboBox } from "../components.slint";
 import { QuietScrollView as ScrollView } from "../scroll-view.slint";
 import { QuotaSpinner } from "../quota-loading.slint";
 import {
@@ -102,6 +102,7 @@ component FilterChip inherits Rectangle {
 
 // Sync state: a calm dot when idle, a spinner and percentage while reading logs.
 component SyncPill inherits Rectangle {
+    in property <bool> logs-enabled;
     in property <UsageSyncState> sync;
     callback clicked();
     height: 30px;
@@ -128,7 +129,7 @@ component SyncPill inherits Rectangle {
             width: 7px;
             height: 7px;
             border-radius: 3.5px;
-            background: root.sync.error != "" ? Theme.warning : root.sync.enabled ? Theme.success : Theme.muted-text;
+            background: root.sync.error != "" ? Theme.warning : root.logs-enabled ? Theme.success : Theme.muted-text;
             animate background { duration: Theme.fast; }
         }
         Text {
@@ -267,7 +268,7 @@ component Hero inherits Rectangle {
             spacing: 18px;
             LegendKey {
                 ink: Theme.usage-input;
-                label: "新输入";
+                label: "输入·含写入";
                 value: root.summary.fresh-text;
             }
 
@@ -333,7 +334,7 @@ component EmptyUsage inherits Rectangle {
         }
 
         Text {
-            text: "经 SwitchX 路由的请求会实时计入；直连与原生 Codex 会话来自会话日志。";
+            text: "经 SwitchX 路由的请求实时计入；Codex 与 Claude Code 用量从会话日志导入。";
             color: Theme.muted-text;
             font-size: 12px;
             horizontal-alignment: center;
@@ -373,6 +374,9 @@ export component UsagePage inherits VerticalLayout {
     in property <string> group-filter;
     in property <string> group-filter-label;
     in property <string> model-filter;
+    in-out property <int> client-filter;
+    in property <bool> claude-enabled;
+    callback filter-client(int);
     // An index into periods, or periods.length for the custom range.
     in-out property <int> period;
     in-out property <UsageMoment> range-start;
@@ -427,6 +431,38 @@ export component UsagePage inherits VerticalLayout {
             }
         }
 
+        client-picker := QuietComboBox {
+            width: 144px;
+            height: 32px;
+            model: ["全部客户端", "Codex", "Claude Code", "未识别客户端"];
+            current-index <=> root.client-filter;
+            selected(value) => { root.filter-client(self.current-index); }
+        }
+
+        Rectangle {
+            horizontal-stretch: 1;
+        }
+
+        SyncPill {
+            y: 1px;
+            sync: root.sync;
+            logs-enabled: root.sync.enabled || root.claude-enabled;
+            clicked => { root.open-sources(); }
+        }
+
+        QuietButton {
+            width: 80px;
+            height: 32px;
+            text: "定价";
+            icon: @image-url("../../assets/ui/tag.svg");
+            icon-color: Theme.muted-text;
+            clicked => { root.open-prices(); }
+        }
+    }
+
+    if root.group-filter != "" || root.model-filter != "": HorizontalLayout {
+        height: 30px;
+        spacing: 10px;
         if root.group-filter != "": FilterChip {
             y: 1px;
             label: "连接 · " + root.group-filter-label;
@@ -439,21 +475,6 @@ export component UsagePage inherits VerticalLayout {
         }
         Rectangle {
             horizontal-stretch: 1;
-        }
-
-        SyncPill {
-            y: 1px;
-            sync: root.sync;
-            clicked => { root.open-sources(); }
-        }
-
-        QuietButton {
-            width: 80px;
-            height: 32px;
-            text: "定价";
-            icon: @image-url("../../assets/ui/tag.svg");
-            icon-color: Theme.muted-text;
-            clicked => { root.open-prices(); }
         }
     }
 
@@ -487,10 +508,10 @@ export component UsagePage inherits VerticalLayout {
                 metric <=> root.metric;
             }
 
-            if root.loaded && root.summary.empty && root.group-filter == "" && root.model-filter == "": EmptyUsage {
+            if root.loaded && root.summary.empty && root.group-filter == "" && root.model-filter == "" && root.client-filter == 0: EmptyUsage {
                 open-sources => { root.open-sources(); }
             }
-            if !(root.loaded && root.summary.empty && root.group-filter == "" && root.model-filter == ""): HorizontalLayout {
+            if !(root.loaded && root.summary.empty && root.group-filter == "" && root.model-filter == "" && root.client-filter == 0): HorizontalLayout {
                 spacing: 14px;
                 UsageRank {
                     title: "按连接";
@@ -509,11 +530,11 @@ export component UsagePage inherits VerticalLayout {
                     toggle(key) => { root.filter-model(key); }
                 }
             }
-            if !(root.loaded && root.summary.empty && root.group-filter == "" && root.model-filter == ""): UsageHeat {
+            if !(root.loaded && root.summary.empty && root.group-filter == "" && root.model-filter == "" && root.client-filter == 0): UsageHeat {
                 cells: root.heat;
                 caption: root.heat-caption;
             }
-            if !(root.loaded && root.summary.empty && root.group-filter == "" && root.model-filter == ""): UsageDetails {
+            if !(root.loaded && root.summary.empty && root.group-filter == "" && root.model-filter == "" && root.client-filter == 0): UsageDetails {
                 rows: root.rows;
                 summary: root.rows-summary;
                 more: root.rows-more;

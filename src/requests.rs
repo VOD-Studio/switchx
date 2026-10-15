@@ -386,6 +386,7 @@ mod tests {
             assert_eq!(
                 record.usage,
                 Some(TokenUsage {
+                    cache_write_1h: 0,
                     input: 900,
                     cached_input: 700,
                     cache_write: 0,

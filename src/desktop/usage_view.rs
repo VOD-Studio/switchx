@@ -442,7 +442,7 @@ pub fn points(report: &Report) -> Vec<UsagePoint> {
                 }
             } else {
                 format!(
-                    "{} Token · {} 次请求{}\n新输入 {} · 输出 {} · 缓存 {}",
+                    "{} Token · {} 次请求{}\n输入（含缓存写入） {} · 输出 {} · 缓存 {}",
                     app::format_tokens(total),
                     app::format_count(point.totals.requests),
                     if cost.is_empty() {
@@ -491,6 +491,8 @@ pub fn group_icon_id(key: &str, providers: &[ProviderRecord]) -> Option<&'static
             |icon| icon.id,
         );
         (!id.is_empty()).then_some(id)
+    } else if key == "client:claude_code" {
+        Some("claude")
     } else if key == "c:openai" {
         Some(provider_icons::default_icon_id(ProviderKind::Chatgpt, ""))
     } else {
@@ -665,10 +667,21 @@ pub fn detail_row(
             .map(app::format_duration)
             .unwrap_or_else(|| "—".into())
             .into(),
-        source: if row.routed {
-            "SwitchX 路由"
+        source: match row.source {
+            switchx::storage::UsageSource::Router => "SwitchX 路由",
+            switchx::storage::UsageSource::CodexLog => "Codex 会话日志",
+            switchx::storage::UsageSource::ClaudeLog => "Claude Code 会话日志",
+        }
+        .into(),
+        client: row.client.label().into(),
+        cache_write: if usage.cache_write > 0 {
+            format!(
+                "缓存写入：5 分钟 {} · 1 小时 {}",
+                app::format_tokens(usage.cache_write - usage.cache_write_1h),
+                app::format_tokens(usage.cache_write_1h)
+            )
         } else {
-            "Codex 会话日志"
+            String::new()
         }
         .into(),
         routed: row.routed,
@@ -692,6 +705,8 @@ pub fn price_rows(prices: Vec<app::PriceView>) -> Vec<UsagePriceRow> {
             priced: price.currency.is_some(),
             input: price.input.into(),
             cached: price.cached_input.into(),
+            write: price.cache_write.into(),
+            write_hour: price.cache_write_1h.into(),
             output: price.output.into(),
             usage: if price.requests == 0 {
                 "暂无用量".to_owned()

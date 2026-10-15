@@ -376,6 +376,7 @@ impl Totals {
             input: self.usage.input + usage.input,
             cached_input: self.usage.cached_input + usage.cached_input,
             cache_write: self.usage.cache_write + usage.cache_write,
+            cache_write_1h: self.usage.cache_write_1h + usage.cache_write_1h,
             output: self.usage.output + usage.output,
             reasoning: self.usage.reasoning + usage.reasoning,
         };
@@ -391,6 +392,7 @@ pub enum GroupKind {
     RoutedLegacy,
     Other,
     Unknown,
+    ClaudeSession,
 }
 
 impl GroupKind {
@@ -406,12 +408,16 @@ impl GroupKind {
             Self::RoutedLegacy => "路由历史",
             Self::Other => "其他提供方",
             Self::Unknown => "未知",
+            Self::ClaudeSession => "会话 · 未关联连接",
         }
     }
 }
 
 /// A connection group's display name and kind.
 pub fn group_identity(group: &str, providers: &[ProviderRecord]) -> (String, GroupKind) {
+    if group == "client:claude_code" {
+        return ("Claude Code 会话".into(), GroupKind::ClaudeSession);
+    }
     if let Some(id) = group.strip_prefix("p:") {
         return match providers.iter().find(|provider| provider.id == id) {
             Some(provider) => (
@@ -513,7 +519,9 @@ impl<'a> Prices<'a> {
 /// The cost of `usage` in millionths of the price's currency, rounded to nearest.
 pub fn price_micros(price: &PriceRecord, usage: TokenUsage) -> u128 {
     let per_million = usage.fresh_input() as u128 * price.input_micros as u128
-        + usage.cache_write as u128 * price.input_micros as u128
+        + usage.cache_write.saturating_sub(usage.cache_write_1h) as u128
+            * price.cache_write_micros as u128
+        + usage.cache_write_1h as u128 * price.cache_write_1h_micros as u128
         + usage.cached_input as u128 * price.cached_input_micros as u128
         + usage.output as u128 * price.output_micros as u128;
     (per_million + 500_000) / 1_000_000
@@ -539,6 +547,7 @@ pub fn build(window: Window, filter: &UsageFilter, inputs: Inputs<'_>) -> Report
             .or_insert_with(|| kinds(group))
             .clone()
     };
+    let client_ok = |fact: &UsageFact| filter.client.is_none_or(|client| client == fact.client);
     let group_ok = |fact: &UsageFact| {
         filter
             .group
@@ -570,7 +579,7 @@ pub fn build(window: Window, filter: &UsageFilter, inputs: Inputs<'_>) -> Report
     let mut connections = BTreeMap::<String, Share>::new();
     let mut models = BTreeMap::<String, Share>::new();
     let mut unpriced = BTreeMap::<String, u64>::new();
-    for fact in inputs.facts {
+    for fact in inputs.facts.iter().filter(|fact| client_ok(fact)) {
         let (name, kind) = identity(&fact.group);
         let cost = prices.cost(
             fact.provider_id.as_deref(),
@@ -623,7 +632,10 @@ pub fn build(window: Window, filter: &UsageFilter, inputs: Inputs<'_>) -> Report
     }
     let previous = inputs.previous.map(|facts| {
         let mut previous = Totals::default();
-        for fact in facts.iter().filter(|fact| group_ok(fact) && model_ok(fact)) {
+        for fact in facts
+            .iter()
+            .filter(|fact| client_ok(fact) && group_ok(fact) && model_ok(fact))
+        {
             let (_, kind) = identity(&fact.group);
             let cost = prices.cost(
                 fact.provider_id.as_deref(),
@@ -702,6 +714,30 @@ pub fn clock(ms: i64, now: DateTime<Local>) -> String {
 mod tests {
     use super::*;
 
+    #[test]
+    fn cache_writes_use_separate_five_minute_and_one_hour_prices() {
+        let price = PriceRecord {
+            provider_id: String::new(),
+            model: "claude-test".into(),
+            currency: Currency::Usd,
+            input_micros: 4_000_000,
+            cached_input_micros: 500_000,
+            cache_write_micros: 5_000_000,
+            cache_write_1h_micros: 8_000_000,
+            output_micros: 20_000_000,
+        };
+        let usage = TokenUsage {
+            input: 1_000_000,
+            cached_input: 400_000,
+            cache_write: 300_000,
+            cache_write_1h: 100_000,
+            output: 50_000,
+            reasoning: 0,
+        };
+        // Fresh 1.2 + read 0.2 + 5m write 1 + 1h write 0.8 + output 1.
+        assert_eq!(price_micros(&price, usage), 4_200_000);
+    }
+
     fn now() -> DateTime<Local> {
         Local.with_ymd_and_hms(2026, 10, 13, 16, 4, 0).unwrap()
     }
@@ -717,6 +753,7 @@ mod tests {
 
     fn fact(bucket: &str, group: &str, model: &str, requests: u64, usage: TokenUsage) -> UsageFact {
         UsageFact {
+            client: crate::storage::UsageClient::Unknown,
             bucket: bucket.into(),
             group: group.into(),
             provider_id: group.strip_prefix("p:").map(str::to_owned),
@@ -741,6 +778,8 @@ mod tests {
 
     fn price(provider_id: &str, model: &str, currency: Currency, prices: [u64; 3]) -> PriceRecord {
         PriceRecord {
+            cache_write_micros: prices[0],
+            cache_write_1h_micros: prices[0],
             provider_id: provider_id.into(),
             model: model.into(),
             currency,
@@ -981,6 +1020,7 @@ mod tests {
         let filtered = build(
             window,
             &UsageFilter {
+                client: None,
                 group: Some("p:api".into()),
                 model: None,
             },

@@ -18,7 +18,7 @@ use chrono::Local;
 use slint::{ComponentHandle, Model, ModelRc, SharedString, VecModel, Weak};
 use switchx::{
     app::{self, PriceInput, USAGE_PAGE, USAGE_ROW_LIMIT, UsageQuery, UsageView},
-    storage::UsageFilter,
+    storage::{UsageClient, UsageFilter},
     ui::{AppWindow, UsageClock, UsageSyncState},
     usage::report::Period,
 };
@@ -42,6 +42,7 @@ enum Job {
     Load(UsageQuery),
     Sync { home: PathBuf, force: bool },
     SetImport { enabled: bool, home: PathBuf },
+    SetClaude { enabled: bool, home: String },
     Rebuild { home: PathBuf },
     Prices,
     Reload,
@@ -86,9 +87,10 @@ impl UsageService {
     }
 
     pub(super) fn sync(&self, home: &str, force: bool) {
-        if let Some(home) = absolute(home) {
-            self.send(Job::Sync { home, force });
-        }
+        self.send(Job::Sync {
+            home: absolute(home).unwrap_or_default(),
+            force,
+        });
     }
 
     /// Stops a running scan at the next file; the thread ends with its channel.
@@ -140,14 +142,20 @@ fn run(receiver: mpsc::Receiver<Job>, weak: Weak<AppWindow>, cancel: Arc<AtomicB
                 } => {
                     home = Some(next);
                     match app::set_usage_log_import(data_dir, enabled) {
-                        Ok(()) if enabled => sync = Some(true),
-                        Ok(()) => {
-                            sync = None;
-                            post_sync(&weak, SyncOutcome::Off);
-                        }
+                        Ok(()) => sync = Some(false),
                         Err(error) => post_sync(&weak, SyncOutcome::Failed(error)),
                     }
                     reload = true;
+                }
+                Job::SetClaude {
+                    enabled,
+                    home: path,
+                } => {
+                    reload = true;
+                    match app::save_usage_claude_source(data_dir, &path, enabled) {
+                        Ok(()) => sync = Some(false),
+                        Err(error) => post_sync(&weak, SyncOutcome::Failed(error)),
+                    }
                 }
                 Job::Rebuild { home: next } => {
                     home = Some(next.clone());
@@ -165,6 +173,7 @@ fn run(receiver: mpsc::Receiver<Job>, weak: Weak<AppWindow>, cancel: Arc<AtomicB
                                     .file_name()
                                     .map(|name| name.to_string_lossy().into_owned())
                                     .unwrap_or_default(),
+                                summary.unreadable,
                             ),
                             Err(error) => SyncOutcome::Failed(error),
                         },
@@ -261,8 +270,12 @@ impl<'a> Progress<'a> {
 }
 
 enum SyncOutcome {
-    Synced { read: usize, added: usize },
-    Rebuilt(usize, String),
+    Synced {
+        read: usize,
+        added: usize,
+        unreadable: usize,
+    },
+    Rebuilt(usize, String, usize),
     Off,
     Failed(String),
 }
@@ -275,26 +288,40 @@ fn post_sync(weak: &Weak<AppWindow>, outcome: SyncOutcome) {
         state.progress = 0.0;
         state.error = "".into();
         match outcome {
-            SyncOutcome::Synced { read, added } => {
-                state.enabled = true;
+            SyncOutcome::Synced {
+                read,
+                added,
+                unreadable,
+            } => {
                 state.text = format!("已同步 · {now}").into();
                 state.detail = format!(
-                    "上次扫描 {now}：读取 {read} 个有变化的文件，新增 {} 条",
+                    "上次扫描 {now}：读取 {read} 个有变化的文件，新增或更新 {} 条",
                     app::format_count(added as u64)
                 )
                 .into();
+                if unreadable > 0 {
+                    state.text = "部分日志未同步".into();
+                    state.error = format!(
+                        "{unreadable} 个日志文件读取失败，已保留先前用量；下次同步会重试。"
+                    )
+                    .into();
+                }
             }
-            SyncOutcome::Rebuilt(added, backup) => {
-                state.enabled = true;
+            SyncOutcome::Rebuilt(added, backup, unreadable) => {
                 state.text = format!("已重新导入 · {now}").into();
                 state.detail = format!(
                     "已重新导入 {} 条；原数据库备份为 {backup}",
                     app::format_count(added as u64)
                 )
                 .into();
+                if unreadable > 0 {
+                    state.text = "部分日志未导入".into();
+                    state.error =
+                        format!("{unreadable} 个日志文件读取失败，可重试同步；原数据已备份。")
+                            .into();
+                }
             }
             SyncOutcome::Off => {
-                state.enabled = false;
                 state.text = "仅路由记录".into();
                 state.detail = "会话日志扫描已关闭；已导入的用量仍会保留。".into();
             }
@@ -326,6 +353,7 @@ fn sync_logs(
             Ok(Some(summary)) => SyncOutcome::Synced {
                 read: summary.read,
                 added: summary.added,
+                unreadable: summary.unreadable,
             },
             Ok(None) => SyncOutcome::Off,
             Err(error) => SyncOutcome::Failed(error),
@@ -379,6 +407,12 @@ fn current_query(app: &AppWindow, rows: usize) -> UsageQuery {
     UsageQuery {
         period,
         filter: UsageFilter {
+            client: match app.get_usage_client_filter() {
+                1 => Some(UsageClient::Codex),
+                2 => Some(UsageClient::ClaudeCode),
+                3 => Some(UsageClient::Unknown),
+                _ => None,
+            },
             group: text(app.get_usage_group_filter()),
             model: text(app.get_usage_model_filter()),
         },
@@ -416,6 +450,17 @@ pub(super) fn connect(app: &AppWindow, service: &UsageService) {
             app.set_usage_range_label(custom_label(period, Local::now()).into());
         }
         load(true);
+    });
+    let load = request.clone();
+    let weak = app.as_weak();
+    app.on_usage_filter_client(move |index| {
+        if let Some(app) = weak.upgrade() {
+            app.set_usage_client_filter(index);
+            app.set_usage_group_filter("".into());
+            app.set_usage_group_filter_label("".into());
+            app.set_usage_model_filter("".into());
+            load(true);
+        }
     });
     let load = request.clone();
     let weak = app.as_weak();
@@ -480,14 +525,24 @@ pub(super) fn connect(app: &AppWindow, service: &UsageService) {
     let weak = app.as_weak();
     let import_service = service.clone();
     app.on_usage_set_log_import(move |enabled| {
-        if let Some(app) = weak.upgrade()
-            && let Some(home) = absolute(&app.get_config_home())
-        {
+        if let Some(app) = weak.upgrade() {
+            let home = absolute(&app.get_config_home()).unwrap_or_default();
             // The switch moves at once; the thread confirms or reports failure.
             let mut sync = app.get_usage_sync();
             sync.enabled = enabled;
             app.set_usage_sync(sync);
             import_service.send(Job::SetImport { enabled, home });
+        }
+    });
+    let weak = app.as_weak();
+    let claude_service = service.clone();
+    app.on_usage_save_claude_source(move |home, enabled| {
+        if let Some(app) = weak.upgrade() {
+            app.set_usage_claude_enabled(enabled);
+            claude_service.send(Job::SetClaude {
+                enabled,
+                home: home.into(),
+            });
         }
     });
     let weak = app.as_weak();
@@ -500,9 +555,8 @@ pub(super) fn connect(app: &AppWindow, service: &UsageService) {
     let weak = app.as_weak();
     let rebuild_service = service.clone();
     app.on_usage_rebuild(move || {
-        if let Some(app) = weak.upgrade()
-            && let Some(home) = absolute(&app.get_config_home())
-        {
+        if let Some(app) = weak.upgrade() {
+            let home = absolute(&app.get_config_home()).unwrap_or_default();
             let mut sync = app.get_usage_sync();
             sync.running = true;
             sync.progress = 0.0;
@@ -513,7 +567,7 @@ pub(super) fn connect(app: &AppWindow, service: &UsageService) {
     });
     let weak = app.as_weak();
     let price_service = service.clone();
-    app.on_usage_save_price(move |model, currency, input, cached, output| {
+    app.on_usage_save_price(move |model, currency, input, cached, output, write, hour| {
         if let Some(app) = weak.upgrade() {
             app.set_usage_price_saving(model.clone());
             price_service.send(Job::SavePrice(PriceInput {
@@ -522,6 +576,8 @@ pub(super) fn connect(app: &AppWindow, service: &UsageService) {
                 currency: currency.into(),
                 input: input.into(),
                 cached_input: cached.into(),
+                cache_write: write.into(),
+                cache_write_1h: hour.into(),
                 output: output.into(),
             }));
         }
@@ -543,10 +599,11 @@ thread_local! {
 
 fn query_key(query: &UsageQuery) -> String {
     format!(
-        "{:?}|{}|{}",
+        "{:?}|{}|{}|{:?}",
         query.period,
         query.filter.group.as_deref().unwrap_or(""),
-        query.filter.model.as_deref().unwrap_or("")
+        query.filter.model.as_deref().unwrap_or(""),
+        query.filter.client
     )
 }
 
@@ -648,10 +705,12 @@ pub(super) fn show_usage(app: &AppWindow, query: &UsageQuery, view: UsageView) {
     } else {
         format!("今日 {}", app::format_tokens(view.today.usage.total())).into()
     });
+    app.set_usage_claude_enabled(view.claude_import);
+    app.set_usage_claude_home(view.claude_home.to_string_lossy().as_ref().into());
     let mut sync = app.get_usage_sync();
     if sync.enabled != view.log_import && !sync.running {
         sync.enabled = view.log_import;
-        if !view.log_import {
+        if !view.log_import && !view.claude_import {
             sync.text = "仅路由记录".into();
         }
         app.set_usage_sync(sync);
@@ -693,8 +752,53 @@ mod tests {
         usage::TokenUsage,
     };
 
+    #[test]
+    fn client_selector_and_price_editor_send_the_complete_user_choices() {
+        headless::install();
+        let app = AppWindow::new().unwrap();
+        let (sender, receiver) = mpsc::channel();
+        let service = UsageService {
+            sender,
+            cancel: Arc::new(AtomicBool::new(false)),
+        };
+        connect(&app, &service);
+        app.set_usage_group_filter("p:previous".into());
+        app.set_usage_model_filter("old-model".into());
+        app.invoke_usage_filter_client(2);
+        let Job::Load(query) = receiver.try_recv().unwrap() else {
+            panic!("expected a report query");
+        };
+        assert_eq!(query.filter.client, Some(UsageClient::ClaudeCode));
+        assert!(query.filter.group.is_none() && query.filter.model.is_none());
+        assert_eq!(query.rows, USAGE_PAGE);
+        app.invoke_usage_save_price(
+            "claude-test".into(),
+            "USD".into(),
+            "4".into(),
+            "0.5".into(),
+            "20".into(),
+            "5".into(),
+            "8".into(),
+        );
+        let Job::SavePrice(price) = receiver.try_recv().unwrap() else {
+            panic!("expected price save");
+        };
+        assert_eq!(
+            (price.cache_write.as_str(), price.cache_write_1h.as_str()),
+            ("5", "8")
+        );
+        app.invoke_usage_save_claude_source("/synthetic/claude".into(), false);
+        let Job::SetClaude { home, enabled } = receiver.try_recv().unwrap() else {
+            panic!("expected source save");
+        };
+        assert_eq!(home, "/synthetic/claude");
+        assert!(!enabled);
+        assert!(!app.get_usage_claude_enabled());
+    }
+
     fn record(id: &str, at: i64, model: &str) -> UsageRecord {
         UsageRecord {
+            client: switchx::storage::UsageClient::Codex,
             id: id.into(),
             source: UsageSource::CodexLog,
             started_at_ms: at,
@@ -703,6 +807,7 @@ mod tests {
             public_model: None,
             model: model.into(),
             usage: TokenUsage {
+                cache_write_1h: 0,
                 input: 10_000,
                 cached_input: 9_000,
                 cache_write: 0,
@@ -786,6 +891,7 @@ mod tests {
         // A different query starts quietly, without replaying arrivals.
         let filtered = UsageQuery {
             filter: UsageFilter {
+                client: None,
                 group: None,
                 model: Some("m1".into()),
             },
@@ -854,7 +960,10 @@ mod tests {
             assert_eq!(row.accessible_expandable(), Some(true));
             assert_eq!(row.accessible_expanded(), Some(false));
             let label = row.accessible_label().unwrap();
-            assert!(label.contains("Codex 原生登录，m1，新输入 "), "{label}");
+            assert!(
+                label.contains("Codex 原生登录，m1，输入含缓存写入 "),
+                "{label}"
+            );
             assert!(accessible_descendants(row).is_empty(), "{label}");
         }
 

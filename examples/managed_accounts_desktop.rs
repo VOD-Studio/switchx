@@ -199,6 +199,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             },
             fallback_from: None,
             usage: (status != RequestStatus::Failed).then_some(switchx::usage::TokenUsage {
+                cache_write_1h: 0,
                 input: 42_000,
                 cached_input: 36_000,
                 cache_write: 0,

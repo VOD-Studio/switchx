@@ -71,7 +71,7 @@ component DetailRow inherits Rectangle {
     clip: true;
     // One node per row: every node in the scrolling page is rebuilt on each scroll step.
     accessible-role: list-item;
-    accessible-label: root.entry.clock + "，" + root.entry.connection + "，" + root.entry.model + "，新输入 " + root.entry.fresh + "，缓存 " + root.entry.cached + "，输出 " + root.entry.output + "，" + root.entry.cost;
+    accessible-label: root.entry.clock + "，" + root.entry.connection + "，" + root.entry.model + "，输入含缓存写入 " + root.entry.fresh + "，缓存 " + root.entry.cached + "，输出 " + root.entry.output + "，" + root.entry.cost;
     accessible-expandable: true;
     accessible-expanded: root.expanded;
     accessible-action-default => { root.toggle(); }
@@ -181,13 +181,18 @@ component DetailRow inherits Rectangle {
     details := AnimatedSection {
         y: root.head;
         expanded: root.expanded;
-        content-height: 96px;
+        content-height: root.entry.cache-write == "" ? 96px : 120px;
         // Mounted only while shown, so collapsed rows stay light to lay out and traverse.
         if details.reveal > 0: VerticalLayout {
             padding-left: 12px;
             padding-right: 12px;
             padding-bottom: 12px;
             spacing: 10px;
+            if root.entry.cache-write != "": Text {
+                text: root.entry.cache-write;
+                color: Theme.muted-text;
+                font-size: 11px;
+            }
             CompositionRibbon {
                 fresh: root.entry.fresh-share;
                 output: root.entry.output-share;
@@ -198,7 +203,7 @@ component DetailRow inherits Rectangle {
                 spacing: 16px;
                 LegendKey {
                     ink: Theme.usage-input;
-                    label: "新输入";
+                    label: "输入·含写入";
                     value: root.entry.fresh;
                 }
 
@@ -235,7 +240,7 @@ component DetailRow inherits Rectangle {
 
                 Fact {
                     label: "来源";
-                    value: root.entry.source;
+                    value: root.entry.client + " · " + root.entry.source;
                 }
 
                 Fact {
@@ -309,7 +314,7 @@ export component UsageDetails inherits Rectangle {
                 { label: "时间", width: Columns.time, stretch: 0, right: false },
                 { label: "连接", width: Columns.connection, stretch: 0, right: false },
                 { label: "模型", width: 80px, stretch: 1, right: false },
-                { label: "新输入", width: Columns.number, stretch: 0, right: true },
+                { label: "输入", width: Columns.number, stretch: 0, right: true },
                 { label: "缓存", width: Columns.number, stretch: 0, right: true },
                 { label: "输出", width: Columns.number, stretch: 0, right: true },
                 { label: "费用", width: Columns.cost, stretch: 0, right: true },

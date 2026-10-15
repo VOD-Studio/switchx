@@ -3,6 +3,7 @@
 
 use serde_json::Value;
 
+pub mod claude_logs;
 pub mod codex_logs;
 pub mod report;
 
@@ -13,11 +14,46 @@ pub struct TokenUsage {
     pub input: u64,
     pub cached_input: u64,
     pub cache_write: u64,
+    /// The one-hour subset of cache writes; the remainder uses the five-minute rate.
+    pub cache_write_1h: u64,
     pub output: u64,
     pub reasoning: u64,
 }
 
 impl TokenUsage {
+    /// Anthropic reports fresh input separately from cache reads and writes.
+    pub fn from_claude(usage: &Value) -> Option<Self> {
+        const LIMIT: u64 = i64::MAX as u64 / 16;
+        let count = |path: &str| {
+            usage
+                .pointer(path)
+                .and_then(Value::as_u64)
+                .map(|n| n.min(LIMIT))
+        };
+        let fresh = count("/input_tokens");
+        let output = count("/output_tokens");
+        let read = count("/cache_read_input_tokens");
+        let hour = count("/cache_creation/ephemeral_1h_input_tokens").unwrap_or(0);
+        let short = count("/cache_creation/ephemeral_5m_input_tokens").unwrap_or(0);
+        let writes = count("/cache_creation_input_tokens");
+        if fresh.is_none()
+            && output.is_none()
+            && read.is_none()
+            && writes.is_none()
+            && hour + short == 0
+        {
+            return None;
+        }
+        let writes = writes.unwrap_or(hour + short).max(hour + short);
+        Some(Self {
+            input: fresh.unwrap_or(0) + read.unwrap_or(0) + writes,
+            cached_input: read.unwrap_or(0),
+            cache_write: writes,
+            cache_write_1h: hour,
+            output: output.unwrap_or(0),
+            reasoning: 0,
+        })
+    }
     /// Reads a Responses `usage` object, or the chat-style names some compatible
     /// upstreams return. Missing input and output counts mean no usage was reported.
     pub fn from_responses(usage: &Value) -> Option<Self> {
@@ -65,6 +101,7 @@ impl TokenUsage {
             input,
             cached_input: cached.min(input),
             cache_write: cache_write.min(input),
+            cache_write_1h: 0,
             output,
             reasoning: reasoning.min(output),
         }
@@ -91,6 +128,7 @@ impl TokenUsage {
             input: self.input.saturating_sub(earlier.input),
             cached_input: self.cached_input.saturating_sub(earlier.cached_input),
             cache_write: self.cache_write.saturating_sub(earlier.cache_write),
+            cache_write_1h: self.cache_write_1h.saturating_sub(earlier.cache_write_1h),
             output: self.output.saturating_sub(earlier.output),
             reasoning: self.reasoning.saturating_sub(earlier.reasoning),
         }
@@ -111,6 +149,31 @@ mod tests {
     use serde_json::json;
 
     #[test]
+    fn claude_cache_components_are_disjoint_and_hour_writes_are_a_subset() {
+        let usage = TokenUsage::from_claude(&json!({
+            "input_tokens": 300000, "cache_read_input_tokens": 400000,
+            "cache_creation_input_tokens": 300000, "output_tokens": 50000,
+            "cache_creation": {"ephemeral_5m_input_tokens": 200000, "ephemeral_1h_input_tokens": 100000}
+        })).unwrap();
+        assert_eq!(usage.input, 1_000_000);
+        assert_eq!(usage.fresh_input(), 300_000);
+        assert_eq!(usage.total(), 1_050_000);
+        let nested_only = TokenUsage::from_claude(&json!({"cache_creation":{"ephemeral_5m_input_tokens":2,"ephemeral_1h_input_tokens":3}})).unwrap();
+        assert_eq!(
+            (
+                nested_only.input,
+                nested_only.cache_write,
+                nested_only.cache_write_1h
+            ),
+            (5, 5, 3)
+        );
+        assert!(TokenUsage::from_claude(&json!({"input_tokens":-1})).is_none());
+        let bounded = TokenUsage::from_claude(&json!({"input_tokens":u64::MAX, "output_tokens":u64::MAX, "cache_read_input_tokens":u64::MAX, "cache_creation":{"ephemeral_5m_input_tokens":u64::MAX,"ephemeral_1h_input_tokens":u64::MAX}})).unwrap();
+        assert!(bounded.total() < i64::MAX as u64);
+        assert!(bounded.cache_write_1h <= bounded.cache_write);
+    }
+
+    #[test]
     fn responses_usage_reads_standard_and_compatible_shapes() {
         let usage = json!({
             "input_tokens": 1_000,
@@ -123,6 +186,7 @@ mod tests {
         assert_eq!(
             parsed,
             TokenUsage {
+                cache_write_1h: 0,
                 input: 1_000,
                 cached_input: 600,
                 cache_write: 0,
@@ -173,6 +237,7 @@ mod tests {
         assert_eq!(
             later.since(first),
             TokenUsage {
+                cache_write_1h: 0,
                 input: 39_737,
                 cached_input: 38_528,
                 cache_write: 0,

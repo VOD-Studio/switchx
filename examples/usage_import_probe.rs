@@ -1,10 +1,13 @@
-//! Import Codex session-log usage into a scratch database and print totals.
+//! Import Codex or Claude Code session-log usage into a scratch database and print totals.
 //! Reads only usage counts; never writes the SwitchX data directory or CODEX_HOME.
-//! Run: cargo run --release --example usage_import_probe -- /abs/codex/home /abs/scratch.sqlite
+//! Run: cargo run --example usage_import_probe -- /abs/client/home /abs/new-scratch.sqlite [--claude]
 
 use std::{collections::BTreeMap, path::Path, sync::atomic::AtomicBool, time::Instant};
 
-use switchx::{storage::Store, usage::codex_logs};
+use switchx::{
+    storage::Store,
+    usage::{claude_logs, codex_logs},
+};
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut args = std::env::args().skip(1);
@@ -15,13 +18,22 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     if !home.is_absolute() || !database.is_absolute() {
         return Err("both paths must be absolute".into());
     }
+    let claude = args.next().is_some_and(|arg| arg == "--claude");
+    // A probe must never overwrite an existing database, including real user data.
+    if database.exists() {
+        return Err("scratch database must not already exist".into());
+    }
     let store = Store::open(database)?;
     for pass in ["first", "repeat"] {
         let started = Instant::now();
-        let summary = codex_logs::import(&store, home, &AtomicBool::new(false), |_| {})
-            .map_err(|error| format!("{error:?}"))?;
+        let summary = if claude {
+            claude_logs::import(&store, home, &AtomicBool::new(false), |_| {})
+        } else {
+            codex_logs::import(&store, home, &AtomicBool::new(false), |_| {})
+        }
+        .map_err(|error| format!("{error:?}"))?;
         println!(
-            "{pass} scan: {} files, {} read, {} rows added, {} unreadable in {:.2?}",
+            "{pass} scan: {} files, {} read, {} rows inserted/updated, {} unreadable in {:.2?}",
             summary.files,
             summary.read,
             summary.added,

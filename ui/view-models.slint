@@ -299,6 +299,8 @@ export struct UsageDetailRow {
     speed: string,
     duration: string,
     source: string,
+    cache-write: string,
+    client: string,
     routed: bool,
     // Shares of the row's input plus output, for the expanded composition bar.
     fresh-share: float,
@@ -323,6 +325,8 @@ export struct UsagePriceRow {
     currency: string,
     input: string,
     cached: string,
+    write: string,
+    write-hour: string,
     output: string,
     usage: string,
     priced: bool,

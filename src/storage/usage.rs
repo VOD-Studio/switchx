@@ -1,6 +1,6 @@
 //! Token usage rows from routed responses and imported Codex session logs.
 
-use rusqlite::{Result, Row, Transaction, params};
+use rusqlite::{OptionalExtension, Result, Row, Transaction, params};
 
 use super::RequestRecord;
 use crate::usage::TokenUsage;
@@ -14,6 +14,7 @@ pub(super) fn usage_columns(row: &Row<'_>, start: usize) -> Result<Option<TokenU
     let count =
         |index: usize| -> Result<u64> { Ok(row.get::<_, i64>(start + index)?.max(0) as u64) };
     Ok(Some(TokenUsage {
+        cache_write_1h: 0,
         input: input.max(0) as u64,
         cached_input: count(1)?,
         cache_write: count(2)?,
@@ -29,6 +30,11 @@ impl super::Store {
         record: &RequestRecord,
         usage: TokenUsage,
     ) -> Result<()> {
+        // Preserve an exact session-log attribution when the router arrives later.
+        let client: Option<String> = transaction.query_row(
+            "SELECT client FROM usage_records WHERE id = ?1 OR (response_id = ?2 AND source = 'codex_log') ORDER BY client = 'unknown' LIMIT 1",
+            params![record.id, record.response_id], |row| row.get(0),
+        ).optional()?;
         if let Some(response_id) = &record.response_id {
             transaction.execute(
                 "DELETE FROM usage_records WHERE source = 'codex_log' AND response_id = ?1",
@@ -39,8 +45,8 @@ impl super::Store {
             "INSERT OR REPLACE INTO usage_records
              (id, source, started_at_ms, provider_id, codex_provider, public_model, model,
               input_tokens, cached_input_tokens, cache_write_tokens, output_tokens, reasoning_tokens,
-              duration_ms, first_event_ms, response_id, session_id)
-             VALUES (?1, 'router', ?2, ?3, NULL, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, NULL)",
+              duration_ms, first_event_ms, response_id, session_id, cache_write_1h_tokens, client)
+             VALUES (?1, 'router', ?2, ?3, NULL, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, NULL, ?14, ?15)",
             params![
                 record.id,
                 record.started_at_ms,
@@ -59,6 +65,8 @@ impl super::Store {
                 record.duration_ms,
                 record.first_event_ms,
                 record.response_id,
+                usage.cache_write_1h as i64,
+                client.as_deref().unwrap_or("unknown"),
             ],
         )?;
         Ok(())
@@ -69,13 +77,15 @@ impl super::Store {
 pub enum UsageSource {
     Router,
     CodexLog,
+    ClaudeLog,
 }
 
 impl UsageSource {
-    fn as_str(self) -> &'static str {
+    pub fn as_str(self) -> &'static str {
         match self {
             Self::Router => "router",
             Self::CodexLog => "codex_log",
+            Self::ClaudeLog => "claude_log",
         }
     }
 
@@ -83,7 +93,42 @@ impl UsageSource {
         match value {
             "router" => Ok(Self::Router),
             "codex_log" => Ok(Self::CodexLog),
+            "claude_log" => Ok(Self::ClaudeLog),
             _ => Err(rusqlite::Error::InvalidQuery),
+        }
+    }
+}
+
+/// The originating client, independent of connection and collection method.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum UsageClient {
+    Codex,
+    ClaudeCode,
+    #[default]
+    Unknown,
+}
+
+impl UsageClient {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Codex => "codex",
+            Self::ClaudeCode => "claude_code",
+            Self::Unknown => "unknown",
+        }
+    }
+    pub fn parse(value: &str) -> Option<Self> {
+        match value {
+            "codex" => Some(Self::Codex),
+            "claude_code" => Some(Self::ClaudeCode),
+            "unknown" => Some(Self::Unknown),
+            _ => None,
+        }
+    }
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Codex => "Codex",
+            Self::ClaudeCode => "Claude Code",
+            Self::Unknown => "未识别客户端",
         }
     }
 }
@@ -94,6 +139,7 @@ impl UsageSource {
 pub struct UsageRecord {
     pub id: String,
     pub source: UsageSource,
+    pub client: UsageClient,
     pub started_at_ms: i64,
     pub provider_id: Option<String>,
     pub codex_provider: Option<String>,
@@ -144,8 +190,8 @@ impl super::Store {
             .collect()
     }
 
-    /// Adds imported rows and the file's new read position atomically. Rows whose
-    /// response is already recorded, by the router or another log, are skipped.
+    /// Inserts or completes imported rows and the file's new read position atomically. Rows whose
+    /// response is already recorded by the router are skipped. Returns changed rows.
     pub fn put_imported_usage(
         &self,
         records: &[UsageRecord],
@@ -158,12 +204,38 @@ impl super::Store {
                 "INSERT OR IGNORE INTO usage_records
                  (id, source, started_at_ms, provider_id, codex_provider, public_model, model,
                   input_tokens, cached_input_tokens, cache_write_tokens, output_tokens, reasoning_tokens,
-                  duration_ms, first_event_ms, response_id, session_id)
-                 SELECT ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16
+                  duration_ms, first_event_ms, response_id, session_id, cache_write_1h_tokens, client)
+                 SELECT ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18
                  WHERE ?15 IS NULL
                     OR NOT EXISTS (SELECT 1 FROM usage_records WHERE response_id = ?15)",
             )?;
             for record in records {
+                if record.source == UsageSource::CodexLog {
+                    added += transaction.execute(
+                        "UPDATE usage_records SET client = 'codex' WHERE source = 'router' AND response_id = ?1 AND client = 'unknown'",
+                        [&record.response_id],
+                    )?;
+                }
+                if record.source == UsageSource::ClaudeLog {
+                    // Snapshots can span scans or be copied into another transcript. Merge
+                    // counters monotonically, without turning content blocks into requests.
+                    added += transaction.execute(
+                        "UPDATE usage_records SET
+                            input_tokens = MAX(input_tokens - cached_input_tokens - cache_write_tokens, ?2) + MAX(cached_input_tokens, ?3) + MAX(cache_write_tokens, ?4),
+                            cached_input_tokens = MAX(cached_input_tokens, ?3),
+                            cache_write_tokens = MAX(cache_write_tokens, ?4),
+                            cache_write_1h_tokens = MAX(cache_write_1h_tokens, ?5),
+                            output_tokens = MAX(output_tokens, ?6),
+                            started_at_ms = MIN(started_at_ms, ?7),
+                            model = CASE WHEN model = '' THEN ?8 ELSE model END,
+                            session_id = COALESCE(session_id, ?9)
+                         WHERE id = ?1 AND source = 'claude_log' AND
+                            (input_tokens - cached_input_tokens - cache_write_tokens < ?2 OR cached_input_tokens < ?3 OR cache_write_tokens < ?4 OR cache_write_1h_tokens < ?5 OR output_tokens < ?6 OR started_at_ms > ?7 OR (model = '' AND ?8 != '') OR (session_id IS NULL AND ?9 IS NOT NULL))",
+                        params![record.id, record.usage.fresh_input() as i64, record.usage.cached_input as i64,
+                            record.usage.cache_write as i64, record.usage.cache_write_1h as i64,
+                            record.usage.output as i64, record.started_at_ms, record.model, record.session_id],
+                    )?;
+                }
                 added += insert.execute(params![
                     record.id,
                     record.source.as_str(),
@@ -181,6 +253,8 @@ impl super::Store {
                     record.first_event_ms,
                     record.response_id,
                     record.session_id,
+                    record.usage.cache_write_1h as i64,
+                    record.client.as_str(),
                 ])?;
             }
         }
@@ -205,7 +279,10 @@ impl super::Store {
     /// Forgets every imported row and read position so logs can be imported again.
     pub fn clear_imported_usage(&self) -> Result<()> {
         let transaction = self.connection.unchecked_transaction()?;
-        transaction.execute("DELETE FROM usage_records WHERE source = 'codex_log'", [])?;
+        transaction.execute(
+            "DELETE FROM usage_records WHERE source IN ('codex_log', 'claude_log')",
+            [],
+        )?;
         transaction.execute("DELETE FROM usage_log_files", [])?;
         transaction.commit()
     }
@@ -215,7 +292,7 @@ impl super::Store {
         let mut statement = self.connection.prepare(
             "SELECT id, source, started_at_ms, provider_id, codex_provider, public_model, model,
                     input_tokens, cached_input_tokens, cache_write_tokens, output_tokens,
-                    reasoning_tokens, duration_ms, first_event_ms, response_id, session_id
+                    reasoning_tokens, duration_ms, first_event_ms, response_id, session_id, cache_write_1h_tokens, client
              FROM usage_records WHERE started_at_ms >= ?1 AND started_at_ms < ?2
              ORDER BY started_at_ms DESC, id DESC",
         )?;
@@ -228,24 +305,29 @@ impl super::Store {
 /// The connection a usage row belongs to: a SwitchX connection (`p:ID`), a
 /// Codex provider key (`c:KEY`), or unknown (`u`).
 const GROUP_KEY: &str = "CASE WHEN provider_id IS NOT NULL THEN 'p:' || provider_id
+    WHEN source = 'claude_log' THEN 'client:claude_code'
     WHEN codex_provider IS NOT NULL THEN 'c:' || codex_provider ELSE 'u' END";
 
 /// Optional single-value filters on the connection group key and model.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct UsageFilter {
     pub group: Option<String>,
+    pub client: Option<UsageClient>,
     pub model: Option<String>,
 }
 
 impl UsageFilter {
     fn clause(&self) -> String {
-        format!(" AND (?3 IS NULL OR ({GROUP_KEY}) = ?3) AND (?4 IS NULL OR model = ?4)")
+        format!(
+            " AND (?3 IS NULL OR ({GROUP_KEY}) = ?3) AND (?4 IS NULL OR model = ?4) AND (?5 IS NULL OR client = ?5)"
+        )
     }
 }
 
 /// Summed usage for one local-time bucket, connection group, and model.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct UsageFact {
+    pub client: UsageClient,
     pub bucket: String,
     pub group: String,
     pub provider_id: Option<String>,
@@ -302,6 +384,8 @@ pub struct PriceRecord {
     pub currency: Currency,
     pub input_micros: u64,
     pub cached_input_micros: u64,
+    pub cache_write_micros: u64,
+    pub cache_write_1h_micros: u64,
     pub output_micros: u64,
 }
 
@@ -322,9 +406,9 @@ impl super::Store {
             "SELECT strftime(?3, started_at_ms / 1000, 'unixepoch', 'localtime') AS bucket,
                     {GROUP_KEY} AS grouping, MAX(provider_id), model, COUNT(*),
                     SUM(input_tokens), SUM(cached_input_tokens), SUM(cache_write_tokens),
-                    SUM(output_tokens), SUM(reasoning_tokens)
+                    SUM(output_tokens), SUM(reasoning_tokens), SUM(cache_write_1h_tokens), client
              FROM usage_records WHERE started_at_ms >= ?1 AND started_at_ms < ?2
-             GROUP BY bucket, grouping, model"
+             GROUP BY bucket, grouping, model, client"
         ))?;
         statement
             .query_map(params![from_ms, to_ms, format], |row| {
@@ -334,7 +418,12 @@ impl super::Store {
                     provider_id: row.get(2)?,
                     model: row.get(3)?,
                     requests: row.get::<_, i64>(4)?.max(0) as u64,
-                    usage: usage_columns(row, 5)?.unwrap_or_default(),
+                    usage: TokenUsage {
+                        cache_write_1h: row.get::<_, i64>(10)?.max(0) as u64,
+                        ..usage_columns(row, 5)?.unwrap_or_default()
+                    },
+                    client: UsageClient::parse(&row.get::<_, String>(11)?)
+                        .ok_or(rusqlite::Error::InvalidQuery)?,
                 })
             })?
             .collect()
@@ -356,14 +445,23 @@ impl super::Store {
             filter.clause()
         ))?;
         statement
-            .query_map(params![from_ms, to_ms, filter.group, filter.model], |row| {
-                Ok((
-                    row.get::<_, i64>(0)?.clamp(0, 6) as u8,
-                    row.get::<_, i64>(1)?.clamp(0, 23) as u8,
-                    row.get::<_, i64>(2)?.max(0) as u64,
-                    row.get::<_, i64>(3)?.max(0) as u64,
-                ))
-            })?
+            .query_map(
+                params![
+                    from_ms,
+                    to_ms,
+                    filter.group,
+                    filter.model,
+                    filter.client.map(UsageClient::as_str)
+                ],
+                |row| {
+                    Ok((
+                        row.get::<_, i64>(0)?.clamp(0, 6) as u8,
+                        row.get::<_, i64>(1)?.clamp(0, 23) as u8,
+                        row.get::<_, i64>(2)?.max(0) as u64,
+                        row.get::<_, i64>(3)?.max(0) as u64,
+                    ))
+                },
+            )?
             .collect()
     }
 
@@ -377,9 +475,16 @@ impl super::Store {
             filter.clause()
         ))?;
         statement
-            .query_map(params![from_ms, to_ms, filter.group, filter.model], |row| {
-                row.get(0)
-            })?
+            .query_map(
+                params![
+                    from_ms,
+                    to_ms,
+                    filter.group,
+                    filter.model,
+                    filter.client.map(UsageClient::as_str)
+                ],
+                |row| row.get(0),
+            )?
             .collect()
     }
 
@@ -398,15 +503,21 @@ impl super::Store {
                 "SELECT COUNT(*) FROM usage_records
                  WHERE started_at_ms >= ?1 AND started_at_ms < ?2{clause}"
             ),
-            params![from_ms, to_ms, filter.group, filter.model],
+            params![
+                from_ms,
+                to_ms,
+                filter.group,
+                filter.model,
+                filter.client.map(UsageClient::as_str)
+            ],
             |row| row.get(0),
         )?;
         let mut statement = self.connection.prepare(&format!(
             "SELECT id, source, started_at_ms, provider_id, codex_provider, public_model, model,
                     input_tokens, cached_input_tokens, cache_write_tokens, output_tokens,
-                    reasoning_tokens, duration_ms, first_event_ms, response_id, session_id
+                    reasoning_tokens, duration_ms, first_event_ms, response_id, session_id, cache_write_1h_tokens, client
              FROM usage_records WHERE started_at_ms >= ?1 AND started_at_ms < ?2{clause}
-             ORDER BY started_at_ms DESC, id DESC LIMIT ?5 OFFSET ?6"
+             ORDER BY started_at_ms DESC, id DESC LIMIT ?6 OFFSET ?7"
         ))?;
         let rows = statement
             .query_map(
@@ -415,6 +526,7 @@ impl super::Store {
                     to_ms,
                     filter.group,
                     filter.model,
+                    filter.client.map(UsageClient::as_str),
                     limit.min(1_000) as i64,
                     offset as i64
                 ],
@@ -454,6 +566,38 @@ impl super::Store {
         Ok(())
     }
 
+    pub fn usage_claude_import(&self) -> Result<bool> {
+        let value: Option<String> = self
+            .connection
+            .query_row(
+                "SELECT value FROM app_settings WHERE key = 'usage_claude_import'",
+                [],
+                |row| row.get(0),
+            )
+            .optional()?;
+        Ok(value.as_deref() != Some("off"))
+    }
+
+    pub fn set_usage_claude_import(&self, enabled: bool) -> Result<()> {
+        self.connection.execute("INSERT INTO app_settings (key, value) VALUES ('usage_claude_import', ?1) ON CONFLICT(key) DO UPDATE SET value = excluded.value", [if enabled { "on" } else { "off" }])?;
+        Ok(())
+    }
+
+    pub fn usage_claude_home(&self) -> Result<Option<String>> {
+        self.connection
+            .query_row(
+                "SELECT value FROM app_settings WHERE key = 'usage_claude_home'",
+                [],
+                |row| row.get(0),
+            )
+            .optional()
+    }
+
+    pub fn set_usage_claude_home(&self, path: &str) -> Result<()> {
+        self.connection.execute("INSERT INTO app_settings (key, value) VALUES ('usage_claude_home', ?1) ON CONFLICT(key) DO UPDATE SET value = excluded.value", [path])?;
+        Ok(())
+    }
+
     /// Every model with recorded usage: requests and input plus output tokens.
     pub fn usage_models(&self) -> Result<Vec<(String, u64, u64)>> {
         let mut statement = self.connection.prepare(
@@ -481,7 +625,7 @@ impl super::Store {
 
     pub fn model_prices(&self) -> Result<Vec<PriceRecord>> {
         let mut statement = self.connection.prepare(
-            "SELECT provider_id, model, currency, input_micros, cached_input_micros, output_micros
+            "SELECT provider_id, model, currency, input_micros, cached_input_micros, output_micros, cache_write_micros, cache_write_1h_micros
              FROM model_prices ORDER BY model, provider_id",
         )?;
         statement
@@ -494,6 +638,8 @@ impl super::Store {
                     input_micros: row.get::<_, i64>(3)?.max(0) as u64,
                     cached_input_micros: row.get::<_, i64>(4)?.max(0) as u64,
                     output_micros: row.get::<_, i64>(5)?.max(0) as u64,
+                    cache_write_micros: row.get::<_, i64>(6)?.max(0) as u64,
+                    cache_write_1h_micros: row.get::<_, i64>(7)?.max(0) as u64,
                 })
             })?
             .collect()
@@ -506,11 +652,12 @@ impl super::Store {
         }
         self.connection.execute(
             "INSERT INTO model_prices (provider_id, model, currency, input_micros,
-                cached_input_micros, output_micros, updated_at_ms)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, CAST(unixepoch('subsec') * 1000 AS INTEGER))
+                cached_input_micros, output_micros, cache_write_micros, cache_write_1h_micros, updated_at_ms)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, CAST(unixepoch('subsec') * 1000 AS INTEGER))
              ON CONFLICT(provider_id, model) DO UPDATE SET currency = excluded.currency,
                 input_micros = excluded.input_micros,
                 cached_input_micros = excluded.cached_input_micros,
+                cache_write_micros = excluded.cache_write_micros, cache_write_1h_micros = excluded.cache_write_1h_micros,
                 output_micros = excluded.output_micros, updated_at_ms = excluded.updated_at_ms",
             params![
                 price.provider_id,
@@ -518,7 +665,9 @@ impl super::Store {
                 price.currency.as_str(),
                 bound(price.input_micros),
                 bound(price.cached_input_micros),
-                bound(price.output_micros)
+                bound(price.output_micros),
+                bound(price.cache_write_micros),
+                bound(price.cache_write_1h_micros)
             ],
         )?;
         Ok(())
@@ -543,7 +692,12 @@ fn usage_record(row: &Row<'_>) -> Result<UsageRecord> {
         codex_provider: row.get(4)?,
         public_model: row.get(5)?,
         model: row.get(6)?,
-        usage: usage_columns(row, 7)?.unwrap_or_default(),
+        usage: TokenUsage {
+            cache_write_1h: row.get::<_, i64>(16)?.max(0) as u64,
+            ..usage_columns(row, 7)?.unwrap_or_default()
+        },
+        client: UsageClient::parse(&row.get::<_, String>(17)?)
+            .ok_or(rusqlite::Error::InvalidQuery)?,
         duration_ms: row.get(12)?,
         first_event_ms: row.get(13)?,
         response_id: row.get(14)?,
@@ -566,6 +720,7 @@ mod tests {
         model: &str,
     ) -> UsageRecord {
         UsageRecord {
+            client: crate::storage::UsageClient::Codex,
             id: id.into(),
             source: if provider.is_some() {
                 UsageSource::Router
@@ -578,6 +733,7 @@ mod tests {
             public_model: None,
             model: model.into(),
             usage: TokenUsage {
+                cache_write_1h: 0,
                 input: 100,
                 cached_input: 60,
                 cache_write: 0,
@@ -636,6 +792,7 @@ mod tests {
         assert_eq!(hourly[0].usage.output, 10);
 
         let one = UsageFilter {
+            client: None,
             group: Some("p:one".into()),
             model: None,
         };
@@ -644,6 +801,7 @@ mod tests {
             [10.0, 10.0]
         );
         let m1 = UsageFilter {
+            client: None,
             group: None,
             model: Some("m1".into()),
         };
@@ -656,6 +814,8 @@ mod tests {
         assert_eq!(store.first_usage_ms().unwrap(), Some(base));
 
         let price = PriceRecord {
+            cache_write_micros: 2_000_000,
+            cache_write_1h_micros: 2_000_000,
             provider_id: String::new(),
             model: "m1".into(),
             currency: Currency::Cny,

@@ -21,7 +21,7 @@ use serde_json::{Map, Value, json};
 use crate::{
     app::{self, AppError, RequestView, UsageQuery},
     codex, control,
-    storage::{Currency, ProviderKind, RequestStatus, Store, UsageFilter},
+    storage::{Currency, ProviderKind, RequestStatus, Store, UsageClient, UsageFilter},
     usage::{
         TokenUsage,
         report::{Granularity, Money, Period, Totals},
@@ -416,6 +416,7 @@ fn tools(access: Access) -> Value {
                     "description": "自定义终点：本地日期 YYYY-MM-DD（包含当天）或 RFC 3339 时间（不含）。\
                                     省略时到现在为止。",
                 },
+                "client": { "type": "string", "enum": ["codex", "claude_code", "unknown"], "description": "按客户端筛选；未识别的路由请求使用 unknown。" },
                 "connection": {
                     "type": "string",
                     "description": "只统计一个连接分组，取自返回结果 connections[].key，如 p:<provider_id>。",
@@ -524,6 +525,8 @@ fn tools(access: Access) -> Value {
                     },
                     "currency": { "type": "string", "enum": ["USD", "CNY"] },
                     "input": price("每百万输入 token 的价格。"),
+                    "cache_write": price("每百万 5 分钟缓存写入 token 的价格；省略为输入价的 1.25 倍。"),
+                    "cache_write_1h": price("每百万 1 小时缓存写入 token 的价格；省略为输入价的 2 倍。"),
                     "cached_input": price("每百万缓存命中输入 token 的价格；省略表示与输入价格相同。"),
                     "output": price("每百万输出 token 的价格。"),
                 }),
@@ -840,6 +843,12 @@ fn usage(store: &Store, arguments: &Map<String, Value>) -> Result<Value, String>
     let query = UsageQuery {
         period,
         filter: UsageFilter {
+            client: optional_string(arguments, "client")?
+                .map(|client| {
+                    UsageClient::parse(client)
+                        .ok_or_else(|| "client 必须是 codex、claude_code 或 unknown。".to_owned())
+                })
+                .transpose()?,
             group: optional_string(arguments, "connection")?.map(str::to_owned),
             model: optional_string(arguments, "model")?.map(str::to_owned),
         },
@@ -877,6 +886,8 @@ fn usage(store: &Store, arguments: &Map<String, Value>) -> Result<Value, String>
                 "model": row.model,
                 "tokens": tokens(row.usage),
                 "routed": row.routed,
+                "client": row.client.as_str(),
+                "source": row.source.as_str(),
             });
             if let Some(public) = &row.public_model {
                 value["public_model"] = public.as_str().into();
@@ -893,6 +904,7 @@ fn usage(store: &Store, arguments: &Map<String, Value>) -> Result<Value, String>
             value
         }).collect::<Vec<_>>(),
         "session_log_import": view.log_import,
+        "claude_log_import": view.claude_import,
     });
     if let Some(previous) = report.previous {
         result["previous_period_totals"] = totals(previous);
@@ -1007,6 +1019,8 @@ fn price_view(price: &app::PriceView) -> Value {
         let amounts = [
             ("input", &price.input),
             ("cached_input", &price.cached_input),
+            ("cache_write", &price.cache_write),
+            ("cache_write_1h", &price.cache_write_1h),
             ("output", &price.output),
         ];
         for (key, amount) in amounts {
@@ -1100,6 +1114,8 @@ fn set_price(
             currency: currency.into(),
             input: required("input")?,
             cached_input: amount("cached_input")?.unwrap_or_default(),
+            cache_write: amount("cache_write")?.unwrap_or_default(),
+            cache_write_1h: amount("cache_write_1h")?.unwrap_or_default(),
             output: required("output")?,
         },
     )?;
@@ -1169,6 +1185,7 @@ fn tokens(usage: TokenUsage) -> Value {
         "input": usage.input,
         "cached_input": usage.cached_input,
         "cache_write": usage.cache_write,
+        "cache_write_1h": usage.cache_write_1h,
         "output": usage.output,
         "reasoning": usage.reasoning,
         "total": usage.total(),
@@ -1435,6 +1452,8 @@ mod tests {
                 currency: "USD".into(),
                 input: "1".into(),
                 cached_input: "0.1".into(),
+                cache_write: "1.25".into(),
+                cache_write_1h: "2".into(),
                 output: "2".into(),
             },
         )

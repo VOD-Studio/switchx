@@ -413,6 +413,7 @@ mod tests {
             error: String::new(),
             fallback: String::new(),
             usage: Some(switchx::usage::TokenUsage {
+                cache_write_1h: 0,
                 input: 12_000,
                 cached_input: 9_000,
                 cache_write: 0,

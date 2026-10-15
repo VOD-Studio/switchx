@@ -110,179 +110,229 @@ component ImportBar inherits Rectangle {
     }
 }
 
-export component UsageSourcesSheet inherits VerticalLayout {
+export component UsageSourcesSheet inherits ScrollView {
+    horizontal-scrollbar-policy: always-off;
+    in property <bool> claude-enabled;
+    in property <string> claude-home;
+    private property <string> edited-claude-home: root.claude-home;
+    callback save-claude-source(string, bool);
     in property <UsageSyncState> sync;
     in property <string> sessions-path;
     callback set-log-import(bool);
     callback sync-now();
     callback rebuild();
     private property <bool> confirming;
-    spacing: 14px;
-    Section {
-        VerticalLayout {
-            padding: 18px;
-            spacing: 10px;
-            Heading {
-                icon: @image-url("../../assets/ui/activity.svg");
-                title: "SwitchX 路由";
+    VerticalLayout {
+        spacing: 14px;
+        Section {
+            VerticalLayout {
+                padding: 18px;
+                spacing: 10px;
+                Heading {
+                    icon: @image-url("../../assets/ui/activity.svg");
+                    title: "SwitchX 路由";
+                    Rectangle {
+                        y: (parent.height - self.height) / 2;
+                        width: 56px;
+                        height: 22px;
+                        border-radius: 6px;
+                        background: Theme.brand-surface;
+                        Text {
+                            text: "始终开启";
+                            color: Theme.brand;
+                            font-size: 11px;
+                            font-weight: 500;
+                            horizontal-alignment: center;
+                            vertical-alignment: center;
+                        }
+                    }
+                }
+
+                Body {
+                    text: "经路由的请求完成时记录用量、连接、模型与速度。能与 Codex 日志匹配的请求归入 Codex，其余显示为未识别客户端。";
+                }
+            }
+        }
+
+        Section {
+            VerticalLayout {
+                padding: 18px;
+                spacing: 10px;
+                Heading {
+                    icon: @image-url("../../assets/ui/database.svg");
+                    title: "Codex 会话日志";
+                    Switch {
+                        y: (parent.height - self.height) / 2;
+                        label: "自动扫描 Codex 会话日志";
+                        on: root.sync.enabled;
+                        toggled => { root.set-log-import(!root.sync.enabled); }
+                    }
+                }
+
+                Body {
+                    text: "覆盖直连、原生登录与其他提供方的会话。启动时扫描一次，之后每分钟只读取新增内容；经路由的会话以路由记录为准，不重复计入。";
+                }
+
                 Rectangle {
-                    y: (parent.height - self.height) / 2;
-                    width: 56px;
-                    height: 22px;
-                    border-radius: 6px;
-                    background: Theme.brand-surface;
+                    height: 30px;
+                    border-radius: 8px;
+                    background: Theme.panel;
                     Text {
-                        text: "始终开启";
-                        color: Theme.brand;
+                        x: 10px;
+                        width: parent.width - 20px;
+                        text: root.sessions-path;
+                        color: Theme.primary-text;
                         font-size: 11px;
-                        font-weight: 500;
-                        horizontal-alignment: center;
+                        font-family: "Menlo";
                         vertical-alignment: center;
+                        overflow: elide;
                     }
                 }
-            }
 
-            Body {
-                text: "经路由的请求完成时，记录上游返回的 Token 数、实际连接与模型，以及生成速度。";
-            }
-        }
-    }
-
-    Section {
-        VerticalLayout {
-            padding: 18px;
-            spacing: 10px;
-            Heading {
-                icon: @image-url("../../assets/ui/database.svg");
-                title: "Codex 会话日志";
-                Switch {
-                    y: (parent.height - self.height) / 2;
-                    label: "自动扫描 Codex 会话日志";
-                    on: root.sync.enabled;
-                    toggled => { root.set-log-import(!root.sync.enabled); }
+                if root.sync.running: ImportBar {
+                    progress: root.sync.progress;
                 }
-            }
-
-            Body {
-                text: "覆盖直连、原生登录与其他提供方的会话。启动时扫描一次，之后每分钟只读取新增内容；经路由的会话以路由记录为准，不重复计入。";
-            }
-
-            Rectangle {
-                height: 30px;
-                border-radius: 8px;
-                background: Theme.panel;
-                Text {
-                    x: 10px;
-                    width: parent.width - 20px;
-                    text: root.sessions-path;
-                    color: Theme.primary-text;
-                    font-size: 11px;
-                    font-family: "Menlo";
-                    vertical-alignment: center;
-                    overflow: elide;
-                }
-            }
-
-            if root.sync.running: ImportBar {
-                progress: root.sync.progress;
-            }
-            HorizontalLayout {
-                spacing: 8px;
-                if root.sync.running: QuotaSpinner {
-                    y: (parent.height - self.height) / 2;
-                }
-                Text {
-                    horizontal-stretch: 1;
-                    text: root.sync.error != "" ? root.sync.error : root.sync.detail != "" ? root.sync.detail : root.sync.text;
-                    color: root.sync.error != "" ? Theme.warning : Theme.muted-text;
-                    font-size: 11px;
-                    vertical-alignment: center;
-                    wrap: word-wrap;
-                }
-
-                QuietButton {
-                    width: 112px;
-                    height: 32px;
-                    text: "立即同步";
-                    icon: @image-url("../../assets/refresh.svg");
-                    icon-color: Theme.muted-text;
-                    loading: root.sync.running;
-                    enabled: !root.sync.running;
-                    clicked => { root.sync-now(); }
-                }
-            }
-        }
-    }
-
-    Section {
-        VerticalLayout {
-            padding: 18px;
-            spacing: 10px;
-            Heading {
-                icon: @image-url("../../assets/refresh.svg");
-                title: "重新导入会话日志";
-                QuietButton {
-                    width: 96px;
-                    height: 32px;
-                    text: "重新导入…";
-                    enabled: !root.sync.running && !root.confirming;
-                    clicked => { root.confirming = true; }
-                }
-            }
-
-            Body {
-                text: "先在数据目录备份数据库，再清除日志导入的用量并重新读取全部会话日志。已删除的日志无法再导入。";
-            }
-
-            AnimatedSection {
-                expanded: root.confirming;
-                content-height: 44px;
                 HorizontalLayout {
-                    padding-top: 6px;
                     spacing: 8px;
-                    alignment: end;
-                    QuietButton {
-                        width: 72px;
-                        height: 32px;
-                        text: "取消";
-                        ghost: true;
-                        clicked => { root.confirming = false; }
+                    if root.sync.running: QuotaSpinner {
+                        y: (parent.height - self.height) / 2;
+                    }
+                    Text {
+                        horizontal-stretch: 1;
+                        text: root.sync.error != "" ? root.sync.error : root.sync.detail != "" ? root.sync.detail : root.sync.text;
+                        color: root.sync.error != "" ? Theme.warning : Theme.muted-text;
+                        font-size: 11px;
+                        vertical-alignment: center;
+                        wrap: word-wrap;
                     }
 
                     QuietButton {
-                        width: 120px;
+                        width: 136px;
                         height: 32px;
-                        text: "备份并重新导入";
-                        primary: true;
-                        clicked => {
-                            root.confirming = false;
-                            root.rebuild();
+                        text: "同步全部日志";
+                        icon: @image-url("../../assets/refresh.svg");
+                        icon-color: Theme.muted-text;
+                        loading: root.sync.running;
+                        enabled: !root.sync.running;
+                        clicked => { root.sync-now(); }
+                    }
+                }
+            }
+        }
+
+        Section {
+            VerticalLayout {
+                padding: 18px;
+                spacing: 10px;
+                Heading {
+                    icon: @image-url("../../assets/ui/database.svg");
+                    title: "Claude Code 会话日志";
+                    Switch {
+                        label: "自动扫描 Claude Code 会话日志";
+                        on: root.claude-enabled;
+                        toggled => { root.save-claude-source(root.claude-home, !root.claude-enabled); }
+                    }
+                }
+
+                Body {
+                    text: "每分钟增量读取主会话、子 agent 与 Workflow 日志。按回复去重，后续用量自动补全；会话不自动关联供应商或订阅账号。";
+                }
+
+                QuietLineEdit {
+                    height: 32px;
+                    text <=> root.edited-claude-home;
+                    placeholder-text: "Claude 配置目录（绝对路径）";
+                    accepted => { root.save-claude-source(root.edited-claude-home, root.claude-enabled); }
+                }
+
+                HorizontalLayout {
+                    spacing: 8px;
+                    Body {
+                        horizontal-stretch: 1;
+                        text: "读取该目录下的 projects；留空恢复默认目录。";
+                    }
+
+                    QuietButton {
+                        width: 88px;
+                        height: 30px;
+                        text: "保存目录";
+                        enabled: !root.sync.running && root.edited-claude-home != root.claude-home;
+                        clicked => { root.save-claude-source(root.edited-claude-home, root.claude-enabled); }
+                    }
+                }
+            }
+        }
+
+        Section {
+            VerticalLayout {
+                padding: 18px;
+                spacing: 10px;
+                Heading {
+                    icon: @image-url("../../assets/refresh.svg");
+                    title: "重新导入会话日志";
+                    QuietButton {
+                        width: 96px;
+                        height: 32px;
+                        text: "重新导入…";
+                        enabled: !root.sync.running && !root.confirming;
+                        clicked => { root.confirming = true; }
+                    }
+                }
+
+                Body {
+                    text: "先备份数据库，再重新导入 Codex 和 Claude Code 的全部会话日志（包括已关闭自动扫描的来源）。已删除的日志无法再导入。";
+                }
+
+                AnimatedSection {
+                    expanded: root.confirming;
+                    content-height: 44px;
+                    HorizontalLayout {
+                        padding-top: 6px;
+                        spacing: 8px;
+                        alignment: end;
+                        QuietButton {
+                            width: 72px;
+                            height: 32px;
+                            text: "取消";
+                            ghost: true;
+                            clicked => { root.confirming = false; }
+                        }
+
+                        QuietButton {
+                            width: 120px;
+                            height: 32px;
+                            text: "备份并重新导入";
+                            primary: true;
+                            clicked => {
+                                root.confirming = false;
+                                root.rebuild();
+                            }
                         }
                     }
                 }
             }
         }
-    }
 
-    HorizontalLayout {
-        spacing: 6px;
-        Image {
-            y: 2px;
-            width: 12px;
-            height: 12px;
-            source: @image-url("../../assets/ui/lock.svg");
-            colorize: Theme.muted-text;
+        HorizontalLayout {
+            spacing: 6px;
+            Image {
+                y: 2px;
+                width: 12px;
+                height: 12px;
+                source: @image-url("../../assets/ui/lock.svg");
+                colorize: Theme.muted-text;
+            }
+
+            Body {
+                horizontal-stretch: 1;
+                font-size: 11px;
+                text: "只读取用量记录中的 Token 数、模型 ID、会话 ID 与时间；不解析或保存提示词、回复与凭据。";
+            }
         }
 
-        Body {
-            horizontal-stretch: 1;
-            font-size: 11px;
-            text: "只读取用量记录中的 Token 数、模型 ID、会话 ID 与时间；提示词、回复、工作目录和凭据不会读取或保存。";
+        Rectangle {
+            vertical-stretch: 1;
         }
-    }
-
-    Rectangle {
-        vertical-stretch: 1;
     }
 }
 
@@ -312,15 +362,17 @@ component PriceField inherits VerticalLayout {
 component PriceCard inherits Rectangle {
     in property <UsagePriceRow> entry;
     in property <bool> saving;
-    callback save(string, string, string, string, string);
+    callback save(string, string, string, string, string, string, string);
     callback clear(string);
     private property <int> currency: root.entry.currency == "CNY" ? 1 : 0;
     private property <string> input: root.entry.input;
     private property <string> cached: root.entry.cached;
     private property <string> output: root.entry.output;
-    private property <bool> dirty: root.input != root.entry.input || root.cached != root.entry.cached || root.output != root.entry.output || (root.entry.priced && (root.currency == 1 ? "CNY" : "USD") != root.entry.currency);
+    private property <string> write: root.entry.write;
+    private property <string> hour: root.entry.write-hour;
+    private property <bool> dirty: root.write != root.entry.write || root.hour != root.entry.write-hour || root.input != root.entry.input || root.cached != root.entry.cached || root.output != root.entry.output || (root.entry.priced && (root.currency == 1 ? "CNY" : "USD") != root.entry.currency);
     function submit() {
-        root.save(root.entry.model, root.currency == 1 ? "CNY" : "USD", root.input, root.cached, root.output);
+        root.save(root.entry.model, root.currency == 1 ? "CNY" : "USD", root.input, root.cached, root.output, root.write, root.hour);
     }
     height: card.preferred-height;
     border-radius: 12px;
@@ -396,7 +448,7 @@ component PriceCard inherits Rectangle {
             }
 
             PriceField {
-                label: "缓存输入 / 百万";
+                label: "缓存读取 / 百万";
                 text <=> root.cached;
                 placeholder: "同输入";
                 accepted => { root.submit(); }
@@ -406,6 +458,23 @@ component PriceCard inherits Rectangle {
                 label: "输出 / 百万";
                 text <=> root.output;
                 placeholder: "例如 10";
+                accepted => { root.submit(); }
+            }
+        }
+
+        HorizontalLayout {
+            spacing: 10px;
+            PriceField {
+                label: "缓存写入 · 5 分钟 / 百万";
+                text <=> root.write;
+                placeholder: "输入价 × 1.25";
+                accepted => { root.submit(); }
+            }
+
+            PriceField {
+                label: "缓存写入 · 1 小时 / 百万";
+                text <=> root.hour;
+                placeholder: "输入价 × 2";
                 accepted => { root.submit(); }
             }
         }
@@ -438,7 +507,7 @@ export component UsagePricesSheet inherits VerticalLayout {
     in property <[UsagePriceRow]> prices;
     in property <string> saving;
     in property <string> error;
-    callback save(string, string, string, string, string);
+    callback save(string, string, string, string, string, string, string);
     callback clear(string);
     spacing: 12px;
 
@@ -456,7 +525,7 @@ export component UsagePricesSheet inherits VerticalLayout {
             for price in root.prices: PriceCard {
                 entry: price;
                 saving: root.saving == price.model;
-                save(model, currency, input, cached, output) => { root.save(model, currency, input, cached, output); }
+                save(model, currency, input, cached, output, write, hour) => { root.save(model, currency, input, cached, output, write, hour); }
                 clear(model) => { root.clear(model); }
             }
             if root.prices.length == 0: Text {
