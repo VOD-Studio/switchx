@@ -29,7 +29,8 @@ class AppImageInspectionTests(unittest.TestCase):
     def setUp(self):
         temporary = tempfile.TemporaryDirectory()
         self.addCleanup(temporary.cleanup)
-        self.root = Path(temporary.name)
+        # macOS temp directories sit behind a symlink; a shell reports the real path.
+        self.root = Path(temporary.name).resolve()
         self.image = self.root / "synthetic.AppImage"
 
     def test_offset_reads_both_linux_architectures_without_executing_them(self):
