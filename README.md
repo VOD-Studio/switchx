@@ -80,7 +80,10 @@ sh scripts/bundle-macos.sh --release  # target/release/SwitchX.app
 
 ## 供 AI Agent 使用（MCP）
 
-`switchx mcp` 在标准输入输出上运行一个 [MCP](https://modelcontextprotocol.io) 服务，Codex、Claude Code 等 agent 可以直接查询 SwitchX，默认只读：
+`switchx mcp` 在标准输入输出上运行一个 [MCP](https://modelcontextprotocol.io) 服务，Codex、Claude Code 等 agent 可以直接查询 SwitchX，默认只读。
+
+最简单的接入方式是打开应用的「工具箱」：选择客户端（Codex、Claude Code 或其他使用 `mcpServers` JSON 的客户端）并按需开启下面的权限，然后点「复制一句话」，把这句话发给 agent，它会自己运行注册命令，并在新会话中调用 `get_status` 确认可用。也可以复制注册命令或 JSON 配置手动注册。命令使用当前 SwitchX 程序的完整路径，设置了 `SWITCHX_DATA_DIR` 时一并传给 MCP 服务；工具箱还会识别当前工作空间的 Codex 是否已注册以及注册时的权限。
+
 
 | 工具             | 内容                                                                     |
 | ---------------- | ------------------------------------------------------------------------ |
@@ -99,7 +102,7 @@ codex mcp add switchx -- /Applications/SwitchX.app/Contents/MacOS/switchx mcp
 ```
 
 ```sh
-claude mcp add switchx -- /Applications/SwitchX.app/Contents/MacOS/switchx mcp
+claude mcp add --scope user switchx -- /Applications/SwitchX.app/Contents/MacOS/switchx mcp
 ```
 
 用 `switchx mcp --allow-writes` 启动时，agent 还可以修改模型和价格：
@@ -128,7 +131,7 @@ codex mcp add switchx -- /Applications/SwitchX.app/Contents/MacOS/switchx mcp --
 | `cancel_preview` | 放弃尚未应用的预览                                       |
 | `restore_config` | 恢复原配置并停止本地路由                                 |
 
-这些操作由应用执行，与在界面中操作相同，结果也会显示在应用里；需要应用正在运行。应用必须使用 agent 自己刚生成的预览：每个 `preview_id` 只能用一次，用户在应用中的任何其他操作都会使它失效。路由端口、默认模型和 Codex 目录省略时使用应用中当前的选择。应用启动后只在本机回环地址监听，并把端口和随机令牌写入数据目录中仅所有者可读的 `control-endpoint.json`，退出时删除；令牌不会出现在工具输出、日志或界面中。
+这些操作由应用执行，与在界面中操作相同，结果也会显示在应用里；需要应用正在运行。应用必须使用 agent 自己刚生成的预览：每个 `preview_id` 只能用一次，用户在应用中的任何其他操作都会使它失效。路由端口、默认模型和 Codex 目录省略时使用应用中当前的选择。应用启动后只在本机回环地址监听，并把端口和随机令牌写入数据目录中仅所有者可读的 `control-endpoint.json`，退出时删除；令牌不会出现在工具输出、日志或界面中。在「工具箱」中关闭「允许 agent 控制 SwitchX」会立即停止监听并删除该文件，此后控制工具和 `get_app_status` 都会被拒绝；这个选择保存在本地数据库中，重启后保持。
 
 Linux 包使用 `/usr/bin/switchx` 或 tar.gz 解压出的 `switchx`，Windows 使用 `switchx.exe` 的完整路径。设置 `SWITCHX_DATA_DIR` 时，MCP 服务读取同一数据目录。
 

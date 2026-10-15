@@ -1,9 +1,9 @@
 //! The local control channel through which `switchx mcp --allow-control` asks a
-//! running app to preview, apply, or restore Codex configuration. The app
-//! listens on loopback and publishes its port with a random token in an
-//! owner-only file in the data directory; each connection carries one
-//! newline-terminated JSON request and receives one JSON response. The token
-//! never appears in responses, logs, or UI.
+//! running app to preview, apply, or restore Codex configuration. Unless the
+//! user turns agent control off, the app listens on loopback and publishes its
+//! port with a random token in an owner-only file in the data directory; each
+//! connection carries one newline-terminated JSON request and receives one
+//! JSON response. The token never appears in responses, logs, or UI.
 
 use std::{
     fs,
@@ -57,6 +57,23 @@ impl From<Result<Value, String>> for Response {
     }
 }
 
+/// Whether the user lets agents control the running app; on until turned off.
+/// A database this version has not created or upgraded yet keeps the default.
+pub fn enabled(data_dir: &Path) -> bool {
+    app::open_store_read_only(data_dir)
+        .ok()
+        .and_then(|store| store.agent_control().ok())
+        .unwrap_or(true)
+}
+
+/// Saves whether the running app accepts agent control requests.
+pub fn set_enabled(data_dir: &Path, enabled: bool) -> Result<(), String> {
+    app::open_store(data_dir)
+        .map_err(|error| error.message().to_owned())?
+        .set_agent_control(enabled)
+        .map_err(|_| app::AppError::Database.message().to_owned())
+}
+
 /// Publishes a running app's control port with a fresh token, which it returns.
 pub fn publish_endpoint(data_dir: &Path, port: u16) -> io::Result<Secret> {
     let mut bytes = [0_u8; 32];
@@ -81,7 +98,10 @@ pub fn remove_endpoint(data_dir: &Path, token: &Secret) {
 
 fn read_endpoint(data_dir: &Path) -> Result<Endpoint, String> {
     let path = data_dir.join(ENDPOINT_FILE);
-    let not_running = || "SwitchX 应用未运行；请先打开 SwitchX，再重试。".to_owned();
+    let not_running = || {
+        "SwitchX 应用未运行，或已在「工具箱」中关闭 agent 控制；请打开 SwitchX 并开启后重试。"
+            .to_owned()
+    };
     let metadata = fs::symlink_metadata(&path).map_err(|_| not_running())?;
     if !metadata.is_file() || metadata.len() > 4096 {
         return Err(not_running());
@@ -227,6 +247,18 @@ mod tests {
         server.join().unwrap();
         assert_eq!(error, "unauthorized");
         assert!(!error.contains(token.expose()));
+    }
+
+    #[test]
+    fn control_stays_enabled_until_turned_off() {
+        let data = Data::new();
+        // No database yet: the default applies and nothing is created.
+        assert!(enabled(&data.0));
+        assert!(!data.0.join("switchx.sqlite").exists());
+        set_enabled(&data.0, false).unwrap();
+        assert!(!enabled(&data.0));
+        set_enabled(&data.0, true).unwrap();
+        assert!(enabled(&data.0));
     }
 
     #[test]

@@ -17,6 +17,7 @@
 //! Reasoning multi-select: add --reasoning-picker (themes, sizes, and motion).
 //! Shared configuration: add --common-config-design or --common-config-native.
 //! Settings: add --settings-design (themes, layouts, states, and motion).
+//! Toolbox agent access: add --toolbox-design (themes, layouts, states, and motion).
 //! Model mapping editor: add --model-editor-design (states, actions, and motion)
 //! or --model-editor-native (window; add --light for the light theme).
 //! Route confirmation: add --route-publish-design or --route-publish-native.
@@ -34,6 +35,7 @@ mod publish;
 mod settings;
 mod status;
 mod support;
+mod toolbox;
 mod usage;
 #[path = "../../src/desktop/usage_view.rs"]
 mod usage_view;
@@ -92,6 +94,10 @@ fn main() -> Result<(), Box<dyn Error>> {
     if flag("--settings-design") {
         app.show()?;
         return settings::render_settings_design(&app, &window, output);
+    }
+    if flag("--toolbox-design") {
+        app.show()?;
+        return toolbox::render_toolbox_design(&app, &window, output);
     }
     if flag("--connection-picker-motion") {
         app.show()?;

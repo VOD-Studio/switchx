@@ -10,7 +10,6 @@ use std::{
 };
 
 use serde_json::{Map, Value, json};
-use slint::ComponentHandle;
 use switchx::{
     codex::{self, client},
     control::{self, MESSAGE_LIMIT, Request, Response},
@@ -25,7 +24,7 @@ use tokio::{
     task::JoinHandle,
 };
 
-use super::{codex_config::DirectPreview, command::Command, worker::Worker};
+use super::{codex_config::DirectPreview, command::Command, feedback::show_action, worker::Worker};
 
 /// A client has this long to send its request after connecting.
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(10);
@@ -117,50 +116,47 @@ impl ControlPreviews {
     }
 }
 
-/// The listener and its published endpoint, removed when the app exits.
+/// The listener and its published endpoint, removed when dropped.
 pub(super) struct ControlServer {
     data_dir: PathBuf,
     token: Secret,
     task: JoinHandle<()>,
 }
 
-impl ControlServer {
-    pub(super) fn stop(self) {
+impl Drop for ControlServer {
+    fn drop(&mut self) {
         self.task.abort();
         control::remove_endpoint(&self.data_dir, &self.token);
     }
 }
 
 /// Starts listening on loopback; agents find the port and token in the data directory.
-pub(super) fn start(
-    runtime: &tokio::runtime::Runtime,
-    app: &AppWindow,
-    sender: &mpsc::Sender<Command>,
+/// Holding only a weak sender lets the worker's channel close when the window exits.
+async fn start(
+    weak: slint::Weak<AppWindow>,
+    sender: mpsc::WeakSender<Command>,
     data_dir: PathBuf,
 ) -> Result<ControlServer, String> {
-    let listener = runtime
-        .block_on(TcpListener::bind(SocketAddr::from((
-            Ipv4Addr::LOCALHOST,
-            0,
-        ))))
+    let listener = TcpListener::bind(SocketAddr::from((Ipv4Addr::LOCALHOST, 0)))
+        .await
         .map_err(|error| error.to_string())?;
     let port = listener
         .local_addr()
         .map_err(|error| error.to_string())?
         .port();
     let token = control::publish_endpoint(&data_dir, port).map_err(|error| error.to_string())?;
-    let expected = Secret::new(token.expose().to_owned());
-    let weak = app.as_weak();
-    let sender = sender.clone();
-    let task = runtime.spawn(async move {
-        let expected = std::sync::Arc::new(expected);
+    let expected = std::sync::Arc::new(Secret::new(token.expose().to_owned()));
+    let task = tokio::spawn(async move {
         while let Ok((stream, _)) = listener.accept().await {
             let expected = expected.clone();
             let weak = weak.clone();
             let sender = sender.clone();
             tokio::spawn(async move {
-                serve(stream, expected.expose(), |method, params| {
-                    dispatch(weak, sender, method, params)
+                serve(stream, expected.expose(), |method, params| async move {
+                    let sender = sender
+                        .upgrade()
+                        .ok_or_else(|| "SwitchX 后台已停止".to_owned())?;
+                    dispatch(weak, sender, method, params).await
                 })
                 .await;
             });
@@ -353,6 +349,69 @@ impl Worker {
                 }))
             }
         }
+    }
+
+    /// Opens or closes the channel to match `enabled`, then shows its state:
+    /// 0 off, 1 listening, 2 unavailable.
+    pub(super) async fn sync_agent_control(&mut self, enabled: bool) {
+        let (state, problem) = if !enabled {
+            self.control_server = None;
+            (0, String::new())
+        } else if self.control_server.is_some() {
+            (1, String::new())
+        } else {
+            let started = match self.data_dir.path() {
+                Ok(path) => {
+                    start(
+                        self.weak.clone(),
+                        self.control_sender.clone(),
+                        path.to_path_buf(),
+                    )
+                    .await
+                }
+                Err(error) => Err(error),
+            };
+            match started {
+                Ok(server) => {
+                    self.control_server = Some(server);
+                    (1, String::new())
+                }
+                Err(error) => {
+                    eprintln!("SwitchX agent control unavailable: {error}");
+                    (2, error)
+                }
+            }
+        };
+        let _ = self.weak.upgrade_in_event_loop(move |app| {
+            app.set_agent_channel(state);
+            app.set_agent_channel_problem(problem.into());
+        });
+    }
+
+    /// Saves the user's choice, then opens or closes the channel.
+    pub(super) async fn set_agent_control(&mut self, enabled: bool) {
+        let saved = self
+            .data_dir
+            .path()
+            .and_then(|path| control::set_enabled(path, enabled));
+        if saved.is_ok() {
+            self.sync_agent_control(enabled).await;
+        }
+        let opened = !enabled || self.control_server.is_some();
+        let _ = self.weak.upgrade_in_event_loop(move |app| {
+            show_action(
+                &app,
+                saved.and_then(|()| {
+                    if !enabled {
+                        Ok("已关闭 agent 控制；控制工具与 get_app_status 将不可用".into())
+                    } else if opened {
+                        Ok("已开启 agent 控制，仅接受本机请求".into())
+                    } else {
+                        Err("设置已保存，但本机控制通道未能开启".into())
+                    }
+                }),
+            );
+        });
     }
 
     /// Live router and Codex configuration state, without addresses' tokens or credentials.

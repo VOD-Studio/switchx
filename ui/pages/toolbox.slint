@@ -1,0 +1,1170 @@
+import { QuietScrollView as ScrollView } from "../scroll-view.slint";
+import { Theme } from "../tokens.slint";
+import { QuietSegmented, StatusPill, SurfaceCard } from "../components.slint";
+import { ButtonSheen } from "../button-sheen.slint";
+import { SettingsHeading, SettingSwitch } from "settings-controls.slint";
+
+// Rust builds the registration text so quoting follows the platform's shell.
+// Client: 0 Codex, 1 Claude Code, 2 an `mcpServers` JSON entry.
+export global McpSetup {
+    in property <string> executable-warning;
+    pure callback command(int, bool, bool, string) -> string;
+    pure callback request(int, bool, bool, string) -> string;
+    pure callback tool-count(bool, bool) -> int;
+}
+
+// Sections rise into place one after another when the page opens.
+component Arrival inherits Rectangle {
+    in property <bool> arrived;
+    in property <int> order;
+    private property <float> reveal: root.arrived ? 1 : 0;
+    animate reveal {
+        duration: Theme.drawer-motion > 0ms ? 560ms : 0ms;
+        delay: root.arrived && Theme.drawer-motion > 0ms ? root.order * 80ms : 0ms;
+        easing: cubic-bezier(0.22, 1, 0.36, 1);
+    }
+    opacity: root.reveal;
+    Rectangle {
+        y: 16px * (1 - root.reveal);
+        width: root.width;
+        height: root.height;
+        @children
+    }
+}
+
+// Text that dissolves into its next value instead of jumping.
+component FadingText inherits VerticalLayout {
+    in property <string> text;
+    in property <color> color: Theme.primary-text;
+    in property <length> font-size: 12px;
+    in property <string> font-family;
+    in property <int> font-weight: 400;
+    in property <TextWrap> wrap: word-wrap;
+    in property <TextOverflow> overflow: clip;
+    private property <string> shown;
+    private property <bool> fading;
+    private property <bool> motion: Theme.animations-enabled && !Theme.system-reduced-motion;
+    init => { root.shown = root.text; }
+    changed text => {
+        if root.motion { root.fading = true; } else { root.shown = root.text; }
+    }
+    Timer {
+        interval: 130ms;
+        running: root.fading;
+        triggered => {
+            root.shown = root.text;
+            root.fading = false;
+        }
+    }
+
+    Text {
+        text: root.shown;
+        color: root.color;
+        font-size: root.font-size;
+        font-family: root.font-family;
+        font-weight: root.font-weight;
+        wrap: root.wrap;
+        overflow: root.overflow;
+        opacity: root.fading ? 0 : 1;
+        animate opacity {
+            duration: root.motion ? 130ms : 0ms;
+            easing: ease-in-out;
+        }
+    }
+}
+
+// Copies through the page's clipboard field. The icon morphs into a check and
+// the label rolls over to a confirmation.
+component CopyAction inherits Rectangle {
+    in property <string> text;
+    in property <string> done: "已复制";
+    in property <bool> primary;
+    in property <bool> enabled: true;
+    callback copy();
+    private property <bool> copied;
+    private property <bool> motion: Theme.animations-enabled && !Theme.system-reduced-motion;
+    private property <float> pop: root.copied ? 1 : 0;
+    private property <float> roll: root.copied ? 1 : 0;
+    private property <length> press: touch.pressed && root.enabled ? 1px : 0px;
+    private property <color> ink: root.primary ? Theme.on-brand : root.copied ? Theme.brand : Theme.primary-text;
+    animate pop {
+        duration: root.motion ? 460ms : 0ms;
+        easing: cubic-bezier(0.34, 1.56, 0.64, 1);
+    }
+    animate roll {
+        duration: root.motion ? 280ms : 0ms;
+        easing: cubic-bezier(0.22, 1, 0.36, 1);
+    }
+    animate press {
+        duration: Theme.fast;
+        easing: ease-out;
+    }
+    Timer {
+        interval: 1800ms;
+        running: root.copied;
+        triggered => { root.copied = false; }
+    }
+
+    function activate() {
+        if root.enabled { root.copy(); root.copied = true; }
+    }
+
+    height: 36px;
+    horizontal-stretch: 0;
+    border-radius: 9px;
+    border-width: root.primary ? 0px : 1px;
+    border-color: root.copied ? Theme.brand.with-alpha(0.5) : touch.has-hover ? Theme.muted-text : Theme.border;
+    background: root.primary ? (root.copied || touch.pressed ? Theme.brand : touch.has-hover ? Theme.solid.with-alpha(0.9) : Theme.solid)
+        : root.copied ? Theme.brand-surface : touch.has-hover ? Theme.raised : Theme.panel;
+    opacity: root.enabled ? 1 : 0.45;
+    clip: true;
+    animate background, border-color, opacity { duration: Theme.fast; }
+    forward-focus: keys;
+    accessible-role: button;
+    accessible-label: root.text;
+    accessible-description: root.copied ? root.done : "";
+    accessible-enabled: root.enabled;
+    accessible-action-default => { root.activate(); }
+
+    Image {
+        x: 13px + (15px - self.width) / 2;
+        y: (parent.height - self.height) / 2 + root.press;
+        width: max(0px, 15px * (1 - min(1, root.pop)));
+        height: self.width;
+        source: @image-url("../../assets/ui/copy.svg");
+        colorize: root.ink;
+        accessible-role: none;
+    }
+
+    Image {
+        x: 13px + (15px - self.width) / 2;
+        y: (parent.height - self.height) / 2 + root.press;
+        width: max(0px, 16px * root.pop);
+        height: self.width;
+        source: @image-url("../../assets/ui/check.svg");
+        colorize: root.ink;
+        accessible-role: none;
+    }
+
+    Text {
+        x: 36px;
+        y: -root.roll * 12px + root.press;
+        width: parent.width - 48px;
+        height: parent.height;
+        text: root.text;
+        color: root.ink;
+        font-size: 12px;
+        font-weight: 600;
+        vertical-alignment: center;
+        overflow: elide;
+        opacity: 1 - root.roll;
+        accessible-role: none;
+    }
+
+    Text {
+        x: 36px;
+        y: (1 - root.roll) * 12px + root.press;
+        width: parent.width - 48px;
+        height: parent.height;
+        text: root.done;
+        color: root.ink;
+        font-size: 12px;
+        font-weight: 600;
+        vertical-alignment: center;
+        overflow: elide;
+        opacity: root.roll;
+        accessible-role: none;
+    }
+
+    ButtonSheen {
+        hovered: touch.has-hover;
+        enabled: root.enabled;
+        border-radius: 9px;
+    }
+
+    Rectangle {
+        border-radius: 9px;
+        border-width: 2px;
+        border-color: Theme.brand;
+        opacity: keys.has-focus ? 1 : 0;
+        animate opacity { duration: Theme.fast; }
+    }
+
+    touch := TouchArea {
+        enabled: root.enabled;
+        mouse-cursor: root.enabled ? pointer : default;
+        clicked => { keys.focus(); root.activate(); }
+    }
+
+    keys := FocusScope {
+        width: 0px;
+        enabled: root.enabled;
+        key-pressed(event) => {
+            if event.text == Key.Return || event.text == Key.Space { root.activate(); return accept; }
+            reject
+        }
+    }
+}
+
+// Agent and SwitchX joined by an MCP lane. Packets cross the lane in short
+// bursts after a change, then the lane rests; the frame clock stays idle.
+component AgentLink inherits Rectangle {
+    in property <string> client-label;
+    in property <int> channel;
+    private property <bool> motion: Theme.animations-enabled && !Theme.system-reduced-motion;
+    private property <float> flow-from;
+    private property <float> flow-to;
+    private property <float> flow: root.flow-to;
+    animate flow {
+        duration: root.motion ? 2600ms : 0ms;
+        easing: cubic-bezier(0.37, 0, 0.2, 1);
+    }
+    private property <float> energy: min(1, max(0, (root.flow-to - root.flow) * 2.5)) * min(1, max(0, (root.flow - root.flow-from) * 5));
+    private property <float> ripple: root.channel == 1 ? 1 : 0;
+    animate ripple {
+        duration: root.channel == 1 && root.motion ? 1200ms : 0ms;
+        easing: cubic-bezier(0.16, 1, 0.3, 1);
+    }
+    private property <color> signal: root.channel == 1 ? Theme.success : root.channel == 2 ? Theme.warning : Theme.muted-text;
+    private property <length> node: 58px;
+    private property <length> lane-y: 29px;
+    private property <length> lane-start: root.node + 10px;
+    private property <length> lane-length: root.width - 2 * root.node - 20px;
+
+    public function send() {
+        if root.motion {
+            root.flow-from = root.energy > 0 ? root.flow - 1 : root.flow;
+            root.flow-to = max(root.flow-to, floor(root.flow)) + 2;
+        }
+    }
+
+    height: 92px;
+    accessible-role: none;
+
+    // The lane
+    for index in 12: Rectangle {
+        x: root.lane-start + index * root.lane-length / 12 + 2px;
+        y: root.lane-y - 1px;
+        width: root.lane-length / 12 - 4px;
+        height: 2px;
+        border-radius: 1px;
+        background: Theme.border;
+    }
+
+    Text {
+        x: root.lane-start;
+        y: root.lane-y - 22px;
+        width: root.lane-length;
+        text: "MCP · stdio";
+        color: Theme.muted-text;
+        font-size: 9px;
+        font-family: "Menlo";
+        horizontal-alignment: center;
+        letter-spacing: 0.5px;
+    }
+
+    for index in 3: Rectangle {
+        property <float> along: mod(root.flow + index / 3, 1);
+        x: root.lane-start + self.along * root.lane-length - 3px;
+        y: root.lane-y - 3px;
+        width: 6px;
+        height: 6px;
+        border-radius: 3px;
+        background: Theme.brand;
+        opacity: root.energy * sin(self.along * 180deg);
+        drop-shadow-blur: 6px;
+        drop-shadow-color: Theme.brand.with-alpha(0.6);
+    }
+
+    // The agent
+    Rectangle {
+        x: 0px;
+        y: 0px;
+        width: root.node;
+        height: root.node;
+        border-radius: 17px;
+        background: Theme.panel;
+        border-width: 1px;
+        border-color: Theme.border;
+        drop-shadow-blur: 14px;
+        drop-shadow-offset-y: 4px;
+        drop-shadow-color: Theme.dark ? #00000050 : #18221a14;
+        Image {
+            x: (parent.width - self.width) / 2;
+            y: (parent.height - self.height) / 2;
+            width: 22px;
+            height: 22px;
+            source: @image-url("../../assets/ui/terminal.svg");
+            colorize: Theme.primary-text;
+        }
+    }
+
+    Text {
+        x: -20px;
+        y: root.node + 8px;
+        width: root.node + 40px;
+        text: root.client-label;
+        color: Theme.muted-text;
+        font-size: 11px;
+        horizontal-alignment: center;
+        overflow: elide;
+    }
+
+    // SwitchX, with the control channel's light
+    Rectangle {
+        x: root.width - root.node;
+        y: 0px;
+        width: root.node;
+        height: root.node;
+        border-radius: 17px;
+        background: Theme.panel;
+        border-width: 1px;
+        border-color: Theme.brand.with-alpha(0.45);
+        drop-shadow-blur: 16px;
+        drop-shadow-offset-y: 4px;
+        drop-shadow-color: Theme.brand.with-alpha(Theme.dark ? 0.22 : 0.18);
+        Image {
+            x: (parent.width - self.width) / 2;
+            y: (parent.height - self.height) / 2;
+            width: 34px;
+            height: 34px;
+            source: @image-url("../../assets/logo.png");
+            image-fit: contain;
+        }
+
+        Rectangle {
+            x: parent.width - 9px - self.width / 2;
+            y: 9px - self.height / 2;
+            width: 10px + 22px * root.ripple;
+            height: self.width;
+            border-radius: self.width / 2;
+            border-width: 1.5px;
+            border-color: root.signal;
+            opacity: root.ripple > 0 && root.ripple < 1 ? (1 - root.ripple) * 0.8 : 0;
+        }
+
+        Rectangle {
+            x: parent.width - 14px;
+            y: 4px;
+            width: 10px;
+            height: 10px;
+            border-radius: 5px;
+            border-width: 2px;
+            border-color: Theme.panel;
+            background: root.signal;
+            animate background { duration: Theme.page-motion; }
+        }
+    }
+
+    Text {
+        x: root.width - root.node - 20px;
+        y: root.node + 8px;
+        width: root.node + 40px;
+        text: "SwitchX";
+        color: Theme.muted-text;
+        font-size: 11px;
+        horizontal-alignment: center;
+    }
+}
+
+// One step of what agents may do, lit when granted.
+component AccessStep inherits Rectangle {
+    in property <string> label;
+    in property <bool> on;
+    private property <float> lit: root.on ? 1 : 0;
+    animate lit {
+        duration: Theme.page-motion;
+        easing: cubic-bezier(0.22, 1, 0.36, 1);
+    }
+    height: 24px;
+    border-radius: 12px;
+    background: Theme.inset;
+    accessible-role: none;
+    Rectangle {
+        width: parent.width * (0.18 + 0.82 * root.lit);
+        height: parent.height;
+        border-radius: parent.border-radius;
+        background: Theme.brand-surface;
+        opacity: root.lit;
+    }
+
+    Image {
+        x: 9px;
+        y: (parent.height - self.height) / 2;
+        width: 11px * root.lit;
+        height: self.width;
+        source: @image-url("../../assets/ui/check.svg");
+        colorize: Theme.brand;
+    }
+
+    Text {
+        x: 9px + 14px * root.lit;
+        width: parent.width - self.x - 6px;
+        height: parent.height;
+        text: root.label;
+        color: root.on ? Theme.brand : Theme.muted-text;
+        font-size: 10px;
+        font-weight: root.on ? 600 : 400;
+        vertical-alignment: center;
+        overflow: elide;
+        animate color { duration: Theme.page-motion; }
+    }
+}
+
+component PermissionRow inherits Rectangle {
+    in property <image> icon;
+    in property <string> title;
+    in property <string> detail;
+    in property <string> flag;
+    in property <string> note;
+    in property <bool> locked;
+    in-out property <bool> checked;
+    in property <bool> enabled: true;
+    private property <bool> on: root.locked || root.checked;
+    private property <float> lit: root.on ? 1 : 0;
+    animate lit {
+        duration: Theme.page-motion;
+        easing: ease-out;
+    }
+    height: root.note == "" ? 56px : 76px;
+    animate height {
+        duration: Theme.page-motion;
+        easing: cubic-bezier(0.22, 1, 0.36, 1);
+    }
+    border-radius: 12px;
+    clip: true;
+
+    Rectangle {
+        background: Theme.raised;
+        opacity: row-touch.has-hover && root.enabled && !root.locked ? 0.7 : 0;
+        animate opacity { duration: Theme.fast; }
+    }
+
+    Rectangle {
+        background: Theme.brand.with-alpha(Theme.dark ? 0.08 : 0.055);
+        opacity: root.lit;
+    }
+
+    row-touch := TouchArea {
+        enabled: root.enabled && !root.locked;
+        mouse-cursor: self.enabled ? pointer : default;
+        clicked => { root.checked = !root.checked; }
+    }
+
+    HorizontalLayout {
+        padding-left: 12px;
+        padding-right: 12px;
+        spacing: 12px;
+        Rectangle {
+            y: 12px;
+            width: 32px;
+            height: 32px;
+            border-radius: 10px;
+            background: root.on ? Theme.brand-surface : Theme.inset;
+            animate background { duration: Theme.page-motion; }
+            Image {
+                x: (parent.width - self.width) / 2;
+                y: (parent.height - self.height) / 2 - 1px * root.lit;
+                width: 16px;
+                height: 16px;
+                source: root.icon;
+                colorize: root.on ? Theme.brand : Theme.muted-text;
+                animate colorize { duration: Theme.page-motion; }
+            }
+        }
+
+        VerticalLayout {
+            padding-top: 11px;
+            spacing: 5px;
+            alignment: start;
+            HorizontalLayout {
+                spacing: 8px;
+                height: 18px;
+                Text {
+                    text: root.title;
+                    color: Theme.primary-text;
+                    font-size: 13px;
+                    font-weight: 500;
+                    vertical-alignment: center;
+                    horizontal-stretch: 0;
+                }
+
+                if root.flag != "": Rectangle {
+                    width: flag-text.preferred-width + 12px;
+                    height: 18px;
+                    border-radius: 5px;
+                    background: root.on ? Theme.panel : Theme.inset;
+                    border-width: 1px;
+                    border-color: root.on ? Theme.brand.with-alpha(0.3) : Theme.border;
+                    animate background, border-color { duration: Theme.page-motion; }
+                    flag-text := Text {
+                        text: root.flag;
+                        color: root.on ? Theme.brand : Theme.muted-text;
+                        font-family: "Menlo";
+                        font-size: 10px;
+                        horizontal-alignment: center;
+                        vertical-alignment: center;
+                        animate color { duration: Theme.page-motion; }
+                    }
+                }
+                Rectangle {
+                    horizontal-stretch: 1;
+                }
+            }
+
+            Text {
+                text: root.detail;
+                color: Theme.muted-text;
+                font-size: 11px;
+                overflow: elide;
+            }
+
+            if root.note != "": Text {
+                text: root.note;
+                color: Theme.warning;
+                font-size: 11px;
+                overflow: elide;
+            }
+        }
+
+        if root.locked: StatusPill {
+            y: 15px;
+            width: 64px;
+            label: "始终开启";
+            ink: Theme.brand;
+            fill: Theme.brand-surface;
+        }
+        if !root.locked: SettingSwitch {
+            y: 16px;
+            label: "允许" + root.title;
+            checked <=> root.checked;
+            enabled: root.enabled;
+        }
+    }
+}
+
+// The channel's light: a halo while listening and one ripple when it opens.
+component ChannelBeacon inherits Rectangle {
+    in property <int> state;
+    private property <bool> motion: Theme.animations-enabled && !Theme.system-reduced-motion;
+    private property <color> ink: root.state == 1 ? Theme.success : root.state == 2 ? Theme.warning : Theme.muted-text;
+    private property <float> lit: root.state == 1 ? 1 : 0;
+    private property <float> ripple: root.state == 1 ? 1 : 0;
+    animate lit {
+        duration: Theme.drawer-motion;
+        easing: ease-out;
+    }
+    animate ripple {
+        duration: root.state == 1 && root.motion ? 1300ms : 0ms;
+        easing: cubic-bezier(0.16, 1, 0.3, 1);
+    }
+    width: 48px;
+    height: 48px;
+    accessible-role: none;
+    Rectangle {
+        x: (parent.width - self.width) / 2;
+        y: (parent.height - self.height) / 2;
+        width: 20px + 18px * root.lit;
+        height: self.width;
+        border-radius: self.width / 2;
+        background: root.ink.with-alpha(0.14 * root.lit);
+    }
+
+    Rectangle {
+        x: (parent.width - self.width) / 2;
+        y: (parent.height - self.height) / 2;
+        width: 14px + 34px * root.ripple;
+        height: self.width;
+        border-radius: self.width / 2;
+        border-width: 1.5px;
+        border-color: root.ink;
+        opacity: root.ripple > 0 && root.ripple < 1 ? (1 - root.ripple) * 0.7 : 0;
+    }
+
+    Rectangle {
+        x: (parent.width - self.width) / 2;
+        y: (parent.height - self.height) / 2;
+        width: 14px;
+        height: 14px;
+        border-radius: 7px;
+        background: root.ink;
+        animate background { duration: Theme.page-motion; }
+    }
+}
+
+component Fact inherits HorizontalLayout {
+    in property <string> text;
+    in property <bool> on;
+    spacing: 8px;
+    height: 18px;
+    Image {
+        y: (parent.height - self.height) / 2;
+        width: 12px;
+        height: 12px;
+        source: @image-url("../../assets/ui/check.svg");
+        colorize: root.on ? Theme.brand : Theme.muted-text;
+        animate colorize { duration: Theme.page-motion; }
+    }
+
+    Text {
+        text: root.text;
+        color: Theme.muted-text;
+        font-size: 11px;
+        vertical-alignment: center;
+        overflow: elide;
+    }
+}
+
+component SoonTile inherits Rectangle {
+    in property <image> icon;
+    in property <string> title;
+    in property <string> detail;
+    height: 70px;
+    border-radius: 14px;
+    border-width: 1px;
+    border-color: Theme.border;
+    HorizontalLayout {
+        padding-left: 16px;
+        padding-right: 16px;
+        spacing: 14px;
+        Image {
+            y: (parent.height - self.height) / 2;
+            width: 20px;
+            height: 20px;
+            source: root.icon;
+            colorize: Theme.muted-text;
+        }
+
+        VerticalLayout {
+            alignment: center;
+            spacing: 5px;
+            Text {
+                text: root.title;
+                color: Theme.primary-text;
+                font-size: 13px;
+                font-weight: 500;
+            }
+
+            Text {
+                text: root.detail;
+                color: Theme.muted-text;
+                font-size: 11px;
+                overflow: elide;
+            }
+        }
+
+        StatusPill {
+            y: (parent.height - self.height) / 2;
+            width: 64px;
+            label: "即将推出";
+        }
+    }
+}
+
+// Agent access through `switchx mcp`: one sentence to hand an agent, the
+// registration it runs, and the running app's control channel.
+export component ToolboxPage inherits ScrollView {
+    in property <bool> busy;
+    in property <bool> recovery-only;
+    in property <string> config-home;
+    // -1 not yet known, 0 off, 1 listening, 2 unavailable.
+    in property <int> channel: -1;
+    in property <string> channel-problem;
+    // 0 none, 1 this copy of SwitchX, 2 another executable.
+    in property <int> registration;
+    in property <bool> registered-writes;
+    in property <bool> registered-control;
+    in-out property <int> client;
+    in-out property <bool> allow-writes;
+    in-out property <bool> allow-control;
+    callback set-channel(bool);
+    private property <string> command-text: McpSetup.command(root.client, root.allow-writes, root.allow-control, root.config-home);
+    private property <string> request-text: McpSetup.request(root.client, root.allow-writes, root.allow-control, root.config-home);
+    private property <int> tools: McpSetup.tool-count(root.allow-writes, root.allow-control);
+    private property <float> shown-tools: root.tools;
+    animate shown-tools {
+        duration: Theme.drawer-motion > 0ms ? 480ms : 0ms;
+        easing: cubic-bezier(0.22, 1, 0.36, 1);
+    }
+    private property <string> client-label: root.client == 0 ? "Codex" : root.client == 1 ? "Claude Code" : "MCP 客户端";
+    private property <bool> arrived;
+    private property <bool> greeted;
+    private property <bool> channel-pending;
+    private property <bool> channel-target;
+    private property <bool> channel-on: root.channel-pending ? root.channel-target : root.channel == 1;
+    private property <string> access-label: root.registered-writes && root.registered-control ? "完整权限"
+        : root.registered-writes ? "可修改模型与价格" : root.registered-control ? "可控制 Codex 配置" : "只读";
+    private property <bool> registered-differs: root.registered-writes != root.allow-writes || root.registered-control != root.allow-control;
+    changed client => { link.send(); }
+    changed allow-writes => { link.send(); }
+    changed allow-control => { link.send(); }
+    changed busy => { if !root.busy { root.channel-pending = false; } }
+    horizontal-scrollbar-policy: always-off;
+
+    function copy-text(text: string) {
+        clipboard.text = text;
+        clipboard.select-all();
+        clipboard.copy();
+        clipboard.text = "";
+        link.send();
+    }
+
+    Timer {
+        interval: 16ms;
+        running: !root.arrived;
+        triggered => { root.arrived = true; }
+    }
+
+    Timer {
+        interval: 460ms;
+        running: root.arrived && !root.greeted;
+        triggered => {
+            root.greeted = true;
+            link.send();
+        }
+    }
+
+    clipboard := TextInput {
+        visible: false;
+        width: 0px;
+        height: 0px;
+        read-only: true;
+        accessible-role: none;
+    }
+
+    VerticalLayout {
+        spacing: 16px;
+        padding-bottom: 4px;
+        Arrival {
+            arrived: root.arrived;
+            order: 0;
+            height: hero.preferred-height;
+            SurfaceCard {
+                border-radius: 18px;
+                background: @linear-gradient(118deg, Theme.brand-surface 0%, Theme.panel 58%);
+                border-color: Theme.brand.with-alpha(Theme.dark ? 0.24 : 0.2);
+                hero := HorizontalLayout {
+                    padding: 22px;
+                    spacing: 26px;
+                    VerticalLayout {
+                        spacing: 12px;
+                        alignment: start;
+                        horizontal-stretch: 1;
+                        HorizontalLayout {
+                            spacing: 8px;
+                            height: 22px;
+                            Rectangle {
+                                width: badge.preferred-width + 18px;
+                                border-radius: 11px;
+                                background: Theme.panel;
+                                border-width: 1px;
+                                border-color: Theme.brand.with-alpha(0.3);
+                                badge := Text {
+                                    text: "一句话接入 · SwitchX MCP";
+                                    color: Theme.brand;
+                                    font-size: 10px;
+                                    font-weight: 600;
+                                    horizontal-alignment: center;
+                                    vertical-alignment: center;
+                                }
+                            }
+
+                            Text {
+                                text: round(root.shown-tools) + " 个工具可用";
+                                color: Theme.muted-text;
+                                font-size: 10px;
+                                vertical-alignment: center;
+                            }
+
+                            Rectangle {
+                                horizontal-stretch: 1;
+                            }
+                        }
+
+                        Text {
+                            text: "一句话，让 agent 接上 SwitchX";
+                            color: Theme.primary-text;
+                            font-size: 19px;
+                            font-weight: 600;
+                        }
+
+                        Text {
+                            text: "复制下面这句话发给 " + root.client-label + "，agent 会自己运行注册命令，并在新会话里确认可用。";
+                            color: Theme.muted-text;
+                            font-size: 12px;
+                            wrap: word-wrap;
+                        }
+
+                        Rectangle {
+                            height: sentence.preferred-height;
+                            animate height {
+                                duration: Theme.page-motion;
+                                easing: cubic-bezier(0.22, 1, 0.36, 1);
+                            }
+                            clip: true;
+                            border-radius: 12px;
+                            background: Theme.panel.with-alpha(Theme.dark ? 0.7 : 0.85);
+                            border-width: 1px;
+                            border-color: Theme.border;
+                            accessible-role: text;
+                            accessible-label: "交给 agent 的一句话";
+                            accessible-value: root.request-text;
+                            sentence := HorizontalLayout {
+                                padding: 14px;
+                                spacing: 12px;
+                                Rectangle {
+                                    width: 3px;
+                                    border-radius: 2px;
+                                    background: @linear-gradient(180deg, Theme.brand 0%, Theme.brand.with-alpha(0.25) 100%);
+                                }
+
+                                FadingText {
+                                    text: root.request-text == "" ? "无法生成注册命令。" : root.request-text;
+                                    font-size: 12px;
+                                    wrap: word-wrap;
+                                }
+                            }
+                        }
+
+                        if McpSetup.executable-warning != "": Text {
+                            text: McpSetup.executable-warning;
+                            color: Theme.warning;
+                            font-size: 11px;
+                            wrap: word-wrap;
+                        }
+
+                        HorizontalLayout {
+                            spacing: 12px;
+                            height: 36px;
+                            CopyAction {
+                                width: 148px;
+                                text: "复制一句话";
+                                done: "已复制，去粘贴吧";
+                                primary: true;
+                                enabled: root.request-text != "";
+                                copy => { root.copy-text(root.request-text); }
+                            }
+
+                            Text {
+                                text: "权限与客户端可在下方调整，这句话会随之更新。";
+                                color: Theme.muted-text;
+                                font-size: 11px;
+                                vertical-alignment: center;
+                                overflow: elide;
+                            }
+                        }
+                    }
+
+                    VerticalLayout {
+                        width: 232px;
+                        alignment: center;
+                        spacing: 18px;
+                        link := AgentLink {
+                            client-label: root.client-label;
+                            channel: root.channel;
+                        }
+
+                        HorizontalLayout {
+                            spacing: 6px;
+                            AccessStep {
+                                label: "读取";
+                                on: true;
+                            }
+
+                            AccessStep {
+                                label: "修改";
+                                on: root.allow-writes;
+                            }
+
+                            AccessStep {
+                                label: "控制";
+                                on: root.allow-control;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        HorizontalLayout {
+            spacing: 16px;
+            Arrival {
+                arrived: root.arrived;
+                order: 1;
+                height: setup.preferred-height;
+                horizontal-stretch: 1;
+                SurfaceCard {
+                    border-radius: 16px;
+                    setup := VerticalLayout {
+                        padding: 20px;
+                        spacing: 14px;
+                        alignment: start;
+                        HorizontalLayout {
+                            spacing: 12px;
+                            SettingsHeading {
+                                icon: @image-url("../../assets/ui/terminal.svg");
+                                title: "接入方式";
+                                description: "按需开放权限。";
+                            }
+
+                            QuietSegmented {
+                                y: 3px;
+                                width: 264px;
+                                options: ["Codex", "Claude Code", "其他客户端"];
+                                current-index: root.client;
+                                selection-background: Theme.panel;
+                                selected(index) => { root.client = index; }
+                            }
+                        }
+
+                        VerticalLayout {
+                            spacing: 4px;
+                            PermissionRow {
+                                icon: @image-url("../../assets/ui/search.svg");
+                                title: "读取";
+                                detail: "连接、模型、价格、用量与请求记录，从不返回任何凭据。";
+                                locked: true;
+                            }
+
+                            PermissionRow {
+                                icon: @image-url("../../assets/ui/tag.svg");
+                                title: "修改模型与价格";
+                                detail: "启用或停用模型、设置备用连接、编辑价格。";
+                                flag: "--allow-writes";
+                                checked <=> root.allow-writes;
+                            }
+
+                            PermissionRow {
+                                icon: @image-url("../../assets/ui/code.svg");
+                                title: "控制 Codex 配置";
+                                detail: "预览并应用路由或直连，或恢复原配置；应用前须经你同意。";
+                                flag: "--allow-control";
+                                note: root.allow-control && root.channel == 0 ? "本机控制通道已关闭，在右侧开启后这些工具才会生效。" : "";
+                                checked <=> root.allow-control;
+                            }
+                        }
+
+                        Rectangle {
+                            height: command.preferred-height;
+                            animate height {
+                                duration: Theme.page-motion;
+                                easing: cubic-bezier(0.22, 1, 0.36, 1);
+                            }
+                            clip: true;
+                            border-radius: 12px;
+                            background: Theme.inset;
+                            border-width: 1px;
+                            border-color: Theme.border;
+                            command := VerticalLayout {
+                                padding: 12px;
+                                padding-left: 14px;
+                                spacing: 8px;
+                                HorizontalLayout {
+                                    height: 28px;
+                                    spacing: 6px;
+                                    for index in 3: Rectangle {
+                                        y: (parent.height - self.height) / 2;
+                                        width: 7px;
+                                        height: 7px;
+                                        border-radius: 4px;
+                                        background: Theme.muted-text.with-alpha(0.25 + index * 0.1);
+                                    }
+                                    Text {
+                                        text: root.client == 2 ? "  MCP 配置 · JSON" : "  终端命令";
+                                        color: Theme.muted-text;
+                                        font-size: 10px;
+                                        vertical-alignment: center;
+                                        letter-spacing: 0.5px;
+                                    }
+
+                                    Rectangle {
+                                        horizontal-stretch: 1;
+                                    }
+
+                                    CopyAction {
+                                        width: 100px;
+                                        height: 28px;
+                                        text: root.client == 2 ? "复制配置" : "复制命令";
+                                        enabled: root.command-text != "";
+                                        copy => { root.copy-text(root.command-text); }
+                                    }
+                                }
+
+                                HorizontalLayout {
+                                    spacing: 8px;
+                                    if root.client != 2: Text {
+                                        text: "$";
+                                        color: Theme.brand;
+                                        font-family: "Menlo";
+                                        font-size: 11px;
+                                        font-weight: 600;
+                                        horizontal-stretch: 0;
+                                    }
+                                    FadingText {
+                                        text: root.command-text;
+                                        font-family: "Menlo";
+                                        font-size: 11px;
+                                        wrap: char-wrap;
+                                    }
+                                }
+                            }
+                        }
+
+                        HorizontalLayout {
+                            spacing: 8px;
+                            height: 18px;
+                            Image {
+                                y: (parent.height - self.height) / 2;
+                                width: 13px;
+                                height: 13px;
+                                source: root.client == 0 && root.registration == 1 ? @image-url("../../assets/ui/check.svg")
+                                    : root.client == 0 && root.registration == 2 ? @image-url("../../assets/ui/alert.svg") : @image-url("../../assets/ui/link.svg");
+                                colorize: root.client == 0 && root.registration == 1 ? Theme.brand : root.client == 0 && root.registration == 2 ? Theme.warning : Theme.muted-text;
+                            }
+
+                            FadingText {
+                                text: root.client != 0 ? "注册后重启 " + root.client-label + "，再让 agent 调用 get_status 确认。"
+                                    : root.registration == 1 ? "已注册到当前工作空间 · " + root.access-label + (root.registered-differs ? "，与上方所选不同，重新运行命令即可更新" : "")
+                                    : root.registration == 2 ? "已注册，但指向另一个 SwitchX 程序；重新运行命令即可更新。"
+                                    : "当前工作空间尚未注册；运行命令后这里会自动更新。";
+                                color: root.client == 0 && root.registration == 1 ? Theme.primary-text : root.client == 0 && root.registration == 2 ? Theme.warning : Theme.muted-text;
+                                font-size: 11px;
+                                wrap: no-wrap;
+                                overflow: elide;
+                            }
+                        }
+                    }
+                }
+            }
+
+            Arrival {
+                arrived: root.arrived;
+                order: 2;
+                width: clamp((root.visible-width - 16px) * 0.34, 260px, 330px);
+                height: setup.preferred-height;
+                SurfaceCard {
+                    border-radius: 16px;
+                    border-color: root.channel == 2 ? Theme.warning.with-alpha(0.5) : Theme.border;
+                    VerticalLayout {
+                        padding: 20px;
+                        spacing: 16px;
+                        alignment: start;
+                        SettingsHeading {
+                            icon: @image-url("../../assets/ui/lock.svg");
+                            title: "本机控制通道";
+                            description: "供带 --allow-control 的 agent 使用。";
+                        }
+
+                        Rectangle {
+                            height: 84px;
+                            border-radius: 14px;
+                            background: Theme.inset;
+                            HorizontalLayout {
+                                padding-left: 14px;
+                                padding-right: 14px;
+                                spacing: 12px;
+                                ChannelBeacon {
+                                    y: (parent.height - self.height) / 2;
+                                    state: root.channel;
+                                }
+
+                                VerticalLayout {
+                                    alignment: center;
+                                    spacing: 5px;
+                                    FadingText {
+                                        text: root.channel == 1 ? "正在本机监听" : root.channel == 0 ? "已关闭" : root.channel == 2 ? "无法开启" : "读取中…";
+                                        font-size: 14px;
+                                        font-weight: 600;
+                                        color: root.channel == 2 ? Theme.warning : Theme.primary-text;
+                                    }
+
+                                    FadingText {
+                                        text: root.channel == 1 ? "仅限本机，端口随机。"
+                                            : root.channel == 0 ? "agent 无法预览或应用 Codex 配置。"
+                                            : root.channel == 2 ? root.channel-problem : "";
+                                        color: Theme.muted-text;
+                                        font-size: 11px;
+                                        wrap: word-wrap;
+                                    }
+                                }
+                            }
+                        }
+
+                        HorizontalLayout {
+                            spacing: 10px;
+                            height: 24px;
+                            Text {
+                                text: "允许 agent 控制 SwitchX";
+                                color: Theme.primary-text;
+                                font-size: 12px;
+                                font-weight: 500;
+                                vertical-alignment: center;
+                                accessible-role: none;
+                            }
+
+                            SettingSwitch {
+                                label: "允许 agent 控制 SwitchX";
+                                auto-toggle: false;
+                                checked: root.channel-on;
+                                enabled: !root.busy && !root.recovery-only && root.channel != -1;
+                                toggled(value) => {
+                                    root.channel-pending = true;
+                                    root.channel-target = value;
+                                    root.set-channel(value);
+                                }
+                            }
+                        }
+
+                        Rectangle {
+                            height: 1px;
+                            background: Theme.border;
+                        }
+
+                        VerticalLayout {
+                            spacing: 8px;
+                            Fact {
+                                text: "只接受本机回环连接";
+                                on: root.channel-on;
+                            }
+
+                            Fact {
+                                text: "令牌只存于私有文件，不在界面显示";
+                                on: root.channel-on;
+                            }
+
+                            Fact {
+                                text: "只能应用 agent 自己刚生成的预览";
+                                on: root.channel-on;
+                            }
+
+                            Fact {
+                                text: "你在应用中的任何操作都会使预览失效";
+                                on: root.channel-on;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        Arrival {
+            arrived: root.arrived;
+            order: 3;
+            height: 70px;
+            HorizontalLayout {
+                spacing: 16px;
+                SoonTile {
+                    icon: @image-url("../../assets/ui/blocks.svg");
+                    title: "Codex MCP 管理";
+                    detail: "按工作空间组织模型可用的工具服务。";
+                }
+
+                SoonTile {
+                    icon: @image-url("../../assets/ui/folder.svg");
+                    title: "Skills";
+                    detail: "集中查看技能、来源与适用范围。";
+                }
+            }
+        }
+    }
+}

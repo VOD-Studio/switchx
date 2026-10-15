@@ -1142,6 +1142,7 @@ mod tests {
         let (sender, receiver) = mpsc::channel(8);
         let background = tokio::spawn(worker::run(
             receiver,
+            sender.downgrade(),
             slint::Weak::default(),
             Ok(data.clone()),
         ));

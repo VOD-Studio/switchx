@@ -123,6 +123,8 @@ pub(super) enum Command {
         request: ControlRequest,
         reply: oneshot::Sender<Result<serde_json::Value, String>>,
     },
+    /// Turns the agent control channel on or off and saves the choice.
+    SetAgentControl(bool),
     Quit,
 }
 

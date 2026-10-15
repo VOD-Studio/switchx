@@ -56,6 +56,8 @@ import { UsagePage } from "pages/usage.slint";
 import { UsageSourcesSheet, UsagePricesSheet } from "usage/usage-sheets.slint";
 import { ClearHistoryConfirm } from "pages/activity-clear.slint";
 import { ConfigPage } from "pages/config.slint";
+import { ToolboxPage } from "pages/toolbox.slint";
+export { McpSetup } from "pages/toolbox.slint";
 import { ConnectionStatusDialog } from "connection-status.slint";
 import { WorkspaceMenu } from "workspace-menu.slint";
 import { FallbackEditor } from "editors/fallback-editor.slint";
@@ -351,6 +353,25 @@ export component AppWindow inherits Window {
     callback usage-open-sources();
     callback usage-open-prices();
     in-out property <bool> window-visible: true;
+    // Toolbox agent access: the registration being prepared, the Codex home's
+    // current registration, and the app's control channel (-1 unknown, 0 off,
+    // 1 listening, 2 unavailable).
+    in-out property <int> mcp-client: 0;
+    in-out property <bool> mcp-allow-writes: false;
+    in-out property <bool> mcp-allow-control: false;
+    in-out property <int> mcp-registration: 0;
+    in-out property <bool> mcp-registered-writes: false;
+    in-out property <bool> mcp-registered-control: false;
+    in-out property <int> agent-channel: -1;
+    in-out property <string> agent-channel-problem;
+    callback set-agent-channel(bool);
+    callback refresh-mcp-registration(string);
+    Timer {
+        interval: 3s;
+        running: root.active-page == 4 && root.window-visible;
+        triggered => { root.refresh-mcp-registration(root.config-home); }
+    }
+
     in-out property <int> selected-model-count: 0;
     in-out property <int> selected-connection-count: 0;
     in-out property <string> default-model-label;
@@ -433,6 +454,7 @@ export component AppWindow inherits Window {
         if (root.active-page != 1) { root.connection-models-open = false; }
         if (root.active-page != 0) { root.model-editor-open = false; root.fallback-editor-open = false; }
         if (root.active-page != 2) { root.usage-sources-open = false; root.usage-prices-open = false; }
+        if (root.active-page == 4) { root.refresh-mcp-registration(root.config-home); }
     }
     changed subscription-editor-open => {
         if (!root.subscription-editor-open) {
@@ -687,7 +709,7 @@ export component AppWindow inherits Window {
 
     property <bool> modal-open: root.request-clear-open || root.usage-sources-open || root.usage-prices-open || root.workspace-open || root.account-removing-id != "" || root.account-login-confirm-open || root.drawer-open || root.connection-picker-open || root.connection-models-open || root.xai-editor-open || root.editor-open || root.subscription-editor-open || root.common-config-editor-open || root.icon-picker-open || root.model-editor-open || root.fallback-editor-open || root.publish-drawer-open || root.direct-drawer-open || root.delete-account-confirm;
     property <string> page-title: root.active-page == 0 ? "模型，随手可用。" : root.active-page == 1 ? "连接" : root.active-page == 2 ? "用量，心中有数。" : root.active-page == 3 ? "每次请求，有迹可循。" : root.active-page == 4 ? "让工作流更顺手。" : "设置";
-    property <string> page-subtitle: root.active-page == 0 ? "配好连接，整组模型随手可用。" : root.active-page == 1 ? "账号与上游，集中管理。" : root.active-page == 2 ? "Token、缓存与估算费用，按连接和模型细看。" : root.active-page == 3 ? "查看模型、耗时与结果。" : root.active-page == 4 ? "MCP 与 Skills，独立于模型连接。" : "把工作空间调成你喜欢的样子。";
+    property <string> page-subtitle: root.active-page == 0 ? "配好连接，整组模型随手可用。" : root.active-page == 1 ? "账号与上游，集中管理。" : root.active-page == 2 ? "Token、缓存与估算费用，按连接和模型细看。" : root.active-page == 3 ? "查看模型、耗时与结果。" : root.active-page == 4 ? "让 agent 直接使用 SwitchX，一句话完成接入。" : "把工作空间调成你喜欢的样子。";
     animate background { duration: Theme.page-motion; }
     Timer {
         interval: 16ms;
@@ -1283,70 +1305,19 @@ export component AppWindow inherits Window {
                                     filter-requests(index) => { root.filter-requests(index); }
                                     clear-history() => { root.request-clear-error = ""; root.request-clear-open = true; }
                                 }
-                                if root.active-page == 4: VerticalLayout {
-                                    spacing: 22px;
-                                    for item in [
-                                        {
-                                            title: "MCP 服务",
-                                            detail: "按工作空间组织模型可用的工具服务。",
-                                            icon: @image-url("../assets/ui/blocks.svg")
-                                        },
-                                        {
-                                            title: "Skills",
-                                            detail: "集中查看技能、来源与适用范围。",
-                                            icon: @image-url("../assets/ui/folder.svg")
-                                        }
-                                    ]: Rectangle {
-                                        height: 105px;
-                                        Rectangle {
-                                            y: parent.height - 1px;
-                                            height: 1px;
-                                            background: Theme.border;
-                                        }
-
-                                        HorizontalLayout {
-                                            spacing: 18px;
-                                            Image {
-                                                y: (parent.height - self.height) / 2;
-                                                width: 26px;
-                                                height: 26px;
-                                                source: item.icon;
-                                                colorize: Theme.brand;
-                                            }
-
-                                            VerticalLayout {
-                                                alignment: center;
-                                                spacing: 8px;
-                                                Text {
-                                                    text: item.title;
-                                                    color: Theme.primary-text;
-                                                    font-size: 17px;
-                                                    font-weight: 500;
-                                                }
-
-                                                Text {
-                                                    text: item.detail;
-                                                    color: Theme.muted-text;
-                                                    font-size: 13px;
-                                                }
-                                            }
-
-                                            StatusPill {
-                                                y: (parent.height - self.height) / 2;
-                                                label: "尚未接入";
-                                            }
-                                        }
-                                    }
-                                    Text {
-                                        text: "工具管理将在后续版本接入。当前可在各订阅连接的配置中管理已有 MCP 设置。";
-                                        color: Theme.muted-text;
-                                        font-size: 12px;
-                                        wrap: word-wrap;
-                                    }
-
-                                    Rectangle {
-                                        vertical-stretch: 1;
-                                    }
+                                if root.active-page == 4: ToolboxPage {
+                                    busy: root.busy;
+                                    recovery-only: root.recovery-only;
+                                    config-home: root.config-home;
+                                    channel: root.agent-channel;
+                                    channel-problem: root.agent-channel-problem;
+                                    registration: root.mcp-registration;
+                                    registered-writes: root.mcp-registered-writes;
+                                    registered-control: root.mcp-registered-control;
+                                    client <=> root.mcp-client;
+                                    allow-writes <=> root.mcp-allow-writes;
+                                    allow-control <=> root.mcp-allow-control;
+                                    set-channel(enabled) => { root.set-agent-channel(enabled); }
                                 }
                                 if root.active-page == 5: ConfigPage {
                                     busy: root.busy;

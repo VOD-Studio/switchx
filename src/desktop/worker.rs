@@ -19,8 +19,12 @@ use tokio::{
 };
 
 use super::{
-    accounts::sync_owned_account, codex_config::codex_home, command::Command,
-    control::ControlPreviews, feedback::show_action, provider_checks::finish_provider_check,
+    accounts::sync_owned_account,
+    codex_config::codex_home,
+    command::Command,
+    control::{ControlPreviews, ControlServer},
+    feedback::show_action,
+    provider_checks::finish_provider_check,
     subscription_editor::SubscriptionAuthDraft,
 };
 
@@ -103,12 +107,16 @@ pub(super) struct Worker {
     pub(super) codex_quota_queries: JoinSet<()>,
     pub(super) recovery_only: bool,
     pub(super) control_previews: ControlPreviews,
+    /// The agent control listener while the user allows it.
+    pub(super) control_server: Option<ControlServer>,
+    pub(super) control_sender: mpsc::WeakSender<Command>,
 }
 
 /// Runs window commands until every sender is dropped, then restores
 /// managed configuration for exit.
 pub(super) async fn run(
     receiver: mpsc::Receiver<Command>,
+    control_sender: mpsc::WeakSender<Command>,
     weak: slint::Weak<AppWindow>,
     directory: Result<PathBuf, AppError>,
 ) -> Result<(), String> {
@@ -129,6 +137,8 @@ pub(super) async fn run(
         codex_quota_queries: JoinSet::new(),
         recovery_only: false,
         control_previews: ControlPreviews::default(),
+        control_server: None,
+        control_sender,
     }
     .run(receiver)
     .await
@@ -136,6 +146,8 @@ pub(super) async fn run(
 
 impl Worker {
     async fn run(mut self, mut receiver: mpsc::Receiver<Command>) -> Result<(), String> {
+        let control = self.data_dir.ok().is_some_and(switchx::control::enabled);
+        self.sync_agent_control(control).await;
         while let Some(command) = receiver.recv().await {
             while self.provider_checks.try_join_next().is_some() {}
             while self.xai_quota_queries.try_join_next().is_some() {}
@@ -153,6 +165,8 @@ impl Worker {
             self.handle(command).await?;
             self.publish_route_status();
         }
+        // Agents cannot reach the app once its window has gone.
+        self.control_server = None;
         self.stop_background_tasks().await?;
         let recovery_only = self.data_dir.needs_recovery("无法检查退出前的恢复状态")?;
         // Also recover when the platform exits the event loop without using our tray.
@@ -270,6 +284,7 @@ impl Worker {
             Command::Control { request, reply } => {
                 let _ = reply.send(self.control(request).await);
             }
+            Command::SetAgentControl(enabled) => self.set_agent_control(enabled).await,
             Command::Quit => return self.quit().await,
         }
         Ok(())

@@ -28,6 +28,8 @@ use crate::{
     },
 };
 
+pub mod setup;
+
 /// Newest first; an unknown requested version gets the newest.
 const PROTOCOL_VERSIONS: [&str; 4] = ["2025-11-25", "2025-06-18", "2025-03-26", "2024-11-05"];
 /// Request history keeps this many recent records for statistics and listing.

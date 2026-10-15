@@ -913,6 +913,29 @@ impl Store {
         Ok(())
     }
 
+    /// Whether the running app accepts agent control requests; on unless turned off.
+    pub fn agent_control(&self) -> Result<bool> {
+        use rusqlite::OptionalExtension;
+        let value: Option<String> = self
+            .connection
+            .query_row(
+                "SELECT value FROM app_settings WHERE key = 'agent_control'",
+                [],
+                |row| row.get(0),
+            )
+            .optional()?;
+        Ok(value.as_deref() != Some("off"))
+    }
+
+    pub fn set_agent_control(&self, enabled: bool) -> Result<()> {
+        self.connection.execute(
+            "INSERT INTO app_settings (key, value) VALUES ('agent_control', ?1)
+             ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+            [if enabled { "on" } else { "off" }],
+        )?;
+        Ok(())
+    }
+
     /// The subscription provider's explicit account binding; absent follows native Codex login.
     /// `default` resolves the managed account default when preparing a new route.
     pub fn chatgpt_account_binding(&self) -> Result<Option<String>> {

@@ -9,6 +9,7 @@
 - 新增 `switchx mcp` 只读 MCP 服务，Codex、Claude Code 等 agent 可查询托管状态、连接、模型映射、用量与请求记录；服务以只读方式打开数据库，不创建或迁移数据，输出不含 API Key、OAuth token、本地路由令牌或凭据引用。
 - `switchx mcp --allow-writes` 允许 agent 启用或停用模型、设置备用连接以及修改模型价格，沿用应用内的校验与托管期间的编辑锁；新增只读的 `list_prices` 工具。正在运行的 SwitchX 会在约 2 秒内自动刷新外部修改。
 - `switchx mcp --allow-control` 允许 agent 通过正在运行的 SwitchX 预览、启用模型路由或直连，并恢复原配置；应用只接受 agent 自己生成且未被界面操作作废的一次性预览。新增 `get_app_status` 查询路由与 Codex 配置的实时状态。
+- 「工具箱」新增 agent 接入页：选择 Codex、Claude Code 或 JSON 配置并按需开放修改与控制权限，即可复制交给 agent 的「一句话」、注册命令或配置；页面会识别当前工作空间的 Codex 注册及其权限，并提供「允许 agent 控制 SwitchX」开关，关闭后立即停止本机控制通道并在重启后保持。页面带有分段入场、连接流动、复制确认等动效，并遵循减少动态效果设置。
 
 ### Changed
 
