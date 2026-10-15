@@ -2,9 +2,12 @@
 
 use slint::ComponentHandle;
 use switchx::{app, codex::provider_config::CodexOptions, credentials::Secret, ui::AppWindow};
-use tokio::sync::mpsc::{self, error::TrySendError};
+use tokio::sync::{
+    mpsc::{self, error::TrySendError},
+    oneshot,
+};
 
-use super::feedback::show_action;
+use super::{control::ControlRequest, feedback::show_action};
 
 pub(super) enum Command {
     Refresh(bool),
@@ -115,6 +118,11 @@ pub(super) enum Command {
         model: String,
     },
     CancelRoutePreview,
+    /// A request from `switchx mcp --allow-control`, answered on `reply`.
+    Control {
+        request: ControlRequest,
+        reply: oneshot::Sender<Result<serde_json::Value, String>>,
+    },
     Quit,
 }
 
@@ -134,6 +142,7 @@ impl Command {
             | Self::ImportCurrent(home)
             | Self::ApplyDirect(home)
             | Self::RestoreConfig(home) => Some(home),
+            Self::Control { request, .. } => request.codex_home(),
             _ => None,
         }
     }
@@ -142,7 +151,11 @@ impl Command {
     pub(super) fn allowed_during_recovery(&self) -> bool {
         matches!(
             self,
-            Self::PollRouteStatus | Self::InspectConfig(_) | Self::RestoreConfig(_) | Self::Quit
+            Self::PollRouteStatus
+                | Self::InspectConfig(_)
+                | Self::RestoreConfig(_)
+                | Self::Control { .. }
+                | Self::Quit
         )
     }
 }

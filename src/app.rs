@@ -129,13 +129,21 @@ pub fn data_directory() -> Result<PathBuf, AppError> {
 /// Rewritten after another process, such as `switchx mcp`, changes saved data.
 const EXTERNAL_CHANGE: &str = "external-change";
 
-/// Tells a running app to reload. The marker is replaced atomically, so an
-/// existing file or symlink at its path is never written through.
+/// Tells a running app to reload.
 pub fn mark_external_change(data_dir: &Path) -> io::Result<()> {
     let mut nonce = [0_u8; 8];
     getrandom::fill(&mut nonce).map_err(|_| io::Error::other("random source unavailable"))?;
     let token: String = nonce.iter().map(|byte| format!("{byte:02x}")).collect();
-    let temporary = data_dir.join(format!(".{EXTERNAL_CHANGE}-{token}"));
+    replace_private_file(data_dir, EXTERNAL_CHANGE, token.as_bytes())
+}
+
+/// Replaces `name` in the data directory atomically with an owner-only file, so
+/// an existing file or symlink at that path is never written through.
+pub(crate) fn replace_private_file(data_dir: &Path, name: &str, contents: &[u8]) -> io::Result<()> {
+    let mut nonce = [0_u8; 8];
+    getrandom::fill(&mut nonce).map_err(|_| io::Error::other("random source unavailable"))?;
+    let suffix: String = nonce.iter().map(|byte| format!("{byte:02x}")).collect();
+    let temporary = data_dir.join(format!(".{name}-{suffix}"));
     let mut options = fs::OpenOptions::new();
     options.write(true).create_new(true);
     #[cfg(unix)]
@@ -144,8 +152,8 @@ pub fn mark_external_change(data_dir: &Path) -> io::Result<()> {
         options.mode(0o600);
     }
     let written = options.open(&temporary).and_then(|mut file| {
-        io::Write::write_all(&mut file, token.as_bytes())?;
-        fs::rename(&temporary, data_dir.join(EXTERNAL_CHANGE))
+        io::Write::write_all(&mut file, contents)?;
+        fs::rename(&temporary, data_dir.join(name))
     });
     if written.is_err() {
         let _ = fs::remove_file(&temporary);

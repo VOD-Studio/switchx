@@ -90,6 +90,7 @@ sh scripts/bundle-macos.sh --release  # target/release/SwitchX.app
 | `get_usage`      | 按预设或自定义时间段的 Token 用量、估算费用、按连接 / 模型分布与明细     |
 | `list_requests`  | 最近经路由的请求：状态、耗时、错误原因、备用切换与 Token 数              |
 | `list_prices`    | 已填写的模型价格（每百万 Token），以及各模型的累计请求与 Token 数        |
+| `get_app_status` | 正在运行的应用的实时状态：本地路由是否运行、目标 Codex 配置的当前模式与模型 |
 
 读取时以只读方式打开现有数据库，不会创建或迁移数据；任何工具都不接收也不返回 API Key、OAuth token、本地路由令牌或凭据引用。首次安装或升级后请先打开一次应用完成数据库初始化。路由进程是否在运行、账号额度等实时状态仍需在应用中查看。
 
@@ -115,6 +116,19 @@ claude mcp add switchx -- /Applications/SwitchX.app/Contents/MacOS/switchx mcp
 ```sh
 codex mcp add switchx -- /Applications/SwitchX.app/Contents/MacOS/switchx mcp --allow-writes
 ```
+
+加上 `--allow-control`（可与 `--allow-writes` 同时使用）后，agent 还可以让正在运行的 SwitchX 应用改写 Codex 配置：
+
+| 工具             | 作用                                                     |
+| ---------------- | -------------------------------------------------------- |
+| `preview_route`  | 准备模型路由发布，返回将写入的变更与 `preview_id`        |
+| `apply_route`    | 按预览启用模型路由                                       |
+| `preview_direct` | 准备让 Codex 直连一个 API 连接，返回变更与 `preview_id`  |
+| `apply_direct`   | 按预览启用直连                                           |
+| `cancel_preview` | 放弃尚未应用的预览                                       |
+| `restore_config` | 恢复原配置并停止本地路由                                 |
+
+这些操作由应用执行，与在界面中操作相同，结果也会显示在应用里；需要应用正在运行。应用必须使用 agent 自己刚生成的预览：每个 `preview_id` 只能用一次，用户在应用中的任何其他操作都会使它失效。路由端口、默认模型和 Codex 目录省略时使用应用中当前的选择。应用启动后只在本机回环地址监听，并把端口和随机令牌写入数据目录中仅所有者可读的 `control-endpoint.json`，退出时删除；令牌不会出现在工具输出、日志或界面中。
 
 Linux 包使用 `/usr/bin/switchx` 或 tar.gz 解压出的 `switchx`，Windows 使用 `switchx.exe` 的完整路径。设置 `SWITCHX_DATA_DIR` 时，MCP 服务读取同一数据目录。
 

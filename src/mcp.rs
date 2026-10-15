@@ -3,7 +3,10 @@
 //! request history. Reads open the existing database read-only, without
 //! creating or migrating it. Only `switchx mcp --allow-writes` also offers
 //! tools that enable models, set fallbacks, and edit prices, through the same
-//! services and edit lock as the app, then tell a running app to reload. No
+//! services and edit lock as the app, then tell a running app to reload.
+//! `--allow-control` also offers tools that ask the running app to preview,
+//! apply, and restore route or direct Codex configuration through
+//! [`crate::control`]; applying takes the ID of a preview the agent made. No
 //! tool takes or returns API keys, OAuth tokens, local router tokens, or
 //! credential references.
 
@@ -17,7 +20,7 @@ use serde_json::{Map, Value, json};
 
 use crate::{
     app::{self, AppError, RequestView, UsageQuery},
-    codex,
+    codex, control,
     storage::{Currency, ProviderKind, RequestStatus, Store, UsageFilter},
     usage::{
         TokenUsage,
@@ -34,15 +37,20 @@ const DEFAULT_ROWS: u64 = 20;
 const INSTRUCTIONS: &str = "SwitchX 的视图：连接（上游）、模型映射、价格、Codex 配置发布状态、用量与请求记录。\
 工具不会返回 API Key、OAuth 令牌或本地路由令牌。\
 路由进程是否正在运行、账号额度等实时状态只能在 SwitchX 应用中查看。";
-const READ_ONLY: &str = "此服务只读，不会修改任何数据。";
+const READ_ONLY: &str = "数据工具只读，不会修改保存的资料。";
 const WRITABLE: &str = "写入工具使用与应用相同的校验；Codex 配置由 SwitchX 托管（路由或直连已启用）时，\
 模型相关修改会被拒绝，需要用户先在应用中恢复原配置。修改在下次发布路由后才影响 Codex。";
 
-/// Whether agents may change saved data.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Access {
-    ReadOnly,
-    ReadWrite,
+const CONTROLLABLE: &str = "控制工具通过正在运行的 SwitchX 应用修改 Codex 配置：先调用 preview_route 或 preview_direct，\
+把预览内容告诉用户并取得同意，再用返回的 preview_id 调用 apply_route 或 apply_direct；restore_config 恢复原配置。";
+
+/// What agents may change beyond reading; both are off by default.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct Access {
+    /// Saved model selections, fallbacks, and prices.
+    pub writes: bool,
+    /// Codex configuration through the running app.
+    pub control: bool,
 }
 
 /// Serves MCP on stdin and stdout until stdin closes.
@@ -148,18 +156,31 @@ impl Server {
             "get_usage" => self.with_store(|store| usage(store, arguments)),
             "list_requests" => self.with_store(|store| requests(store, arguments)),
             "list_prices" => self.with_store(prices),
-            _ if self.access == Access::ReadOnly => {
-                return Err((-32602, format!("Unknown tool: {name}")));
-            }
-            "set_models_enabled" => {
+            "get_app_status" => self.control("status", arguments, &["codex_home"]),
+            "set_models_enabled" if self.access.writes => {
                 self.write(|data_dir, store| set_models_enabled(data_dir, store, arguments))
             }
-            "set_model_fallback" => {
+            "set_model_fallback" if self.access.writes => {
                 self.write(|data_dir, store| set_model_fallback(data_dir, store, arguments))
             }
-            "set_price" => self.write(|data_dir, store| set_price(data_dir, store, arguments)),
-            "delete_price" => {
+            "set_price" if self.access.writes => {
+                self.write(|data_dir, store| set_price(data_dir, store, arguments))
+            }
+            "delete_price" if self.access.writes => {
                 self.write(|data_dir, store| delete_price(data_dir, store, arguments))
+            }
+            "preview_route" if self.access.control => {
+                self.control(name, arguments, &["codex_home", "port", "model"])
+            }
+            "preview_direct" if self.access.control => {
+                self.control(name, arguments, &["codex_home", "provider_id"])
+            }
+            "apply_route" | "apply_direct" if self.access.control => {
+                self.control(name, arguments, &["preview_id"])
+            }
+            "cancel_preview" if self.access.control => self.control(name, arguments, &[]),
+            "restore_config" if self.access.control => {
+                self.control(name, arguments, &["codex_home"])
             }
             _ => return Err((-32602, format!("Unknown tool: {name}"))),
         };
@@ -185,6 +206,26 @@ impl Server {
             .as_deref()
             .map_err(|error| unavailable(*error))?;
         tool(&app::open_store_read_only(data_dir).map_err(unavailable)?)
+    }
+
+    /// Forwards a request to the running app, refusing arguments the method does not take.
+    fn control(
+        &self,
+        method: &str,
+        arguments: &Map<String, Value>,
+        allowed: &[&str],
+    ) -> Result<Value, String> {
+        if let Some(key) = arguments
+            .keys()
+            .find(|key| !allowed.contains(&key.as_str()))
+        {
+            return Err(format!("{method} 不接受参数 {key}。"));
+        }
+        let data_dir = self
+            .data_dir
+            .as_deref()
+            .map_err(|error| unavailable(*error))?;
+        control::call(data_dir, method, Value::Object(arguments.clone()))
     }
 
     /// Writes through the app's services, but only to an existing current-schema
@@ -302,8 +343,9 @@ fn initialize(params: &Value, access: Access) -> Value {
             "version": env!("CARGO_PKG_VERSION"),
         },
         "instructions": format!(
-            "{INSTRUCTIONS}{}",
-            if access == Access::ReadWrite { WRITABLE } else { READ_ONLY }
+            "{INSTRUCTIONS}{}{}",
+            if access.writes { WRITABLE } else { READ_ONLY },
+            if access.control { CONTROLLABLE } else { "" },
         ),
     })
 }
@@ -313,7 +355,8 @@ fn initialize(params: &Value, access: Access) -> Value {
 enum Effect {
     Read,
     Write,
-    Remove,
+    /// Removes data or rewrites Codex configuration; clients should confirm it.
+    Destructive,
 }
 
 fn tools(access: Access) -> Value {
@@ -417,8 +460,16 @@ fn tools(access: Access) -> Value {
              没有价格的模型排在前面。",
             json!({}),
         ),
+        tool(
+            "get_app_status",
+            "应用实时状态",
+            "向正在运行的 SwitchX 应用查询实时状态：本地路由是否在运行及其地址、目标 Codex 配置当前的模式、\
+             提供方和模型、是否由 SwitchX 托管、是否有待恢复的旧配置，以及 agent 发起的待应用预览。\
+             需要 SwitchX 应用正在运行。",
+            json!({ "codex_home": codex_home() }),
+        ),
     ];
-    if access == Access::ReadWrite {
+    if access.writes {
         let price =
             |description: &str| json!({ "type": ["number", "string"], "description": description });
         tools.extend([
@@ -488,11 +539,97 @@ fn tools(access: Access) -> Value {
                     },
                 }),
                 &["model"],
-                Effect::Remove,
+                Effect::Destructive,
+            ),
+        ]);
+    }
+    if access.control {
+        let preview_id = || {
+            json!({
+                "preview_id": {
+                    "type": "string",
+                    "description": "对应预览返回的 preview_id；应用中的任何其他操作都会使它失效。",
+                },
+            })
+        };
+        tools.extend([
+            described(
+                "preview_route",
+                "预览模型路由",
+                "让 SwitchX 应用准备模型路由发布：核对 Codex CLI、已启用的模型及其上游、账号绑定，\
+                 返回将写入 Codex 配置的变更和 preview_id。不会修改配置。参数省略时使用应用中当前的选择。",
+                json!({
+                    "codex_home": codex_home(),
+                    "port": {
+                        "type": ["integer", "string"],
+                        "description": "本地路由端口，1–65535；省略时使用应用中设置的端口。",
+                    },
+                    "model": {
+                        "type": "string",
+                        "description": "写入 Codex 的默认模型（公开模型 ID）；省略时使用应用中选择的默认模型。",
+                    },
+                }),
+                &[],
+                Effect::Write,
+            ),
+            described(
+                "apply_route",
+                "启用模型路由",
+                "按 preview_route 的预览启用模型路由：启动本地路由并改写 Codex 配置的受管字段。\
+                 调用前必须把预览内容告诉用户并取得同意。启用后需在终端运行 codex --no-daemon 新建会话。",
+                preview_id(),
+                &["preview_id"],
+                Effect::Destructive,
+            ),
+            described(
+                "preview_direct",
+                "预览直连",
+                "让 SwitchX 应用准备把 Codex 直接连到一个 API 连接，返回将改写的字段和 preview_id。不会修改配置。",
+                json!({
+                    "codex_home": codex_home(),
+                    "provider_id": {
+                        "type": "string",
+                        "description": "API 连接 ID，取自 list_providers。",
+                    },
+                }),
+                &["provider_id"],
+                Effect::Write,
+            ),
+            described(
+                "apply_direct",
+                "启用直连",
+                "按 preview_direct 的预览改写 Codex 配置，使其直接连接该上游；应用前会再次核对上游模型目录。\
+                 调用前必须把预览内容告诉用户并取得同意。之后需重启目标 Codex 客户端。",
+                preview_id(),
+                &["preview_id"],
+                Effect::Destructive,
+            ),
+            described(
+                "cancel_preview",
+                "取消预览",
+                "放弃尚未应用的路由或直连预览。",
+                json!({}),
+                &[],
+                Effect::Write,
+            ),
+            described(
+                "restore_config",
+                "恢复原配置",
+                "恢复 SwitchX 改写前的 Codex 配置受管字段并停止本地路由。外部改动有冲突时会保留外部值并报告冲突字段。",
+                json!({ "codex_home": codex_home() }),
+                &[],
+                Effect::Destructive,
             ),
         ]);
     }
     Value::Array(tools)
+}
+
+fn codex_home() -> Value {
+    json!({
+        "type": "string",
+        "description": "目标 Codex 配置目录的绝对路径；省略时使用应用中选择的目录。",
+    })
 }
 
 fn described(
@@ -516,7 +653,7 @@ fn described(
         "annotations": {
             "title": title,
             "readOnlyHint": effect == Effect::Read,
-            "destructiveHint": effect == Effect::Remove,
+            "destructiveHint": effect == Effect::Destructive,
             "idempotentHint": true,
             "openWorldHint": false,
         },
@@ -1169,7 +1306,7 @@ mod tests {
     }
 
     fn exchange(data_dir: &Path, messages: &[Value]) -> Vec<Value> {
-        exchange_with(data_dir, Access::ReadOnly, messages)
+        exchange_with(data_dir, Access::default(), messages)
     }
 
     fn exchange_with(data_dir: &Path, access: Access, messages: &[Value]) -> Vec<Value> {
@@ -1350,7 +1487,8 @@ mod tests {
                 "list_models",
                 "get_usage",
                 "list_requests",
-                "list_prices"
+                "list_prices",
+                "get_app_status"
             ]
         );
         assert!(tools.iter().all(|tool| {
@@ -1369,7 +1507,7 @@ mod tests {
             "not json\n[]\n".as_bytes(),
             &mut output,
             Ok(data.0.clone()),
-            Access::ReadOnly,
+            Access::default(),
         )
         .unwrap();
         let errors: Vec<Value> = String::from_utf8(output)
@@ -1569,7 +1707,10 @@ mod tests {
         });
         let responses = exchange_with(
             &data.0,
-            Access::ReadWrite,
+            Access {
+                writes: true,
+                control: false,
+            },
             &[
                 initialize.clone(),
                 json!({ "jsonrpc": "2.0", "id": 1, "method": "tools/list" }),
@@ -1664,7 +1805,10 @@ mod tests {
         fs::write(data.0.join(codex::ROUTE_JOURNAL), "{}").unwrap();
         let responses = exchange_with(
             &data.0,
-            Access::ReadWrite,
+            Access {
+                writes: true,
+                control: false,
+            },
             &[
                 call(
                     1,
@@ -1723,5 +1867,100 @@ mod tests {
             1,
             "no temporary files remain"
         );
+    }
+
+    /// Plays the running app for one connection: records the request and answers it.
+    fn fake_app(data_dir: &Path, result: Value) -> std::thread::JoinHandle<control::Request> {
+        use std::io::{BufRead, BufReader, Write};
+        let listener = std::net::TcpListener::bind(("127.0.0.1", 0)).unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let token = control::publish_endpoint(data_dir, port).unwrap();
+        let token = token.expose().to_owned();
+        std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            let mut line = String::new();
+            BufReader::new(stream.try_clone().unwrap())
+                .read_line(&mut line)
+                .unwrap();
+            let request: control::Request = serde_json::from_str(&line).unwrap();
+            assert!(control::verify(&token, &request.token));
+            serde_json::to_writer(&mut stream, &control::Response::Ok { result }).unwrap();
+            stream.write_all(b"\n").unwrap();
+            request
+        })
+    }
+
+    #[test]
+    fn control_tools_need_the_flag_and_forward_to_the_running_app() {
+        let data = Data::new();
+        fs::create_dir_all(&data.0).unwrap();
+        let control = Access {
+            writes: false,
+            control: true,
+        };
+
+        // Without the flag only the read-only status tool exists.
+        let responses = exchange(
+            &data.0,
+            &[
+                json!({ "jsonrpc": "2.0", "id": 1, "method": "tools/list" }),
+                call(2, "preview_route", json!({})),
+                call(3, "get_app_status", json!({})),
+            ],
+        );
+        let names: Vec<_> = responses[0]["result"]["tools"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|tool| tool["name"].as_str().unwrap().to_owned())
+            .collect();
+        assert!(names.contains(&"get_app_status".to_owned()));
+        assert!(!names.contains(&"apply_route".to_owned()));
+        assert_eq!(responses[1]["error"]["code"], -32602);
+        assert_eq!(responses[2]["result"]["isError"], true);
+        assert!(
+            responses[2]["result"]["content"][0]["text"]
+                .as_str()
+                .unwrap()
+                .contains("未运行")
+        );
+
+        let app = fake_app(
+            &data.0,
+            json!({ "preview_id": "p1", "kind": "route", "changed_fields": ["model"] }),
+        );
+        let responses = exchange_with(
+            &data.0,
+            control,
+            &[
+                json!({ "jsonrpc": "2.0", "id": 1, "method": "tools/list" }),
+                call(2, "apply_route", json!({ "preview_id": "p1", "port": 1 })),
+                call(
+                    3,
+                    "preview_route",
+                    json!({ "model": "sx-flash", "port": 18731 }),
+                ),
+            ],
+        );
+        let request = app.join().unwrap();
+        let tools = responses[0]["result"]["tools"].as_array().unwrap();
+        let tool = |name: &str| tools.iter().find(|tool| tool["name"] == name).unwrap();
+        assert_eq!(tool("apply_route")["annotations"]["destructiveHint"], true);
+        assert_eq!(
+            tool("restore_config")["annotations"]["destructiveHint"],
+            true
+        );
+        assert_eq!(tool("preview_route")["annotations"]["readOnlyHint"], false);
+        assert!(tools.iter().all(|tool| tool["name"] != "set_price"));
+        // Unexpected arguments are refused before reaching the app.
+        assert_eq!(responses[1]["result"]["isError"], true);
+        assert_eq!(tool_result(&responses[2])["preview_id"], "p1");
+        assert_eq!(request.method, "preview_route");
+        assert_eq!(
+            request.params,
+            json!({ "model": "sx-flash", "port": 18731 })
+        );
+        let everything = responses.iter().map(Value::to_string).collect::<String>();
+        assert!(!everything.contains(&request.token));
     }
 }

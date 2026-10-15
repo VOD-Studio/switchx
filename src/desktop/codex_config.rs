@@ -83,6 +83,15 @@ pub(super) fn route_preview_data(preview: &RoutePreview) -> RoutePreviewData {
     }
 }
 
+/// What an inspected direct switch will change.
+pub(super) struct DirectPreview {
+    pub provider_id: String,
+    pub provider_name: String,
+    pub model: String,
+    pub target: PathBuf,
+    pub changes: Vec<String>,
+}
+
 pub(super) fn route_port(text: &str) -> Result<u16, String> {
     text.parse::<u16>()
         .ok()
@@ -190,7 +199,11 @@ pub(super) fn connect(app: &AppWindow, sender: &mpsc::Sender<Command>) {
 }
 
 impl Worker {
-    pub(super) fn inspect_direct(&mut self, id: String, target: String) {
+    pub(super) fn inspect_direct(
+        &mut self,
+        id: String,
+        target: String,
+    ) -> Result<DirectPreview, String> {
         self.route_session.discard_preview();
         let _ = self
             .weak
@@ -215,11 +228,18 @@ impl Worker {
         })();
         match result {
             Ok((switch, provider, state)) => {
+                let preview = DirectPreview {
+                    provider_id: provider.id.clone(),
+                    provider_name: provider.name.clone(),
+                    model: switch.default_model().to_owned(),
+                    target: switch.target().to_path_buf(),
+                    changes: switch.changes.clone(),
+                };
                 let summary = format!(
                     "目标：{} · 模型：{} · 受管变更：{}",
-                    provider.name,
-                    switch.default_model(),
-                    switch.changes.join("、")
+                    preview.provider_name,
+                    preview.model,
+                    preview.changes.join("、")
                 );
                 self.prepared = Some((switch, provider, state));
                 let _ = self.weak.upgrade_in_event_loop(move |app| {
@@ -228,18 +248,21 @@ impl Worker {
                     app.set_direct_preview_ready(true);
                     app.set_action_message("差异已准备；应用前将再次检查上游目录".into());
                 });
+                Ok(preview)
             }
             Err(error) => {
                 self.prepared = None;
+                let shown = error.clone();
                 let _ = self.weak.upgrade_in_event_loop(move |app| {
                     app.set_direct_preview_ready(false);
-                    show_action(&app, Err(error));
+                    show_action(&app, Err(shown));
                 });
+                Err(error)
             }
         }
     }
 
-    pub(super) async fn apply_direct(&mut self, target: String) {
+    pub(super) async fn apply_direct(&mut self, target: String) -> Result<String, String> {
         let result = async {
             let (switch, selected, selected_config) =
                 self.prepared.take().ok_or("请先预览直连变更")?;
@@ -269,6 +292,10 @@ impl Worker {
             ))
         }
         .await;
+        let outcome = result
+            .as_ref()
+            .map(|(message, _)| message.clone())
+            .map_err(Clone::clone);
         let _ = self.weak.upgrade_in_event_loop(move |app| {
             app.set_direct_preview_ready(false);
             match result {
@@ -281,9 +308,10 @@ impl Worker {
                 Err(error) => show_action(&app, Err(error)),
             }
         });
+        outcome
     }
 
-    pub(super) async fn restore_config(&mut self, target: String) {
+    pub(super) async fn restore_config(&mut self, target: String) -> Result<(), String> {
         self.prepared = None;
         let result = async {
             let data_dir = self.data_dir.path()?;
@@ -303,6 +331,7 @@ impl Worker {
             client::inspect(&target_home, data_dir)
         }
         .await;
+        let outcome = result.as_ref().map(|_| ()).map_err(Clone::clone);
         let fallback_status = self
             .data_dir
             .ok()
@@ -345,6 +374,7 @@ impl Worker {
                 Err(error) => show_action(&app, Err(error)),
             }
         });
+        outcome
     }
 
     pub(super) fn inspect_config(&mut self, target: String) {
@@ -397,7 +427,12 @@ impl Worker {
         });
     }
 
-    pub(super) async fn inspect_route(&mut self, target: String, port: String, model: String) {
+    pub(super) async fn inspect_route(
+        &mut self,
+        target: String,
+        port: String,
+        model: String,
+    ) -> Result<RoutePreview, String> {
         self.prepared = None;
         let result = async {
             let data_dir = self.data_dir.path()?;
@@ -408,6 +443,7 @@ impl Worker {
                 .await
         }
         .await;
+        let outcome = result.clone();
         let _ = self.weak.upgrade_in_event_loop(move |app| {
             app.set_direct_preview_ready(false);
             app.set_route_preview_model(model.as_str().into());
@@ -429,9 +465,15 @@ impl Worker {
                 }
             }
         });
+        outcome
     }
 
-    pub(super) async fn apply_route(&mut self, target: String, port: String, model: String) {
+    pub(super) async fn apply_route(
+        &mut self,
+        target: String,
+        port: String,
+        model: String,
+    ) -> Result<(), String> {
         let result = async {
             let data_dir = self.data_dir.path()?;
             self.route_session
@@ -439,6 +481,7 @@ impl Worker {
                 .await
         }
         .await;
+        let outcome = result.clone();
         let status = self
             .data_dir
             .ok()
@@ -455,6 +498,7 @@ impl Worker {
                 }),
             );
         });
+        outcome
     }
 
     pub(super) fn cancel_route_preview(&mut self) {

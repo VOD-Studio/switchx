@@ -3,6 +3,7 @@ pub mod catalog;
 pub mod chatgpt;
 pub mod code_highlight;
 pub mod codex;
+pub mod control;
 pub mod credential_helper;
 pub mod credentials;
 pub mod headless;

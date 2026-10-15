@@ -13,11 +13,18 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         return Ok(());
     }
     if arguments.first().is_some_and(|command| command == "mcp") {
-        let access = match &arguments[1..] {
-            [] => mcp::Access::ReadOnly,
-            [flag] if flag == "--allow-writes" => mcp::Access::ReadWrite,
-            _ => return Err("usage: switchx mcp [--allow-writes]".into()),
-        };
+        let usage = "usage: switchx mcp [--allow-writes] [--allow-control]";
+        let mut access = mcp::Access::default();
+        for flag in &arguments[1..] {
+            let enabled = match flag.to_str() {
+                Some("--allow-writes") => &mut access.writes,
+                Some("--allow-control") => &mut access.control,
+                _ => return Err(usage.into()),
+            };
+            if std::mem::replace(enabled, true) {
+                return Err(usage.into());
+            }
+        }
         mcp::serve(app::data_directory(), access)?;
         return Ok(());
     }

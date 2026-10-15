@@ -20,7 +20,7 @@ use tokio::{
 
 use super::{
     accounts::sync_owned_account, codex_config::codex_home, command::Command,
-    feedback::show_action, provider_checks::finish_provider_check,
+    control::ControlPreviews, feedback::show_action, provider_checks::finish_provider_check,
     subscription_editor::SubscriptionAuthDraft,
 };
 
@@ -102,6 +102,7 @@ pub(super) struct Worker {
     pub(super) xai_quota_queries: JoinSet<()>,
     pub(super) codex_quota_queries: JoinSet<()>,
     pub(super) recovery_only: bool,
+    pub(super) control_previews: ControlPreviews,
 }
 
 /// Runs window commands until every sender is dropped, then restores
@@ -127,6 +128,7 @@ pub(super) async fn run(
         xai_quota_queries: JoinSet::new(),
         codex_quota_queries: JoinSet::new(),
         recovery_only: false,
+        control_previews: ControlPreviews::default(),
     }
     .run(receiver)
     .await
@@ -158,6 +160,16 @@ impl Worker {
     }
 
     async fn handle(&mut self, command: Command) -> Result<(), String> {
+        // Anything the window does may change what an agent previewed.
+        if !matches!(
+            command,
+            Command::Control { .. }
+                | Command::PollRouteStatus
+                | Command::RefreshRequests
+                | Command::Refresh(_)
+        ) {
+            self.control_previews.clear();
+        }
         match command {
             Command::PollRouteStatus => {}
             Command::RefreshRequests => self.refresh_requests(),
@@ -216,9 +228,15 @@ impl Worker {
                 self.fetch_models(scope, generation, provider, draft, url, key)
                     .await
             }
-            Command::InspectDirect { id, home } => self.inspect_direct(id, home),
-            Command::ApplyDirect(home) => self.apply_direct(home).await,
-            Command::RestoreConfig(home) => self.restore_config(home).await,
+            Command::InspectDirect { id, home } => {
+                let _ = self.inspect_direct(id, home);
+            }
+            Command::ApplyDirect(home) => {
+                let _ = self.apply_direct(home).await;
+            }
+            Command::RestoreConfig(home) => {
+                let _ = self.restore_config(home).await;
+            }
             Command::InspectConfig(home) => self.inspect_config(home),
             Command::ImportCurrent(home) => self.import_current(home),
             Command::CheckLogin(home) => self.check_login(home).await,
@@ -243,10 +261,15 @@ impl Worker {
             Command::SelectModels(public_ids, enabled) => self.select_models(public_ids, enabled),
             Command::SaveFallback(public_id, fallback) => self.save_fallback(public_id, fallback),
             Command::InspectRoute { home, port, model } => {
-                self.inspect_route(home, port, model).await
+                let _ = self.inspect_route(home, port, model).await;
             }
-            Command::ApplyRoute { home, port, model } => self.apply_route(home, port, model).await,
+            Command::ApplyRoute { home, port, model } => {
+                let _ = self.apply_route(home, port, model).await;
+            }
             Command::CancelRoutePreview => self.cancel_route_preview(),
+            Command::Control { request, reply } => {
+                let _ = reply.send(self.control(request).await);
+            }
             Command::Quit => return self.quit().await,
         }
         Ok(())

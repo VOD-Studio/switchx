@@ -9,6 +9,7 @@ mod codex_config;
 mod command;
 mod common_config;
 mod connection_models;
+mod control;
 mod feedback;
 mod grok;
 mod icon_picker;
@@ -105,9 +106,12 @@ pub fn run() -> Result<(), Box<dyn std::error::Error>> {
     usage::connect(&app, &usage_service);
     // Read new session-log usage at launch; the usage thread repeats it each minute.
     usage_service.sync(&app.get_config_home(), false);
-    if let Ok(path) = &directory {
+    let control_server = directory.as_ref().ok().and_then(|path| {
         workbench::watch_external_changes(&app, &usage_service, path.clone());
-    }
+        control::start(&runtime, &app, &sender, path.clone())
+            .inspect_err(|error| eprintln!("SwitchX agent control unavailable: {error}"))
+            .ok()
+    });
     workbench::connect(&app, &sender);
     activity::connect(&app, &sender);
     provider_editor::connect(&app, &sender);
@@ -140,6 +144,9 @@ pub fn run() -> Result<(), Box<dyn std::error::Error>> {
         slint::CloseRequestResponse::HideWindow
     });
     let result = app.run();
+    if let Some(server) = control_server {
+        server.stop();
+    }
     usage_service.stop();
     #[cfg(target_os = "macos")]
     macos::clear_quit_handler();
