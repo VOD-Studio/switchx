@@ -1,8 +1,10 @@
 //! The connection workbench: saved connections, their models, and search.
 
+use std::{path::PathBuf, sync::mpsc as std_mpsc, time::Duration};
+
 use slint::{ComponentHandle, Model, ModelRc, VecModel};
 use switchx::{
-    app::{AppError, Snapshot, load_snapshot},
+    app::{AppError, Snapshot, external_change, load_snapshot},
     storage::ProviderKind,
     ui::{AppWindow, ModelRow, ProviderRow},
 };
@@ -13,8 +15,50 @@ use super::{
     grok::{show_xai_accounts, xai_account_view},
     icon_picker::{provider_icon_row, resolved_provider_icon_id},
     rows::sync_rows,
+    usage::UsageService,
     worker::Worker,
 };
+
+/// How often the app looks for changes another process, such as `switchx mcp`, saved.
+const EXTERNAL_CHANGE_POLL: Duration = Duration::from_secs(2);
+
+/// Reloads the workbench and usage views after another process changes saved
+/// data. A change seen while a command runs is retried on the next poll.
+pub(super) fn watch_external_changes(app: &AppWindow, usage: &UsageService, data_dir: PathBuf) {
+    let weak = app.as_weak();
+    let usage = usage.clone();
+    let mut seen = external_change(&data_dir);
+    let watcher = std::thread::Builder::new()
+        .name("switchx-external".into())
+        .spawn(move || {
+            loop {
+                std::thread::sleep(EXTERNAL_CHANGE_POLL);
+                let current = external_change(&data_dir);
+                if current == seen {
+                    continue;
+                }
+                let (reloaded, outcome) = std_mpsc::channel();
+                let usage = usage.clone();
+                let posted = weak.upgrade_in_event_loop(move |app| {
+                    let idle = !app.get_busy();
+                    if idle {
+                        app.invoke_refresh(false);
+                        usage.reload();
+                    }
+                    let _ = reloaded.send(idle);
+                });
+                // The window is gone once the event loop or the window stops answering.
+                match posted.map(|()| outcome.recv()) {
+                    Ok(Ok(true)) => seen = current,
+                    Ok(Ok(false)) => {}
+                    _ => return,
+                }
+            }
+        });
+    if let Err(error) = watcher {
+        eprintln!("SwitchX external change watcher: {error}");
+    }
+}
 
 pub(super) fn matching_providers(
     providers: &ModelRc<ProviderRow>,

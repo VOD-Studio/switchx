@@ -328,7 +328,10 @@ pub struct PriceView {
 
 /// Unpriced models with usage come first, busiest first, then priced ones.
 pub fn load_prices(data_dir: &Path) -> Result<Vec<PriceView>, AppError> {
-    let store = open_store(data_dir)?;
+    prices_from(&open_store(data_dir)?)
+}
+
+pub(crate) fn prices_from(store: &Store) -> Result<Vec<PriceView>, AppError> {
     let prices = store.model_prices().map_err(|_| AppError::Database)?;
     let mut views = store
         .usage_models()

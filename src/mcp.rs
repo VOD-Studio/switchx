@@ -1,8 +1,11 @@
-//! A read-only Model Context Protocol server on stdio, run as `switchx mcp`, so
-//! agents can inspect SwitchX status, connections, model mappings, usage, and
-//! request history. Tools open the existing database read-only, without
-//! creating, migrating, or writing it, and never return API keys, OAuth
-//! tokens, local router tokens, or credential references.
+//! A Model Context Protocol server on stdio, run as `switchx mcp`, so agents
+//! can inspect SwitchX status, connections, model mappings, prices, usage, and
+//! request history. Reads open the existing database read-only, without
+//! creating or migrating it. Only `switchx mcp --allow-writes` also offers
+//! tools that enable models, set fallbacks, and edit prices, through the same
+//! services and edit lock as the app, then tell a running app to reload. No
+//! tool takes or returns API keys, OAuth tokens, local router tokens, or
+//! credential references.
 
 use std::{
     io::{self, BufRead, Write},
@@ -28,13 +31,28 @@ const PROTOCOL_VERSIONS: [&str; 4] = ["2025-11-25", "2025-06-18", "2025-03-26", 
 const REQUEST_WINDOW: usize = 100;
 const DEFAULT_ROWS: u64 = 20;
 
-const INSTRUCTIONS: &str = "SwitchX 的只读视图：连接（上游）、模型映射、Codex 配置发布状态、用量与请求记录。\
-所有工具都不会修改数据，也不会返回 API Key、OAuth 令牌或本地路由令牌。\
+const INSTRUCTIONS: &str = "SwitchX 的视图：连接（上游）、模型映射、价格、Codex 配置发布状态、用量与请求记录。\
+工具不会返回 API Key、OAuth 令牌或本地路由令牌。\
 路由进程是否正在运行、账号额度等实时状态只能在 SwitchX 应用中查看。";
+const READ_ONLY: &str = "此服务只读，不会修改任何数据。";
+const WRITABLE: &str = "写入工具使用与应用相同的校验；Codex 配置由 SwitchX 托管（路由或直连已启用）时，\
+模型相关修改会被拒绝，需要用户先在应用中恢复原配置。修改在下次发布路由后才影响 Codex。";
+
+/// Whether agents may change saved data.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Access {
+    ReadOnly,
+    ReadWrite,
+}
 
 /// Serves MCP on stdin and stdout until stdin closes.
-pub fn serve(data_dir: Result<PathBuf, AppError>) -> io::Result<()> {
-    serve_on(io::stdin().lock(), &mut io::stdout().lock(), data_dir)
+pub fn serve(data_dir: Result<PathBuf, AppError>, access: Access) -> io::Result<()> {
+    serve_on(
+        io::stdin().lock(),
+        &mut io::stdout().lock(),
+        data_dir,
+        access,
+    )
 }
 
 /// Serves newline-delimited JSON-RPC messages from `input`, answering on `output`.
@@ -42,8 +60,9 @@ pub fn serve_on(
     input: impl BufRead,
     output: &mut impl Write,
     data_dir: Result<PathBuf, AppError>,
+    access: Access,
 ) -> io::Result<()> {
-    let server = Server { data_dir };
+    let server = Server { data_dir, access };
     for line in input.lines() {
         let line = line?;
         if line.trim().is_empty() {
@@ -60,6 +79,7 @@ pub fn serve_on(
 
 struct Server {
     data_dir: Result<PathBuf, AppError>,
+    access: Access,
 }
 
 impl Server {
@@ -98,9 +118,9 @@ impl Server {
         }
         let params = message.get("params").cloned().unwrap_or(Value::Null);
         let result = match method {
-            "initialize" => Ok(initialize(&params)),
+            "initialize" => Ok(initialize(&params, self.access)),
             "ping" => Ok(json!({})),
-            "tools/list" => Ok(json!({ "tools": tools() })),
+            "tools/list" => Ok(json!({ "tools": tools(self.access) })),
             "tools/call" => self.call(&params),
             _ => Err((-32601, "Method not found".to_owned())),
         };
@@ -127,6 +147,20 @@ impl Server {
             "list_models" => self.with_store(|store| models(store, arguments)),
             "get_usage" => self.with_store(|store| usage(store, arguments)),
             "list_requests" => self.with_store(|store| requests(store, arguments)),
+            "list_prices" => self.with_store(prices),
+            _ if self.access == Access::ReadOnly => {
+                return Err((-32602, format!("Unknown tool: {name}")));
+            }
+            "set_models_enabled" => {
+                self.write(|data_dir, store| set_models_enabled(data_dir, store, arguments))
+            }
+            "set_model_fallback" => {
+                self.write(|data_dir, store| set_model_fallback(data_dir, store, arguments))
+            }
+            "set_price" => self.write(|data_dir, store| set_price(data_dir, store, arguments)),
+            "delete_price" => {
+                self.write(|data_dir, store| delete_price(data_dir, store, arguments))
+            }
             _ => return Err((-32602, format!("Unknown tool: {name}"))),
         };
         // Tool failures go back to the model so it can correct its arguments.
@@ -151,6 +185,22 @@ impl Server {
             .as_deref()
             .map_err(|error| unavailable(*error))?;
         tool(&app::open_store_read_only(data_dir).map_err(unavailable)?)
+    }
+
+    /// Writes through the app's services, but only to an existing current-schema
+    /// database, which the read-only store also uses to report the result.
+    fn write(
+        &self,
+        tool: impl FnOnce(&Path, &Store) -> Result<Value, String>,
+    ) -> Result<Value, String> {
+        let data_dir = self
+            .data_dir
+            .as_deref()
+            .map_err(|error| unavailable(*error))?;
+        let store = app::open_store_read_only(data_dir).map_err(unavailable)?;
+        let mut result = tool(data_dir, &store)?;
+        result["app_notified"] = app::mark_external_change(data_dir).is_ok().into();
+        Ok(result)
     }
 
     fn status(&self) -> Value {
@@ -237,7 +287,7 @@ fn failure(id: Value, code: i64, message: &str) -> Value {
     json!({ "jsonrpc": "2.0", "id": id, "error": { "code": code, "message": message } })
 }
 
-fn initialize(params: &Value) -> Value {
+fn initialize(params: &Value, access: Access) -> Value {
     let requested = params.get("protocolVersion").and_then(Value::as_str);
     let version = PROTOCOL_VERSIONS
         .into_iter()
@@ -251,31 +301,26 @@ fn initialize(params: &Value) -> Value {
             "title": "SwitchX",
             "version": env!("CARGO_PKG_VERSION"),
         },
-        "instructions": INSTRUCTIONS,
+        "instructions": format!(
+            "{INSTRUCTIONS}{}",
+            if access == Access::ReadWrite { WRITABLE } else { READ_ONLY }
+        ),
     })
 }
 
-fn tools() -> Value {
+/// How a tool affects saved data, for client approval prompts.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Effect {
+    Read,
+    Write,
+    Remove,
+}
+
+fn tools(access: Access) -> Value {
     let tool = |name: &str, title: &str, description: &str, properties: Value| {
-        json!({
-            "name": name,
-            "title": title,
-            "description": description,
-            "inputSchema": {
-                "type": "object",
-                "properties": properties,
-                "additionalProperties": false,
-            },
-            "annotations": {
-                "title": title,
-                "readOnlyHint": true,
-                "destructiveHint": false,
-                "idempotentHint": true,
-                "openWorldHint": false,
-            },
-        })
+        described(name, title, description, properties, &[], Effect::Read)
     };
-    json!([
+    let mut tools = vec![
         tool(
             "get_status",
             "SwitchX 状态",
@@ -365,7 +410,117 @@ fn tools() -> Value {
                 },
             }),
         ),
-    ])
+        tool(
+            "list_prices",
+            "模型价格",
+            "列出用户填写的模型价格（每百万 token，适用于所有连接）以及每个模型的累计请求数和 token 数。\
+             没有价格的模型排在前面。",
+            json!({}),
+        ),
+    ];
+    if access == Access::ReadWrite {
+        let price =
+            |description: &str| json!({ "type": ["number", "string"], "description": description });
+        tools.extend([
+            described(
+                "set_models_enabled",
+                "启用或停用模型",
+                "启用或停用已保存的模型映射；启用的模型会在下次发布路由时出现在 Codex 中。\
+                 配置由 SwitchX 托管时会被拒绝。",
+                json!({
+                    "public_ids": {
+                        "type": "array",
+                        "items": { "type": "string" },
+                        "minItems": 1,
+                        "maxItems": 100,
+                        "uniqueItems": true,
+                        "description": "公开模型 ID，取自 list_models 的 public_id。",
+                    },
+                    "enabled": { "type": "boolean" },
+                }),
+                &["public_ids", "enabled"],
+                Effect::Write,
+            ),
+            described(
+                "set_model_fallback",
+                "设置备用连接",
+                "设置或清除模型的备用连接：主连接无法建立连接时，路由改用备用连接上的同名上游模型。\
+                 主备都必须是 API 连接，且备用连接已保存同一上游模型。配置由 SwitchX 托管时会被拒绝。",
+                json!({
+                    "public_id": {
+                        "type": "string",
+                        "description": "公开模型 ID，取自 list_models 的 public_id。",
+                    },
+                    "fallback_provider_id": {
+                        "type": ["string", "null"],
+                        "description": "备用连接 ID，取自 list_providers 的 id；null 或省略表示清除。",
+                    },
+                }),
+                &["public_id"],
+                Effect::Write,
+            ),
+            described(
+                "set_price",
+                "设置模型价格",
+                "设置一个上游模型每百万 token 的价格，用于估算费用，适用于所有连接。\
+                 金额为非负数，最多 6 位小数。",
+                json!({
+                    "model": {
+                        "type": "string",
+                        "description": "上游模型名，取自 get_usage 的 models[].key 或 list_prices 的 model。",
+                    },
+                    "currency": { "type": "string", "enum": ["USD", "CNY"] },
+                    "input": price("每百万输入 token 的价格。"),
+                    "cached_input": price("每百万缓存命中输入 token 的价格；省略表示与输入价格相同。"),
+                    "output": price("每百万输出 token 的价格。"),
+                }),
+                &["model", "currency", "input", "output"],
+                Effect::Write,
+            ),
+            described(
+                "delete_price",
+                "删除模型价格",
+                "删除一个模型的价格；之后它的用量不再估算费用。",
+                json!({
+                    "model": {
+                        "type": "string",
+                        "description": "已定价的上游模型名，取自 list_prices。",
+                    },
+                }),
+                &["model"],
+                Effect::Remove,
+            ),
+        ]);
+    }
+    Value::Array(tools)
+}
+
+fn described(
+    name: &str,
+    title: &str,
+    description: &str,
+    properties: Value,
+    required: &[&str],
+    effect: Effect,
+) -> Value {
+    json!({
+        "name": name,
+        "title": title,
+        "description": description,
+        "inputSchema": {
+            "type": "object",
+            "properties": properties,
+            "required": required,
+            "additionalProperties": false,
+        },
+        "annotations": {
+            "title": title,
+            "readOnlyHint": effect == Effect::Read,
+            "destructiveHint": effect == Effect::Remove,
+            "idempotentHint": true,
+            "openWorldHint": false,
+        },
+    })
 }
 
 fn unavailable(error: AppError) -> String {
@@ -693,6 +848,148 @@ fn requests(store: &Store, arguments: &Map<String, Value>) -> Result<Value, Stri
     Ok(json!({ "stats": stats, "requests": requests }))
 }
 
+fn prices(store: &Store) -> Result<Value, String> {
+    let prices: Vec<_> = app::prices_from(store)
+        .map_err(unavailable)?
+        .iter()
+        .map(price_view)
+        .collect();
+    Ok(json!({ "unit": "per_million_tokens", "prices": prices }))
+}
+
+fn price_view(price: &app::PriceView) -> Value {
+    let mut view = json!({
+        "model": price.model,
+        "requests": price.requests,
+        "tokens": price.tokens,
+    });
+    if let Some(currency) = price.currency {
+        view["currency"] = currency.as_str().into();
+        let amounts = [
+            ("input", &price.input),
+            ("cached_input", &price.cached_input),
+            ("output", &price.output),
+        ];
+        for (key, amount) in amounts {
+            if let Ok(amount) = amount.parse::<f64>() {
+                view[key] = amount.into();
+            }
+        }
+    }
+    view
+}
+
+fn saved_model(store: &Store, public_id: &str) -> Result<Value, String> {
+    let snapshot = app::snapshot_from(store, false).map_err(unavailable)?;
+    snapshot
+        .models
+        .iter()
+        .find(|model| model.saved && model.public_id == public_id)
+        .map(|model| {
+            json!({
+                "public_id": model.public_id,
+                "provider_id": model.provider_id,
+                "upstream_model": model.upstream_model,
+                "enabled": model.enabled,
+                "fallback_provider_id": (!model.fallback_provider_id.is_empty())
+                    .then_some(model.fallback_provider_id.as_str()),
+            })
+        })
+        .ok_or_else(|| format!("没有公开 ID 为 {public_id} 的模型映射；请先调用 list_models。"))
+}
+
+fn set_models_enabled(
+    data_dir: &Path,
+    store: &Store,
+    arguments: &Map<String, Value>,
+) -> Result<Value, String> {
+    let ids = match arguments.get("public_ids") {
+        Some(Value::Array(ids)) if (1..=100).contains(&ids.len()) => ids
+            .iter()
+            .map(|id| id.as_str().map(str::to_owned))
+            .collect::<Option<Vec<_>>>(),
+        _ => None,
+    }
+    .ok_or("public_ids 必须是 1 到 100 个字符串。")?;
+    let enabled = required_bool(arguments, "enabled")?;
+    // Validate every ID first, so a typo cannot leave a partial change.
+    for id in &ids {
+        saved_model(store, id)?;
+    }
+    app::select_models(data_dir, &ids, enabled)?;
+    let models = ids
+        .iter()
+        .map(|id| saved_model(store, id))
+        .collect::<Result<Vec<_>, _>>()?;
+    Ok(json!({ "models": models }))
+}
+
+fn set_model_fallback(
+    data_dir: &Path,
+    store: &Store,
+    arguments: &Map<String, Value>,
+) -> Result<Value, String> {
+    let public_id = required_string(arguments, "public_id")?;
+    let fallback = optional_string(arguments, "fallback_provider_id")?;
+    saved_model(store, public_id)?;
+    app::save_fallback(data_dir, public_id, fallback)?;
+    Ok(json!({ "model": saved_model(store, public_id)? }))
+}
+
+fn set_price(
+    data_dir: &Path,
+    store: &Store,
+    arguments: &Map<String, Value>,
+) -> Result<Value, String> {
+    let amount = |key: &str| match arguments.get(key) {
+        None | Some(Value::Null) => Ok(None),
+        Some(Value::String(text)) => Ok(Some(text.trim().to_owned())),
+        Some(Value::Number(number)) => Ok(Some(number.to_string())),
+        Some(_) => Err(format!("{key} 必须是数字或数字字符串。")),
+    };
+    let required = |key: &str| amount(key)?.ok_or_else(|| format!("缺少 {key}。"));
+    let model = required_string(arguments, "model")?;
+    let currency = required_string(arguments, "currency")?;
+    if Currency::parse(currency).is_none() {
+        return Err("currency 必须是 USD 或 CNY。".into());
+    }
+    app::save_price(
+        data_dir,
+        &app::PriceInput {
+            provider_id: String::new(),
+            model: model.into(),
+            currency: currency.into(),
+            input: required("input")?,
+            cached_input: amount("cached_input")?.unwrap_or_default(),
+            output: required("output")?,
+        },
+    )?;
+    let saved = app::prices_from(store)
+        .map_err(unavailable)?
+        .iter()
+        .find(|price| price.model == model)
+        .map(price_view)
+        .ok_or("价格已保存，但无法读回。")?;
+    Ok(json!({ "unit": "per_million_tokens", "price": saved }))
+}
+
+fn delete_price(
+    data_dir: &Path,
+    store: &Store,
+    arguments: &Map<String, Value>,
+) -> Result<Value, String> {
+    let model = required_string(arguments, "model")?;
+    let priced = app::prices_from(store)
+        .map_err(unavailable)?
+        .iter()
+        .any(|price| price.model == model && price.currency.is_some());
+    if !priced {
+        return Err(format!("{model} 没有价格；请先调用 list_prices。"));
+    }
+    app::delete_price(data_dir, "", model)?;
+    Ok(json!({ "deleted": model }))
+}
+
 fn request_stats(requests: &[RequestView]) -> Map<String, Value> {
     let stats = app::request_stats(requests);
     let mut value = Map::new();
@@ -808,6 +1105,14 @@ fn optional_string<'a>(
     }
 }
 
+fn required_string<'a>(arguments: &'a Map<String, Value>, key: &str) -> Result<&'a str, String> {
+    optional_string(arguments, key)?.ok_or_else(|| format!("缺少 {key}。"))
+}
+
+fn required_bool(arguments: &Map<String, Value>, key: &str) -> Result<bool, String> {
+    optional_bool(arguments, key)?.ok_or_else(|| format!("缺少 {key}。"))
+}
+
 fn optional_bool(arguments: &Map<String, Value>, key: &str) -> Result<Option<bool>, String> {
     match arguments.get(key) {
         None | Some(Value::Null) => Ok(None),
@@ -864,12 +1169,22 @@ mod tests {
     }
 
     fn exchange(data_dir: &Path, messages: &[Value]) -> Vec<Value> {
+        exchange_with(data_dir, Access::ReadOnly, messages)
+    }
+
+    fn exchange_with(data_dir: &Path, access: Access, messages: &[Value]) -> Vec<Value> {
         let input: String = messages
             .iter()
             .map(|message| format!("{message}\n"))
             .collect();
         let mut output = Vec::new();
-        serve_on(input.as_bytes(), &mut output, Ok(data_dir.to_owned())).unwrap();
+        serve_on(
+            input.as_bytes(),
+            &mut output,
+            Ok(data_dir.to_owned()),
+            access,
+        )
+        .unwrap();
         String::from_utf8(output)
             .unwrap()
             .lines()
@@ -976,7 +1291,7 @@ mod tests {
         app::save_price(
             data_dir,
             &app::PriceInput {
-                provider_id: "probe".into(),
+                provider_id: String::new(),
                 model: "deepseek-flash".into(),
                 currency: "USD".into(),
                 input: "1".into(),
@@ -1034,7 +1349,8 @@ mod tests {
                 "list_providers",
                 "list_models",
                 "get_usage",
-                "list_requests"
+                "list_requests",
+                "list_prices"
             ]
         );
         assert!(tools.iter().all(|tool| {
@@ -1049,7 +1365,13 @@ mod tests {
         );
 
         let mut output = Vec::new();
-        serve_on("not json\n[]\n".as_bytes(), &mut output, Ok(data.0.clone())).unwrap();
+        serve_on(
+            "not json\n[]\n".as_bytes(),
+            &mut output,
+            Ok(data.0.clone()),
+            Access::ReadOnly,
+        )
+        .unwrap();
         let errors: Vec<Value> = String::from_utf8(output)
             .unwrap()
             .lines()
@@ -1167,5 +1489,239 @@ mod tests {
                 .contains("打开一次应用")
         );
         assert_eq!(fs::read(&database).unwrap(), before);
+    }
+
+    /// A second API connection serving the same upstream model, as a fallback.
+    fn seed_fallback(data_dir: &Path) {
+        let store = app::open_store(data_dir).unwrap();
+        let mut model = store.models().unwrap().remove(0);
+        model.provider_id = "backup".into();
+        model.public_id = "sx-flash-backup".into();
+        model.display_name = "Backup Flash".into();
+        store
+            .put_api_provider(
+                &ProviderRecord {
+                    kind: ProviderKind::ApiKey,
+                    account_binding: None,
+                    icon_id: None,
+                    id: "backup".into(),
+                    name: "Backup Upstream".into(),
+                    base_url: "https://backup.example.invalid/v1".into(),
+                    model_id: "deepseek-flash".into(),
+                    credential_ref: None,
+                },
+                &[model],
+                None,
+                Some(&Secret::new(format!("{API_KEY}-backup"))),
+                None,
+            )
+            .unwrap();
+    }
+
+    #[test]
+    fn read_only_server_offers_no_write_tools() {
+        let data = Data::new();
+        seed(&data.0);
+        let database = data.0.join("switchx.sqlite");
+        let before = fs::read(&database).unwrap();
+        let responses = exchange(
+            &data.0,
+            &[
+                json!({ "jsonrpc": "2.0", "id": 1, "method": "tools/list" }),
+                call(
+                    2,
+                    "set_models_enabled",
+                    json!({ "public_ids": ["sx-flash"], "enabled": false }),
+                ),
+                call(
+                    3,
+                    "set_price",
+                    json!({ "model": "x", "currency": "USD", "input": 1, "output": 1 }),
+                ),
+                call(4, "list_prices", json!({})),
+            ],
+        );
+        let tools = responses[0]["result"]["tools"].as_array().unwrap();
+        assert!(
+            tools
+                .iter()
+                .all(|tool| tool["annotations"]["readOnlyHint"] == true)
+        );
+        assert_eq!(responses[1]["error"]["code"], -32602);
+        assert_eq!(responses[2]["error"]["code"], -32602);
+        let price = &tool_result(&responses[3])["prices"][0];
+        assert_eq!(price["model"], "deepseek-flash");
+        assert_eq!(price["output"], 2.0);
+        assert_eq!(fs::read(&database).unwrap(), before);
+        assert!(app::external_change(&data.0).is_none());
+    }
+
+    #[test]
+    fn write_tools_change_models_and_prices_and_notify_the_app() {
+        let data = Data::new();
+        seed(&data.0);
+        seed_fallback(&data.0);
+        let initialize = json!({
+            "jsonrpc": "2.0",
+            "id": 0,
+            "method": "initialize",
+            "params": { "protocolVersion": "2025-06-18" },
+        });
+        let responses = exchange_with(
+            &data.0,
+            Access::ReadWrite,
+            &[
+                initialize.clone(),
+                json!({ "jsonrpc": "2.0", "id": 1, "method": "tools/list" }),
+                call(
+                    2,
+                    "set_models_enabled",
+                    json!({ "public_ids": ["sx-flash", "missing"], "enabled": false }),
+                ),
+                call(
+                    3,
+                    "set_models_enabled",
+                    json!({ "public_ids": ["sx-flash"], "enabled": false }),
+                ),
+                call(
+                    4,
+                    "set_model_fallback",
+                    json!({ "public_id": "sx-flash", "fallback_provider_id": "backup" }),
+                ),
+                call(
+                    5,
+                    "set_price",
+                    json!({ "model": "gpt-5.5", "currency": "CNY", "input": "0.5", "output": 4 }),
+                ),
+                call(
+                    6,
+                    "set_price",
+                    json!({ "model": "gpt-5.5", "currency": "EUR", "input": 1, "output": 1 }),
+                ),
+                call(7, "delete_price", json!({ "model": "deepseek-flash" })),
+                call(8, "delete_price", json!({ "model": "deepseek-flash" })),
+                call(
+                    9,
+                    "set_model_fallback",
+                    json!({ "public_id": "sx-flash", "fallback_provider_id": null }),
+                ),
+            ],
+        );
+        assert!(
+            responses[0]["result"]["instructions"]
+                .as_str()
+                .unwrap()
+                .contains("写入工具")
+        );
+        let tools = responses[1]["result"]["tools"].as_array().unwrap();
+        let tool = |name: &str| tools.iter().find(|tool| tool["name"] == name).unwrap();
+        assert_eq!(tool("set_price")["annotations"]["readOnlyHint"], false);
+        assert_eq!(tool("delete_price")["annotations"]["destructiveHint"], true);
+        assert_eq!(tool("set_price")["inputSchema"]["required"][0], "model");
+
+        // An unknown ID changes nothing.
+        assert_eq!(responses[2]["result"]["isError"], true);
+        let disabled = tool_result(&responses[3]);
+        assert_eq!(disabled["models"][0]["enabled"], false);
+        assert_eq!(disabled["app_notified"], true);
+        let fallback = tool_result(&responses[4]);
+        assert_eq!(fallback["model"]["fallback_provider_id"], "backup");
+        let price = tool_result(&responses[5]);
+        assert_eq!(price["price"]["currency"], "CNY");
+        assert_eq!(price["price"]["input"], 0.5);
+        assert_eq!(price["price"]["cached_input"], 0.5);
+        assert_eq!(price["price"]["output"], 4.0);
+        assert_eq!(responses[6]["result"]["isError"], true);
+        assert_eq!(tool_result(&responses[7])["deleted"], "deepseek-flash");
+        assert_eq!(responses[8]["result"]["isError"], true);
+        assert!(tool_result(&responses[9])["model"]["fallback_provider_id"].is_null());
+
+        let store = Store::open_read_only(&data.0.join("switchx.sqlite")).unwrap();
+        let models = store.models().unwrap();
+        let flash = models
+            .iter()
+            .find(|model| model.public_id == "sx-flash")
+            .unwrap();
+        assert!(!flash.enabled);
+        assert_eq!(flash.fallback_provider_id, None);
+        let prices = store.model_prices().unwrap();
+        assert_eq!(
+            prices
+                .iter()
+                .map(|price| price.model.as_str())
+                .collect::<Vec<_>>(),
+            ["gpt-5.5"]
+        );
+        assert!(app::external_change(&data.0).is_some());
+        let everything = responses.iter().map(Value::to_string).collect::<String>();
+        assert!(!everything.contains(API_KEY));
+    }
+
+    #[test]
+    fn write_tools_respect_the_managed_config_lock() {
+        let data = Data::new();
+        seed(&data.0);
+        fs::write(data.0.join(codex::ROUTE_JOURNAL), "{}").unwrap();
+        let responses = exchange_with(
+            &data.0,
+            Access::ReadWrite,
+            &[
+                call(
+                    1,
+                    "set_models_enabled",
+                    json!({ "public_ids": ["sx-flash"], "enabled": false }),
+                ),
+                call(
+                    2,
+                    "set_price",
+                    json!({ "model": "deepseek-flash", "currency": "USD", "input": 3, "output": 6 }),
+                ),
+            ],
+        );
+        assert_eq!(responses[0]["result"]["isError"], true);
+        assert!(
+            responses[0]["result"]["content"][0]["text"]
+                .as_str()
+                .unwrap()
+                .contains("恢复原配置")
+        );
+        // Prices only affect estimates, so they stay editable while routing.
+        assert_eq!(tool_result(&responses[1])["price"]["input"], 3.0);
+        let store = Store::open_read_only(&data.0.join("switchx.sqlite")).unwrap();
+        assert!(store.models().unwrap()[0].enabled);
+    }
+
+    #[test]
+    fn external_change_marker_is_replaced_without_following_symlinks() {
+        let data = Data::new();
+        fs::create_dir_all(&data.0).unwrap();
+        assert_eq!(app::external_change(&data.0), None);
+        app::mark_external_change(&data.0).unwrap();
+        let first = app::external_change(&data.0).unwrap();
+        app::mark_external_change(&data.0).unwrap();
+        assert_ne!(app::external_change(&data.0).unwrap(), first);
+        #[cfg(unix)]
+        {
+            let outside = data.0.with_extension("outside");
+            fs::write(&outside, "untouched").unwrap();
+            let marker = data.0.join("external-change");
+            fs::remove_file(&marker).unwrap();
+            std::os::unix::fs::symlink(&outside, &marker).unwrap();
+            assert_eq!(app::external_change(&data.0), None);
+            app::mark_external_change(&data.0).unwrap();
+            assert_eq!(fs::read_to_string(&outside).unwrap(), "untouched");
+            assert!(
+                !fs::symlink_metadata(&marker)
+                    .unwrap()
+                    .file_type()
+                    .is_symlink()
+            );
+            fs::remove_file(outside).unwrap();
+        }
+        assert_eq!(
+            fs::read_dir(&data.0).unwrap().count(),
+            1,
+            "no temporary files remain"
+        );
     }
 }

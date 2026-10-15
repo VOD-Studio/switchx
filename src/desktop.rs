@@ -89,7 +89,7 @@ pub fn run() -> Result<(), Box<dyn std::error::Error>> {
             .into(),
     );
     let (sender, receiver) = mpsc::channel::<Command>(8);
-    let background = runtime.spawn(worker::run(receiver, app.as_weak(), directory));
+    let background = runtime.spawn(worker::run(receiver, app.as_weak(), directory.clone()));
     connect_tray(&app, &tray, &sender);
     #[cfg(target_os = "macos")]
     {
@@ -105,6 +105,9 @@ pub fn run() -> Result<(), Box<dyn std::error::Error>> {
     usage::connect(&app, &usage_service);
     // Read new session-log usage at launch; the usage thread repeats it each minute.
     usage_service.sync(&app.get_config_home(), false);
+    if let Ok(path) = &directory {
+        workbench::watch_external_changes(&app, &usage_service, path.clone());
+    }
     workbench::connect(&app, &sender);
     activity::connect(&app, &sender);
     provider_editor::connect(&app, &sender);

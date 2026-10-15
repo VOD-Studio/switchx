@@ -44,6 +44,7 @@ enum Job {
     SetImport { enabled: bool, home: PathBuf },
     Rebuild { home: PathBuf },
     Prices,
+    Reload,
     SavePrice(PriceInput),
     DeletePrice(String),
 }
@@ -77,6 +78,11 @@ impl UsageService {
 
     pub(super) fn load(&self, query: UsageQuery) {
         self.send(Job::Load(query));
+    }
+
+    /// Another process changed saved data; reload the open report and prices.
+    pub(super) fn reload(&self) {
+        self.send(Job::Reload);
     }
 
     pub(super) fn sync(&self, home: &str, force: bool) {
@@ -167,6 +173,10 @@ fn run(receiver: mpsc::Receiver<Job>, weak: Weak<AppWindow>, cancel: Arc<AtomicB
                     reload = true;
                 }
                 Job::Prices => prices = true,
+                Job::Reload => {
+                    prices = true;
+                    reload = true;
+                }
                 Job::SavePrice(input) => {
                     let model = input.model.clone();
                     post_price(&weak, app::save_price(data_dir, &input), &model);

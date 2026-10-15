@@ -12,8 +12,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         println!("SwitchX {}", env!("CARGO_PKG_VERSION"));
         return Ok(());
     }
-    if arguments.len() == 1 && arguments[0] == "mcp" {
-        mcp::serve(app::data_directory())?;
+    if arguments.first().is_some_and(|command| command == "mcp") {
+        let access = match &arguments[1..] {
+            [] => mcp::Access::ReadOnly,
+            [flag] if flag == "--allow-writes" => mcp::Access::ReadWrite,
+            _ => return Err("usage: switchx mcp [--allow-writes]".into()),
+        };
+        mcp::serve(app::data_directory(), access)?;
         return Ok(());
     }
     if let Some(secret) = credential_helper::read(arguments.into_iter())? {

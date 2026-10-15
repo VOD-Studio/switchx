@@ -41,13 +41,13 @@ pub use providers::{
 };
 pub(crate) use snapshot::snapshot_from;
 pub use snapshot::{ModelView, ProviderView, Snapshot, load_snapshot};
-pub(crate) use usage::usage_from;
 pub use usage::{
     PriceInput, PriceView, USAGE_PAGE, USAGE_ROW_LIMIT, UsageQuery, UsageRow, UsageView,
     delete_price, format_amounts, format_count, format_money, format_tokens, load_prices,
     load_usage, parse_price, price_text, rebuild_usage_logs, save_price, set_usage_log_import,
     sync_usage_logs,
 };
+pub(crate) use usage::{prices_from, usage_from};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AppError {
@@ -124,6 +124,42 @@ pub fn data_directory() -> Result<PathBuf, AppError> {
             .ok_or(AppError::DataDirectory)?;
         Ok(base.join("switchx"))
     }
+}
+
+/// Rewritten after another process, such as `switchx mcp`, changes saved data.
+const EXTERNAL_CHANGE: &str = "external-change";
+
+/// Tells a running app to reload. The marker is replaced atomically, so an
+/// existing file or symlink at its path is never written through.
+pub fn mark_external_change(data_dir: &Path) -> io::Result<()> {
+    let mut nonce = [0_u8; 8];
+    getrandom::fill(&mut nonce).map_err(|_| io::Error::other("random source unavailable"))?;
+    let token: String = nonce.iter().map(|byte| format!("{byte:02x}")).collect();
+    let temporary = data_dir.join(format!(".{EXTERNAL_CHANGE}-{token}"));
+    let mut options = fs::OpenOptions::new();
+    options.write(true).create_new(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.mode(0o600);
+    }
+    let written = options.open(&temporary).and_then(|mut file| {
+        io::Write::write_all(&mut file, token.as_bytes())?;
+        fs::rename(&temporary, data_dir.join(EXTERNAL_CHANGE))
+    });
+    if written.is_err() {
+        let _ = fs::remove_file(&temporary);
+    }
+    written
+}
+
+/// The latest external change marker, compared between polls.
+pub fn external_change(data_dir: &Path) -> Option<String> {
+    let path = data_dir.join(EXTERNAL_CHANGE);
+    fs::symlink_metadata(&path)
+        .ok()
+        .filter(fs::Metadata::is_file)?;
+    fs::read_to_string(path).ok()
 }
 
 pub fn ensure_editable(data_dir: &Path) -> Result<(), String> {

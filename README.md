@@ -78,9 +78,9 @@ sh scripts/bundle-macos.sh --release  # target/release/SwitchX.app
 
 定制内容仅保存在本地 SQLite，不写入 Codex TOML、模型目录、恢复日志或请求记录。主备模型分别使用自己的定制配置；修改连接目录会保留已有模型的定制。单项定制总大小上限为 32 KiB。
 
-## 供 AI Agent 读取（MCP）
+## 供 AI Agent 使用（MCP）
 
-`switchx mcp` 在标准输入输出上运行一个只读的 [MCP](https://modelcontextprotocol.io) 服务，Codex、Claude Code 等 agent 可以直接查询 SwitchX：
+`switchx mcp` 在标准输入输出上运行一个 [MCP](https://modelcontextprotocol.io) 服务，Codex、Claude Code 等 agent 可以直接查询 SwitchX，默认只读：
 
 | 工具             | 内容                                                                     |
 | ---------------- | ------------------------------------------------------------------------ |
@@ -89,8 +89,9 @@ sh scripts/bundle-macos.sh --release  # target/release/SwitchX.app
 | `list_models`    | 模型映射：公开模型 ID、实际上游模型、上下文窗口、推理档位、启用状态与备用连接 |
 | `get_usage`      | 按预设或自定义时间段的 Token 用量、估算费用、按连接 / 模型分布与明细     |
 | `list_requests`  | 最近经路由的请求：状态、耗时、错误原因、备用切换与 Token 数              |
+| `list_prices`    | 已填写的模型价格（每百万 Token），以及各模型的累计请求与 Token 数        |
 
-服务以只读方式打开现有数据库，不会创建、迁移或修改数据，也不会返回 API Key、OAuth token、本地路由令牌或凭据引用。首次安装或升级后请先打开一次应用完成数据库初始化。路由进程是否在运行、账号额度等实时状态仍需在应用中查看。
+读取时以只读方式打开现有数据库，不会创建或迁移数据；任何工具都不接收也不返回 API Key、OAuth token、本地路由令牌或凭据引用。首次安装或升级后请先打开一次应用完成数据库初始化。路由进程是否在运行、账号额度等实时状态仍需在应用中查看。
 
 ```sh
 codex mcp add switchx -- /Applications/SwitchX.app/Contents/MacOS/switchx mcp
@@ -98,6 +99,21 @@ codex mcp add switchx -- /Applications/SwitchX.app/Contents/MacOS/switchx mcp
 
 ```sh
 claude mcp add switchx -- /Applications/SwitchX.app/Contents/MacOS/switchx mcp
+```
+
+用 `switchx mcp --allow-writes` 启动时，agent 还可以修改模型和价格：
+
+| 工具                 | 作用                                                   |
+| -------------------- | ------------------------------------------------------ |
+| `set_models_enabled` | 启用或停用已保存的模型映射                             |
+| `set_model_fallback` | 设置或清除模型的备用 API 连接                          |
+| `set_price`          | 设置模型每百万 Token 的输入、缓存输入与输出价格        |
+| `delete_price`       | 删除模型价格                                           |
+
+写入与应用内操作使用相同的校验。路由或直连启用期间，模型相关修改会被拒绝，需先在应用中恢复原配置；价格只影响费用估算，随时可改。修改在下次发布路由后才影响 Codex。正在运行的 SwitchX 会在约 2 秒内自动刷新界面。连接、API Key 和账号仍只能在应用中管理。
+
+```sh
+codex mcp add switchx -- /Applications/SwitchX.app/Contents/MacOS/switchx mcp --allow-writes
 ```
 
 Linux 包使用 `/usr/bin/switchx` 或 tar.gz 解压出的 `switchx`，Windows 使用 `switchx.exe` 的完整路径。设置 `SWITCHX_DATA_DIR` 时，MCP 服务读取同一数据目录。
