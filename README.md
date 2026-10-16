@@ -3,7 +3,7 @@
 [![CI](https://github.com/VOD-Studio/switchx/actions/workflows/ci.yml/badge.svg)](https://github.com/VOD-Studio/switchx/actions/workflows/ci.yml)
 [![Release](https://img.shields.io/github/v/release/VOD-Studio/switchx?include_prereleases)](https://github.com/VOD-Studio/switchx/releases)
 
-<img src="assets/app-icon.png" alt="SwitchX 应用图标" width="128" height="128">
+<img src="assets/readme-logo.png" alt="SwitchX 应用图标" width="128" height="128">
 
 为 Codex 管理模型上游的桌面应用，使用 Rust 与 Slint 构建。
 
