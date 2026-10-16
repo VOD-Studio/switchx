@@ -1031,6 +1031,7 @@ async fn display_names_and_hidden_aliases_route_to_the_exact_upstream() {
             actual,
             name,
             &switchx::catalog::MappingSettings {
+                input_modalities: None,
                 context_window: "",
                 reasoning_levels: None,
                 default_reasoning: None,

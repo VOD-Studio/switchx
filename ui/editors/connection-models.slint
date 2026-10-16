@@ -1,3 +1,4 @@
+import { InputCapabilitiesPicker } from "input-capabilities.slint";
 import { ButtonSheen } from "../button-sheen.slint";
 import { ReasoningPicker } from "reasoning-picker.slint";
 import { Theme } from "../tokens.slint";
@@ -705,7 +706,7 @@ export component ConnectionModels inherits Rectangle {
                                         duration: self.glowing ? 160ms : 1400ms;
                                         easing: ease-out;
                                     }
-                                    height: (self.fresh ? 82px : 62px) - (self.fresh ? 40px : 20px) * self.removed;
+                                    height: (self.fresh ? 120px : 100px) - (self.fresh ? 78px : 58px) * self.removed;
                                     Timer {
                                         interval: max(1ms, (Motion.on ? 50ms : 0ms) * clamp(index - root.stagger-base, 0, 8));
                                         running: !item.landed;
@@ -768,7 +769,7 @@ export component ConnectionModels inherits Rectangle {
                                             mouse-cursor: default;
                                             if item.removed < 0.98: Rectangle {
                                                 y: 0px;
-                                                height: item.fresh ? 82px : 62px;
+                                                height: item.fresh ? 120px : 100px;
                                                 opacity: 1 - item.removed;
                                                 VerticalLayout {
                                                     padding-left: 12px;
@@ -808,7 +809,7 @@ export component ConnectionModels inherits Rectangle {
                                                             placeholder-text: "实际模型 ID";
                                                             accessible-label: "实际模型 " + (index + 1);
                                                             enabled: !root.busy && !root.managed && !root.subscription;
-                                                            edited(value) => { root.edited(); }
+                                                            edited(value) => { row.inherited-modalities = 0; root.edited(); }
                                                         }
 
                                                         QuietLineEdit {
@@ -840,6 +841,39 @@ export component ConnectionModels inherits Rectangle {
                                                             icon-color: Theme.muted-text;
                                                             enabled: !root.busy && !root.managed;
                                                             clicked => { row.removing = true; root.edited(); }
+                                                        }
+                                                    }
+
+                                                    HorizontalLayout {
+                                                        height: 30px;
+                                                        padding-left: 30px;
+                                                        spacing: 10px;
+                                                        Text {
+                                                            text: "输入能力";
+                                                            color: Theme.muted-text;
+                                                            font-size: 11px;
+                                                            vertical-alignment: center;
+                                                        }
+
+                                                        InputCapabilitiesPicker {
+                                                            width: 180px;
+                                                            height: 30px;
+                                                            value <=> row.input-modalities;
+                                                            inherited: row.inherited-modalities;
+                                                            label: "输入能力 " + (index + 1);
+                                                            enabled: !root.busy && !root.managed;
+                                                            edited => { root.edited(); }
+                                                        }
+
+                                                        Text {
+                                                            text: row.input-modalities == 0 ? "沿用资料" : "自定义";
+                                                            color: Theme.muted-text;
+                                                            font-size: 10px;
+                                                            vertical-alignment: center;
+                                                        }
+
+                                                        Rectangle {
+                                                            horizontal-stretch: 1;
                                                         }
                                                     }
 

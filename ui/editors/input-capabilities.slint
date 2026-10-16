@@ -1,0 +1,301 @@
+import { Theme } from "../tokens.slint";
+import { QuietButton, DropdownViewport } from "../components.slint";
+
+// Zero preserves the source. The other values match catalog::InputModalities.
+export global InputCapabilities {
+    public pure function effective(value: int, inherited: int) -> int { return value == 0 ? max(1, inherited) : value; }
+    public pure function image(value: int) -> bool { return value == 2 || value == 4; }
+    public pure function audio(value: int) -> bool { return value == 3 || value == 4; }
+    public pure function label(value: int) -> string {
+        return value == 4 ? "文字 · 图片 · 音频" : value == 3 ? "文字 · 音频" : value == 2 ? "文字 · 图片" : "纯文本";
+    }
+    public pure function toggle(value: int, image: bool) -> int {
+        let has-image = image ? !self.image(value) : self.image(value);
+        let has-audio = image ? self.audio(value) : !self.audio(value);
+        return has-image ? (has-audio ? 4 : 2) : (has-audio ? 3 : 1);
+    }
+}
+
+component CapabilityTile inherits Rectangle {
+    in property <string> title;
+    in property <string> caption;
+    in property <string> label;
+    in property <image> icon;
+    in property <bool> selected;
+    in property <bool> enabled: true;
+    in property <bool> required;
+    callback toggle();
+    private property <float> selected-progress: root.selected ? 1 : 0;
+    animate selected-progress {
+        duration: Theme.page-motion;
+        easing: cubic-bezier(0.22, 1, 0.36, 1);
+    }
+    min-width: 0px;
+    height: 94px;
+    border-radius: 12px;
+    border-width: 1px;
+    border-color: keyboard.has-focus ? Theme.brand : root.selected ? Theme.brand.with-alpha(0.45) : Theme.border;
+    background: root.selected ? Theme.brand-surface : touch.has-hover && root.enabled ? Theme.raised : Theme.inset;
+    opacity: root.enabled || root.required ? 1 : 0.55;
+    animate background, border-color, opacity { duration: Theme.fast; }
+    forward-focus: keyboard;
+    accessible-role: checkbox;
+    accessible-label: root.label;
+    accessible-checked: root.selected;
+    accessible-enabled: root.enabled && !root.required;
+    accessible-action-default => { if root.enabled && !root.required { root.toggle(); } }
+    VerticalLayout {
+        padding: 12px;
+        spacing: 7px;
+        HorizontalLayout {
+            Image {
+                width: 20px;
+                height: 20px;
+                source: root.icon;
+                colorize: root.selected ? Theme.brand : Theme.muted-text;
+            }
+
+            Rectangle {
+                horizontal-stretch: 1;
+            }
+
+            Rectangle {
+                width: 16px;
+                height: 16px;
+                border-radius: 8px;
+                border-width: 1px;
+                border-color: root.selected ? Theme.brand : Theme.border;
+                background: root.selected ? Theme.brand : transparent;
+                animate background, border-color { duration: Theme.fast; }
+                Image {
+                    x: 3px;
+                    y: 3px;
+                    width: 10px;
+                    height: 10px;
+                    source: @image-url("../../assets/ui/check.svg");
+                    colorize: Theme.on-brand;
+                    opacity: root.selected-progress;
+                    transform-scale: 0.7 + 0.3 * root.selected-progress;
+                }
+            }
+        }
+
+        Text {
+            text: root.title;
+            color: Theme.primary-text;
+            font-size: 13px;
+            font-weight: 600;
+        }
+
+        Text {
+            text: root.caption;
+            color: Theme.muted-text;
+            font-size: 10px;
+            overflow: elide;
+        }
+    }
+
+    touch := TouchArea {
+        enabled: root.enabled && !root.required;
+        mouse-cursor: pointer;
+        clicked => { keyboard.focus(); root.toggle(); }
+    }
+
+    keyboard := FocusScope {
+        width: 0px;
+        enabled: root.enabled && !root.required;
+        key-pressed(event) => {
+            if event.text == " " || event.text == Key.Return { root.toggle(); return accept; }
+            return reject;
+        }
+    }
+}
+
+export component InputCapabilitiesEditor inherits Rectangle {
+    in-out property <int> value;
+    in property <int> inherited: 1;
+    in property <bool> enabled: true;
+    in property <string> label: "模型输入能力";
+    in property <string> source: "当前资料";
+    in property <bool> pending-source;
+    in property <bool> batch;
+    callback edited();
+    private property <int> effective: InputCapabilities.effective(root.value, root.inherited);
+    border-radius: 14px;
+    border-width: 1px;
+    border-color: Theme.border;
+    background: Theme.panel;
+    VerticalLayout {
+        padding: 16px;
+        spacing: 12px;
+        HorizontalLayout {
+            spacing: 8px;
+            VerticalLayout {
+                spacing: 4px;
+                Text {
+                    text: root.batch ? "统一输入能力" : "输入能力";
+                    color: Theme.primary-text;
+                    font-size: 14px;
+                    font-weight: 600;
+                }
+
+                Text {
+                    text: root.value == 0 ? "沿用" + root.source : "自定义 · " + InputCapabilities.label(root.effective);
+                    color: Theme.muted-text;
+                    font-size: 11px;
+                    overflow: elide;
+                }
+            }
+
+            Rectangle {
+                horizontal-stretch: 1;
+            }
+
+            QuietButton {
+                text: "仅文字";
+                accessible-label: root.label + "：仅文字";
+                width: 64px;
+                height: 30px;
+                ghost: true;
+                enabled: root.enabled && root.value != 1;
+                clicked => { root.value = 1; root.edited(); }
+            }
+
+            QuietButton {
+                text: "沿用资料";
+                accessible-label: root.label + "：沿用资料";
+                width: 88px;
+                height: 30px;
+                ghost: true;
+                enabled: root.enabled && root.value != 0;
+                clicked => { root.value = 0; root.edited(); }
+            }
+        }
+
+        HorizontalLayout {
+            spacing: 8px;
+            CapabilityTile {
+                title: "文字";
+                caption: "始终支持";
+                label: root.label + "：文字";
+                icon: @image-url("../../assets/ui/terminal.svg");
+                selected: true;
+                required: true;
+            }
+
+            CapabilityTile {
+                title: "图片";
+                caption: root.pending-source && root.value == 0 ? "导入后确定" : "照片、截图";
+                label: root.label + "：图片";
+                icon: @image-url("../../assets/ui/image.svg");
+                selected: InputCapabilities.image(root.effective);
+                enabled: root.enabled;
+                toggle => { root.value = InputCapabilities.toggle(root.effective, true); root.edited(); }
+            }
+
+            CapabilityTile {
+                title: "音频";
+                caption: root.pending-source && root.value == 0 ? "导入后确定" : "声音输入";
+                label: root.label + "：音频";
+                icon: @image-url("../../assets/ui/audio.svg");
+                selected: InputCapabilities.audio(root.effective);
+                enabled: root.enabled;
+                toggle => { root.value = InputCapabilities.toggle(root.effective, false); root.edited(); }
+            }
+        }
+
+        Text {
+            text: root.batch ? "统一设置覆盖预设；单个模型的选择优先。沿用时保留各自资料。" : "选择上游实际支持的输入类型，保存并重新发布后生效。";
+            color: Theme.muted-text;
+            font-size: 11px;
+            wrap: word-wrap;
+        }
+    }
+}
+
+// Compact entry for directory and batch rows; the same editor opens above or below it.
+export component InputCapabilitiesPicker inherits Rectangle {
+    in-out property <int> value;
+    in property <int> inherited: 1;
+    in property <bool> enabled: true;
+    in property <string> label: "输入能力";
+    callback edited();
+    private property <bool> open;
+    private property <bool> entered;
+    private property <bool> mounted: popup.is-open;
+    private property <float> reveal: root.open && root.entered ? 1 : 0;
+    animate reveal {
+        duration: root.open ? Theme.page-motion : Theme.fast;
+        easing: cubic-bezier(0.22, 1, 0.36, 1);
+    }
+    function close() { root.open = false; if Theme.fast == 0ms { popup.close(); } }
+    changed enabled => { if !root.enabled { root.close(); } }
+    changed mounted => { if !root.mounted { root.open = false; root.entered = false; } }
+    Timer {
+        interval: 16ms;
+        running: root.open && !root.entered;
+        triggered => { root.entered = true; }
+    }
+
+    Timer {
+        interval: max(1ms, Theme.fast);
+        running: root.mounted && !root.open;
+        triggered => { popup.close(); }
+    }
+
+    height: 36px;
+    min-width: 0px;
+    QuietButton {
+        width: parent.width;
+        height: parent.height;
+        text: root.value == 0 && root.inherited == 0 ? "沿用资料" : InputCapabilities.label(InputCapabilities.effective(root.value, root.inherited));
+        accessible-label: root.label;
+        enabled: root.enabled;
+        icon: @image-url("../../assets/ui/chevron-down.svg");
+        icon-width: 10px;
+        icon-height: 10px;
+        clicked => { root.entered = Theme.page-motion == 0ms; popup.show(); root.open = true; }
+    }
+
+    popup := PopupWindow {
+        x: -root.absolute-position.x;
+        y: -root.absolute-position.y;
+        width: DropdownViewport.size.x;
+        height: DropdownViewport.size.y;
+        property <Point> viewport: DropdownViewport.size;
+        changed viewport => { self.width = self.viewport.x; self.height = self.viewport.y; }
+        close-policy: no-auto-close;
+        forward-focus: keyboard;
+        keyboard := FocusScope {
+            key-pressed(event) => { if event.text == Key.Escape { root.close(); return accept; } return reject; }
+            TouchArea {
+                clicked => { root.close(); }
+            }
+
+            Rectangle {
+                width: min(380px, parent.width - 24px);
+                height: editor.preferred-height + 2px;
+                x: max(12px, min(root.absolute-position.x, parent.width - self.width - 12px));
+                property <bool> above: root.absolute-position.y + root.height + 8px + self.height > parent.height - 12px;
+                y: (self.above ? max(12px, root.absolute-position.y - self.height - 8px) : root.absolute-position.y + root.height + 8px) + (self.above ? 6px : -6px) * (1 - root.reveal);
+                opacity: root.reveal;
+                border-radius: 14px;
+                background: Theme.panel;
+                drop-shadow-blur: 24px;
+                drop-shadow-offset-y: 6px;
+                drop-shadow-color: Theme.scrim;
+                TouchArea { }
+
+                editor := InputCapabilitiesEditor {
+                    value <=> root.value;
+                    inherited: root.inherited;
+                    enabled: root.enabled && root.open;
+                    label: root.label;
+                    pending-source: root.inherited == 0;
+                    source: root.inherited == 0 ? "模型资料（保存时读取）" : "当前资料";
+                    edited => { root.edited(); }
+                }
+            }
+        }
+    }
+}

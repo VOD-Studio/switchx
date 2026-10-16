@@ -661,6 +661,7 @@ pub(crate) fn default_model_metadata() -> Result<Value, String> {
         "grok-4.5",
         "Grok 4.5",
         &crate::catalog::MappingSettings {
+            input_modalities: None,
             context_window: "500000",
             reasoning_levels: Some("low, medium, high, xhigh"),
             default_reasoning: Some("high"),
@@ -1056,6 +1057,7 @@ mod tests {
         let server = Server::new().await;
         let account = server.seed();
         let mut directory = app::ConnectionModel {
+            input_modalities: None,
             public_id: String::new(),
             display_name: "Grok 主力".into(),
             upstream_model: "grok-4.5".into(),

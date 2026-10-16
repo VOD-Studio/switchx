@@ -270,6 +270,7 @@ fn picked_models(
             model_id,
             &display_name,
             &catalog::MappingSettings {
+                input_modalities: None,
                 context_window: "",
                 reasoning_levels: None,
                 default_reasoning: None,

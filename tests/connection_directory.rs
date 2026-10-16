@@ -37,6 +37,7 @@ fn provider(id: &str) -> ProviderRecord {
 }
 fn draft(id: &str) -> ConnectionModel {
     ConnectionModel {
+        input_modalities: None,
         public_id: String::new(),
         display_name: format!("{id} · 示例"),
         upstream_model: id.into(),
@@ -132,6 +133,7 @@ fn new_subscription_directory_keeps_only_edited_models_and_official_capabilities
         "official-pro",
         "Official",
         &catalog::MappingSettings {
+            input_modalities: None,
             context_window: "1000000",
             reasoning_levels: Some("low, high"),
             default_reasoning: Some("high"),
@@ -144,6 +146,7 @@ fn new_subscription_directory_keeps_only_edited_models_and_official_capabilities
         "official-mini",
         "Mini",
         &catalog::MappingSettings {
+            input_modalities: None,
             context_window: "128000",
             reasoning_levels: None,
             default_reasoning: None,
@@ -213,6 +216,7 @@ fn names_are_global_trimmed_and_renames_keep_identity_and_compatibility() {
     assert_eq!(store.models().unwrap(), original);
 
     let mut renamed = ConnectionModel {
+        input_modalities: None,
         public_id: original[0].public_id.clone(),
         ..draft("coder-pro")
     };
@@ -273,6 +277,7 @@ fn legacy_duplicate_names_can_be_resolved_without_ambiguous_aliases() {
         .filter(|model| model.provider_id == "one")
         .collect();
     let renamed = ConnectionModel {
+        input_modalities: None,
         public_id: expected[0].public_id.clone(),
         display_name: "unique name / one".into(),
         ..draft("coder-pro")
@@ -319,6 +324,7 @@ fn directory_save_is_atomic_preserves_identity_selection_and_detects_external_ed
     let mut drafts: Vec<_> = selected
         .iter()
         .map(|model| ConnectionModel {
+            input_modalities: None,
             public_id: model.public_id.clone(),
             ..draft(&model.upstream_model)
         })
@@ -440,6 +446,7 @@ fn subscription_directory_keeps_official_capabilities_and_rejects_unknown_models
         "official-pro",
         "Official",
         &switchx::catalog::MappingSettings {
+            input_modalities: None,
             context_window: "1000000",
             reasoning_levels: Some("low, high"),
             default_reasoning: Some("high"),
@@ -498,6 +505,7 @@ fn reasoning_defaults_round_trip_and_invalid_defaults_do_not_partially_save() {
     let metadata: serde_json::Value = serde_json::from_str(&original[0].metadata).unwrap();
     assert_eq!(metadata["default_reasoning_level"], "high");
     let mut changed = ConnectionModel {
+        input_modalities: None,
         public_id: original[0].public_id.clone(),
         ..draft("coder-pro")
     };

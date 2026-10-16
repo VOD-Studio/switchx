@@ -10,10 +10,73 @@ pub const REASONING_LEVELS: &[&str] = &[
 ];
 
 pub struct MappingSettings<'a> {
+    /// None preserves the source; a value explicitly replaces its input types.
+    pub input_modalities: Option<InputModalities>,
     pub context_window: &'a str,
     // None keeps imported values; an empty string explicitly removes reasoning.
     pub reasoning_levels: Option<&'a str>,
     pub default_reasoning: Option<&'a str>,
+}
+
+/// The input types understood by the model catalog. Text is always required.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum InputModalities {
+    #[default]
+    Text,
+    TextImage,
+    TextAudio,
+    TextImageAudio,
+}
+
+impl InputModalities {
+    pub fn from_metadata(metadata: &Value) -> Self {
+        let types = metadata["input_modalities"].as_array();
+        let has = |name| types.is_some_and(|types| types.iter().any(|value| value == name));
+        match (has("image"), has("audio")) {
+            (true, true) => Self::TextImageAudio,
+            (true, false) => Self::TextImage,
+            (false, true) => Self::TextAudio,
+            (false, false) => Self::Text,
+        }
+    }
+
+    /// Zero is the editor's inherit choice; 1..=4 are explicit capabilities.
+    pub fn from_selection(selection: i32) -> Option<Self> {
+        match selection {
+            1 => Some(Self::Text),
+            2 => Some(Self::TextImage),
+            3 => Some(Self::TextAudio),
+            4 => Some(Self::TextImageAudio),
+            _ => None,
+        }
+    }
+
+    pub fn selection(self) -> i32 {
+        match self {
+            Self::Text => 1,
+            Self::TextImage => 2,
+            Self::TextAudio => 3,
+            Self::TextImageAudio => 4,
+        }
+    }
+
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Text => "纯文本",
+            Self::TextImage => "文字 · 图片",
+            Self::TextAudio => "文字 · 音频",
+            Self::TextImageAudio => "文字 · 图片 · 音频",
+        }
+    }
+
+    pub fn types(self) -> &'static [&'static str] {
+        match self {
+            Self::Text => &["text"],
+            Self::TextImage => &["text", "image"],
+            Self::TextAudio => &["text", "audio"],
+            Self::TextImageAudio => &["text", "image", "audio"],
+        }
+    }
 }
 
 pub fn reasoning_levels(text: &str) -> Result<Vec<&str>, String> {
@@ -96,6 +159,12 @@ pub fn mapping_metadata(
     }
     model["slug"] = model_id.into();
     model["display_name"] = display_name.into();
+    if let Some(modalities) = settings.input_modalities {
+        model["input_modalities"] = json!(modalities.types());
+        if !modalities.types().contains(&"image") {
+            model["supports_image_detail_original"] = false.into();
+        }
+    }
     if !settings.context_window.trim().is_empty() {
         let window = settings
             .context_window
@@ -560,6 +629,7 @@ mod tests {
     #[test]
     fn manual_mapping_is_neutral_and_edits_preserve_imported_capabilities() {
         let settings = MappingSettings {
+            input_modalities: None,
             context_window: "256000",
             reasoning_levels: Some("high, low, high"),
             default_reasoning: Some("high"),
@@ -578,6 +648,7 @@ mod tests {
             "deepseek-flash",
             source["display_name"].as_str().unwrap(),
             &MappingSettings {
+                input_modalities: None,
                 context_window: "1048576",
                 reasoning_levels: Some("low, high, max"),
                 default_reasoning: Some("high"),
@@ -597,6 +668,7 @@ mod tests {
             assert_eq!(edited[key], source[key]);
         }
         let empty = MappingSettings {
+            input_modalities: None,
             context_window: "",
             reasoning_levels: Some(""),
             default_reasoning: Some(""),
@@ -607,19 +679,23 @@ mod tests {
         assert!(cleared["default_reasoning_level"].is_null());
         for settings in [
             MappingSettings {
+                input_modalities: None,
                 context_window: "0",
                 ..empty
             },
             MappingSettings {
+                input_modalities: None,
                 context_window: "-1",
                 ..empty
             },
             MappingSettings {
+                input_modalities: None,
                 context_window: "",
                 reasoning_levels: Some("unknown"),
                 default_reasoning: Some(""),
             },
             MappingSettings {
+                input_modalities: None,
                 context_window: "",
                 reasoning_levels: Some("low"),
                 default_reasoning: Some("high"),

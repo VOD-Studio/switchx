@@ -1,4 +1,5 @@
 export struct ModelRow {
+    input-modalities: int,
     provider-id: string,
     provider-name: string,
     upstream-model: string,
@@ -47,6 +48,8 @@ export struct ProviderRow {
 }
 
 export struct ConnectionModelRow {
+    input-modalities: int,
+    inherited-modalities: int,
     public-id: string,
     display-name: string,
     upstream-model: string,
@@ -118,6 +121,8 @@ export struct AccountRow {
 // A discovered upstream model in the batch picker. Empty `context` and `levels`
 // inherit the template values (when `source` is set), then the shared values.
 export struct BatchModelRow {
+    input-modalities: int,
+    template-modalities: int,
     id: string,
     added: bool,
     supported: bool,

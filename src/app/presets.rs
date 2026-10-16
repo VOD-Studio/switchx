@@ -22,6 +22,7 @@ impl ModelPreset {
             self.model_id,
             self.model_id,
             &catalog::MappingSettings {
+                input_modalities: None,
                 context_window: &self.context_window.to_string(),
                 reasoning_levels: Some(&self.reasoning_levels.join(", ")),
                 default_reasoning: Some(self.default_reasoning),

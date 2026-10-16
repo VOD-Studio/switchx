@@ -25,6 +25,8 @@ use super::{
 pub(super) fn connection_model_row(model: &ModelRecord) -> ConnectionModelRow {
     let metadata: serde_json::Value = serde_json::from_str(&model.metadata).unwrap_or_default();
     ConnectionModelRow {
+        input_modalities: 0,
+        inherited_modalities: catalog::InputModalities::from_metadata(&metadata).selection(),
         public_id: model.public_id.clone().into(),
         display_name: model.display_name.clone().into(),
         upstream_model: model.upstream_model.clone().into(),
@@ -64,11 +66,13 @@ pub(super) fn connection_directory_rows(
     for model in discovered {
         if known.insert(model.upstream_model.clone()) {
             rows.push(ConnectionModelRow {
+                input_modalities: model.input_modalities.map(|m| m.selection()).unwrap_or(0),
                 display_name: model.display_name.into(),
                 upstream_model: model.upstream_model.into(),
                 context_window: model.context_window.into(),
                 reasoning_levels: model.reasoning_levels.into(),
                 default_reasoning: model.default_reasoning.into(),
+                inherited_modalities: model.input_modalities.map(|m| m.selection()).unwrap_or(1),
                 ..Default::default()
             });
         }
@@ -154,6 +158,7 @@ fn edited_directory(app: &AppWindow) -> Vec<app::ConnectionModel> {
         .iter()
         .filter(|row| !row.removing)
         .map(|row| app::ConnectionModel {
+            input_modalities: catalog::InputModalities::from_selection(row.input_modalities),
             public_id: row.public_id.into(),
             display_name: row.display_name.into(),
             upstream_model: row.upstream_model.into(),
@@ -211,6 +216,7 @@ fn show_draft_directory(app: &AppWindow, provider: &ProviderRecord) {
                 context_window: model.context_window.into(),
                 reasoning_levels: model.reasoning_levels.into(),
                 default_reasoning: model.default_reasoning.into(),
+                inherited_modalities: model.input_modalities.selection(),
                 ..Default::default()
             })
             .collect::<Vec<_>>();
@@ -287,6 +293,13 @@ pub(super) fn connect(app: &AppWindow, sender: &mpsc::Sender<Command>) {
                     .iter()
                     .filter(|row| row.supported)
                     .map(|row| app::ConnectionModel {
+                        input_modalities: catalog::InputModalities::from_selection(
+                            if row.input_modalities == 0 {
+                                row.template_modalities
+                            } else {
+                                row.input_modalities
+                            },
+                        ),
                         public_id: String::new(),
                         display_name: format!("{}/{}", row.id, provider.name),
                         upstream_model: row.id.into(),
@@ -438,6 +451,8 @@ pub(super) fn connect(app: &AppWindow, sender: &mpsc::Sender<Command>) {
                 } else {
                     candidate.context
                 },
+                input_modalities: candidate.input_modalities,
+                inherited_modalities: candidate.template_modalities,
                 default_reasoning: default,
                 reasoning_levels: levels,
                 ..Default::default()
@@ -1178,6 +1193,7 @@ mod tests {
             "discovery must not create a connection or database"
         );
         let directory = ["coder-pro", "coder-mini"].map(|id| app::ConnectionModel {
+            input_modalities: None,
             public_id: String::new(),
             display_name: format!("Edited {id}"),
             upstream_model: id.into(),
@@ -1276,6 +1292,7 @@ mod tests {
             "existing-model",
             "My custom name",
             &catalog::MappingSettings {
+                input_modalities: None,
                 context_window: "1050000",
                 reasoning_levels: Some("low, medium, high"),
                 default_reasoning: Some("high"),

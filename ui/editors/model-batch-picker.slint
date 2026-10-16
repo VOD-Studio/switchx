@@ -1,3 +1,8 @@
+import {
+    InputCapabilities,
+    InputCapabilitiesEditor,
+    InputCapabilitiesPicker,
+} from "input-capabilities.slint";
 import { RequestOverridesEditor, RequestRules } from "request-overrides.slint";
 import { ButtonSheen } from "../button-sheen.slint";
 import { Theme } from "../tokens.slint";
@@ -62,6 +67,7 @@ component RowTag inherits Rectangle {
 }
 
 component BatchRow inherits Rectangle {
+    in property <int> shared-modalities;
     in property <BatchModelRow> item;
     in property <int> index;
     // Shared entrance clock, 0 → 1 once per new list.
@@ -74,7 +80,7 @@ component BatchRow inherits Rectangle {
     in property <string> shared-levels-label;
     callback toggle();
     callback expand();
-    callback edit(string, string);
+    callback edit(string, string, int);
 
     private property <bool> motion: Theme.animations-enabled && !Theme.system-reduced-motion;
     private property <bool> selectable: root.item.supported && !root.item.added;
@@ -86,7 +92,7 @@ component BatchRow inherits Rectangle {
     private property <string> effective-context: root.item.context != "" ? root.item.context : root.inherited-context;
     private property <string> effective-label: root.item.levels != "" ? root.item.levels-label
         : root.item.source != "" ? root.item.template-levels-label : root.shared-levels-label;
-    private property <bool> customized: root.item.context != "" || root.item.levels != "";
+    private property <bool> customized: root.item.context != "" || root.item.levels != "" || root.item.input-modalities != 0;
     private property <length> line-height: 58px;
     private property <length> editor-height: 46px;
 
@@ -268,7 +274,7 @@ component BatchRow inherits Rectangle {
                             background: Theme.brand;
                         }
                         chip-text := Text {
-                            text: BatchFormat.tokens(root.effective-context) + " · " + (root.effective-label == "" ? "不思考" : root.effective-label);
+                            text: InputCapabilities.label(InputCapabilities.effective(root.item.input-modalities, root.shared-modalities == 0 ? root.item.template-modalities : root.shared-modalities)) + " · " + BatchFormat.tokens(root.effective-context) + " · " + (root.effective-label == "" ? "不思考" : root.effective-label);
                             color: root.customized ? Theme.primary-text : Theme.muted-text;
                             font-size: 11px;
                             vertical-alignment: center;
@@ -327,7 +333,7 @@ component BatchRow inherits Rectangle {
                 placeholder-text: root.inherited-context;
                 accessible-label: root.item.id + " 的上下文窗口";
                 enabled: root.enabled;
-                edited(text) => { root.edit(text, levels-edit.text); }
+                edited(text) => { root.edit(text, levels-edit.text, root.item.input-modalities); }
             }
 
             Text {
@@ -343,7 +349,16 @@ component BatchRow inherits Rectangle {
                 placeholder-text: root.inherited-levels == "" ? "不设置" : root.inherited-levels;
                 accessible-label: root.item.id + " 的思考等级";
                 enabled: root.enabled;
-                edited(text) => { root.edit(context-edit.text, text); }
+                edited(text) => { root.edit(context-edit.text, text, root.item.input-modalities); }
+            }
+
+            InputCapabilitiesPicker {
+                width: 120px;
+                value: root.item.input-modalities;
+                inherited: root.shared-modalities == 0 ? root.item.template-modalities : root.shared-modalities;
+                label: root.item.id + " 的输入能力";
+                enabled: root.enabled;
+                edited => { root.edit(context-edit.text, levels-edit.text, self.value); }
             }
 
             QuietButton {
@@ -355,7 +370,7 @@ component BatchRow inherits Rectangle {
                 clicked => {
                     context-edit.text = "";
                     levels-edit.text = "";
-                    root.edit("", "");
+                    root.edit("", "", 0);
                 }
             }
         }
@@ -382,6 +397,7 @@ export component ModelBatchPicker inherits Rectangle {
     in property <int> discovery-tone;
     in property <string> discovery-message;
     in-out property <string> query;
+    in-out property <int> shared-modalities;
     in-out property <string> shared-context;
     in-out property <string> shared-levels;
     in-out property <string> shared-default;
@@ -394,7 +410,7 @@ export component ModelBatchPicker inherits Rectangle {
     callback toggle(int);
     callback select-all(bool);
     callback filter(string);
-    callback edit(int, string, string);
+    callback edit(int, string, string, int);
     callback save();
     callback cancel();
 
@@ -600,12 +616,13 @@ export component ModelBatchPicker inherits Rectangle {
                                 expanded: root.expanded-index == index;
                                 enabled: root.editable;
                                 provider-name: root.provider-name;
+                                shared-modalities: root.shared-modalities;
                                 shared-context: root.shared-context;
                                 shared-levels: root.shared-levels;
                                 shared-levels-label: root.shared-levels-label;
                                 toggle => { root.toggle(index); }
                                 expand => { root.expanded-index = root.expanded-index == index ? -1 : index; }
-                                edit(context, levels) => { root.edit(index, context, levels); }
+                                edit(context, levels, modalities) => { root.edit(index, context, levels, modalities); }
                             }
                         }
                     }
@@ -813,6 +830,14 @@ export component ModelBatchPicker inherits Rectangle {
                     }
                 }
             }
+        }
+
+        InputCapabilitiesEditor {
+            value <=> root.shared-modalities;
+            enabled: root.editable;
+            label: "统一输入能力";
+            source: "各模型资料";
+            batch: true;
         }
 
         if root.show-request-settings: RequestOverridesEditor {

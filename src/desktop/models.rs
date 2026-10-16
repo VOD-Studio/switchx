@@ -13,6 +13,30 @@ use super::{
 };
 
 pub(super) fn update_model_display_name(app: &AppWindow) {
+    let inherited = app
+        .get_models()
+        .iter()
+        .find(|model| {
+            model.public_id == app.get_model_original_id()
+                && model.upstream_model == app.get_model_upstream_id()
+        })
+        .map(|model| model.input_modalities)
+        .unwrap_or_else(|| {
+            if app.get_providers().iter().any(|provider| {
+                provider.id == app.get_model_provider_id()
+                    && provider.is_subscription
+                    && !provider.is_grok
+            }) {
+                app.get_batch_models()
+                    .iter()
+                    .find(|model| model.id == app.get_model_upstream_id())
+                    .map(|model| model.template_modalities)
+                    .unwrap_or(0)
+            } else {
+                1
+            }
+        });
+    app.set_model_inherited_modalities(inherited);
     if !app.get_model_display_name_custom() {
         app.set_model_display_name(
             format!(
@@ -93,6 +117,7 @@ pub(super) fn open_model_editor(
             .filter(|value| !value.is_empty())
             .unwrap_or_else(|| "未设置".into()),
     );
+    app.set_model_input_modalities(0);
     app.set_model_source_path("".into());
     app.set_model_delete_confirm(false);
     app.set_model_batch_mode(original_id.is_empty());
@@ -100,6 +125,7 @@ pub(super) fn open_model_editor(
     if original_id.is_empty() {
         app.set_batch_query("".into());
         app.set_batch_context("".into());
+        app.set_batch_input_modalities(0);
         app.set_batch_levels("".into());
         app.set_batch_default("未设置".into());
         update_batch_reasoning_options(app);
@@ -135,6 +161,9 @@ pub(super) fn request_draft(app: &AppWindow) -> (String, String, String) {
 pub(super) fn connect(app: &AppWindow, sender: &mpsc::Sender<Command>) {
     app.on_save_model(queue_on(app, sender, |app| {
         Command::SaveModel(ModelForm {
+            input_modalities: catalog::InputModalities::from_selection(
+                app.get_model_input_modalities(),
+            ),
             request_overrides: request_draft(app),
             provider: app.get_model_provider_id().into(),
             original_id: app.get_model_original_id().into(),
@@ -333,6 +362,7 @@ impl Worker {
 
     pub(super) async fn save_model(&mut self, form: ModelForm) {
         let ModelForm {
+            input_modalities,
             provider,
             original_id,
             public_id,
@@ -361,6 +391,7 @@ impl Worker {
                 upstream_model: &upstream_model,
                 catalog_path: &path,
                 settings: Some(catalog::MappingSettings {
+                    input_modalities,
                     context_window: &context,
                     reasoning_levels: (!keep_imported_reasoning).then_some(levels.as_str()),
                     default_reasoning: (!keep_imported_reasoning)
@@ -393,6 +424,7 @@ impl Worker {
 
     pub(super) async fn save_models(&mut self, form: BatchForm) {
         let BatchForm {
+            input_modalities,
             provider,
             models,
             context,
@@ -410,14 +442,18 @@ impl Worker {
             let models = models
                 .iter()
                 .map(
-                    |(upstream_model, context_window, reasoning_levels)| app::BatchModel {
-                        upstream_model,
-                        context_window,
-                        reasoning_levels,
+                    |(upstream_model, context_window, reasoning_levels, input_modalities)| {
+                        app::BatchModel {
+                            input_modalities: *input_modalities,
+                            upstream_model,
+                            context_window,
+                            reasoning_levels,
+                        }
                     },
                 )
                 .collect::<Vec<_>>();
             let input = app::BatchInput {
+                input_modalities,
                 request_overrides: Some(&overrides),
                 provider_id: &provider,
                 models: &models,

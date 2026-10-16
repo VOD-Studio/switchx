@@ -1319,6 +1319,7 @@ mod tests {
             "model-a",
             "Model A",
             &catalog::MappingSettings {
+                input_modalities: None,
                 context_window: "128000",
                 reasoning_levels: Some(""),
                 default_reasoning: Some(""),
@@ -1444,6 +1445,7 @@ mod tests {
                 "model-a",
                 "Model A",
                 &catalog::MappingSettings {
+                    input_modalities: None,
                     context_window: "128000",
                     reasoning_levels: Some(""),
                     default_reasoning: Some(""),

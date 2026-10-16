@@ -1,3 +1,4 @@
+import { InputCapabilitiesEditor } from "input-capabilities.slint";
 import { RequestOverridesEditor, RequestRules } from "request-overrides.slint";
 import { ReasoningPicker, ReasoningChoices } from "reasoning-picker.slint";
 import { Theme } from "../tokens.slint";
@@ -44,6 +45,8 @@ export component ModelEditor inherits Rectangle {
     in-out property <bool> model-request-open;
     private property <string> request-error: RequestRules.validate(root.model-user-agent, root.model-header-overrides, root.model-body-overrides);
     in property <string> model-original-id;
+    in-out property <int> model-input-modalities;
+    in property <int> model-inherited-modalities: 1;
     in-out property <string> model-context-window;
     in-out property <string> model-reasoning-levels;
     in-out property <string> model-default-reasoning;
@@ -54,6 +57,7 @@ export component ModelEditor inherits Rectangle {
     in property <BatchSummary> batch-summary;
     in property <bool> batch-saving;
     in-out property <string> batch-query;
+    in-out property <int> batch-input-modalities;
     in-out property <string> batch-context;
     in-out property <string> batch-levels;
     in-out property <string> batch-default;
@@ -69,7 +73,7 @@ export component ModelEditor inherits Rectangle {
     callback batch-toggle(int);
     callback batch-select-all(bool);
     callback batch-filter(string);
-    callback batch-edit(int, string, string);
+    callback batch-edit(int, string, string, int);
     callback save-batch();
 
     private property <bool> adding: root.model-original-id == "";
@@ -173,6 +177,14 @@ export component ModelEditor inherits Rectangle {
                                     locked: root.config-managed;
                                     running: root.single-shown;
                                     replay: root.replay;
+                                }
+
+                                InputCapabilitiesEditor {
+                                    value <=> root.model-input-modalities;
+                                    inherited: root.model-inherited-modalities;
+                                    enabled: !root.locked;
+                                    pending-source: root.model-source-path != "" || root.model-inherited-modalities == 0;
+                                    source: root.model-source-path != "" ? "导入资料（保存时读取）" : root.model-inherited-modalities == 0 ? "模型资料（保存时读取）" : root.adding ? "默认资料 · 纯文本" : "已保存资料";
                                 }
 
                                 MappingSection {
@@ -491,6 +503,7 @@ export component ModelEditor inherits Rectangle {
                         discovery-tone: root.discovery-scope == 1 && root.batch ? root.discovery-tone : 0;
                         discovery-message: root.discovery-scope == 1 && root.batch ? root.discovery-message : "";
                         query <=> root.batch-query;
+                        shared-modalities <=> root.batch-input-modalities;
                         shared-context <=> root.batch-context;
                         shared-levels <=> root.batch-levels;
                         shared-default <=> root.batch-default;
@@ -502,7 +515,7 @@ export component ModelEditor inherits Rectangle {
                         toggle(index) => { root.batch-toggle(index); }
                         select-all(checked) => { root.batch-select-all(checked); }
                         filter(query) => { root.batch-filter(query); }
-                        edit(index, context, levels) => { root.batch-edit(index, context, levels); }
+                        edit(index, context, levels, modalities) => { root.batch-edit(index, context, levels, modalities); }
                         save => { root.save-batch(); }
                         cancel => { root.model-editor-open = false; }
                     }

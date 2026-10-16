@@ -189,6 +189,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     provider_id: &provider.id, original_id: "", public_id: "sx-mock-alpha-extra",
                     display_name: "Alpha extra model", upstream_model: "extra-model", catalog_path: "",
                     settings: Some(switchx::catalog::MappingSettings {
+                input_modalities: None,
                         context_window: "256000", reasoning_levels: Some("low, high"), default_reasoning: Some("high"),
                     }),
                 })?;

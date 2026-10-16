@@ -2,7 +2,7 @@
 //! can inspect SwitchX status, connections, model mappings, prices, usage, and
 //! request history. Reads open the existing database read-only, without
 //! creating or migrating it. Only `switchx mcp --allow-writes` also offers
-//! tools that enable models, set fallbacks, and edit prices, through the same
+//! tools that edit model mappings, capabilities, fallbacks, and prices, through the same
 //! services and edit lock as the app, then tell a running app to reload.
 //! `--allow-control` also offers tools that ask the running app to preview,
 //! apply, and restore route or direct Codex configuration through
@@ -28,6 +28,7 @@ use crate::{
     },
 };
 
+mod models;
 pub mod setup;
 
 /// Newest first; an unknown requested version gets the newest.
@@ -49,7 +50,7 @@ const CONTROLLABLE: &str = "控制工具通过正在运行的 SwitchX 应用修�
 /// What agents may change beyond reading; both are off by default.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct Access {
-    /// Saved model selections, fallbacks, and prices.
+    /// Saved model mappings, selections, fallbacks, and prices.
     pub writes: bool,
     /// Codex configuration through the running app.
     pub control: bool,
@@ -159,6 +160,12 @@ impl Server {
             "list_requests" => self.with_store(|store| requests(store, arguments)),
             "list_prices" => self.with_store(prices),
             "get_app_status" => self.control("status", arguments, &["codex_home"]),
+            "save_model" if self.access.writes => {
+                self.write(|dir, store| models::save(dir, store, arguments))
+            }
+            "delete_model" if self.access.writes => {
+                self.write(|dir, store| models::delete(dir, store, arguments))
+            }
             "set_models_enabled" if self.access.writes => {
                 self.write(|data_dir, store| set_models_enabled(data_dir, store, arguments))
             }
@@ -384,7 +391,7 @@ fn tools(access: Access) -> Value {
             "list_models",
             "模型映射",
             "列出已保存的模型映射：Codex 中使用的公开模型 ID、所属连接、实际上游模型、上下文窗口、推理档位、\
-             是否启用以及备用连接。",
+             输入能力、是否启用以及备用连接。",
             json!({
                 "provider_id": {
                     "type": "string",
@@ -473,6 +480,7 @@ fn tools(access: Access) -> Value {
         ),
     ];
     if access.writes {
+        tools.extend(models::definitions());
         let price =
             |description: &str| json!({ "type": ["number", "string"], "description": description });
         tools.extend([
@@ -770,6 +778,7 @@ fn models(store: &Store, arguments: &Map<String, Value>) -> Result<Value, String
             "没有 ID 为 {provider} 的连接；请先调用 list_providers。"
         ));
     }
+    let saved = store.models().map_err(|_| "无法读取模型资料")?;
     let models: Vec<_> = snapshot
         .models
         .iter()
@@ -783,12 +792,14 @@ fn models(store: &Store, arguments: &Map<String, Value>) -> Result<Value, String
                 "provider_id": model.provider_id,
                 "provider_name": model.provider_name,
                 "upstream_model": model.upstream_model,
+                "request_overrides_configured": saved.iter().find(|record| record.public_id == model.public_id).is_some_and(|record| !record.request_overrides.is_empty()),
                 "ready": model.ready,
                 "enabled": model.enabled,
             });
             if !model.ready {
                 view["problem"] = model.detail.as_str().into();
             }
+            view["input_modalities"] = serde_json::json!(model.input_modalities.types());
             if let Ok(window) = model.context_window.parse::<i64>() {
                 view["context_window"] = window.into();
             }
@@ -1046,6 +1057,11 @@ fn saved_model(store: &Store, public_id: &str) -> Result<Value, String> {
                 "provider_id": model.provider_id,
                 "upstream_model": model.upstream_model,
                 "enabled": model.enabled,
+                "display_name": model.display_name,
+                "context_window": model.context_window,
+                "reasoning_levels": model.reasoning_levels,
+                "default_reasoning": model.default_reasoning,
+                "input_modalities": model.input_modalities.types(),
                 "fallback_provider_id": (!model.fallback_provider_id.is_empty())
                     .then_some(model.fallback_provider_id.as_str()),
             })
@@ -1715,6 +1731,139 @@ mod tests {
         assert_eq!(price["output"], 2.0);
         assert_eq!(fs::read(&database).unwrap(), before);
         assert!(app::external_change(&data.0).is_none());
+    }
+
+    #[test]
+    fn mcp_model_editor_supports_all_fields_partial_edits_creation_and_deletion() {
+        let data = Data::new();
+        seed(&data.0);
+        let access = Access {
+            writes: true,
+            control: false,
+        };
+        let responses = exchange_with(
+            &data.0,
+            access,
+            &[
+                call(
+                    1,
+                    "save_model",
+                    json!({"public_id": "sx-flash", "display_name": "Visual model", "upstream_model": "synthetic-vision", "context_window": 256000, "reasoning_levels": ["low", "high"], "default_reasoning": "high", "input_modalities": ["text", "image", "audio"], "request_overrides": {"user_agent": "synthetic-agent", "headers": {"x-tenant": "private-tenant"}, "body": {"temperature": 0.2}}}),
+                ),
+                call(
+                    2,
+                    "save_model",
+                    json!({"public_id": "sx-flash", "input_modalities": ["text"]}),
+                ),
+                call(3, "list_models", json!({})),
+                call(
+                    4,
+                    "save_model",
+                    json!({"public_id": "sx-flash", "input_modalities": ["image"]}),
+                ),
+                call(
+                    5,
+                    "save_model",
+                    json!({"public_id": "sx-flash", "api_key": "never-echo-this"}),
+                ),
+                call(
+                    6,
+                    "save_model",
+                    json!({"public_id": "sx-flash", "request_overrides": {"headers": {"Authorization": "never-echo-this"}}}),
+                ),
+            ],
+        );
+        assert_eq!(
+            tool_result(&responses[0])["model"]["input_modalities"],
+            json!(["text", "image", "audio"])
+        );
+        assert_eq!(
+            tool_result(&responses[1])["model"]["input_modalities"],
+            json!(["text"])
+        );
+        let listed = tool_result(&responses[2]);
+        let model = &listed["models"][0];
+        assert_eq!(model["display_name"], "Visual model");
+        assert_eq!(model["upstream_model"], "synthetic-vision");
+        assert_eq!(model["context_window"], 256000);
+        assert_eq!(model["reasoning_levels"], json!(["low", "high"]));
+        assert_eq!(model["default_reasoning"], "high");
+        assert_eq!(model["request_overrides_configured"], true);
+        for response in &responses[3..] {
+            assert_eq!(response["result"]["isError"], true);
+        }
+        let output = serde_json::to_string(&responses).unwrap();
+        for secret in ["private-tenant", "never-echo-this", API_KEY, LOCAL_TOKEN] {
+            assert!(!output.contains(secret));
+        }
+        let store = app::open_store(&data.0).unwrap();
+        let saved = store.models().unwrap().remove(0);
+        assert_eq!(saved.request_overrides.user_agent(), "synthetic-agent");
+        assert_eq!(
+            serde_json::from_str::<Value>(&saved.metadata).unwrap()["input_modalities"],
+            json!(["text"])
+        );
+        let cleared = exchange_with(
+            &data.0,
+            access,
+            &[call(
+                7,
+                "save_model",
+                json!({"public_id": "sx-flash", "reasoning_levels": [], "default_reasoning": null, "request_overrides": null}),
+            )],
+        );
+        tool_result(&cleared[0]);
+        assert!(store.models().unwrap()[0].request_overrides.is_empty());
+        let created = exchange_with(
+            &data.0,
+            access,
+            &[call(
+                8,
+                "save_model",
+                json!({"provider_id": "probe", "upstream_model": "new-model", "input_modalities": ["text", "audio"]}),
+            )],
+        );
+        let created = tool_result(&created[0]);
+        let id = created["model"]["public_id"].as_str().unwrap();
+        let deleted = exchange_with(
+            &data.0,
+            access,
+            &[call(9, "delete_model", json!({"public_id": id}))],
+        );
+        assert_eq!(tool_result(&deleted[0])["deleted"], id);
+        assert_eq!(store.models().unwrap().len(), 1);
+        assert!(app::external_change(&data.0).is_some());
+    }
+
+    #[test]
+    fn mcp_model_editor_obeys_read_only_and_managed_config_locks() {
+        let data = Data::new();
+        seed(&data.0);
+        let store = app::open_store(&data.0).unwrap();
+        let before = store.models().unwrap();
+        let calls = [
+            call(
+                1,
+                "save_model",
+                json!({"public_id": "sx-flash", "input_modalities": ["text"]}),
+            ),
+            call(2, "delete_model", json!({"public_id": "sx-flash"})),
+        ];
+        for response in exchange(&data.0, &calls) {
+            assert_eq!(response["error"]["code"], -32602);
+        }
+        fs::write(data.0.join(codex::ROUTE_JOURNAL), "{}").unwrap();
+        for response in exchange_with(
+            &data.0,
+            Access {
+                writes: true,
+                control: false,
+            },
+            &calls,
+        ) {
+            assert_eq!(response["result"]["isError"], true);
+        }
+        assert_eq!(store.models().unwrap(), before);
     }
 
     #[test]

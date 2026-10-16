@@ -32,6 +32,8 @@ pub(super) fn show_batch_candidates(app: &AppWindow, candidates: Vec<app::BatchC
                 added: model.added,
                 supported: model.supported,
                 checked: false,
+                input_modalities: 0,
+                template_modalities: model.input_modalities.selection(),
                 source: model.source.into(),
                 template_context: model.context_window.into(),
                 template_levels_label: catalog::reasoning_label(&model.reasoning_levels).into(),
@@ -133,9 +135,16 @@ pub(super) fn filter_batch_rows(app: &AppWindow, query: &str) {
     });
 }
 
-pub(super) fn edit_batch_row(app: &AppWindow, index: usize, context: &str, levels: &str) {
+pub(super) fn edit_batch_row(
+    app: &AppWindow,
+    index: usize,
+    context: &str,
+    levels: &str,
+    modalities: i32,
+) {
     let rows = app.get_batch_models();
     if let Some(mut row) = rows.row_data(index) {
+        row.input_modalities = modalities;
         row.context = context.trim().into();
         row.levels = levels.trim().into();
         row.levels_label = catalog::reasoning_label(levels).into();
@@ -154,11 +163,15 @@ pub(super) fn batch_save_command(app: &AppWindow) -> Option<Command> {
                 row.id.to_string(),
                 row.context.trim().to_owned(),
                 row.levels.trim().to_owned(),
+                catalog::InputModalities::from_selection(row.input_modalities),
             )
         })
         .collect::<Vec<_>>();
     (!models.is_empty()).then(|| {
         Command::SaveModels(BatchForm {
+            input_modalities: catalog::InputModalities::from_selection(
+                app.get_batch_input_modalities(),
+            ),
             request_overrides: super::models::request_draft(app),
             provider: app.get_model_provider_id().into(),
             models,
@@ -205,9 +218,9 @@ pub(super) fn connect(app: &AppWindow, sender: &mpsc::Sender<Command>) {
         }
     });
     let weak = app.as_weak();
-    app.on_batch_edit(move |index, context, levels| {
+    app.on_batch_edit(move |index, context, levels, modalities| {
         if let Some(app) = weak.upgrade() {
-            edit_batch_row(&app, index as usize, &context, &levels);
+            edit_batch_row(&app, index as usize, &context, &levels, modalities);
         }
     });
     let weak = app.as_weak();
@@ -246,6 +259,7 @@ mod tests {
         headless::install();
         let app = AppWindow::new().unwrap();
         let candidate = |id: &str, added: bool, supported: bool| app::BatchCandidate {
+            input_modalities: Default::default(),
             model_id: id.into(),
             added,
             supported,
@@ -286,7 +300,7 @@ mod tests {
         assert_eq!(app.get_batch_summary().selected, 2);
         assert_eq!(app.get_batch_summary().visible_selected, 2);
 
-        edit_batch_row(&app, 2, " 64000 ", "max low medium high");
+        edit_batch_row(&app, 2, " 64000 ", "max low medium high", 2);
         let edited = app.get_batch_models().row_data(2).unwrap();
         assert_eq!(edited.context, "64000");
         assert_eq!(edited.levels_label, "low → high, max");
@@ -299,6 +313,7 @@ mod tests {
         app.set_batch_default("high".into());
         app.set_model_user_agent("synthetic-agent/1".into());
         let Some(Command::SaveModels(BatchForm {
+            input_modalities,
             request_overrides,
             provider,
             models,
@@ -309,16 +324,18 @@ mod tests {
         else {
             panic!("batch save command")
         };
+        assert_eq!(input_modalities, None);
         assert_eq!(request_overrides.0, "synthetic-agent/1");
         assert_eq!(provider, "provider");
         assert_eq!(
             models,
             vec![
-                ("coder-pro".into(), String::new(), String::new()),
+                ("coder-pro".into(), String::new(), String::new(), None),
                 (
                     "chat-max".into(),
                     "64000".into(),
-                    "max low medium high".into()
+                    "max low medium high".into(),
+                    Some(catalog::InputModalities::TextImage)
                 ),
             ]
         );

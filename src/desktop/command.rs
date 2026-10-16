@@ -190,6 +190,7 @@ pub(super) struct SubscriptionForm {
 
 /// The single model mapping editor.
 pub(super) struct ModelForm {
+    pub input_modalities: Option<switchx::catalog::InputModalities>,
     pub request_overrides: (String, String, String),
     pub provider: String,
     pub original_id: String,
@@ -204,10 +205,16 @@ pub(super) struct ModelForm {
 
 /// A batch addition from the model picker.
 pub(super) struct BatchForm {
+    pub input_modalities: Option<switchx::catalog::InputModalities>,
     pub request_overrides: (String, String, String),
     pub provider: String,
-    /// Upstream model, row context window, row reasoning levels.
-    pub models: Vec<(String, String, String)>,
+    /// Upstream model, row context window, row reasoning levels, row input capabilities.
+    pub models: Vec<(
+        String,
+        String,
+        String,
+        Option<switchx::catalog::InputModalities>,
+    )>,
     pub context: String,
     pub levels: String,
     pub default_reasoning: String,

@@ -32,6 +32,7 @@ pub struct Snapshot {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ModelView {
+    pub input_modalities: crate::catalog::InputModalities,
     pub provider_id: String,
     pub provider_name: String,
     pub binding_label: String,
@@ -97,7 +98,8 @@ fn model_view(
     let detail = if ready {
         let metadata = metadata.as_ref().unwrap();
         format!(
-            "上下文 {} · 资料已保存 · 实际能力待验证",
+            "{} · 上下文 {} · 实际能力待验证",
+            crate::catalog::InputModalities::from_metadata(metadata).label(),
             metadata["context_window"]
         )
     } else if model.is_some() {
@@ -106,6 +108,10 @@ fn model_view(
         "尚未添加模型映射".into()
     };
     ModelView {
+        input_modalities: metadata
+            .as_ref()
+            .map(crate::catalog::InputModalities::from_metadata)
+            .unwrap_or_default(),
         provider_id: provider.id.clone(),
         provider_name: provider.name.clone(),
         binding_label: binding_label(provider),

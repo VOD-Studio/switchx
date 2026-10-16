@@ -115,7 +115,7 @@ pub(crate) fn save_mapping_from(
     }) {
         return Err("此上游已有该实际模型的映射，请编辑已有条目".into());
     }
-    let source = if source.is_some() {
+    let mut source = if source.is_some() {
         source
     } else if input.catalog_path.trim().is_empty() {
         old.filter(|model| model.upstream_model == input.upstream_model)
@@ -127,6 +127,24 @@ pub(crate) fn save_mapping_from(
             input.upstream_model,
         )?)
     };
+    // Official templates refresh instructions and tools, but an unrelated edit must
+    // preserve the saved input capabilities, including an explicit text-only choice.
+    if input.catalog_path.trim().is_empty()
+        && input
+            .settings
+            .as_ref()
+            .is_some_and(|settings| settings.input_modalities.is_none())
+        && let Some(old) = old.filter(|model| model.upstream_model == input.upstream_model)
+        && let Some(source) = source.as_mut()
+    {
+        if !source.is_object() {
+            return Err("模型资料不是对象".into());
+        }
+        let saved: serde_json::Value =
+            serde_json::from_str(&old.metadata).map_err(|_| "已保存的模型资料损坏")?;
+        source["input_modalities"] = saved["input_modalities"].clone();
+        source["supports_image_detail_original"] = saved["supports_image_detail_original"].clone();
+    }
     let metadata = if let Some(settings) = &input.settings {
         catalog::mapping_metadata(
             input.upstream_model,
@@ -176,6 +194,7 @@ pub(crate) fn save_mapping_from(
 /// A discovered upstream model and the values a batch addition starts from.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct BatchCandidate {
+    pub input_modalities: catalog::InputModalities,
     pub model_id: String,
     pub added: bool,
     pub supported: bool,
@@ -187,6 +206,7 @@ pub struct BatchCandidate {
 }
 
 pub struct BatchModel<'a> {
+    pub input_modalities: Option<catalog::InputModalities>,
     pub upstream_model: &'a str,
     // Empty values inherit the template, then the shared settings.
     pub context_window: &'a str,
@@ -194,6 +214,7 @@ pub struct BatchModel<'a> {
 }
 
 pub struct BatchInput<'a> {
+    pub input_modalities: Option<catalog::InputModalities>,
     pub request_overrides: Option<&'a crate::request_overrides::RequestOverrides>,
     pub provider_id: &'a str,
     pub models: &'a [BatchModel<'a>],
@@ -288,6 +309,10 @@ fn candidates_for(
         .map(|id| {
             let template = model_template(provider, id, templates)?;
             Ok(BatchCandidate {
+                input_modalities: template
+                    .as_ref()
+                    .map(catalog::InputModalities::from_metadata)
+                    .unwrap_or_default(),
                 model_id: id.clone(),
                 added: models
                     .iter()
@@ -399,6 +424,7 @@ pub(crate) fn save_mappings_from(
             model_id,
             &display_name,
             &catalog::MappingSettings {
+                input_modalities: item.input_modalities.or(input.input_modalities),
                 context_window,
                 reasoning_levels,
                 default_reasoning: default_reasoning.as_deref(),
@@ -429,6 +455,7 @@ pub(crate) fn save_mappings_from(
 /// accepted from the editor. Existing public IDs and selection survive edits.
 #[derive(Debug, Clone)]
 pub struct ConnectionModel {
+    pub input_modalities: Option<catalog::InputModalities>,
     pub public_id: String,
     pub display_name: String,
     pub upstream_model: String,
@@ -528,6 +555,7 @@ pub(crate) fn connection_model_records(
             model_id,
             name,
             &catalog::MappingSettings {
+                input_modalities: draft.input_modalities,
                 context_window: &draft.context_window,
                 reasoning_levels: Some(&draft.reasoning_levels),
                 default_reasoning: Some(&draft.default_reasoning),
@@ -648,6 +676,70 @@ mod tests {
     use std::{env, fs};
 
     #[test]
+    fn refreshed_official_templates_preserve_saved_input_capabilities() {
+        let path =
+            env::temp_dir().join(format!("switchx-capability-refresh-{}", new_id().unwrap()));
+        let store = open_store(&path).unwrap();
+        store
+            .put_provider(&ProviderRecord {
+                id: "mock".into(),
+                name: "Mock".into(),
+                base_url: "https://example.invalid/v1".into(),
+                model_id: "model".into(),
+                credential_ref: None,
+                kind: ProviderKind::ApiKey,
+                account_binding: None,
+                icon_id: None,
+            })
+            .unwrap();
+        let template = catalog::mapping_metadata(
+            "model",
+            "Official",
+            &catalog::MappingSettings {
+                input_modalities: Some(catalog::InputModalities::TextImage),
+                context_window: "",
+                reasoning_levels: None,
+                default_reasoning: None,
+            },
+            None,
+        )
+        .unwrap();
+        for (original, modalities) in [
+            ("", Some(catalog::InputModalities::TextAudio)),
+            ("sx-test", None),
+        ] {
+            save_mapping_from(
+                &path,
+                ModelInput {
+                    provider_id: "mock",
+                    original_id: original,
+                    public_id: "sx-test",
+                    display_name: "Edited",
+                    upstream_model: "model",
+                    catalog_path: "",
+                    request_overrides: None,
+                    settings: Some(catalog::MappingSettings {
+                        input_modalities: modalities,
+                        context_window: "256000",
+                        reasoning_levels: None,
+                        default_reasoning: None,
+                    }),
+                },
+                Some(template.clone()),
+            )
+            .unwrap();
+            let saved: serde_json::Value =
+                serde_json::from_str(&store.models().unwrap()[0].metadata).unwrap();
+            assert_eq!(
+                saved["input_modalities"],
+                serde_json::json!(["text", "audio"])
+            );
+        }
+        drop(store);
+        let _ = fs::remove_dir_all(path);
+    }
+
+    #[test]
     fn request_customization_survives_model_and_directory_edits_but_never_enters_catalogs() {
         use crate::request_overrides::RequestOverrides;
         let path = env::temp_dir().join(format!("switchx-request-settings-{}", new_id().unwrap()));
@@ -680,6 +772,7 @@ mod tests {
                     upstream_model: "model",
                     catalog_path: "",
                     settings: Some(catalog::MappingSettings {
+                        input_modalities: None,
                         context_window: "128000",
                         reasoning_levels: Some("low, high"),
                         default_reasoning: Some("high"),
@@ -698,6 +791,7 @@ mod tests {
         let store = open_store(&path).unwrap();
         let records = store.models().unwrap();
         let drafts = [ConnectionModel {
+            input_modalities: None,
             public_id: "sx-model".into(),
             display_name: "Directory edit".into(),
             upstream_model: "model".into(),
@@ -748,14 +842,17 @@ mod tests {
         let ids = save_mappings(
             &path,
             &BatchInput {
+                input_modalities: None,
                 provider_id: "mock",
                 models: &[
                     BatchModel {
+                        input_modalities: None,
                         upstream_model: "second",
                         context_window: "",
                         reasoning_levels: "",
                     },
                     BatchModel {
+                        input_modalities: None,
                         upstream_model: "third",
                         context_window: "",
                         reasoning_levels: "",
@@ -804,6 +901,7 @@ mod tests {
                     upstream_model,
                     catalog_path: "",
                     settings: Some(catalog::MappingSettings {
+                        input_modalities: None,
                         context_window,
                         reasoning_levels: Some("low, high"),
                         default_reasoning: Some("high"),
@@ -868,9 +966,11 @@ mod tests {
         save_mappings(
             &path,
             &BatchInput {
+                input_modalities: None,
                 request_overrides: None,
                 provider_id: "deepseek",
                 models: &[BatchModel {
+                    input_modalities: None,
                     upstream_model: "deepseek-flash",
                     context_window: "",
                     reasoning_levels: "",
@@ -902,6 +1002,7 @@ mod tests {
 
         let before = store.models().unwrap();
         let shared = |models| BatchInput {
+            input_modalities: None,
             request_overrides: None,
             provider_id: "deepseek",
             models,
@@ -913,17 +1014,20 @@ mod tests {
             // An existing pair, an invalid row value and an empty batch all write nothing.
             &[
                 BatchModel {
+                    input_modalities: None,
                     upstream_model: "custom-chat",
                     context_window: "",
                     reasoning_levels: "",
                 },
                 BatchModel {
+                    input_modalities: None,
                     upstream_model: "deepseek-flash",
                     context_window: "",
                     reasoning_levels: "",
                 },
             ][..],
             &[BatchModel {
+                input_modalities: None,
                 upstream_model: "custom-chat",
                 context_window: "0",
                 reasoning_levels: "",
@@ -938,16 +1042,19 @@ mod tests {
             &path,
             &shared(&[
                 BatchModel {
+                    input_modalities: None,
                     upstream_model: "deepseek-v4-pro",
                     context_window: "",
                     reasoning_levels: "",
                 },
                 BatchModel {
+                    input_modalities: None,
                     upstream_model: "custom-chat",
                     context_window: "",
                     reasoning_levels: "",
                 },
                 BatchModel {
+                    input_modalities: None,
                     upstream_model: "custom-coder",
                     context_window: "64000",
                     reasoning_levels: "high, max",
@@ -996,6 +1103,7 @@ mod tests {
 
         fs::write(path.join(crate::codex::ROUTE_JOURNAL), "synthetic journal").unwrap();
         let blocked = [BatchModel {
+            input_modalities: None,
             upstream_model: "custom-blocked",
             context_window: "",
             reasoning_levels: "",
@@ -1026,6 +1134,7 @@ mod tests {
             "fixture-official",
             "Fixture",
             &catalog::MappingSettings {
+                input_modalities: None,
                 context_window: "272000",
                 reasoning_levels: Some("low, medium, high"),
                 default_reasoning: Some("medium"),
@@ -1045,9 +1154,11 @@ mod tests {
             save_mappings_from(
                 &path,
                 &BatchInput {
+                    input_modalities: None,
                     request_overrides: None,
                     provider_id: "plus",
                     models: &[BatchModel {
+                        input_modalities: None,
                         upstream_model,
                         context_window: "",
                         reasoning_levels,
@@ -1105,6 +1216,7 @@ mod tests {
                 id,
                 id,
                 &catalog::MappingSettings {
+                    input_modalities: None,
                     context_window: "128000",
                     reasoning_levels: None,
                     default_reasoning: None,
