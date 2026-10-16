@@ -1,7 +1,7 @@
-//! What a user hands an agent to register `switchx mcp`: the client's command
-//! or configuration for the chosen access, and a one-sentence request that
-//! asks the agent to run it. Only paths and flags appear; never credentials,
-//! tokens, or the control endpoint.
+//! What a user hands an agent to register `switchx mcp`: the chosen client's
+//! command or configuration, and one sentence that asks whichever client
+//! receives it to register the server on itself. Only paths and flags appear;
+//! never credentials, tokens, or the control endpoint.
 
 use std::{fs, path::Path};
 
@@ -121,36 +121,25 @@ fn json_entry(access: Access, executable: &str, data_dir: Option<&str>, pretty: 
     )
 }
 
-/// One sentence asking an agent to register the server and confirm it works.
-pub fn request(client: Client, access: Access, launch: Launch) -> String {
+/// One sentence asking whichever client receives it to register the server on
+/// itself and confirm it works. The window's client choice does not appear:
+/// Codex, Claude Code, and a JSON config each get the same sentence, and a
+/// Codex home only changes the manual command.
+pub fn request(access: Access, launch: Launch) -> String {
     let consent = match (access.writes, access.control) {
         (false, false) => "",
         (true, false) => "；之后修改 SwitchX 的模型或价格前，先向我说明并等我同意",
         (false, true) => "；之后修改 Codex 配置前，先把预览告诉我并等我同意",
         (true, true) => "；之后修改 SwitchX 的模型、价格或 Codex 配置前，先向我说明并等我同意",
     };
-    let command = || registration(client, access, launch);
-    match client {
-        Client::Codex => format!(
-            "请在终端运行 `{}`，把 SwitchX 注册为 Codex 的 MCP 服务，完成后提醒我新开一个 Codex 会话，\
-             并在新会话中调用 switchx 的 get_status 工具确认可用{consent}。",
-            command()
-        ),
-        Client::ClaudeCode => format!(
-            "请在终端运行 `{}`，把 SwitchX 注册为 Claude Code 的 MCP 服务，完成后提醒我重启 Claude Code，\
-             并在重启后调用 switchx 的 get_status 工具确认可用{consent}。",
-            command()
-        ),
-        Client::Json => {
-            let executable = launch.executable.display().to_string();
-            let data_dir = launch.data_dir.map(|path| path.display().to_string());
-            let entry = json_entry(access, &executable, data_dir.as_deref(), false);
-            format!(
-                "请把名为 switchx 的 MCP 服务 `{entry}` 加入你的 MCP 配置并保留已有服务，\
-                 重新加载后调用它的 get_status 工具确认可用{consent}。"
-            )
-        }
-    }
+    let executable = launch.executable.display().to_string();
+    let data_dir = launch.data_dir.map(|path| path.display().to_string());
+    let entry = json_entry(access, &executable, data_dir.as_deref(), false);
+    format!(
+        "请把名为 switchx 的 stdio MCP 服务 `{entry}` 注册到你自己：你就是收到这句话的客户端，\
+         用你自己的注册命令或配置文件，保留已有服务，并让各个项目都能使用。\
+         完成后提醒我新开一个会话或重新加载，再调用 switchx 的 get_status 工具确认可用{consent}。"
+    )
 }
 
 /// The access a Codex home's `[mcp_servers.switchx]` grants.
@@ -310,25 +299,45 @@ mod tests {
     }
 
     #[test]
-    fn requests_embed_the_registration_and_ask_before_changes() {
+    fn requests_register_whichever_client_receives_them() {
         let executable = PathBuf::from("/opt/switchx");
-        let read = request(Client::Codex, READ, launch(&executable));
-        assert!(read.contains(&format!(
-            "`{}`",
-            registration(Client::Codex, READ, launch(&executable))
-        )));
+        let read = request(READ, launch(&executable));
+        assert!(read.contains(r#"`{"command":"/opt/switchx","args":["mcp"]}`"#));
+        assert!(read.contains("收到这句话的客户端"));
         assert!(read.contains("get_status"));
         assert!(!read.contains("同意"));
+        assert!(!read.to_ascii_lowercase().contains("codex"));
+        assert!(!read.contains("Claude"));
 
-        let all = request(Client::ClaudeCode, ALL, launch(&executable));
-        assert!(all.contains("--allow-writes --allow-control"));
-        assert!(all.contains("Claude Code"));
+        let home = PathBuf::from("/isolated/codex");
+        let data = PathBuf::from("/isolated/data");
+        let all = request(
+            ALL,
+            Launch {
+                executable: &executable,
+                data_dir: Some(&data),
+                codex_home: Some(&home),
+            },
+        );
+        assert!(all.contains(r#""args":["mcp","--allow-writes","--allow-control"]"#));
+        assert!(all.contains(r#""SWITCHX_DATA_DIR":"/isolated/data""#));
+        // The selected Codex home belongs to the manual command, not this sentence.
+        assert!(!all.contains("CODEX_HOME"));
+        assert!(!all.contains("/isolated/codex"));
+        assert!(!all.contains("claude"));
+        assert!(all.contains("Codex 配置"));
         assert!(all.contains("等我同意"));
+        assert!(!read.contains('\n') && !all.contains('\n'));
 
-        let json = request(Client::Json, READ, launch(&executable));
-        assert!(json.contains(r#"`{"command":"/opt/switchx","args":["mcp"]}`"#));
-        // Every request is a single line to paste.
-        assert!([read, all, json].iter().all(|text| !text.contains('\n')));
+        let writes = request(
+            Access {
+                writes: true,
+                control: false,
+            },
+            launch(&executable),
+        );
+        assert!(writes.contains("模型或价格"));
+        assert!(!writes.contains("Codex"));
     }
 
     #[test]

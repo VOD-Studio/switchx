@@ -1,6 +1,7 @@
-//! The toolbox page's agent access: the registration command and one-sentence
-//! request for the chosen client and access, the Codex home's current
-//! registration, and the switch for the app's agent control channel.
+//! The toolbox page's agent access: the registration command for the chosen
+//! client, one sentence any receiving client can use to register itself, the
+//! Codex home's current registration, and the switch for the app's agent
+//! control channel.
 
 use std::path::{Path, PathBuf};
 
@@ -60,9 +61,9 @@ pub(super) fn connect(app: &AppWindow, sender: &mpsc::Sender<Command>) {
         })
         .into()
     });
-    mcp.on_request(move |kind, writes, control, home| {
+    mcp.on_request(move |_kind, writes, control, home| {
         launch(&home, &|launch| {
-            setup::request(Client::from_index(kind), Access { writes, control }, launch)
+            setup::request(Access { writes, control }, launch)
         })
         .into()
     });

@@ -789,7 +789,7 @@ export component ToolboxPage inherits ScrollView {
                         }
 
                         Text {
-                            text: "复制下面这句话发给 " + root.client-label + "，agent 会自己运行注册命令，并在新会话里确认可用。";
+                            text: "复制下面这句话发给哪个客户端，那个客户端就会把 SwitchX 注册到自己，并在新会话里确认可用。";
                             color: Theme.muted-text;
                             font-size: 12px;
                             wrap: word-wrap;
@@ -846,7 +846,7 @@ export component ToolboxPage inherits ScrollView {
                             }
 
                             Text {
-                                text: "权限与客户端可在下方调整，这句话会随之更新。";
+                                text: "权限可在下方调整，这句话会随之更新。";
                                 color: Theme.muted-text;
                                 font-size: 11px;
                                 vertical-alignment: center;
@@ -860,7 +860,7 @@ export component ToolboxPage inherits ScrollView {
                         alignment: center;
                         spacing: 18px;
                         link := AgentLink {
-                            client-label: root.client-label;
+                            client-label: "客户端";
                             channel: root.channel;
                         }
 

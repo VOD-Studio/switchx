@@ -84,13 +84,8 @@ fn toolbox_copies_the_registration_and_switches_agent_control() {
         )
         .into()
     });
-    mcp.on_request(|client, writes, control, _| {
-        setup::request(
-            Client::from_index(client),
-            Access { writes, control },
-            launch(),
-        )
-        .into()
+    mcp.on_request(|_client, writes, control, _| {
+        setup::request(Access { writes, control }, launch()).into()
     });
     mcp.on_tool_count(|writes, control| setup::tool_count(Access { writes, control }) as i32);
     let channel_requests = Rc::new(RefCell::new(Vec::new()));
@@ -123,13 +118,11 @@ fn toolbox_copies_the_registration_and_switches_agent_control() {
             headless::clear_clipboard();
             click(&window, &app, "复制一句话");
             let read = headless::clipboard();
-            assert_eq!(
-                read,
-                setup::request(Client::Codex, Access::default(), launch())
-            );
+            assert_eq!(read, setup::request(Access::default(), launch()));
             assert!(read.contains(EXECUTABLE) && !read.contains("--allow"));
+            assert!(!read.contains("codex mcp") && !read.contains("claude mcp"));
 
-            // Permissions and the client feed both the command and the sentence.
+            // Permissions feed the sentence. The client changes only the manual command.
             click(&window, &app, "允许修改模型与价格");
             assert!(app.get_mcp_allow_writes());
             click(&window, &app, "允许控制 Codex 配置");
@@ -146,10 +139,9 @@ fn toolbox_copies_the_registration_and_switches_agent_control() {
             click(&window, &app, "Claude Code");
             assert_eq!(app.get_mcp_client(), 1);
             click(&window, &app, "复制一句话");
-            assert_eq!(
-                headless::clipboard(),
-                setup::request(Client::ClaudeCode, all, launch())
-            );
+            let sentence = headless::clipboard();
+            assert_eq!(sentence, setup::request(all, launch()));
+            assert!(!sentence.contains("claude mcp") && !sentence.contains("codex mcp"));
             click(&window, &app, "其他客户端");
             click(&window, &app, "复制配置");
             assert!(headless::clipboard().contains("\"mcpServers\""));

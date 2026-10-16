@@ -32,13 +32,8 @@ fn connect(app: &AppWindow) {
         )
         .into()
     });
-    mcp.on_request(move |client, writes, control, _| {
-        setup::request(
-            Client::from_index(client),
-            Access { writes, control },
-            launch(),
-        )
-        .into()
+    mcp.on_request(move |_client, writes, control, _| {
+        setup::request(Access { writes, control }, launch()).into()
     });
     mcp.on_tool_count(|writes, control| setup::tool_count(Access { writes, control }) as i32);
 }

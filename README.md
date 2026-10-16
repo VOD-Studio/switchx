@@ -84,7 +84,7 @@ sh scripts/bundle-macos.sh --release  # target/release/SwitchX.app
 
 `switchx mcp` 在标准输入输出上运行一个 [MCP](https://modelcontextprotocol.io) 服务，Codex、Claude Code 等 agent 可以直接查询 SwitchX，默认只读。
 
-最简单的接入方式是打开应用的「工具箱」：选择客户端（Codex、Claude Code 或其他使用 `mcpServers` JSON 的客户端）并按需开启下面的权限，然后点「复制一句话」，把这句话发给 agent，它会自己运行注册命令，并在新会话中调用 `get_status` 确认可用。也可以复制注册命令或 JSON 配置手动注册。命令使用当前 SwitchX 程序的完整路径，设置了 `SWITCHX_DATA_DIR` 时一并传给 MCP 服务；工具箱还会识别当前工作空间的 Codex 是否已注册以及注册时的权限。
+最简单的接入方式是打开应用的「工具箱」：按需开启下面的权限，然后点「复制一句话」。把这句话发给哪个客户端，那个客户端就用自己的注册命令或配置文件，把 SwitchX 注册到自己，并在新会话中调用 `get_status` 确认可用。也可以在下方选择 Codex、Claude Code 或其他使用 `mcpServers` JSON 的客户端，复制注册命令或配置手动注册。命令使用当前 SwitchX 程序的完整路径，设置了 `SWITCHX_DATA_DIR` 时一并传给 MCP 服务；工具箱还会识别当前工作空间的 Codex 是否已注册以及注册时的权限。
 
 
 | 工具             | 内容                                                                     |
