@@ -9,6 +9,7 @@ use std::{
 use crate::{codex, storage::Store};
 
 mod activity;
+pub mod claude;
 mod clients;
 mod common_config;
 mod models;

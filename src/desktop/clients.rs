@@ -3,11 +3,7 @@
 use std::path::{Path, PathBuf};
 
 use slint::ComponentHandle;
-use switchx::{
-    app,
-    clients::{ClientKind, WorkspaceKey},
-    ui::AppWindow,
-};
+use switchx::{app, clients::ClientKind, ui::AppWindow};
 use tokio::sync::mpsc;
 
 use super::{
@@ -52,7 +48,9 @@ pub(super) fn connect(window: &AppWindow, sender: &mpsc::Sender<Command>) {
     let navigation = sender.clone();
     window.on_client_navigation(move |previous, page| {
         if let Some(window) = weak.upgrade() {
-            let page = if previous == 0 && !matches!(page, 0 | 1 | 3) {
+            let page = if previous == 1 {
+                window.global::<switchx::ui::ClaudeUi>().get_page()
+            } else if !matches!(page, 0 | 1 | 3) {
                 window.get_codex_last_page()
             } else {
                 page
@@ -84,17 +82,33 @@ pub(super) fn connect(window: &AppWindow, sender: &mpsc::Sender<Command>) {
 impl Worker {
     pub(super) fn initialize_client_workspaces(&mut self) {
         // Database creation, online backups and migrations stay off the UI thread.
-        let data_dir = if self.recovery_only {
+        let mut workspaces = load_workspaces(if self.recovery_only {
             None
         } else {
             self.data_dir.ok()
-        };
-        let workspaces = load_workspaces(data_dir);
+        });
+        if self.recovery_only
+            && let Some(data) = self.data_dir.ok()
+            && let Ok(store) = switchx::storage::Store::open_recovery(&data.join("switchx.sqlite"))
+        {
+            for (client, home, workspace) in &mut workspaces {
+                if std::env::var_os(client.home_variable()).is_none()
+                    && let Ok(Some(saved)) = store.selected_client_workspace(*client)
+                {
+                    *home = saved.key.home.clone();
+                    *workspace = Some(saved);
+                }
+            }
+        }
         let codex_home = workspaces
             .iter()
             .find(|(client, _, _)| *client == ClientKind::Codex)
             .map(|(_, home, _)| home.to_string_lossy().into_owned())
             .unwrap_or_default();
+        let claude_home = workspaces
+            .iter()
+            .find(|(client, _, _)| *client == ClientKind::ClaudeCode)
+            .map(|(_, home, _)| home.to_string_lossy().into_owned());
         let _ = self.weak.upgrade_in_event_loop(move |window| {
             for (client, home, workspace) in workspaces {
                 match client {
@@ -111,12 +125,18 @@ impl Worker {
                         window.set_claude_home(home.to_string_lossy().as_ref().into());
                         if let Some(workspace) = workspace {
                             window.set_claude_workspace_id(workspace.id.into());
+                            window
+                                .global::<switchx::ui::ClaudeUi>()
+                                .set_page(workspace.last_page.clamp(0, 2));
                         }
                     }
                 }
             }
         });
         self.inspect_config(codex_home);
+        if let Some(home) = claude_home {
+            self.inspect_claude(home);
+        }
         let _ = self
             .weak
             .upgrade_in_event_loop(|window| window.invoke_usage_refresh());
@@ -124,8 +144,7 @@ impl Worker {
 
     pub(super) fn client_navigation(&mut self, workspace_id: String, page: i32) {
         self.discard_previews();
-        let result = if !self.recovery_only && !workspace_id.is_empty() && matches!(page, 0 | 1 | 3)
-        {
+        let result = if !self.recovery_only && !workspace_id.is_empty() && (0..=3).contains(&page) {
             self.data_dir
                 .path()
                 .and_then(|dir| app::save_client_page(dir, &workspace_id, page))
@@ -137,47 +156,6 @@ impl Worker {
             window.set_direct_preview_ready(false);
             window.set_route_preview_ready(false);
             if let Err(error) = result {
-                show_action(&window, Err(error));
-            }
-        });
-    }
-
-    pub(super) fn inspect_claude(&mut self, home: String) {
-        let result: Result<_, String> = (|| {
-            let key = WorkspaceKey::new(ClientKind::ClaudeCode, &PathBuf::from(home))?;
-            let status = match std::fs::metadata(key.config_path()) {
-                Ok(metadata) if metadata.is_file() => "发现 settings.json；尚未接管配置",
-                Ok(_) => return Err("settings.json 不是普通文件".into()),
-                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-                    "settings.json 尚不存在；未创建目录或配置"
-                }
-                Err(_) => return Err("无法访问 Claude Code 配置文件".into()),
-            };
-            let workspace = if self.recovery_only {
-                None
-            } else {
-                Some(app::remember_client_workspace(
-                    self.data_dir.path()?,
-                    ClientKind::ClaudeCode,
-                    &key.home,
-                )?)
-            };
-            Ok((key, workspace, status))
-        })();
-        let _ = self.weak.upgrade_in_event_loop(move |window| match result {
-            Ok((key, workspace, status)) => {
-                window.set_claude_home(key.home.to_string_lossy().as_ref().into());
-                window.set_claude_status(status.into());
-                if let Some(workspace) = workspace {
-                    window.set_claude_workspace_id(workspace.id.into());
-                }
-                show_action(
-                    &window,
-                    Ok("已检查 Claude Code 目录，未改写客户端配置".into()),
-                );
-            }
-            Err(error) => {
-                window.set_claude_status(error.as_str().into());
                 show_action(&window, Err(error));
             }
         });

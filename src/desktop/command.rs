@@ -16,6 +16,35 @@ pub(super) enum Command {
         page: i32,
     },
     InspectClaude(String),
+    ClaudeCheckCli {
+        home: String,
+        path: String,
+    },
+    ClaudeImport(String),
+    ClaudeSave(super::claude::SaveClaude),
+    ClaudeApply(String),
+    ClaudeCancelPreview,
+    ClaudeDelete {
+        home: String,
+        id: String,
+        revision: i64,
+    },
+    ClaudeFetch(super::claude::FetchClaude),
+    ClaudeEdit {
+        home: String,
+        id: String,
+        native: bool,
+        tab: i32,
+        generation: i32,
+    },
+    ClaudePreview {
+        home: String,
+        id: String,
+    },
+    ClaudeRestorePreview {
+        home: String,
+        keep_conflicts: bool,
+    },
     Refresh(bool),
     RefreshRequests,
     ClearRequests,
@@ -163,6 +192,9 @@ impl Command {
                 | Self::InitializeClients
                 | Self::ClientNavigation { .. }
                 | Self::InspectClaude(_)
+                | Self::ClaudeRestorePreview { .. }
+                | Self::ClaudeApply(_)
+                | Self::ClaudeCancelPreview
                 | Self::InspectConfig(_)
                 | Self::RestoreConfig(_)
                 | Self::Control { .. }

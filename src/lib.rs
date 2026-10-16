@@ -1,6 +1,7 @@
 pub mod app;
 pub mod catalog;
 pub mod chatgpt;
+pub mod claude;
 pub mod clients;
 pub mod code_highlight;
 pub mod codex;

@@ -1,84 +1,424 @@
 import { QuietScrollView } from "../scroll-view.slint";
-import { QuietButton, QuietLineEdit, SurfaceCard } from "../components.slint";
+import {
+    QuietButton,
+    QuietLineEdit,
+    QuietSegmented,
+    QuietComboBox,
+    SurfaceCard,
+    StatusPill,
+} from "../components.slint";
+import { ClaudeUi } from "../claude-state.slint";
 import { Theme } from "../tokens.slint";
 
-export component ClaudeWorkspacePage inherits QuietScrollView {
+export component ClaudeWorkspacePage inherits VerticalLayout {
     in property <bool> busy;
     in-out property <string> home;
     in property <string> status;
     callback inspect(string);
-    horizontal-scrollbar-policy: always-off;
+    spacing: 15px;
+    HorizontalLayout {
+        spacing: 12px;
+        QuietSegmented {
+            width: 270px;
+            options: ["连接", "模型", "配置"];
+            current-index: ClaudeUi.page;
+            selected(index) => { ClaudeUi.page = index; }
+        }
 
-    VerticalLayout {
-        spacing: 18px;
-        padding-bottom: 10px;
-        SurfaceCard {
-            height: 218px;
+        Rectangle {
+            horizontal-stretch: 1;
+        }
+
+        QuietButton {
+            text: "刷新";
+            ghost: true;
+            width: 72px;
+            enabled: !root.busy;
+            clicked => { ClaudeUi.refresh(); }
+        }
+
+        QuietButton {
+            text: "添加连接";
+            icon: @image-url("../../assets/ui/plus.svg");
+            icon-color: Theme.on-brand;
+            primary: true;
+            width: 120px;
+            enabled: !root.busy && ClaudeUi.loaded;
+            accessible-label: "添加 Claude 连接";
+            clicked => { ClaudeUi.edit("", 0); }
+        }
+    }
+
+    SurfaceCard {
+        height: 76px;
+        HorizontalLayout {
+            padding: 16px;
+            spacing: 14px;
             VerticalLayout {
-                padding: 24px;
-                spacing: 14px;
+                spacing: 5px;
                 Text {
-                    text: "Claude Code 工作空间";
+                    text: ClaudeUi.managed ? "直连 · " + ClaudeUi.active-name : "使用原有配置";
                     color: Theme.primary-text;
-                    font-size: 17px;
+                    font-size: 15px;
                     font-weight: 600;
                 }
 
                 Text {
-                    text: "选择这个客户端使用的配置目录。";
+                    text: root.status;
                     color: Theme.muted-text;
-                    font-size: 13px;
+                    font-size: 11px;
+                    overflow: elide;
                 }
+            }
 
+            Rectangle {
+                horizontal-stretch: 1;
+            }
+
+            StatusPill {
+                label: ClaudeUi.recovering ? "待恢复" : ClaudeUi.managed ? "配置已写入" : "未接管";
+                ink: ClaudeUi.recovering ? Theme.warning : Theme.muted-text;
+                fill: ClaudeUi.recovering ? Theme.warning-surface : Theme.raised;
+            }
+
+            if ClaudeUi.managed: QuietButton {
+                text: "恢复";
+                width: 70px;
+                enabled: !root.busy;
+                accessible-label: "预览恢复 Claude 配置";
+                clicked => { ClaudeUi.preview-recovery(false); }
+            }
+        }
+    }
+
+    if ClaudeUi.config-error != "": Text {
+        text: ClaudeUi.config-error;
+        color: Theme.error;
+        font-size: 12px;
+        wrap: word-wrap;
+    }
+    if ClaudeUi.page == 0: QuietScrollView {
+        horizontal-scrollbar-policy: always-off;
+        VerticalLayout {
+            spacing: 12px;
+            padding-bottom: 12px;
+            HorizontalLayout {
+                spacing: 10px;
                 QuietLineEdit {
-                    text <=> root.home;
-                    accessible-label: "Claude Code 配置目录绝对路径";
-                    icon: @image-url("../../assets/ui/folder.svg");
-                    enabled: !root.busy;
+                    text <=> ClaudeUi.query;
+                    placeholder-text: "搜索 Claude 连接";
+                    accessible-label: "搜索 Claude 连接";
+                    icon: @image-url("../../assets/ui/search.svg");
+                    width: 220px;
                 }
 
-                HorizontalLayout {
+                Rectangle {
+                    horizontal-stretch: 1;
+                }
+
+                QuietButton {
+                    text: "导入当前配置";
+                    ghost: true;
+                    width: 114px;
+                    enabled: !root.busy && ClaudeUi.loaded && !ClaudeUi.managed;
+                    clicked => { ClaudeUi.import-current(); }
+                }
+
+                QuietButton {
+                    text: "官方登录";
+                    ghost: true;
+                    width: 92px;
+                    enabled: !root.busy && ClaudeUi.loaded;
+                    clicked => { ClaudeUi.new-native(); }
+                }
+            }
+
+            if !ClaudeUi.loaded || ClaudeUi.connections.length == 0: SurfaceCard {
+                height: 156px;
+                VerticalLayout {
+                    padding: 26px;
                     spacing: 12px;
-                    QuietButton {
-                        text: "检查目录";
-                        width: 120px;
-                        primary: true;
-                        horizontal-stretch: 0;
-                        enabled: !root.busy;
-                        clicked => { root.inspect(root.home); }
+                    Text {
+                        text: ClaudeUi.loaded ? "从一个连接开始。" : "正在读取 Claude 工作空间…";
+                        color: Theme.primary-text;
+                        font-size: 22px;
+                        font-weight: 500;
                     }
 
                     Text {
-                        text: root.status;
-                        horizontal-stretch: 1;
+                        text: "添加 Anthropic 兼容 API 或使用本机官方登录，再选择要显示的模型。";
                         color: Theme.muted-text;
-                        font-size: 12px;
+                        font-size: 13px;
                         wrap: word-wrap;
-                        vertical-alignment: center;
+                    }
+                }
+            }
+            for connection[index] in ClaudeUi.connections: SurfaceCard {
+                visible: ClaudeUi.matches-query(connection.name, ClaudeUi.query);
+                height: 104px;
+                border-color: connection.id == ClaudeUi.active-id && ClaudeUi.managed ? Theme.brand : Theme.border;
+                HorizontalLayout {
+                    padding: 18px;
+                    spacing: 10px;
+                    Image {
+                        width: 25px;
+                        height: 25px;
+                        source: @image-url("../../assets/providers/icons/claude.svg");
+                        colorize: Theme.brand;
+                        image-fit: contain;
+                    }
+
+                    VerticalLayout {
+                        spacing: 6px;
+                        horizontal-stretch: 1;
+                        Text {
+                            text: connection.name;
+                            color: Theme.primary-text;
+                            font-size: 15px;
+                            font-weight: 600;
+                            overflow: elide;
+                        }
+
+                        Text {
+                            text: connection.native ? "登录由 Claude Code 管理" : connection.endpoint;
+                            color: Theme.muted-text;
+                            font-size: 11px;
+                            overflow: elide;
+                        }
+
+                        Text {
+                            text: connection.authentication + " · " + connection.model-count + " 个菜单模型";
+                            color: Theme.muted-text;
+                            font-size: 11px;
+                            overflow: elide;
+                        }
+                    }
+
+                    QuietButton {
+                        text: "模型";
+                        width: 58px;
+                        enabled: !root.busy;
+                        accessible-label: "查看 Claude 模型 " + connection.name;
+                        clicked => { ClaudeUi.selected-connection = index; ClaudeUi.page = 1; }
+                    }
+
+                    QuietButton {
+                        text: "编辑";
+                        width: 58px;
+                        enabled: !root.busy && !ClaudeUi.managed;
+                        accessible-label: "编辑 Claude 连接 " + connection.name;
+                        clicked => { ClaudeUi.edit(connection.id, 0); }
+                    }
+
+                    QuietButton {
+                        text: "预览启用";
+                        width: 96px;
+                        primary: true;
+                        enabled: !root.busy && !ClaudeUi.recovering;
+                        accessible-label: "预览 Claude 连接 " + connection.name;
+                        clicked => { ClaudeUi.preview(connection.id); }
+                    }
+
+                    QuietButton {
+                        text: "删除";
+                        icon: @image-url("../../assets/ui/trash.svg");
+                        icon-only: true;
+                        icon-color: Theme.muted-text;
+                        width: 32px;
+                        ghost: true;
+                        enabled: !root.busy && !ClaudeUi.managed;
+                        accessible-label: "删除 Claude 连接 " + connection.name;
+                        clicked => { ClaudeUi.delete-id = connection.id; ClaudeUi.delete-name = connection.name; ClaudeUi.delete-revision = connection.revision; ClaudeUi.delete-open = true; }
+                    }
+                }
+            }
+            if ClaudeUi.managed: Text {
+                text: "此工作空间正在托管配置。可预览切换连接；修改或删除已有连接前请先恢复。";
+                color: Theme.muted-text;
+                font-size: 11px;
+                wrap: word-wrap;
+            }
+        }
+    }
+    if ClaudeUi.page == 1: QuietScrollView {
+        horizontal-scrollbar-policy: always-off;
+        VerticalLayout {
+            spacing: 12px;
+            padding-bottom: 12px;
+            HorizontalLayout {
+                spacing: 12px;
+                QuietComboBox {
+                    model: ClaudeUi.connection-names;
+                    current-index <=> ClaudeUi.selected-connection;
+                    width: 240px;
+                    enabled: ClaudeUi.connections.length > 0;
+                    accessible-label: "Claude 模型所属连接";
+                }
+
+                Rectangle {
+                    horizontal-stretch: 1;
+                }
+
+                QuietButton {
+                    text: "编辑模型列表";
+                    width: 132px;
+                    enabled: ClaudeUi.connections.length > 0 && !ClaudeUi.managed && !root.busy;
+                    clicked => { ClaudeUi.edit(ClaudeUi.connections[ClaudeUi.selected-connection].id, 1); }
+                }
+            }
+
+            if ClaudeUi.connections.length > 0: Text {
+                text: ClaudeUi.connections[ClaudeUi.selected-connection].picker + " · 默认模型：" + (ClaudeUi.connections[ClaudeUi.selected-connection].default-model == "" ? "客户端默认" : ClaudeUi.connections[ClaudeUi.selected-connection].default-model);
+                color: Theme.muted-text;
+                font-size: 12px;
+                wrap: word-wrap;
+            }
+            for model in ClaudeUi.connections[ClaudeUi.selected-connection].models: SurfaceCard {
+                height: model.description == "" ? 76px : 94px;
+                HorizontalLayout {
+                    padding: 16px;
+                    spacing: 14px;
+                    VerticalLayout {
+                        spacing: 5px;
+                        Text {
+                            text: model.label == "" ? model.model : model.label;
+                            font-size: 14px;
+                            font-weight: 500;
+                            color: Theme.primary-text;
+                            overflow: elide;
+                        }
+
+                        Text {
+                            text: model.model;
+                            color: Theme.muted-text;
+                            font-size: 11px;
+                            overflow: elide;
+                        }
+
+                        if model.description != "": Text {
+                            text: model.description;
+                            color: Theme.muted-text;
+                            font-size: 11px;
+                            overflow: elide;
+                        }
+                    }
+
+                    Rectangle {
+                        horizontal-stretch: 1;
+                    }
+
+                    StatusPill {
+                        label: !model.enabled ? "不发布" : model.model == ClaudeUi.connections[ClaudeUi.selected-connection].default-model ? "默认模型" : "菜单模型";
+                    }
+                }
+            }
+            if ClaudeUi.connections.length == 0: Text {
+                text: "先添加或导入一个连接，再编辑模型列表。";
+                color: Theme.muted-text;
+                font-size: 13px;
+            }
+        }
+    }
+    if ClaudeUi.page == 2: QuietScrollView {
+        horizontal-scrollbar-policy: always-off;
+        VerticalLayout {
+            spacing: 16px;
+            SurfaceCard {
+                height: 202px;
+                VerticalLayout {
+                    padding: 22px;
+                    spacing: 13px;
+                    Text {
+                        text: "配置目录";
+                        color: Theme.primary-text;
+                        font-size: 16px;
+                        font-weight: 600;
+                    }
+
+                    QuietLineEdit {
+                        text <=> root.home;
+                        edited => {
+                            ClaudeUi.loaded = false;
+                            ClaudeUi.connections = [];
+                            ClaudeUi.connection-names = [];
+                            ClaudeUi.preview-ready = false;
+                            ClaudeUi.cli-check-id = "";
+                            ClaudeUi.cli-checking = false;
+                            ClaudeUi.cli-version = "";
+                            ClaudeUi.cli-message = "读取工作空间后检查 CLI";
+                            ClaudeUi.supports-menu = false;
+                            ClaudeUi.supports-behaves-as = false;
+                            ClaudeUi.feedback = "";
+                        }
+                        accessible-label: "Claude Code 配置目录绝对路径";
+                        icon: @image-url("../../assets/ui/folder.svg");
+                        enabled: !root.busy && !ClaudeUi.managed;
+                    }
+
+                    HorizontalLayout {
+                        spacing: 12px;
+                        QuietButton {
+                            text: "读取工作空间";
+                            width: 132px;
+                            enabled: !root.busy;
+                            clicked => { root.inspect(root.home); }
+                        }
+
+                        Text {
+                            text: "用户级 settings.json；MCP 和官方登录文件由各自流程管理。";
+                            color: Theme.muted-text;
+                            font-size: 11px;
+                            wrap: word-wrap;
+                            horizontal-stretch: 1;
+                        }
+                    }
+                }
+            }
+
+            SurfaceCard {
+                height: 208px;
+                VerticalLayout {
+                    padding: 22px;
+                    spacing: 13px;
+                    Text {
+                        text: "Claude Code CLI";
+                        color: Theme.primary-text;
+                        font-size: 16px;
+                        font-weight: 600;
+                    }
+
+                    QuietLineEdit {
+                        text <=> ClaudeUi.cli-setting;
+                        placeholder-text: "程序绝对路径，留空自动检测";
+                        accessible-label: "Claude CLI 程序路径";
+                        enabled: !root.busy;
+                    }
+
+                    HorizontalLayout {
+                        spacing: 12px;
+                        QuietButton {
+                            text: ClaudeUi.cli-checking ? "检查中…" : "保存并检查";
+                            width: 132px;
+                            enabled: !root.busy && !ClaudeUi.cli-checking;
+                            clicked => { ClaudeUi.check-cli(); }
+                        }
+
+                        Text {
+                            text: ClaudeUi.cli-message;
+                            color: Theme.muted-text;
+                            font-size: 11px;
+                            wrap: word-wrap;
+                            horizontal-stretch: 1;
+                        }
                     }
                 }
             }
         }
-
-        SurfaceCard {
-            height: 142px;
-            VerticalLayout {
-                padding: 24px;
-                spacing: 10px;
-                Text {
-                    text: "连接管理尚未启用";
-                    color: Theme.primary-text;
-                    font-size: 16px;
-                    font-weight: 500;
-                }
-
-                Text {
-                    text: "当前可独立管理客户端目录。Claude 连接与模型发布将在后续接入；目录检查不会改写 settings.json。";
-                    color: Theme.muted-text;
-                    font-size: 13px;
-                    wrap: word-wrap;
-                }
-            }
-        }
+    }
+    if ClaudeUi.feedback != "": Text {
+        text: ClaudeUi.feedback;
+        color: Theme.muted-text;
+        font-size: 12px;
+        wrap: word-wrap;
     }
 }

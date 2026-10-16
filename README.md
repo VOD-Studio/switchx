@@ -5,13 +5,15 @@
 
 <img src="assets/readme-logo.png" alt="SwitchX 应用图标" width="128" height="128">
 
-为 Codex 管理模型上游的桌面应用，使用 Rust 与 Slint 构建。
+为 Codex 与 Claude Code 管理模型连接的桌面应用，使用 Rust 与 Slint 构建。
 
 SwitchX 把 API 供应商、ChatGPT 订阅和 Grok 订阅放进同一个模型目录，通过本地路由同时发布到 Codex 的模型菜单。写入 Codex 配置前先预览，之后可随时恢复原状。
 
-当前为预览版，以 macOS 为主要平台。
+Claude Code 支持 Anthropic 兼容直连和自定义模型菜单，使用独立工作空间。当前为预览版，以 macOS 为主要平台。
 
 ## 功能
+
+- **Claude Code**：连接编辑与导入、完整自定义模型菜单、默认与角色映射、CLI 识别、直连预览和恢复；切换客户端视图保留 Codex 路由。
 
 - **连接**：兼容 Responses 的 API 上游（内置 DeepSeek、Kimi、MiniMax、小米 MiMo 预设）、ChatGPT 订阅与 Grok 订阅。
 - **模型目录**：获取上游模型列表并批量添加，为每个模型设置全局唯一的显示名称、上下文窗口、思考等级，以及文字／图片／音频输入能力。
@@ -80,15 +82,35 @@ sh scripts/bundle-macos.sh --release  # target/release/SwitchX.app
 
 定制内容仅保存在本地 SQLite，不写入 Codex TOML、模型目录、恢复日志或请求记录。主备模型分别使用自己的定制配置；修改连接目录会保留已有模型的定制。单项定制总大小上限为 32 KiB。
 
+## Claude Code 直连
+
+1. 在侧栏选择 **Claude Code**，到「配置」页确认目录和 CLI 程序。默认读取 `CLAUDE_CONFIG_DIR`，未设置时使用 `~/.claude`；可以指定绝对路径。
+2. 添加 Anthropic 兼容 API 连接，选择 helper、API Key 或 Bearer 认证；也可以导入当前用户配置或添加「本机官方登录」。后者沿用 Claude Code 登录，不读取系统钥匙串或改写官方登录文件。
+3. 在「模型列表」中获取或手动填写实际模型 ID，编辑名称、说明、`behavesAs`、顺序和勾选项。菜单支持保留原菜单、追加内置菜单、替换内置菜单；默认模型与角色映射独立设置。保存仅更新 SwitchX 资料。
+4. 在连接卡片选择「预览启用」，核对目标和字段后确认。恢复也先预览；外部改动会保留，存在冲突时可选择保留外部值并结束管理。
+
+自定义菜单要求 CLI **2.1.242+**，`behavesAs` 要求 **2.1.257+**。默认模型可以不在自定义列表中；取消勾选不会禁止使用该模型，CLI 仍可保留 Default 或当前会话模型。配置更新后用 `/model` 和 `/status` 核对；模型菜单更新与当前会话选中的模型是不同状态。
+
+当前支持用户级 `settings.json`，保留权限、Hooks、MCP 等无关字段。直连可在 SwitchX 退出后继续使用；helper 模式需保留 SwitchX 程序与资料目录。API Key/Bearer 模式会把凭据写入权限受限的客户端设置，helper 模式只写入读取命令。原配置完整快照保存于私有备份，预览、MCP 输出和恢复日志不包含凭据。
+
+同一 Claude 工作空间托管期间，可添加连接并预览切换；编辑、删除已有连接前需要恢复。其他工作空间与 Codex 不受此限制。Claude 路由聚合、协议转换、云平台认证及多账号登录管理在后续阶段实现。
+
+[界面截图与隔离 CLI 验证](docs/claude-code-verification.md) · [完整实施方案](docs/claude-code-client-plan.md)
+
 ## 供 AI Agent 使用（MCP）
 
 `switchx mcp` 在标准输入输出上运行一个 [MCP](https://modelcontextprotocol.io) 服务，Codex、Claude Code 等 agent 可以直接查询 SwitchX，默认只读。
+
+Claude 工具必须显式传入 `workspace_id`，从 `list_client_workspaces` 读取。`--allow-writes` 增加 `save_claude_models`（使用读取时的 `revision`）；`--allow-control` 增加 `preview_claude_direct` / `apply_claude_direct`、`preview_claude_restore` / `apply_claude_restore`。应用只接受对应操作的一次性 `preview_id`。原有工具继续操作 Codex，不随当前界面选择重定向。
+
 
 最简单的接入方式是打开应用的「工具箱」：按需开启下面的权限，然后点「复制一句话」。把这句话发给哪个客户端，那个客户端就用自己的注册命令或配置文件，把 SwitchX 注册到自己，并在新会话中调用 `get_status` 确认可用。也可以在下方选择 Codex、Claude Code 或其他使用 `mcpServers` JSON 的客户端，复制注册命令或配置手动注册。命令使用当前 SwitchX 程序的完整路径，设置了 `SWITCHX_DATA_DIR` 时一并传给 MCP 服务；工具箱还会识别当前工作空间的 Codex 是否已注册以及注册时的权限。
 
 
 | 工具             | 内容                                                                     |
 | ---------------- | ------------------------------------------------------------------------ |
+| `list_client_workspaces` | 已保存的客户端、工作空间 ID 和配置路径 |
+| `list_claude_connections` | 指定 Claude 工作空间的连接、模型设置与版本号，不返回凭据 |
 | `get_status`     | Codex 配置是否由 SwitchX 托管（路由 / 直连）、连接与模型数量、最近请求和今日用量 |
 | `list_providers` | 连接的名称、类型、服务地址、默认模型、凭据是否已配置与账号绑定           |
 | `list_models`    | 模型映射：公开模型 ID、实际上游模型、上下文窗口、推理档位、输入能力、启用状态与备用连接 |

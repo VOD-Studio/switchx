@@ -110,6 +110,7 @@ pub(super) struct Worker {
     pub(super) weak: slint::Weak<AppWindow>,
     pub(super) data_dir: DataDir,
     pub(super) codex: CodexRuntime,
+    pub(super) claude_prepared: Option<switchx::claude::config::Prepared>,
     pub(super) pending_login: Option<PendingLogin>,
     pub(super) pending_xai_login: Option<PendingLogin>,
     pub(super) xai_manager: Option<xai::AccountManager>,
@@ -139,6 +140,7 @@ pub(super) async fn run(
         weak,
         data_dir: DataDir(directory),
         codex: CodexRuntime::default(),
+        claude_prepared: None,
         pending_login: None,
         pending_xai_login: None,
         xai_manager: None,
@@ -203,6 +205,31 @@ impl Worker {
                 self.client_navigation(workspace_id, page)
             }
             Command::InspectClaude(home) => self.inspect_claude(home),
+            Command::ClaudeCheckCli { home, path } => self.claude_check_cli(home, path),
+            Command::ClaudeImport(home) => self.import_claude(home),
+            Command::ClaudeSave(form) => self.save_claude(form),
+            Command::ClaudeApply(home) => {
+                let _ = self.apply_claude(home).await;
+            }
+            Command::ClaudeCancelPreview => self.cancel_claude_preview(),
+            Command::ClaudeDelete { home, id, revision } => self.delete_claude(home, id, revision),
+            Command::ClaudeFetch(fetch) => self.fetch_claude_models(fetch),
+            Command::ClaudeEdit {
+                home,
+                id,
+                native,
+                tab,
+                generation,
+            } => self.begin_claude_editor(home, id, native, tab, generation),
+            Command::ClaudePreview { home, id } => {
+                let _ = self.preview_claude(home, id).await;
+            }
+            Command::ClaudeRestorePreview {
+                home,
+                keep_conflicts,
+            } => {
+                let _ = self.preview_claude_restore(home, keep_conflicts);
+            }
             Command::PollRouteStatus => {}
             Command::RefreshRequests => self.refresh_requests(),
             Command::ClearRequests => self.clear_requests(),
@@ -335,6 +362,13 @@ impl Worker {
     pub(super) fn discard_previews(&mut self) {
         self.codex.prepared = None;
         self.codex.route_session.discard_preview();
+        self.claude_prepared = None;
+        let _ = self.weak.upgrade_in_event_loop(|window| {
+            use slint::ComponentHandle;
+            window
+                .global::<switchx::ui::ClaudeUi>()
+                .set_preview_ready(false);
+        });
     }
 
     /// The snapshot to show after a change; failed changes keep the window as is.

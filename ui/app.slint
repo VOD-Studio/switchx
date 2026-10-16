@@ -63,6 +63,16 @@ import { ConnectionStatusDialog } from "connection-status.slint";
 import { WorkspaceMenu } from "workspace-menu.slint";
 import { ClientSwitcher } from "client-switcher.slint";
 import { ClaudeWorkspacePage } from "pages/claude-workspace.slint";
+import { ClaudeUi } from "claude-state.slint";
+export {
+    ClaudeUi,
+    ClaudeConnectionRow,
+    ClaudeModelRow,
+} from "claude-state.slint";
+import {
+    ClaudeConnectionEditor,
+    ClaudeChangePreview,
+} from "editors/claude-connection.slint";
 import { FallbackEditor } from "editors/fallback-editor.slint";
 import {
     AccountLoginConfirm,
@@ -139,6 +149,12 @@ export component AppWindow inherits Window {
             root.codex-last-page = root.active-page;
         }
         root.active-client = client;
+        ClaudeUi.editor-generation += 1;
+        ClaudeUi.editor-open = false;
+        ClaudeUi.edit-key = "";
+        ClaudeUi.preview-open = false;
+        ClaudeUi.preview-ready = false;
+        ClaudeUi.delete-open = false;
         root.workspace-open = false;
         root.drawer-open = false;
         root.publish-drawer-open = false;
@@ -152,7 +168,17 @@ export component AppWindow inherits Window {
             root.error-action = "";
         }
         root.active-page = client == 1 ? 6 : root.codex-last-page;
+        if client == 1 { ClaudeUi.refresh(); }
     }
+    property <bool> claude-editor-visible: ClaudeUi.editor-open;
+    changed claude-editor-visible => {
+        if !root.claude-editor-visible {
+            ClaudeUi.edit-key = "";
+            ClaudeUi.editor-generation += 1;
+            ClaudeUi.fetching = false;
+        }
+    }
+
     in-out property <bool> drawer-open: false;
     in-out property <bool> workspace-open: false;
     in-out property <bool> status-directories-expanded: false;
@@ -480,6 +506,14 @@ export component AppWindow inherits Window {
         if (root.subscription-editor-open || root.subscription-editor-pending) { root.cancel-subscription-editor(); }
     }
     changed active-page => {
+        if root.active-page != 6 {
+            ClaudeUi.editor-open = false;
+            ClaudeUi.editor-generation += 1;
+            ClaudeUi.edit-key = "";
+            ClaudeUi.preview-open = false;
+            ClaudeUi.preview-ready = false;
+            ClaudeUi.delete-open = false;
+        }
         if (root.active-page == 0 || root.active-page == 1 || root.active-page == 3) {
             root.active-client = 0;
             root.codex-last-page = root.active-page;
@@ -756,7 +790,7 @@ export component AppWindow inherits Window {
         triggered => { root.departing-connection-form = 0; }
     }
 
-    property <bool> modal-open: root.request-clear-open || root.usage-sources-open || root.usage-prices-open || root.workspace-open || root.account-removing-id != "" || root.account-login-confirm-open || root.drawer-open || root.connection-picker-open || root.connection-models-open || root.xai-editor-open || root.editor-open || root.subscription-editor-open || root.common-config-editor-open || root.icon-picker-open || root.model-editor-open || root.fallback-editor-open || root.publish-drawer-open || root.direct-drawer-open || root.delete-account-confirm;
+    property <bool> modal-open: ClaudeUi.editor-open || ClaudeUi.preview-open || ClaudeUi.delete-open || root.request-clear-open || root.usage-sources-open || root.usage-prices-open || root.workspace-open || root.account-removing-id != "" || root.account-login-confirm-open || root.drawer-open || root.connection-picker-open || root.connection-models-open || root.xai-editor-open || root.editor-open || root.subscription-editor-open || root.common-config-editor-open || root.icon-picker-open || root.model-editor-open || root.fallback-editor-open || root.publish-drawer-open || root.direct-drawer-open || root.delete-account-confirm;
     property <string> page-title: root.active-page == 6 ? "Claude Code" : root.active-page == 0 ? "模型，随手可用。" : root.active-page == 1 ? "连接" : root.active-page == 2 ? "用量，心中有数。" : root.active-page == 3 ? "每次请求，有迹可循。" : root.active-page == 4 ? "让工作流更顺手。" : "设置";
     property <string> page-subtitle: root.active-page == 6 ? "连接与模型，按客户端独立管理。" : root.active-page == 0 ? "Codex · 配好连接，整组模型随手可用。" : root.active-page == 1 ? "Codex · 账号与上游，集中管理。" : root.active-page == 2 ? "Token、缓存与估算费用，按连接和模型细看。" : root.active-page == 3 ? "Codex · 查看模型、耗时与结果。" : root.active-page == 4 ? "让 agent 直接使用 SwitchX，一句话完成接入。" : "把工作空间调成你喜欢的样子。";
     animate background { duration: Theme.page-motion; }
@@ -837,7 +871,7 @@ export component AppWindow inherits Window {
                         ClientSwitcher {
                             selected: root.active-page == 6 ? 1 : root.active-page == 0 || root.active-page == 1 || root.active-page == 3 ? 0 : -1;
                             codex-status: root.connection-label;
-                            claude-status: "尚未接入";
+                            claude-status: ClaudeUi.recovering ? "配置待恢复" : ClaudeUi.managed ? "直连 · " + ClaudeUi.active-name : ClaudeUi.loaded ? ClaudeUi.connections.length + " 个连接，未启用" : "尚未读取";
                             enabled: !root.busy;
                             chosen(client) => { root.choose-client(client); }
                         }
@@ -1962,6 +1996,73 @@ export component AppWindow inherits Window {
         }
     }
 
+    Drawer {
+        open: ClaudeUi.editor-open;
+        title: ClaudeUi.edit-id == "" ? "添加 Claude 连接" : "编辑 Claude 连接";
+        subtitle: "连接与模型列表保存在当前 Claude 工作空间。";
+        panel-width: min(940px, root.width - 48px);
+        busy: root.busy;
+        dismissed => { ClaudeUi.editor-open = false; app-keyboard.focus(); }
+        ClaudeConnectionEditor {
+            busy: root.busy;
+        }
+    }
+
+    Drawer {
+        open: ClaudeUi.preview-open;
+        title: ClaudeUi.preview-restore ? "恢复 Claude Code 配置" : "预览 Claude Code 直连";
+        subtitle: root.claude-home;
+        panel-width: 670px;
+        busy: root.busy;
+        dismissed => { ClaudeUi.preview-open = false; ClaudeUi.cancel-preview(); app-keyboard.focus(); }
+        ClaudeChangePreview {
+            busy: root.busy;
+        }
+    }
+
+    Drawer {
+        open: ClaudeUi.delete-open;
+        title: "删除 Claude 连接";
+        subtitle: ClaudeUi.delete-name;
+        panel-width: 460px;
+        centered: true;
+        busy: root.busy;
+        dismissed => { ClaudeUi.delete-open = false; app-keyboard.focus(); }
+        VerticalLayout {
+            spacing: 18px;
+            Text {
+                text: "删除此连接及其模型目录，不会修改 Claude 配置。";
+                color: Theme.primary-text;
+                font-size: 13px;
+                wrap: word-wrap;
+            }
+
+            Text {
+                text: ClaudeUi.feedback;
+                color: Theme.error;
+                font-size: 12px;
+                wrap: word-wrap;
+            }
+
+            HorizontalLayout {
+                spacing: 10px;
+                QuietButton {
+                    text: "取消";
+                    enabled: !root.busy;
+                    clicked => { ClaudeUi.delete-open = false; }
+                }
+
+                QuietButton {
+                    text: "确认删除";
+                    primary: true;
+                    enabled: !root.busy;
+                    accessible-label: "确认删除 Claude 连接";
+                    clicked => { ClaudeUi.remove(); }
+                }
+            }
+        }
+    }
+
     ConnectionStatusDialog {
         open: root.drawer-open;
         busy: root.busy;
@@ -1996,6 +2097,7 @@ export component SwitchXTray inherits SystemTrayIcon {
     tooltip: "switchx";
     callback show-app();
     callback restore-config();
+    callback restore-claude();
     callback quit-app();
     Menu {
         MenuItem {
@@ -2004,8 +2106,13 @@ export component SwitchXTray inherits SystemTrayIcon {
         }
 
         MenuItem {
-            title: "恢复原配置";
+            title: "恢复 Codex 配置";
             activated => { root.restore-config(); }
+        }
+
+        MenuItem {
+            title: "恢复 Claude Code 配置";
+            activated => { root.restore-claude(); }
         }
 
         MenuItem {

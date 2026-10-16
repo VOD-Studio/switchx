@@ -43,6 +43,9 @@ pub(super) fn watch_external_changes(app: &AppWindow, usage: &UsageService, data
                     let idle = !app.get_busy();
                     if idle {
                         app.invoke_refresh(false);
+                        if app.get_active_client() == 1 {
+                            app.global::<switchx::ui::ClaudeUi>().invoke_refresh();
+                        }
                         usage.reload();
                     }
                     let _ = reloaded.send(idle);

@@ -270,7 +270,7 @@ mod tests {
                 .connection
                 .query_row("PRAGMA user_version", [], |row| row.get::<_, i64>(0))
                 .unwrap(),
-            18
+            super::super::SCHEMA_VERSION
         );
         let backups = std::fs::read_dir(root.join("migration-backups"))
             .unwrap()

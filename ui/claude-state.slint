@@ -1,0 +1,83 @@
+export struct ClaudeModelRow { model: string, label: string, description: string, behaves-as: string, enabled: bool }
+export struct ClaudeConnectionRow {
+    id: string,
+    name: string,
+    endpoint: string,
+    authentication: string,
+    default-model: string,
+    picker: string,
+    revision: string,
+    model-count: int,
+    native: bool,
+    models: [ClaudeModelRow],
+}
+export global ClaudeUi {
+    in-out property <[ClaudeConnectionRow]> connections;
+    in-out property <[string]> connection-names;
+    in-out property <int> selected-connection: 0;
+    in-out property <int> page: 0;
+    in-out property <bool> loaded: false;
+    in-out property <bool> managed: false;
+    in-out property <bool> recovering: false;
+    in-out property <string> active-id;
+    in-out property <string> active-name;
+    in-out property <string> config-error;
+    in-out property <string> cli-setting;
+    in-out property <string> cli-version;
+    in-out property <string> cli-message: "CLI 版本尚未检查";
+    in-out property <string> cli-check-id;
+    in-out property <bool> cli-checking: false;
+    in-out property <bool> supports-menu: false;
+    in-out property <bool> supports-behaves-as: false;
+    in-out property <string> feedback;
+    in-out property <string> query;
+    in-out property <bool> editor-open: false;
+    in-out property <int> editor-generation: 0;
+    in-out property <int> editor-tab: 0;
+    in-out property <string> edit-workspace;
+    in-out property <string> edit-id;
+    in-out property <string> edit-revision;
+    in-out property <string> edit-name;
+    in-out property <string> edit-url;
+    in-out property <int> edit-auth: 0;
+    in-out property <string> edit-key;
+    in-out property <int> edit-picker: 1;
+    in-out property <string> edit-default;
+    in-out property <string> role-sonnet;
+    in-out property <string> role-opus;
+    in-out property <string> role-haiku;
+    in-out property <string> role-fable;
+    in-out property <string> role-subagent;
+    in-out property <[ClaudeModelRow]> edit-models;
+    in-out property <bool> fetching: false;
+    in-out property <string> editor-error;
+    in-out property <bool> preview-open: false;
+    in-out property <bool> preview-ready: false;
+    in-out property <bool> preview-restore: false;
+    in-out property <bool> preview-conflicts: false;
+    in-out property <string> preview-text;
+    in-out property <bool> delete-open: false;
+    in-out property <string> delete-id;
+    in-out property <string> delete-name;
+    in-out property <string> delete-revision;
+    pure callback matches-query(string, string) -> bool;
+    callback refresh();
+    callback check-cli();
+    callback import-current();
+    callback edit(string, int);
+    callback new-native();
+    callback save();
+    callback fetch-models();
+    callback model-edit(int, int, string);
+    callback model-toggle(int, bool);
+    callback add-model();
+    callback toggle-all(bool);
+    callback remove-model(int);
+    callback move-model(int, int);
+    callback choose-default(int);
+    callback preview(string);
+    callback preview-recovery(bool);
+    callback apply();
+    callback cancel-preview();
+    callback remove();
+}

@@ -49,6 +49,18 @@ pub(super) enum ControlRequest {
     ApplyDirect {
         preview: String,
     },
+    PreviewClaude {
+        workspace: String,
+        provider: String,
+    },
+    RestoreClaude {
+        workspace: String,
+        keep_conflicts: bool,
+    },
+    ApplyClaude {
+        preview: String,
+        restore: bool,
+    },
     CancelPreview,
     Restore {
         home: String,
@@ -67,12 +79,22 @@ impl ControlRequest {
     }
 
     fn allowed_during_recovery(&self) -> bool {
-        matches!(self, Self::Status { .. } | Self::Restore { .. })
+        matches!(
+            self,
+            Self::Status { .. }
+                | Self::Restore { .. }
+                | Self::RestoreClaude { .. }
+                | Self::ApplyClaude { restore: true, .. }
+        )
     }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum PreviewTarget {
+    Claude {
+        home: String,
+        restore: bool,
+    },
     Route {
         home: String,
         port: String,
@@ -110,6 +132,8 @@ impl ControlPreviews {
 
     fn pending(&self) -> Option<&'static str> {
         self.0.as_ref().map(|(_, target)| match target {
+            PreviewTarget::Claude { restore: false, .. } => "claude_direct",
+            PreviewTarget::Claude { restore: true, .. } => "claude_restore",
             PreviewTarget::Route { .. } => "route",
             PreviewTarget::Direct { .. } => "direct",
         })
@@ -269,6 +293,22 @@ async fn dispatch(
         "apply_direct" => ControlRequest::ApplyDirect {
             preview: required("preview_id")?,
         },
+        "preview_claude_direct" => ControlRequest::PreviewClaude {
+            workspace: required("workspace_id")?,
+            provider: required("provider_id")?,
+        },
+        "preview_claude_restore" => ControlRequest::RestoreClaude {
+            workspace: required("workspace_id")?,
+            keep_conflicts: match params.get("keep_conflicts") {
+                None => false,
+                Some(Value::Bool(value)) => *value,
+                _ => return Err("keep_conflicts 必须是布尔值".into()),
+            },
+        },
+        "apply_claude_direct" | "apply_claude_restore" => ControlRequest::ApplyClaude {
+            preview: required("preview_id")?,
+            restore: method == "apply_claude_restore",
+        },
         "cancel_preview" => ControlRequest::CancelPreview,
         "restore_config" => ControlRequest::Restore { home },
         _ => return Err(format!("未知的控制方法：{method}")),
@@ -290,6 +330,64 @@ impl Worker {
         }
         match request {
             ControlRequest::Status { home } => self.control_status(&home),
+            ControlRequest::PreviewClaude {
+                workspace,
+                provider,
+            } => {
+                self.control_previews.clear();
+                let home = switchx::app::claude::claude_workspace_by_id(
+                    self.data_dir.path()?,
+                    &workspace,
+                )?
+                .key
+                .home
+                .to_string_lossy()
+                .into_owned();
+                let preview = self.preview_claude(home.clone(), provider).await?;
+                let id = self.control_previews.issue(PreviewTarget::Claude {
+                    home,
+                    restore: false,
+                })?;
+                Ok(claude_preview_json(&preview, &id, &workspace))
+            }
+            ControlRequest::RestoreClaude {
+                workspace,
+                keep_conflicts,
+            } => {
+                self.control_previews.clear();
+                let home = switchx::app::claude::claude_workspace_by_id(
+                    self.data_dir.path()?,
+                    &workspace,
+                )?
+                .key
+                .home
+                .to_string_lossy()
+                .into_owned();
+                let preview = self.preview_claude_restore(home.clone(), keep_conflicts)?;
+                let id = self.control_previews.issue(PreviewTarget::Claude {
+                    home,
+                    restore: true,
+                })?;
+                Ok(claude_preview_json(&preview, &id, &workspace))
+            }
+            ControlRequest::ApplyClaude { preview, restore } => {
+                let target = self.control_previews.take(&preview)?;
+                let PreviewTarget::Claude {
+                    home,
+                    restore: expected,
+                } = target
+                else {
+                    return Err("此预览不属于 Claude；请使用对应的应用工具".into());
+                };
+                if restore != expected {
+                    return Err("预览操作不匹配，请重新预览并使用对应的应用工具".into());
+                }
+                let conflicts = self.apply_claude(home).await?;
+                Ok(
+                    json!({"applied": if restore {"claude_restore"} else {"claude_direct"},"conflicts":conflicts,
+                    "message":"用户配置已更新；当前 CLI 会话请通过 /model 与 /status 核对。"}),
+                )
+            }
             ControlRequest::PreviewRoute { home, port, model } => {
                 self.control_previews.clear();
                 let preview = self
@@ -304,7 +402,7 @@ impl Worker {
                 let PreviewTarget::Route { home, port, model } =
                     self.control_previews.take(&preview)?
                 else {
-                    return Err("这个预览 ID 属于直连预览；请调用 apply_direct。".into());
+                    return Err("预览操作不匹配；请重新预览并使用对应的应用工具。".into());
                 };
                 self.apply_route(home.clone(), port, model).await?;
                 Ok(json!({
@@ -323,7 +421,7 @@ impl Worker {
             }
             ControlRequest::ApplyDirect { preview } => {
                 let PreviewTarget::Direct { home } = self.control_previews.take(&preview)? else {
-                    return Err("这个预览 ID 属于路由预览；请调用 apply_route。".into());
+                    return Err("预览操作不匹配；请重新预览并使用对应的应用工具。".into());
                 };
                 let message = self.apply_direct(home.clone()).await?;
                 Ok(json!({
@@ -335,7 +433,8 @@ impl Worker {
             ControlRequest::CancelPreview => {
                 let had = self.control_previews.pending();
                 self.control_previews.clear();
-                self.codex.prepared = None;
+                self.discard_previews();
+                self.cancel_claude_preview();
                 self.cancel_route_preview();
                 Ok(json!({ "cancelled": had }))
             }
@@ -489,6 +588,16 @@ fn route_preview_json(preview: &RoutePreview, id: &str) -> Value {
     })
 }
 
+fn claude_preview_json(
+    preview: &switchx::claude::config::Preview,
+    id: &str,
+    workspace: &str,
+) -> Value {
+    json!({"preview_id": id, "kind": if preview.operation == "restore" {"claude_restore"} else {"claude_direct"},
+        "workspace_id":workspace, "preview":preview,
+        "next":if preview.operation == "restore" {"说明预览并取得同意后，调用 apply_claude_restore。"} else {"说明预览并取得同意后，调用 apply_claude_direct。"}})
+}
+
 fn direct_preview_json(preview: &DirectPreview, id: &str) -> Value {
     json!({
         "preview_id": id,
@@ -587,5 +696,37 @@ mod tests {
         previews.clear();
         assert!(previews.take(&id).is_err());
         assert_eq!(previews.pending(), None);
+        for (restore, kind) in [(false, "claude_direct"), (true, "claude_restore")] {
+            let target = PreviewTarget::Claude {
+                home: "/explicit/claude".into(),
+                restore,
+            };
+            let id = previews.issue(target.clone()).unwrap();
+            assert_eq!(previews.pending(), Some(kind));
+            assert_eq!(previews.take(&id).unwrap(), target);
+            assert!(previews.take(&id).is_err());
+        }
+        assert!(
+            ControlRequest::PreviewClaude {
+                workspace: "explicit-workspace".into(),
+                provider: "explicit-provider".into()
+            }
+            .codex_home()
+            .is_none()
+        );
+        assert!(
+            ControlRequest::RestoreClaude {
+                workspace: "explicit-workspace".into(),
+                keep_conflicts: false
+            }
+            .allowed_during_recovery()
+        );
+        assert!(
+            !ControlRequest::ApplyClaude {
+                preview: "preview".into(),
+                restore: false
+            }
+            .allowed_during_recovery()
+        );
     }
 }

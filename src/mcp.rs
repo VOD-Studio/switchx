@@ -28,6 +28,7 @@ use crate::{
     },
 };
 
+mod claude;
 mod models;
 pub mod setup;
 
@@ -154,6 +155,22 @@ impl Server {
         };
         let outcome = match name {
             "get_status" => Ok(self.status()),
+            "list_client_workspaces" => self.with_store(claude::workspaces),
+            "list_claude_connections" => {
+                self.with_store(|store| claude::connections(store, arguments))
+            }
+            "save_claude_models" if self.access.writes => {
+                self.write(|data, store| claude::save(data, store, arguments))
+            }
+            "preview_claude_direct" if self.access.control => {
+                self.control(name, arguments, &["workspace_id", "provider_id"])
+            }
+            "preview_claude_restore" if self.access.control => {
+                self.control(name, arguments, &["workspace_id", "keep_conflicts"])
+            }
+            "apply_claude_direct" | "apply_claude_restore" if self.access.control => {
+                self.control(name, arguments, &["preview_id"])
+            }
             "list_providers" => self.with_store(providers),
             "list_models" => self.with_store(|store| models(store, arguments)),
             "get_usage" => self.with_store(|store| usage(store, arguments)),
@@ -636,6 +653,7 @@ fn tools(access: Access) -> Value {
             ),
         ]);
     }
+    tools.extend(claude::definitions(access));
     Value::Array(tools)
 }
 
@@ -1531,7 +1549,9 @@ mod tests {
                 "get_usage",
                 "list_requests",
                 "list_prices",
-                "get_app_status"
+                "get_app_status",
+                "list_client_workspaces",
+                "list_claude_connections"
             ]
         );
         assert!(tools.iter().all(|tool| {

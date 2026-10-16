@@ -5,6 +5,7 @@
 mod accounts;
 mod activity;
 mod batch_picker;
+mod claude;
 mod clients;
 mod codex_config;
 mod command;
@@ -131,6 +132,7 @@ pub fn run() -> Result<(), Box<dyn std::error::Error>> {
     batch_picker::connect(&app, &sender);
     codex_config::connect(&app, &sender);
     clients::connect(&app, &sender);
+    claude::connect(&app, &sender);
     toolbox::connect(&app, &sender);
     queue(&app, &sender, Command::InitializeClients);
     queue(&app, &sender, Command::Refresh(false));
@@ -138,6 +140,16 @@ pub fn run() -> Result<(), Box<dyn std::error::Error>> {
     app.window().on_close_requested(move || {
         if let Some(app) = weak.upgrade() {
             app.set_window_visible(false);
+            let claude = app.global::<switchx::ui::ClaudeUi>();
+            if claude.get_preview_open() || claude.get_preview_ready() {
+                claude.invoke_cancel_preview();
+            }
+            claude.set_editor_generation(claude.get_editor_generation().wrapping_add(1));
+            claude.set_editor_open(false);
+            app.global::<switchx::ui::ClaudeUi>()
+                .set_edit_key("".into());
+            app.global::<switchx::ui::ClaudeUi>()
+                .set_preview_open(false);
             app.set_icon_picker_open(false);
             if app.get_subscription_editor_open() || app.get_subscription_editor_pending() {
                 app.invoke_cancel_subscription_editor();
@@ -191,6 +203,24 @@ fn connect_tray(app: &AppWindow, tray: &SwitchXTray, sender: &mpsc::Sender<Comma
                 &app,
                 &restore_sender,
                 Command::RestoreConfig(app.get_config_home().to_string()),
+            );
+        }
+    });
+    let window = app.as_weak();
+    let restore_sender = sender.clone();
+    tray.on_restore_claude(move || {
+        if let Some(app) = window.upgrade() {
+            app.set_window_visible(true);
+            let _ = app.show();
+            app.set_active_client(1);
+            app.set_active_page(6);
+            queue(
+                &app,
+                &restore_sender,
+                Command::ClaudeRestorePreview {
+                    home: app.get_claude_home().into(),
+                    keep_conflicts: false,
+                },
             );
         }
     });

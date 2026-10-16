@@ -4,7 +4,7 @@ use rusqlite::{Connection, OpenFlags, Result, Transaction, TransactionBehavior, 
 
 use crate::{credentials::Secret, usage::TokenUsage};
 
-const SCHEMA_VERSION: i64 = 18;
+const SCHEMA_VERSION: i64 = 19;
 
 /// Usage, log import and price tables; every statement is safe to repeat.
 const USAGE_SCHEMA: &str = "CREATE TABLE IF NOT EXISTS usage_records (
@@ -203,9 +203,10 @@ impl Store {
         let version: i64 = connection.query_row("PRAGMA user_version", [], |row| row.get(0))?;
         let parent = path.parent().ok_or(rusqlite::Error::InvalidQuery)?;
         Ok(version < SCHEMA_VERSION
-            && crate::codex::JOURNALS
+            && (crate::codex::JOURNALS
                 .iter()
-                .any(|name| parent.join(name).exists()))
+                .any(|name| parent.join(name).exists())
+                || crate::claude::config::has_recovery(parent)))
     }
 
     /// Only the stable credential columns are available through this opener.
@@ -223,7 +224,7 @@ impl Store {
         let version: i64 = connection.query_row("PRAGMA user_version", [], |row| row.get(0))?;
         if !matches!(
             version,
-            8 | 9 | 10 | 11 | 12 | 13 | 14 | 15 | 16 | 17 | SCHEMA_VERSION
+            8 | 9 | 10 | 11 | 12 | 13 | 14 | 15 | 16 | 17 | 18 | SCHEMA_VERSION
         ) {
             return Err(rusqlite::Error::InvalidQuery);
         }
@@ -253,7 +254,7 @@ impl Store {
         if version > SCHEMA_VERSION {
             return Err(rusqlite::Error::InvalidQuery);
         }
-        if version > 0 && version < 18 {
+        if version > 0 && version < SCHEMA_VERSION {
             workspaces::backup_before_migration(&connection, path, version)?;
         }
         if version < 2 {
@@ -551,6 +552,11 @@ impl Store {
                 transaction.execute_batch(workspaces::SCHEMA)
             })?;
         }
+        if version < 19 {
+            Self::migrate_step(&connection, 19, |transaction, _| {
+                transaction.execute_batch(claude::SCHEMA)
+            })?;
+        }
         Ok(Self { connection })
     }
 
@@ -786,6 +792,14 @@ impl Store {
         };
         let transaction = self.connection.unchecked_transaction()?;
         use rusqlite::OptionalExtension;
+        let bound: bool = transaction.query_row(
+            "SELECT EXISTS(SELECT 1 FROM client_connections WHERE provider_id=?1)",
+            [&provider.id],
+            |row| row.get(0),
+        )?;
+        if bound {
+            return Err(rusqlite::Error::InvalidQuery);
+        }
         let saved_kind: Option<String> = transaction
             .query_row(
                 "SELECT kind FROM providers WHERE id = ?1",
@@ -1111,7 +1125,7 @@ impl Store {
 
     pub fn providers(&self) -> Result<Vec<ProviderRecord>> {
         let mut statement = self.connection.prepare(
-            "SELECT id, name, base_url, model_id, credential_ref, kind, account_binding, icon_id FROM providers ORDER BY name, id",
+            "SELECT id, name, base_url, model_id, credential_ref, kind, account_binding, icon_id FROM providers WHERE NOT EXISTS(SELECT 1 FROM client_connections c WHERE c.provider_id=providers.id) ORDER BY name, id",
         )?;
         statement.query_map([], provider_from_row)?.collect()
     }
@@ -1120,7 +1134,7 @@ impl Store {
         use rusqlite::OptionalExtension;
         self.connection
             .query_row(
-                "SELECT id, name, base_url, model_id, credential_ref, kind, account_binding, icon_id FROM providers WHERE id = ?1",
+                "SELECT id, name, base_url, model_id, credential_ref, kind, account_binding, icon_id FROM providers WHERE id = ?1 AND NOT EXISTS(SELECT 1 FROM client_connections c WHERE c.provider_id=providers.id)",
                 [id],
                 provider_from_row,
             )
@@ -1475,6 +1489,7 @@ fn validate_api_key(key: &str) -> Result<()> {
     Ok(())
 }
 
+mod claude;
 mod usage;
 mod workspaces;
 

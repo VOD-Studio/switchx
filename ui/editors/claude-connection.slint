@@ -1,0 +1,441 @@
+import { QuietScrollView } from "../scroll-view.slint";
+import {
+    QuietButton,
+    QuietLineEdit,
+    QuietSegmented,
+    QuietComboBox,
+    QuietCheckBox,
+    SurfaceCard,
+} from "../components.slint";
+import { ClaudeUi } from "../claude-state.slint";
+import { Theme } from "../tokens.slint";
+
+component FieldLabel inherits Text {
+    color: Theme.muted-text;
+    font-size: 12px;
+}
+
+export component ClaudeConnectionEditor inherits VerticalLayout {
+    in property <bool> busy;
+    property <string> model-query;
+    spacing: 14px;
+    QuietSegmented {
+        width: 300px;
+        options: ["连接设置", "模型列表", "高级设置"];
+        current-index: ClaudeUi.editor-tab;
+        selected(index) => { ClaudeUi.editor-tab = index; }
+    }
+
+    QuietScrollView {
+        horizontal-scrollbar-policy: always-off;
+        VerticalLayout {
+            spacing: 16px;
+            padding-bottom: 12px;
+            if ClaudeUi.editor-tab == 0: VerticalLayout {
+                spacing: 12px;
+                FieldLabel {
+                    text: "连接名称";
+                }
+
+                QuietLineEdit {
+                    text <=> ClaudeUi.edit-name;
+                    placeholder-text: "例如：工作网关";
+                    accessible-label: "Claude 连接名称";
+                    enabled: !root.busy;
+                }
+
+                FieldLabel {
+                    text: "认证方式";
+                }
+
+                QuietComboBox {
+                    model: [
+                        "SwitchX 凭据 helper（推荐）",
+                        "API Key · x-api-key",
+                        "Bearer · Authorization",
+                        "本机官方登录"
+                    ];
+                    current-index <=> ClaudeUi.edit-auth;
+                    accessible-label: "Claude 认证方式";
+                    enabled: !root.busy;
+                    selected(index) => { if index == 3 { ClaudeUi.edit-key = ""; } }
+                }
+
+                if ClaudeUi.edit-auth != 3: VerticalLayout {
+                    spacing: 12px;
+                    FieldLabel {
+                        text: "Anthropic 兼容 API 根地址";
+                    }
+
+                    QuietLineEdit {
+                        text <=> ClaudeUi.edit-url;
+                        placeholder-text: "https://api.anthropic.com";
+                        accessible-label: "Claude API 地址";
+                        enabled: !root.busy;
+                    }
+
+                    FieldLabel {
+                        text: "API Key 或 Token";
+                    }
+
+                    QuietLineEdit {
+                        text <=> ClaudeUi.edit-key;
+                        input-type: password;
+                        placeholder-text: ClaudeUi.edit-id == "" ? "输入连接凭据" : "留空保留已保存凭据";
+                        accessible-label: "Claude API Key";
+                        enabled: !root.busy;
+                    }
+                }
+                if ClaudeUi.edit-auth == 3: Text {
+                    text: "使用 Claude Code 自己保存的官方登录。SwitchX 不读取系统钥匙串，也不会改写官方登录文件。";
+                    color: Theme.muted-text;
+                    font-size: 12px;
+                    wrap: word-wrap;
+                }
+                FieldLabel {
+                    text: "默认模型 ID";
+                }
+
+                QuietLineEdit {
+                    text <=> ClaudeUi.edit-default;
+                    placeholder-text: ClaudeUi.edit-auth == 3 ? "留空使用客户端默认模型" : "输入实际模型 ID，或在模型列表中设为默认";
+                    accessible-label: "Claude 默认模型 ID";
+                    enabled: !root.busy;
+                }
+
+                Text {
+                    text: "保存只更新连接资料。需要使用这份配置时，在连接列表中预览并启用。";
+                    color: Theme.muted-text;
+                    font-size: 12px;
+                    wrap: word-wrap;
+                }
+            }
+            if ClaudeUi.editor-tab == 1: VerticalLayout {
+                spacing: 12px;
+                HorizontalLayout {
+                    spacing: 10px;
+                    QuietComboBox {
+                        model: ["保留原菜单", "追加到内置菜单", "由 SwitchX 管理菜单"];
+                        current-index <=> ClaudeUi.edit-picker;
+                        width: 240px;
+                        accessible-label: "Claude 模型菜单策略";
+                        enabled: !root.busy;
+                    }
+
+                    Rectangle {
+                        horizontal-stretch: 1;
+                    }
+
+                    QuietButton {
+                        text: ClaudeUi.fetching ? "获取中…" : "获取模型";
+                        width: 104px;
+                        enabled: !root.busy && !ClaudeUi.fetching && ClaudeUi.edit-auth != 3;
+                        clicked => { ClaudeUi.fetch-models(); }
+                    }
+
+                    QuietButton {
+                        text: "添加模型";
+                        width: 104px;
+                        enabled: !root.busy;
+                        clicked => { ClaudeUi.add-model(); }
+                    }
+                }
+
+                HorizontalLayout {
+                    spacing: 10px;
+                    QuietLineEdit {
+                        text <=> root.model-query;
+                        placeholder-text: "搜索模型 ID 或名称";
+                        accessible-label: "搜索待发布 Claude 模型";
+                        width: 230px;
+                    }
+
+                    Text {
+                        text: "默认：" + (ClaudeUi.edit-default == "" ? "客户端默认" : ClaudeUi.edit-default);
+                        color: Theme.muted-text;
+                        font-size: 11px;
+                        overflow: elide;
+                        horizontal-stretch: 1;
+                        vertical-alignment: center;
+                    }
+
+                    QuietButton {
+                        text: "全选";
+                        ghost: true;
+                        width: 62px;
+                        enabled: !root.busy;
+                        clicked => { ClaudeUi.toggle-all(true); }
+                    }
+
+                    QuietButton {
+                        text: "清空选择";
+                        ghost: true;
+                        width: 90px;
+                        enabled: !root.busy;
+                        clicked => { ClaudeUi.toggle-all(false); }
+                    }
+                }
+
+                for model[index] in ClaudeUi.edit-models: SurfaceCard {
+                    visible: ClaudeUi.matches-query(model.model + " " + model.label, root.model-query);
+                    height: 160px;
+                    VerticalLayout {
+                        padding: 12px;
+                        spacing: 8px;
+                        HorizontalLayout {
+                            spacing: 8px;
+                            QuietCheckBox {
+                                text: "发布到菜单";
+                                checked: model.enabled;
+                                auto-toggle: false;
+                                enabled: !root.busy;
+                                accessible-label: "发布 Claude 模型 " + index;
+                                toggled => { ClaudeUi.model-toggle(index, !model.enabled); }
+                            }
+
+                            Rectangle {
+                                horizontal-stretch: 1;
+                            }
+
+                            QuietButton {
+                                text: ClaudeUi.edit-default == model.model && model.model != "" ? "默认模型" : "设为默认";
+                                width: 90px;
+                                selected: ClaudeUi.edit-default == model.model && model.model != "";
+                                enabled: !root.busy && model.model != "";
+                                accessible-label: "默认 Claude 模型 " + index;
+                                clicked => { ClaudeUi.choose-default(index); }
+                            }
+
+                            QuietButton {
+                                text: "上移";
+                                icon: @image-url("../../assets/ui/arrow-up.svg");
+                                icon-only: true;
+                                icon-color: Theme.muted-text;
+                                width: 32px;
+                                ghost: true;
+                                enabled: !root.busy && index > 0;
+                                accessible-label: "上移 Claude 模型 " + index;
+                                clicked => { ClaudeUi.move-model(index, -1); }
+                            }
+
+                            QuietButton {
+                                text: "下移";
+                                icon: @image-url("../../assets/ui/arrow-down.svg");
+                                icon-only: true;
+                                icon-color: Theme.muted-text;
+                                width: 32px;
+                                ghost: true;
+                                enabled: !root.busy && index + 1 < ClaudeUi.edit-models.length;
+                                accessible-label: "下移 Claude 模型 " + index;
+                                clicked => { ClaudeUi.move-model(index, 1); }
+                            }
+
+                            QuietButton {
+                                text: "移除";
+                                icon: @image-url("../../assets/ui/trash.svg");
+                                icon-only: true;
+                                icon-color: Theme.muted-text;
+                                width: 32px;
+                                ghost: true;
+                                enabled: !root.busy;
+                                accessible-label: "移除 Claude 模型 " + index;
+                                clicked => { ClaudeUi.remove-model(index); }
+                            }
+                        }
+
+                        HorizontalLayout {
+                            spacing: 10px;
+                            QuietLineEdit {
+                                text: model.model;
+                                placeholder-text: "实际模型 ID";
+                                accessible-label: "Claude 模型 ID " + index;
+                                enabled: !root.busy;
+                                edited(text) => { ClaudeUi.model-edit(index, 0, text); }
+                            }
+
+                            QuietLineEdit {
+                                text: model.label;
+                                placeholder-text: "菜单显示名称";
+                                accessible-label: "Claude 模型名称 " + index;
+                                enabled: !root.busy;
+                                edited(text) => { ClaudeUi.model-edit(index, 1, text); }
+                            }
+                        }
+
+                        HorizontalLayout {
+                            spacing: 10px;
+                            QuietLineEdit {
+                                text: model.description;
+                                placeholder-text: "菜单说明（可选）";
+                                accessible-label: "Claude 模型说明 " + index;
+                                enabled: !root.busy;
+                                edited(text) => { ClaudeUi.model-edit(index, 2, text); }
+                            }
+
+                            QuietLineEdit {
+                                text: model.behaves-as;
+                                placeholder-text: "behavesAs（可选，2.1.257+）";
+                                accessible-label: "Claude 模型能力映射 " + index;
+                                enabled: !root.busy;
+                                edited(text) => { ClaudeUi.model-edit(index, 3, text); }
+                            }
+                        }
+                    }
+                }
+                if ClaudeUi.edit-models.length == 0: Text {
+                    text: "可手动添加模型，或从上游获取列表。";
+                    color: Theme.muted-text;
+                    font-size: 13px;
+                }
+                Text {
+                    text: "勾选与排序控制自定义菜单条目。Default 和当前会话模型仍可能由 CLI 保留；behavesAs 不会改变上游的实际能力。";
+                    color: Theme.muted-text;
+                    font-size: 11px;
+                    wrap: word-wrap;
+                }
+            }
+            if ClaudeUi.editor-tab == 2: VerticalLayout {
+                spacing: 12px;
+                Text {
+                    text: "模型角色映射";
+                    color: Theme.primary-text;
+                    font-size: 16px;
+                    font-weight: 600;
+                }
+
+                FieldLabel {
+                    text: "Sonnet";
+                }
+
+                QuietLineEdit {
+                    text <=> ClaudeUi.role-sonnet;
+                    placeholder-text: "实际模型 ID，留空使用客户端默认";
+                    accessible-label: "Claude Sonnet 模型映射";
+                    enabled: !root.busy;
+                }
+
+                FieldLabel {
+                    text: "Opus";
+                }
+
+                QuietLineEdit {
+                    text <=> ClaudeUi.role-opus;
+                    placeholder-text: "实际模型 ID";
+                    accessible-label: "Claude Opus 模型映射";
+                    enabled: !root.busy;
+                }
+
+                FieldLabel {
+                    text: "Haiku";
+                }
+
+                QuietLineEdit {
+                    text <=> ClaudeUi.role-haiku;
+                    placeholder-text: "实际模型 ID";
+                    accessible-label: "Claude Haiku 模型映射";
+                    enabled: !root.busy;
+                }
+
+                FieldLabel {
+                    text: "Fable";
+                }
+
+                QuietLineEdit {
+                    text <=> ClaudeUi.role-fable;
+                    placeholder-text: "实际模型 ID（客户端支持时）";
+                    accessible-label: "Claude Fable 模型映射";
+                    enabled: !root.busy;
+                }
+
+                FieldLabel {
+                    text: "子代理";
+                }
+
+                QuietLineEdit {
+                    text <=> ClaudeUi.role-subagent;
+                    placeholder-text: "留空沿用客户端行为";
+                    accessible-label: "Claude 子代理模型映射";
+                    enabled: !root.busy;
+                }
+            }
+        }
+    }
+
+    if ClaudeUi.editor-error != "": Text {
+        text: ClaudeUi.editor-error;
+        color: Theme.error;
+        font-size: 12px;
+        wrap: word-wrap;
+    }
+    HorizontalLayout {
+        spacing: 10px;
+        Text {
+            text: "保存后在连接页预览并启用";
+            color: Theme.muted-text;
+            font-size: 11px;
+            vertical-alignment: center;
+            horizontal-stretch: 1;
+        }
+
+        QuietButton {
+            text: "取消";
+            width: 86px;
+            enabled: !root.busy;
+            clicked => { ClaudeUi.editor-open = false; }
+        }
+
+        QuietButton {
+            text: "保存连接";
+            width: 120px;
+            primary: true;
+            enabled: !root.busy && !ClaudeUi.fetching;
+            accessible-label: "保存 Claude 连接";
+            clicked => { ClaudeUi.save(); }
+        }
+    }
+}
+
+export component ClaudeChangePreview inherits VerticalLayout {
+    in property <bool> busy;
+    spacing: 14px;
+    QuietScrollView {
+        horizontal-scrollbar-policy: always-off;
+        VerticalLayout {
+            padding: 4px;
+            Text {
+                text: ClaudeUi.preview-text;
+                color: Theme.primary-text;
+                font-size: 13px;
+                wrap: word-wrap;
+            }
+        }
+    }
+
+    if ClaudeUi.preview-restore && ClaudeUi.preview-conflicts: QuietButton {
+        text: "保留外部值并结束管理…";
+        enabled: !root.busy;
+        clicked => { ClaudeUi.preview-recovery(true); }
+    }
+    if ClaudeUi.feedback != "": Text {
+        text: ClaudeUi.feedback;
+        color: Theme.muted-text;
+        font-size: 12px;
+        wrap: word-wrap;
+    }
+    HorizontalLayout {
+        spacing: 10px;
+        QuietButton {
+            text: "返回";
+            enabled: !root.busy;
+            clicked => { ClaudeUi.preview-open = false; ClaudeUi.cancel-preview(); }
+        }
+
+        QuietButton {
+            text: ClaudeUi.preview-restore ? (ClaudeUi.preview-conflicts ? "恢复可还原字段" : "确认恢复") : "确认应用";
+            primary: true;
+            enabled: !root.busy && ClaudeUi.preview-ready;
+            accessible-label: "确认 Claude 配置变更";
+            clicked => { ClaudeUi.apply(); }
+        }
+    }
+}
