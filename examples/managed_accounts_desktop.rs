@@ -177,6 +177,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     .enumerate()
     {
         store.put_request(&RequestRecord {
+            client: switchx::storage::UsageClient::Unknown,
+            workspace_id: None,
             id: format!("synthetic-ui-request-{index}"),
             started_at_ms: chrono::Utc::now().timestamp_millis() - index as i64 * 60_000,
             public_model: Some("synthetic-api-model".into()),

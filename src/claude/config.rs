@@ -63,6 +63,29 @@ struct Journal {
     observed_exists: bool,
     paths: Vec<Vec<String>>,
     pending: bool,
+    #[serde(default)]
+    route: Option<RouteMetadata>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct RouteMetadata {
+    pub address: std::net::SocketAddr,
+    pub token_ref: String,
+    pub mode: super::publication::Mode,
+    pub generation: String,
+    pub providers: Vec<String>,
+}
+impl RouteMetadata {
+    fn validate(&self) -> Result<(), String> {
+        if self.address.ip() != std::net::Ipv4Addr::LOCALHOST
+            || self.address.port() == 0
+            || !self.token_ref.strip_prefix("router-").is_some_and(valid_id)
+            || !valid_id(&self.generation)
+        {
+            return Err("Claude 路由恢复记录无效".into());
+        }
+        Ok(())
+    }
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -82,6 +105,8 @@ pub struct Status {
     pub pending: bool,
     pub provider_id: String,
     pub provider_name: String,
+    pub mode: String,
+    pub endpoint: Option<String>,
 }
 
 struct Image(Option<Secret>);
@@ -122,12 +147,17 @@ pub struct Prepared {
     keep_conflicts: bool,
     provider: Option<Connection>,
     key: Option<Secret>,
+    route: Option<RouteMetadata>,
 }
 
 pub fn has_recovery(data_dir: &Path) -> bool {
     match fs::read_dir(data_dir.join("claude")) {
-        Ok(mut entries) => entries
-            .any(|entry| entry.map_or(true, |entry| entry.path().join("active.json").exists())),
+        Ok(mut entries) => entries.any(|entry| {
+            entry.map_or(true, |entry| {
+                entry.path().join("active.json").exists()
+                    || entry.path().join("route-lease.json").exists()
+            })
+        }),
         Err(error) => error.kind() != std::io::ErrorKind::NotFound,
     }
 }
@@ -187,6 +217,12 @@ fn journal(data_dir: &Path, workspace: &ClientWorkspace) -> Result<Option<Journa
     {
         return Err("Claude 恢复记录与目标不匹配".into());
     }
+    if let Some(route) = &journal.route {
+        route.validate()?;
+        if route.token_ref != format!("router-{}", workspace.id) {
+            return Err("路由令牌引用不属于当前工作空间".into());
+        }
+    }
     Ok(Some(journal))
 }
 
@@ -225,14 +261,78 @@ fn snapshot(
 }
 
 pub fn status(data_dir: &Path, workspace: &ClientWorkspace) -> Result<Status, String> {
-    Ok(
-        journal(data_dir, workspace)?.map_or_else(Status::default, |j| Status {
-            managed: true,
-            pending: j.pending,
-            provider_id: j.provider_id,
-            provider_name: j.provider_name,
-        }),
-    )
+    let journal = journal(data_dir, workspace)?;
+    let lease = route_lease(data_dir, workspace)?;
+    let route = journal
+        .as_ref()
+        .and_then(|j| j.route.as_ref())
+        .or(lease.as_ref());
+    Ok(Status {
+        managed: journal.is_some() || lease.is_some(),
+        pending: journal.as_ref().is_some_and(|j| j.pending)
+            || (lease.is_some() && journal.as_ref().is_none_or(|j| j.route.is_none())),
+        provider_id: journal
+            .as_ref()
+            .map(|j| j.provider_id.clone())
+            .unwrap_or_default(),
+        provider_name: journal
+            .as_ref()
+            .map(|j| j.provider_name.clone())
+            .unwrap_or_else(|| "待清理的路由".into()),
+        mode: route
+            .map(|r| r.mode.as_str())
+            .unwrap_or(if journal.is_some() { "direct" } else { "none" })
+            .into(),
+        endpoint: route.map(|r| format!("http://{}", r.address)),
+    })
+}
+pub fn route_metadata(
+    data_dir: &Path,
+    workspace: &ClientWorkspace,
+) -> Result<Option<RouteMetadata>, String> {
+    Ok(journal(data_dir, workspace)?
+        .and_then(|j| j.route)
+        .or(route_lease(data_dir, workspace)?))
+}
+fn route_lease(
+    data_dir: &Path,
+    workspace: &ClientWorkspace,
+) -> Result<Option<RouteMetadata>, String> {
+    let image = read(&directory(data_dir, &workspace.id)?.join("route-lease.json"))?;
+    if !image.exists() {
+        return Ok(None);
+    }
+    let route: RouteMetadata =
+        serde_json::from_str(image.text()).map_err(|_| "Claude 路由租约无效")?;
+    route.validate()?;
+    if route.token_ref != format!("router-{}", workspace.id) {
+        return Err("路由租约不属于当前工作空间".into());
+    }
+    Ok(Some(route))
+}
+pub(crate) fn write_route_lease(
+    data_dir: &Path,
+    workspace: &ClientWorkspace,
+    route: &RouteMetadata,
+) -> Result<(), String> {
+    route.validate()?;
+    private_dir(&data_dir.join("claude"))?;
+    let dir = directory(data_dir, &workspace.id)?;
+    private_dir(&dir)?;
+    let target = dir.join("route-lease.json");
+    let text = serde_json::to_string(route).map_err(|_| "无法保存路由租约")?;
+    replace(&target, &Image(Some(Secret::new(text))), &read(&target)?)
+}
+pub(crate) fn clear_route_lease(
+    data_dir: &Path,
+    workspace: &ClientWorkspace,
+) -> Result<(), String> {
+    let target = directory(data_dir, &workspace.id)?.join("route-lease.json");
+    if target.exists() {
+        fs::remove_file(&target).map_err(|_| "无法清理路由租约")?;
+        crate::codex::route_switch::sync_parent(&target)?;
+    }
+    Ok(())
 }
 
 pub fn protects(
@@ -300,6 +400,60 @@ pub fn prepare(
     helper: &Path,
     capabilities: ClaudeCapabilities,
 ) -> Result<Prepared, String> {
+    prepare_inner(
+        data_dir,
+        workspace,
+        connection,
+        key,
+        helper,
+        capabilities,
+        None,
+    )
+}
+
+pub fn prepare_route(
+    data_dir: &Path,
+    workspace: &ClientWorkspace,
+    plan: &super::publication::Plan,
+    route: RouteMetadata,
+    helper: &Path,
+    capabilities: ClaudeCapabilities,
+) -> Result<Prepared, String> {
+    route.validate()?;
+    let connection = Connection {
+        id: workspace.id.clone(),
+        workspace_id: workspace.id.clone(),
+        name: if route.mode == super::publication::Mode::Aggregate {
+            "Claude 模型聚合"
+        } else {
+            "Claude 模型路由"
+        }
+        .into(),
+        base_url: format!("http://{}", route.address),
+        settings: plan.settings.clone(),
+        revision: 0,
+        has_key: true,
+    };
+    prepare_inner(
+        data_dir,
+        workspace,
+        connection,
+        None,
+        helper,
+        capabilities,
+        Some(route),
+    )
+}
+#[allow(clippy::too_many_arguments)]
+fn prepare_inner(
+    data_dir: &Path,
+    workspace: &ClientWorkspace,
+    connection: Connection,
+    key: Option<Secret>,
+    helper: &Path,
+    capabilities: ClaudeCapabilities,
+    route: Option<RouteMetadata>,
+) -> Result<Prepared, String> {
     if workspace.key.client != ClientKind::ClaudeCode {
         return Err("目标不是 Claude Code 工作空间".into());
     }
@@ -310,6 +464,9 @@ pub fn prepare(
     let observed = read(&workspace.key.config_path())?;
     observed.value()?;
     let previous = journal(data_dir, workspace)?;
+    if route.is_none() && route_metadata(data_dir, workspace)?.is_some() {
+        return Err("请先恢复并停止此 Claude 路由，再启用直连".into());
+    }
     let (baseline, mut paths) = if let Some(previous) = &previous {
         if previous.pending {
             return Err("上次配置写入尚未完成，请先恢复".into());
@@ -349,19 +506,29 @@ pub fn prepare(
             path(&["env", "ANTHROPIC_BASE_URL"]),
             Some(connection.base_url.clone().into()),
         ));
-        let credential = key.as_ref().ok_or("连接凭据不存在，请重新输入")?;
+        let credential = key.as_ref();
+        if route.is_none() && credential.is_none() {
+            return Err("连接凭据不存在，请重新输入".into());
+        }
         match settings.auth {
             AuthMode::Helper => changes.push((
                 path(&["apiKeyHelper"]),
-                Some(client::helper_command(helper, &connection.id, data_dir)?.into()),
+                Some(
+                    if let Some(route) = &route {
+                        client::local_token_command(helper, &route.token_ref, data_dir)?
+                    } else {
+                        client::helper_command(helper, &connection.id, data_dir)?
+                    }
+                    .into(),
+                ),
             )),
             AuthMode::ApiKey => changes.push((
                 path(&["env", "ANTHROPIC_API_KEY"]),
-                Some(credential.expose().into()),
+                Some(credential.ok_or("连接凭据不存在")?.expose().into()),
             )),
             AuthMode::Bearer => changes.push((
                 path(&["env", "ANTHROPIC_AUTH_TOKEN"]),
-                Some(credential.expose().into()),
+                Some(credential.ok_or("连接凭据不存在")?.expose().into()),
             )),
             AuthMode::Native => unreachable!(),
         }
@@ -418,7 +585,7 @@ pub fn prepare(
     let preview = Preview {
         target: workspace.key.config_path(),
         provider: connection.name.clone(),
-        operation: "apply",
+        operation: route.as_ref().map_or("apply", |r| r.mode.as_str()),
         fields,
         models: if settings.picker == PickerPolicy::Preserve {
             Vec::new()
@@ -443,8 +610,9 @@ pub fn prepare(
         paths: paths.into_iter().collect(),
         restore: false,
         keep_conflicts: false,
-        provider: Some(connection),
+        provider: route.is_none().then_some(connection),
         key,
+        route,
     })
 }
 
@@ -453,7 +621,35 @@ pub fn prepare_restore(
     workspace: &ClientWorkspace,
     keep_conflicts: bool,
 ) -> Result<Prepared, String> {
-    let journal = journal(data_dir, workspace)?.ok_or("这个 Claude 工作空间没有待恢复配置")?;
+    let saved = journal(data_dir, workspace)?;
+    if saved.is_none()
+        && let Some(route) = route_lease(data_dir, workspace)?
+    {
+        let observed = read(&workspace.key.config_path())?;
+        return Ok(Prepared {
+            preview: Preview {
+                target: workspace.key.config_path(),
+                provider: "未完成的 Claude 路由".into(),
+                operation: "restore",
+                fields: Vec::new(),
+                models: Vec::new(),
+                notes: vec!["清理未完成的路由监听与本地令牌；客户端文件保持原状。".into()],
+                conflicts: Vec::new(),
+            },
+            workspace: workspace.clone(),
+            baseline: observed.copy(),
+            desired: observed.copy(),
+            observed,
+            journal: None,
+            paths: Vec::new(),
+            restore: true,
+            keep_conflicts,
+            provider: None,
+            key: None,
+            route: Some(route),
+        });
+    }
+    let journal = saved.ok_or("这个 Claude 工作空间没有待恢复配置")?;
     let observed = read(&workspace.key.config_path())?;
     let baseline = snapshot(data_dir, workspace, &journal, "baseline")?;
     let applied = snapshot(data_dir, workspace, &journal, "applied")?;
@@ -488,7 +684,8 @@ pub fn prepare_restore(
         baseline,
         desired,
         journal: Some(journal.clone()),
-        paths: journal.paths,
+        paths: journal.paths.clone(),
+        route: journal.route.clone(),
         restore: true,
         keep_conflicts,
         provider: None,
@@ -497,6 +694,12 @@ pub fn prepare_restore(
 }
 
 impl Prepared {
+    pub fn is_route_publication(&self) -> bool {
+        self.route.is_some() && !self.restore
+    }
+    pub fn route_generation(&self) -> Option<&str> {
+        self.route.as_ref().map(|r| r.generation.as_str())
+    }
     pub fn validate_capabilities(&self, capabilities: ClaudeCapabilities) -> Result<(), String> {
         self.provider.as_ref().map_or(Ok(()), |provider| {
             provider.settings.validate_client(capabilities)
@@ -513,6 +716,23 @@ impl Prepared {
         self.key.as_ref().map(Secret::expose) == key.map(Secret::expose)
     }
 
+    pub(crate) fn validate_current(&self, data_dir: &Path) -> Result<(), String> {
+        if WorkspaceKey::new(ClientKind::ClaudeCode, &self.workspace.key.home)?
+            != self.workspace.key
+            || !read(&self.workspace.key.config_path())?.matches(&self.observed)
+            || journal(data_dir, &self.workspace)? != self.journal
+        {
+            return Err("配置、目录或恢复记录在预览后发生变化，请重新预览".into());
+        }
+        if !self.restore
+            && self.route.is_none()
+            && route_metadata(data_dir, &self.workspace)?.is_some()
+        {
+            return Err("请先恢复并停止 Claude 路由".into());
+        }
+        Ok(())
+    }
+
     pub fn apply(self, data_dir: &Path) -> Result<Vec<String>, String> {
         if WorkspaceKey::new(ClientKind::ClaudeCode, &self.workspace.key.home)?
             != self.workspace.key
@@ -522,6 +742,7 @@ impl Prepared {
         let target = self.workspace.key.config_path();
         private_dir(&self.workspace.key.home)?;
         let _lock = lock(&target)?;
+        self.validate_current(data_dir)?;
         if !read(&target)?.matches(&self.observed)
             || journal(data_dir, &self.workspace)? != self.journal
         {
@@ -530,7 +751,8 @@ impl Prepared {
         let directory = directory(data_dir, &self.workspace.id)?;
         if self.restore {
             replace(&target, &self.desired, &self.observed)?;
-            if self.preview.conflicts.is_empty() || self.keep_conflicts {
+            if self.journal.is_some() && (self.preview.conflicts.is_empty() || self.keep_conflicts)
+            {
                 fs::remove_file(directory.join("active.json"))
                     .map_err(|_| "配置已恢复，但恢复记录清理失败，请重试")?;
                 crate::codex::route_switch::sync_parent(&directory.join("active.json"))?;
@@ -554,45 +776,65 @@ impl Prepared {
                 image.text().as_bytes(),
             )?;
         }
-        let connection = self.provider.ok_or("连接预览缺失")?;
+        let connection = self.provider;
+        let provider_id = connection
+            .as_ref()
+            .map(|c| c.id.clone())
+            .unwrap_or_default();
+        let provider_name = connection
+            .as_ref()
+            .map(|c| c.name.clone())
+            .unwrap_or_else(|| self.preview.provider.clone());
         let mut protected = self
             .journal
             .as_ref()
             .map(|j| j.protected_providers.clone())
             .unwrap_or_default();
-        if !protected.contains(&connection.id) {
-            protected.push(connection.id.clone());
+        if let Some(route) = &self.route {
+            protected.extend(route.providers.iter().cloned());
+        } else if !protected.contains(&provider_id) {
+            protected.push(provider_id.clone());
         }
         let mut journal = Journal {
             version: 1,
             workspace_id: self.workspace.id.clone(),
             target: target.clone(),
             transaction,
-            provider_id: connection.id.clone(),
-            provider_name: connection.name,
+            provider_id: provider_id.clone(),
+            provider_name,
             protected_providers: protected,
             baseline_exists: self.baseline.exists(),
             observed_exists: self.observed.exists(),
             paths: self.paths,
             pending: true,
+            route: self.route.clone(),
         };
         write_journal(&directory, &journal)?;
         replace(&target, &self.desired, &self.observed)?;
         journal.pending = false;
-        journal.protected_providers = vec![connection.id];
+        journal.protected_providers = self
+            .route
+            .map(|r| r.providers)
+            .unwrap_or_else(|| vec![provider_id]);
         write_journal(&directory, &journal)?;
         Ok(Vec::new())
     }
 }
 
-struct Lock(File);
+pub(crate) struct Lock(File);
 impl Drop for Lock {
     fn drop(&mut self) {
         let _ = self.0.unlock();
     }
 }
 fn lock(target: &Path) -> Result<Lock, String> {
-    let path = target.with_file_name(".switchx-claude.lock");
+    lock_file(target.with_file_name(".switchx-claude.lock"))
+}
+pub(crate) fn route_owner(workspace: &ClientWorkspace) -> Result<Lock, String> {
+    private_dir(&workspace.key.home)?;
+    lock_file(workspace.key.home.join(".switchx-claude-route.lock"))
+}
+fn lock_file(path: PathBuf) -> Result<Lock, String> {
     if fs::symlink_metadata(&path).is_ok_and(|m| !m.is_file() || m.file_type().is_symlink()) {
         return Err("配置锁文件无效".into());
     }

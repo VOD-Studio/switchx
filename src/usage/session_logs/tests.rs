@@ -432,6 +432,8 @@ fn exact_response_ids_merge_router_usage_and_preserve_reported_cost_in_both_orde
         logged.response_id = Some(response.clone());
         logged.reported_cost_micros = Some(123);
         let routed = RequestRecord {
+            client: crate::storage::UsageClient::Unknown,
+            workspace_id: None,
             id: format!("route-{index}"),
             started_at_ms: at,
             public_model: Some("public".into()),

@@ -32,12 +32,12 @@ impl super::Store {
     ) -> Result<()> {
         // Preserve an exact session-log attribution when the router arrives later.
         let provenance: Option<(String, Option<i64>)> = transaction.query_row(
-            "SELECT client, reported_cost_micros FROM usage_records WHERE id = ?1 OR (response_id = ?2 AND source IN ('codex_log', 'session_log')) ORDER BY client = 'unknown' LIMIT 1",
+            "SELECT client, reported_cost_micros FROM usage_records WHERE id = ?1 OR (response_id = ?2 AND source IN ('codex_log', 'claude_log', 'session_log')) ORDER BY client = 'unknown' LIMIT 1",
             params![record.id, record.response_id], |row| Ok((row.get(0)?, row.get(1)?)),
         ).optional()?;
         if let Some(response_id) = &record.response_id {
             transaction.execute(
-                "DELETE FROM usage_records WHERE source IN ('codex_log', 'session_log') AND response_id = ?1",
+                "DELETE FROM usage_records WHERE source IN ('codex_log', 'claude_log', 'session_log') AND response_id = ?1",
                 [response_id],
             )?;
         }
@@ -66,7 +66,7 @@ impl super::Store {
                 record.first_event_ms,
                 record.response_id,
                 usage.cache_write_1h as i64,
-                provenance.as_ref().map_or("unknown", |p|p.0.as_str()),
+                if record.client != UsageClient::Unknown {record.client.as_str()} else {provenance.as_ref().map_or("unknown", |p|p.0.as_str())},
                 provenance.as_ref().and_then(|p|p.1),
             ],
         )?;
@@ -275,7 +275,7 @@ impl super::Store {
             for record in records {
                 if matches!(
                     record.source,
-                    UsageSource::CodexLog | UsageSource::SessionLog
+                    UsageSource::CodexLog | UsageSource::ClaudeLog | UsageSource::SessionLog
                 ) {
                     added += transaction.execute(
                         "UPDATE usage_records SET client = CASE WHEN client = 'unknown' THEN ?2 ELSE client END, reported_cost_micros = COALESCE(?3, reported_cost_micros) WHERE source = 'router' AND response_id = ?1 AND (client = 'unknown' OR (?3 IS NOT NULL AND reported_cost_micros IS NOT ?3))",

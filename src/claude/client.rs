@@ -92,13 +92,13 @@ pub async fn inspect(saved: Option<&str>, home: &Path) -> Result<CliInfo, String
         if output.len() >= 4096 {
             return Err("CLI 版本输出过长");
         }
-        if !child
-            .wait()
-            .await
-            .map_err(|_| "CLI 版本检查失败")?
-            .success()
-        {
-            return Err("CLI 版本检查失败");
+        let status = child.wait().await.map_err(|_| "CLI 版本检查失败")?;
+        if !status.success() {
+            return Err(if status.code().is_none() {
+                "CLI 进程被系统终止，请先在终端检查所选 CLI 的 --version"
+            } else {
+                "CLI 版本检查失败"
+            });
         }
         Ok(output)
     })
@@ -127,6 +127,14 @@ pub fn helper_command(
     provider: &str,
     data_dir: &Path,
 ) -> Result<String, String> {
+    credential_command(executable, provider, data_dir, "credential")
+}
+fn credential_command(
+    executable: &Path,
+    provider: &str,
+    data_dir: &Path,
+    verb: &str,
+) -> Result<String, String> {
     if !executable.is_absolute() || !data_dir.is_absolute() {
         return Err("凭据程序和数据目录必须是绝对路径".into());
     }
@@ -146,17 +154,24 @@ pub fn helper_command(
         }
     };
     Ok(format!(
-        "{} credential {} {}",
+        "{} {verb} {} {}",
         quote(executable)?,
         quote(provider)?,
         quote(data_dir)?
     ))
 }
 
-#[cfg(test)]
+pub fn local_token_command(
+    executable: &Path,
+    reference: &str,
+    data_dir: &Path,
+) -> Result<String, String> {
+    credential_command(executable, reference, data_dir, "local-token")
+}
+
+#[cfg(all(test, unix))]
 mod tests {
     use super::*;
-    #[cfg(unix)]
     #[test]
     fn helper_arguments_cannot_execute_shell_substitutions() {
         let command = helper_command(
@@ -169,5 +184,25 @@ mod tests {
             command,
             "'/opt/My App/switchx' credential 'saved-id' '/data/a'\\''b $(echo secret)'"
         );
+    }
+    #[tokio::test]
+    async fn terminated_version_checks_report_the_process_failure_without_echoing_output() {
+        use std::os::unix::fs::PermissionsExt;
+        let root = std::env::temp_dir().join(format!(
+            "switchx-cli-signal-{}",
+            crate::id::new_id().unwrap()
+        ));
+        std::fs::create_dir(&root).unwrap();
+        let executable = root.join("claude-fixture");
+        std::fs::write(
+            &executable,
+            "#!/bin/sh\nprintf 'synthetic-version-private\\n'\nkill -9 $$\n",
+        )
+        .unwrap();
+        std::fs::set_permissions(&executable, std::fs::Permissions::from_mode(0o700)).unwrap();
+        let error = inspect(executable.to_str(), &root).await.unwrap_err();
+        assert!(error.contains("终止"));
+        assert!(!error.contains("synthetic-version-private"));
+        std::fs::remove_dir_all(root).unwrap();
     }
 }

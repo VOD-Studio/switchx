@@ -9,11 +9,11 @@
 
 SwitchX 把 API 供应商、ChatGPT 订阅和 Grok 订阅放进同一个模型目录，通过本地路由同时发布到 Codex 的模型菜单。写入 Codex 配置前先预览，之后可随时恢复原状。
 
-Claude Code 支持 Anthropic 兼容直连和自定义模型菜单，使用独立工作空间。当前为预览版，以 macOS 为主要平台。
+Claude Code 支持 Anthropic 兼容直连、原生 Messages 路由、多连接聚合和自定义模型菜单，使用独立工作空间。当前为预览版，以 macOS 为主要平台。
 
 ## 功能
 
-- **Claude Code**：连接编辑与导入、完整自定义模型菜单、默认与角色映射、CLI 识别、直连预览和恢复；切换客户端视图保留 Codex 路由。
+- **Claude Code**：连接编辑与导入、完整自定义模型菜单、默认与角色映射、CLI 识别、直连与聚合预览、恢复；切换客户端和配置目录保留其他工作空间的路由。
 
 - **连接**：兼容 Responses 的 API 上游（内置 DeepSeek、Kimi、MiniMax、小米 MiMo 预设）、ChatGPT 订阅与 Grok 订阅。
 - **模型目录**：获取上游模型列表并批量添加，为每个模型设置全局唯一的显示名称、上下文窗口、思考等级，以及文字／图片／音频输入能力。
@@ -93,15 +93,36 @@ sh scripts/bundle-macos.sh --release  # target/release/SwitchX.app
 
 当前支持用户级 `settings.json`，保留权限、Hooks、MCP 等无关字段。直连可在 SwitchX 退出后继续使用；helper 模式需保留 SwitchX 程序与资料目录。API Key/Bearer 模式会把凭据写入权限受限的客户端设置，helper 模式只写入读取命令。原配置完整快照保存于私有备份，预览、MCP 输出和恢复日志不包含凭据。
 
-同一 Claude 工作空间托管期间，可添加连接并预览切换；编辑、删除已有连接前需要恢复。其他工作空间与 Codex 不受此限制。Claude 路由聚合、协议转换、云平台认证及多账号登录管理在后续阶段实现。
+同一 Claude 工作空间托管期间，可添加连接并预览切换；编辑、删除已有连接前需要恢复。其他工作空间与 Codex 不受此限制。协议转换、云平台认证及多账号登录管理在后续阶段实现。
 
 [界面截图与隔离 CLI 验证](docs/claude-code-verification.md) · [完整实施方案](docs/claude-code-client-plan.md)
+
+## Claude Code 路由与聚合
+
+在 Claude Code 的「路由」页选择模式、默认连接和默认模型，点击「预览发布」核对后确认：
+
+- **单连接路由**：发布默认连接勾选的模型，以及默认模型和角色映射。
+- **多连接聚合**：发布所有 API 连接勾选的模型。每个模型有独立公开 ID；不同连接的同名模型不会混用凭据或上游。
+- **端口**：`0` 表示自动分配；正在运行的工作空间沿用原端口。更换端口前先停止并恢复。
+- **默认连接**：决定明确的默认和角色请求。未知模型直接报错，不会猜测连接。预览更新后，已开始的请求继续使用原绑定。
+
+首次启用或更换端点后新建 Claude CLI 会话；更新同一路由的菜单后可用 `/model` 选择，用 `/status` 核对。模型菜单和当前会话的选择分别管理。
+
+路由期间需保持 SwitchX 运行，关闭窗口后可留在托盘继续转发。停止时先恢复配置，再停止监听和清理本地令牌；外部改动有冲突时保留服务。正常退出会尝试恢复本实例运行的所有 Claude 路由；强制终止后的记录会保留，下次启动提示恢复，不自动接管旧端口。直连配置继续按原行为保留。
+
+配置目录可以切换，其他工作空间的路由继续运行。当前仍需先恢复才能编辑或删除已有连接；默认连接、默认模型与路由模式支持运行中预览更新。可以添加新连接后重新发布聚合。
+
+支持原生 `POST /v1/messages`、JSON/SSE、`GET /v1/models` 和转发 `/v1/messages/count_tokens`。token 计数由上游提供，上游不支持时返回错误；不生成估算成功结果。请求与非流式响应各限 16 MiB，SSE 单个事件限 2 MiB，每个工作空间最多 8 个并发转发。当前不做协议转换或自动备用切换。
+
+路由页可查看当前工作空间的最近请求；用量页可筛选 Claude Code。消息 ID 由路由生成并返回 CLI，使路由记录与导入的本地日志对应，同一响应只统计一次。
+
+[路由验证与界面截图](docs/claude-route-verification.md)
 
 ## 供 AI Agent 使用（MCP）
 
 `switchx mcp` 在标准输入输出上运行一个 [MCP](https://modelcontextprotocol.io) 服务，Codex、Claude Code 等 agent 可以直接查询 SwitchX，默认只读。
 
-Claude 工具必须显式传入 `workspace_id`，从 `list_client_workspaces` 读取。`--allow-writes` 增加 `save_claude_models`（使用读取时的 `revision`）；`--allow-control` 增加 `preview_claude_direct` / `apply_claude_direct`、`preview_claude_restore` / `apply_claude_restore`。应用只接受对应操作的一次性 `preview_id`。原有工具继续操作 Codex，不随当前界面选择重定向。
+Claude 工具必须显式传入 `workspace_id`，从 `list_client_workspaces` 读取。`--allow-writes` 增加 `save_claude_models`（使用读取时的 `revision`）；`--allow-control` 增加 `preview_claude_direct` / `apply_claude_direct`、`preview_claude_restore` / `apply_claude_restore`。应用只接受对应操作的一次性 `preview_id`。`get_claude_status` 查询指定工作空间的配置与运行状态；`preview_claude_route` / `apply_claude_route` 准备并发布单连接路由或聚合，停止沿用 Claude 恢复工具。连接列表也返回稳定的模型绑定和上次发布选项。原有 Codex 工具不随当前界面选择重定向。
 
 
 最简单的接入方式是打开应用的「工具箱」：按需开启下面的权限，然后点「复制一句话」。把这句话发给哪个客户端，那个客户端就用自己的注册命令或配置文件，把 SwitchX 注册到自己，并在新会话中调用 `get_status` 确认可用。也可以在下方选择 Codex、Claude Code 或其他使用 `mcpServers` JSON 的客户端，复制注册命令或配置手动注册。命令使用当前 SwitchX 程序的完整路径，设置了 `SWITCHX_DATA_DIR` 时一并传给 MCP 服务；工具箱还会识别当前工作空间的 Codex 是否已注册以及注册时的权限。

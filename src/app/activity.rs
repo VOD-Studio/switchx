@@ -78,7 +78,7 @@ pub fn format_duration(ms: i64) -> String {
 
 pub fn clear_requests(data_dir: &Path) -> Result<usize, AppError> {
     open_store(data_dir)?
-        .clear_requests()
+        .clear_codex_requests()
         .map_err(|_| AppError::Database)
 }
 
@@ -96,7 +96,7 @@ pub(crate) fn requests_from(store: &Store, limit: usize) -> Result<Vec<RequestVi
             .unwrap_or_else(|| id.clone())
     };
     store
-        .requests(limit)
+        .codex_requests(limit)
         .map_err(|_| AppError::Database)?
         .into_iter()
         .map(|record| {

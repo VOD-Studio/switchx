@@ -50,6 +50,8 @@ impl RequestTracker {
     ) -> Result<Self, String> {
         Ok(Self {
             record: RequestRecord {
+                client: crate::storage::UsageClient::Unknown,
+                workspace_id: None,
                 id: crate::id::new_id()?,
                 started_at_ms: SystemTime::now()
                     .duration_since(UNIX_EPOCH)

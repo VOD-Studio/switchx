@@ -110,7 +110,8 @@ pub(super) struct Worker {
     pub(super) weak: slint::Weak<AppWindow>,
     pub(super) data_dir: DataDir,
     pub(super) codex: CodexRuntime,
-    pub(super) claude_prepared: Option<switchx::claude::config::Prepared>,
+    pub(super) claude_prepared: Option<super::claude::PreparedChange>,
+    pub(super) claude_routes: switchx::claude::route_session::Sessions,
     pub(super) pending_login: Option<PendingLogin>,
     pub(super) pending_xai_login: Option<PendingLogin>,
     pub(super) xai_manager: Option<xai::AccountManager>,
@@ -141,6 +142,7 @@ pub(super) async fn run(
         data_dir: DataDir(directory),
         codex: CodexRuntime::default(),
         claude_prepared: None,
+        claude_routes: Default::default(),
         pending_login: None,
         pending_xai_login: None,
         xai_manager: None,
@@ -179,6 +181,7 @@ impl Worker {
             }
             self.handle(command).await?;
             self.publish_route_status();
+            self.publish_claude_route_status();
         }
         // Agents cannot reach the app once its window has gone.
         self.control_server = None;
@@ -205,6 +208,10 @@ impl Worker {
                 self.client_navigation(workspace_id, page)
             }
             Command::InspectClaude(home) => self.inspect_claude(home),
+            Command::ClaudeRouteModels { home, options } => self.claude_route_models(home, options),
+            Command::ClaudeRoutePreview { home, options } => {
+                let _ = self.preview_claude_route(home, options).await;
+            }
             Command::ClaudeCheckCli { home, path } => self.claude_check_cli(home, path),
             Command::ClaudeImport(home) => self.import_claude(home),
             Command::ClaudeSave(form) => self.save_claude(form),
@@ -422,6 +429,9 @@ impl Worker {
     }
 
     async fn restore_for_exit(&mut self, recovery_only: bool) -> Result<(), String> {
+        if let Some(data) = self.data_dir.ok() {
+            self.claude_routes.restore_for_exit(data).await?;
+        }
         if let Some(data_dir) = self.data_dir.ok()
             && let Some(recovery) = route_switch::recovery(data_dir)?
         {

@@ -4,7 +4,7 @@ use rusqlite::{Connection, OpenFlags, Result, Transaction, TransactionBehavior, 
 
 use crate::{credentials::Secret, usage::TokenUsage};
 
-const SCHEMA_VERSION: i64 = 19;
+const SCHEMA_VERSION: i64 = 20;
 
 /// Usage, log import and price tables; every statement is safe to repeat.
 const USAGE_SCHEMA: &str = "CREATE TABLE IF NOT EXISTS usage_records (
@@ -169,6 +169,8 @@ impl RequestStatus {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RequestRecord {
+    pub client: UsageClient,
+    pub workspace_id: Option<String>,
     pub id: String,
     pub started_at_ms: i64,
     pub public_model: Option<String>,
@@ -224,7 +226,7 @@ impl Store {
         let version: i64 = connection.query_row("PRAGMA user_version", [], |row| row.get(0))?;
         if !matches!(
             version,
-            8 | 9 | 10 | 11 | 12 | 13 | 14 | 15 | 16 | 17 | 18 | SCHEMA_VERSION
+            8 | 9 | 10 | 11 | 12 | 13 | 14 | 15 | 16 | 17 | 18 | 19 | SCHEMA_VERSION
         ) {
             return Err(rusqlite::Error::InvalidQuery);
         }
@@ -557,6 +559,28 @@ impl Store {
                 transaction.execute_batch(claude::SCHEMA)
             })?;
         }
+        if version < 20 {
+            Self::migrate_step(&connection, 20, |transaction, _| {
+                transaction.execute_batch(claude::ROUTE_SCHEMA)?;
+                transaction.execute_batch(claude::SYNC_BINDINGS)?;
+                for (column, sql) in [
+                    (
+                        "client",
+                        "ALTER TABLE request_records ADD COLUMN client TEXT NOT NULL DEFAULT 'unknown'",
+                    ),
+                    (
+                        "workspace_id",
+                        "ALTER TABLE request_records ADD COLUMN workspace_id TEXT",
+                    ),
+                ] {
+                    let exists:bool=transaction.query_row("SELECT EXISTS(SELECT 1 FROM pragma_table_info('request_records') WHERE name=?1)",[column],|row|row.get(0))?;
+                    if !exists {
+                        transaction.execute_batch(sql)?;
+                    }
+                }
+                transaction.execute_batch("UPDATE usage_records SET response_id='claude:' || substr(id,8) WHERE source='claude_log' AND response_id IS NULL;")
+            })?;
+        }
         Ok(Self { connection })
     }
 
@@ -611,8 +635,8 @@ impl Store {
         transaction.execute(
             "INSERT INTO request_records
              (id, started_at_ms, public_model, provider_id, upstream_model, generation,
-              http_status, headers_ms, first_event_ms, duration_ms, status, error_code, fallback_from)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)",
+              http_status, headers_ms, first_event_ms, duration_ms, status, error_code, fallback_from, client, workspace_id)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15)",
             params![
                 record.id,
                 record.started_at_ms,
@@ -626,7 +650,9 @@ impl Store {
                 record.duration_ms,
                 record.status.as_str(),
                 record.error_code,
-                record.fallback_from
+                record.fallback_from,
+                record.client.as_str(),
+                record.workspace_id
             ],
         )?;
         if let Some(usage) = record.usage.filter(|usage| !usage.is_empty()) {
@@ -642,17 +668,33 @@ impl Store {
     }
 
     pub fn requests(&self, limit: usize) -> Result<Vec<RequestRecord>> {
+        self.scoped_requests(limit, None, None)
+    }
+    pub fn codex_requests(&self, limit: usize) -> Result<Vec<RequestRecord>> {
+        self.scoped_requests(limit, Some("codex"), None)
+    }
+    pub fn claude_requests(&self, workspace: &str, limit: usize) -> Result<Vec<RequestRecord>> {
+        self.scoped_requests(limit, Some("claude_code"), Some(workspace))
+    }
+    fn scoped_requests(
+        &self,
+        limit: usize,
+        client: Option<&str>,
+        workspace: Option<&str>,
+    ) -> Result<Vec<RequestRecord>> {
         let mut statement = self.connection.prepare(
             "SELECT r.id, r.started_at_ms, r.public_model, r.provider_id, r.upstream_model, r.generation,
                     r.http_status, r.headers_ms, r.first_event_ms, r.duration_ms, r.status, r.error_code,
                     r.fallback_from, u.input_tokens, u.cached_input_tokens, u.cache_write_tokens,
-                    u.output_tokens, u.reasoning_tokens, u.response_id
+                    u.output_tokens, u.reasoning_tokens, u.response_id, r.client, r.workspace_id, u.cache_write_1h_tokens
              FROM request_records r
              LEFT JOIN usage_records u ON u.id = r.id AND u.source = 'router'
+             WHERE (?2 IS NULL OR (?2 = 'codex' AND r.client != 'claude_code') OR r.client = ?2)
+               AND (?3 IS NULL OR r.workspace_id = ?3)
              ORDER BY r.started_at_ms DESC, r.rowid DESC LIMIT ?1",
         )?;
         statement
-            .query_map([limit.min(1000) as i64], |row| {
+            .query_map(params![limit.min(1000) as i64, client, workspace], |row| {
                 let status: String = row.get(10)?;
                 Ok(RequestRecord {
                     id: row.get(0)?,
@@ -674,7 +716,18 @@ impl Store {
                     },
                     error_code: row.get(11)?,
                     fallback_from: row.get(12)?,
-                    usage: usage_columns(row, 13)?,
+                    usage: usage_columns(row, 13)?.map(|mut usage| {
+                        usage.cache_write_1h = row
+                            .get::<_, Option<i64>>(21)
+                            .ok()
+                            .flatten()
+                            .unwrap_or(0)
+                            .max(0) as u64;
+                        usage
+                    }),
+                    client: UsageClient::parse(&row.get::<_, String>(19)?)
+                        .ok_or(rusqlite::Error::InvalidQuery)?,
+                    workspace_id: row.get(20)?,
                     response_id: row.get(18)?,
                 })
             })?
@@ -3279,6 +3332,8 @@ mod tests {
         };
         store.put_provider(&provider).unwrap();
         let mut record = RequestRecord {
+            client: crate::storage::UsageClient::Unknown,
+            workspace_id: None,
             id: "first".into(),
             started_at_ms: 1_800_000_000_000,
             public_model: Some("sx-one".into()),
@@ -3344,6 +3399,8 @@ mod tests {
             reasoning: 10,
         };
         let record = RequestRecord {
+            client: crate::storage::UsageClient::Unknown,
+            workspace_id: None,
             id: "routed".into(),
             started_at_ms: 2,
             public_model: Some("显示名称".into()),
@@ -3362,6 +3419,8 @@ mod tests {
         };
         store.put_request(&record).unwrap();
         let empty = RequestRecord {
+            client: crate::storage::UsageClient::Unknown,
+            workspace_id: None,
             id: "no-usage".into(),
             started_at_ms: 1,
             usage: Some(TokenUsage::default()),

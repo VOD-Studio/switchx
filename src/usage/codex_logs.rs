@@ -842,6 +842,8 @@ mod tests {
         let home = Home::new();
         let store = Store::open(Path::new(":memory:")).unwrap();
         let routed = RequestRecord {
+            client: crate::storage::UsageClient::Unknown,
+            workspace_id: None,
             id: "router-request".into(),
             started_at_ms: 4_000_000_000_000,
             public_model: Some("显示名称".into()),
@@ -946,6 +948,8 @@ mod tests {
         // A router write that lands after the import replaces the logged copy.
         store
             .put_request(&RequestRecord {
+                client: crate::storage::UsageClient::Unknown,
+                workspace_id: None,
                 id: "late-router".into(),
                 response_id: Some("resp_unrecorded".into()),
                 ..routed
@@ -1027,6 +1031,8 @@ mod tests {
 
         store
             .put_request(&RequestRecord {
+                client: crate::storage::UsageClient::Unknown,
+                workspace_id: None,
                 id: "router-request".into(),
                 started_at_ms: millis("2026-10-13T08:00:30.000Z"),
                 public_model: Some("显示名称".into()),

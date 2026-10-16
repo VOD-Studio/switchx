@@ -1,3 +1,5 @@
+#[path = "router/claude.rs"]
+mod claude;
 use std::{collections::HashMap, io, sync::Arc, time::Duration};
 
 #[path = "router/managed_accounts.rs"]

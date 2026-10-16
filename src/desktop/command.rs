@@ -16,6 +16,14 @@ pub(super) enum Command {
         page: i32,
     },
     InspectClaude(String),
+    ClaudeRouteModels {
+        home: String,
+        options: switchx::claude::publication::Options,
+    },
+    ClaudeRoutePreview {
+        home: String,
+        options: switchx::claude::publication::Options,
+    },
     ClaudeCheckCli {
         home: String,
         path: String,

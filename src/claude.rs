@@ -3,6 +3,10 @@
 pub mod client;
 pub mod config;
 mod json_edit;
+mod messages;
+pub mod publication;
+pub mod route_session;
+pub mod router;
 mod types;
 
 pub use types::{AuthMode, Connection, ConnectionSettings, ModelOption, PickerPolicy, Roles};

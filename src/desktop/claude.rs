@@ -9,9 +9,60 @@ use switchx::{
     app,
     claude::{self, AuthMode, Connection, ConnectionSettings, ModelOption, PickerPolicy, Roles},
     credentials::Secret,
-    ui::{AppWindow, ClaudeConnectionRow, ClaudeModelRow, ClaudeUi},
+    ui::{AppWindow, ClaudeConnectionRow, ClaudeModelRow, ClaudeRouteRow, ClaudeUi},
 };
 use tokio::sync::mpsc;
+
+pub(super) enum PreparedChange {
+    Direct(Box<claude::config::Prepared>),
+    Route(Box<claude::route_session::PreparedRoute>),
+}
+impl PreparedChange {
+    fn preview(&self) -> &claude::config::Preview {
+        match self {
+            Self::Direct(value) => &value.preview,
+            Self::Route(value) => &value.preview,
+        }
+    }
+}
+fn route_options(ui: &ClaudeUi) -> Result<claude::publication::Options, String> {
+    let port = if ui.get_route_port().trim().is_empty() {
+        0
+    } else {
+        ui.get_route_port()
+            .trim()
+            .parse::<u16>()
+            .map_err(|_| "端口须为 0–65535，0 表示自动分配")?
+    };
+    Ok(claude::publication::Options {
+        mode: if ui.get_route_mode() == 0 {
+            claude::publication::Mode::Route
+        } else {
+            claude::publication::Mode::Aggregate
+        },
+        primary: ui
+            .get_route_provider_ids()
+            .row_data(ui.get_route_primary() as usize)
+            .unwrap_or_default()
+            .into(),
+        default_model: ui.get_route_default().trim().into(),
+        port,
+    })
+}
+fn show_route_models(ui: &ClaudeUi, models: Vec<claude::publication::PublishedModel>) {
+    ui.set_route_models(ModelRc::new(VecModel::from(
+        models
+            .into_iter()
+            .map(|m| ClaudeRouteRow {
+                id: m.public_id.into(),
+                label: m.label.into(),
+                provider: m.provider_name.into(),
+                upstream: m.upstream_model.into(),
+                menu: m.menu,
+            })
+            .collect::<Vec<_>>(),
+    )));
+}
 
 pub(super) struct SaveClaude {
     pub home: String,
@@ -139,6 +190,18 @@ pub(super) fn connect(window: &AppWindow, sender: &mpsc::Sender<Command>) {
             });
         }};
     }
+    action!(on_preview_routing, |window: &AppWindow| Ok(
+        Command::ClaudeRoutePreview {
+            home: window.get_claude_home().into(),
+            options: route_options(&window.global::<ClaudeUi>())?
+        }
+    ));
+    action!(on_refresh_route_models, |window: &AppWindow| Ok(
+        Command::ClaudeRouteModels {
+            home: window.get_claude_home().into(),
+            options: route_options(&window.global::<ClaudeUi>())?
+        }
+    ));
     action!(on_refresh, |window: &AppWindow| Ok(Command::InspectClaude(
         window.get_claude_home().into()
     )));
@@ -384,7 +447,7 @@ fn show_snapshot(window: &AppWindow, snapshot: app::claude::ClaudeSnapshot) {
         .and_then(|id| rows.iter().position(|c| c.id == id))
         .unwrap_or(0) as i32;
     if window.get_claude_workspace_id().as_str() != snapshot.workspace.id {
-        ui.set_page(snapshot.workspace.last_page.clamp(0, 2));
+        ui.set_page(snapshot.workspace.last_page.clamp(0, 3));
     }
     window.set_claude_home(
         snapshot
@@ -408,6 +471,49 @@ fn show_snapshot(window: &AppWindow, snapshot: app::claude::ClaudeSnapshot) {
         }
         .into(),
     );
+    let route_providers: Vec<_> = snapshot
+        .connections
+        .iter()
+        .filter(|c| c.settings.auth != AuthMode::Native)
+        .collect();
+    ui.set_route_primary(
+        route_providers
+            .iter()
+            .position(|c| c.id == snapshot.route_options.primary)
+            .unwrap_or(0) as i32,
+    );
+    ui.set_route_provider_ids(ModelRc::new(VecModel::from(
+        route_providers
+            .iter()
+            .map(|c| c.id.as_str().into())
+            .collect::<Vec<slint::SharedString>>(),
+    )));
+    ui.set_route_provider_names(ModelRc::new(VecModel::from(
+        route_providers
+            .iter()
+            .map(|c| c.name.as_str().into())
+            .collect::<Vec<slint::SharedString>>(),
+    )));
+    ui.set_route_mode(
+        if snapshot.route_options.mode == claude::publication::Mode::Route {
+            0
+        } else {
+            1
+        },
+    );
+    ui.set_route_default(snapshot.route_options.default_model.into());
+    ui.set_route_port(snapshot.route_options.port.to_string().into());
+    show_route_models(&ui, snapshot.route_models);
+    ui.set_route_error(snapshot.route_error.into());
+    ui.set_recent_requests(ModelRc::new(VecModel::from(
+        snapshot
+            .recent_requests
+            .into_iter()
+            .map(Into::into)
+            .collect::<Vec<slint::SharedString>>(),
+    )));
+    ui.set_active_mode(snapshot.status.mode.into());
+    ui.set_route_endpoint(snapshot.status.endpoint.unwrap_or_default().into());
     ui.set_loaded(true);
     ui.set_managed(snapshot.status.managed);
     ui.set_recovering(snapshot.status.pending);
@@ -490,10 +596,11 @@ pub(super) fn preview_text(preview: &claude::config::Preview) -> String {
 ",
         preview.target.display(),
         preview.provider,
-        if preview.operation == "restore" {
-            "恢复配置"
-        } else {
-            "应用直连"
+        match preview.operation {
+            "restore" => "恢复配置",
+            "route" => "发布单连接路由",
+            "aggregate" => "发布模型聚合",
+            _ => "应用直连",
         }
     );
     if preview.fields.is_empty() {
@@ -831,6 +938,68 @@ impl Worker {
         });
     }
 
+    pub(super) fn claude_route_models(
+        &mut self,
+        home: String,
+        options: claude::publication::Options,
+    ) {
+        self.discard_previews();
+        let result = (|| -> Result<_, String> {
+            let data = self.data_dir.path()?;
+            app::claude::route_plan(data, Path::new(&home), options)
+        })();
+        let _ = self.weak.upgrade_in_event_loop(move |window| {
+            window.set_busy(false);
+            if window.get_claude_home().as_str() != home {
+                return;
+            }
+            let ui = window.global::<ClaudeUi>();
+            match result {
+                Ok(plan) => {
+                    show_route_models(&ui, plan.models);
+                    ui.set_route_error("".into());
+                }
+                Err(error) => ui.set_route_error(error.into()),
+            }
+        });
+    }
+    pub(super) async fn preview_claude_route(
+        &mut self,
+        home: String,
+        options: claude::publication::Options,
+    ) -> Result<claude::config::Preview, String> {
+        self.discard_previews();
+        let result = async {
+            let data = self.data_dir.path()?;
+            let cli = app::claude::inspect_claude_cli(data, Path::new(&home)).await?;
+            let helper = switchx::credential_helper::executable()?;
+            self.claude_routes
+                .prepare(data, Path::new(&home), options, &helper, cli.capabilities)
+                .await
+        }
+        .await;
+        self.publish_claude_preview(
+            home,
+            result.map(|prepared| PreparedChange::Route(Box::new(prepared))),
+        )
+    }
+    pub(super) fn publish_claude_route_status(&self) {
+        let statuses = self.claude_routes.statuses();
+        let _ = self.weak.upgrade_in_event_loop(move |window| {
+            let ui = window.global::<ClaudeUi>();
+            let status = statuses
+                .iter()
+                .find(|(id, _, _)| id == window.get_claude_workspace_id().as_str());
+            let running = status.is_some_and(|(_, running, _)| *running);
+            ui.set_route_running(running);
+            ui.set_route_recording_failed(status.is_some_and(|(_, _, failed)| *failed));
+            if matches!(ui.get_active_mode().as_str(), "route" | "aggregate") && !running {
+                ui.set_recovering(true);
+                window.set_claude_status("路由未运行，请先恢复配置；不会自动启动旧路由".into());
+            }
+        });
+    }
+
     pub(super) async fn preview_claude(
         &mut self,
         home: String,
@@ -843,7 +1012,10 @@ impl Worker {
             app::claude::preview_claude_direct(data, Path::new(&home), &id, &helper).await
         }
         .await;
-        self.publish_claude_preview(home, result)
+        self.publish_claude_preview(
+            home,
+            result.map(|prepared| PreparedChange::Direct(Box::new(prepared))),
+        )
     }
     pub(super) fn preview_claude_restore(
         &mut self,
@@ -855,15 +1027,18 @@ impl Worker {
             .data_dir
             .path()
             .and_then(|data| app::claude::preview_claude_restore(data, Path::new(&home), keep));
-        self.publish_claude_preview(home, result)
+        self.publish_claude_preview(
+            home,
+            result.map(|prepared| PreparedChange::Direct(Box::new(prepared))),
+        )
     }
     fn publish_claude_preview(
         &mut self,
         home: String,
-        result: Result<claude::config::Prepared, String>,
+        result: Result<PreparedChange, String>,
     ) -> Result<claude::config::Preview, String> {
         let result = result.map(|prepared| {
-            let preview = prepared.preview.clone();
+            let preview = prepared.preview().clone();
             self.claude_prepared = Some(prepared);
             preview
         });
@@ -878,6 +1053,7 @@ impl Worker {
                 Ok(preview) => {
                     ui.set_preview_text(preview_text(&preview).into());
                     ui.set_preview_restore(preview.operation == "restore");
+                    ui.set_preview_route(matches!(preview.operation, "route" | "aggregate"));
                     ui.set_preview_conflicts(!preview.conflicts.is_empty());
                     ui.set_preview_ready(true);
                     ui.set_feedback("".into());
@@ -897,24 +1073,56 @@ impl Worker {
                 .claude_prepared
                 .take()
                 .ok_or("请先预览 Claude 配置变更")?;
-            if self.recovery_only && prepared.preview.operation != "restore" {
+            if self.recovery_only && prepared.preview().operation != "restore" {
                 return Err("旧版资料有配置待恢复，请先恢复".into());
             }
             let data = self.data_dir.path()?;
-            if prepared.provider().is_some() {
-                let cli = app::claude::inspect_claude_cli(data, Path::new(&home)).await?;
-                prepared.validate_capabilities(cli.capabilities)?;
+            match prepared {
+                PreparedChange::Direct(prepared) => {
+                    if prepared.preview.operation == "restore" {
+                        self.claude_routes
+                            .restore(data, Path::new(&home), *prepared)
+                            .await
+                    } else {
+                        let cli = app::claude::inspect_claude_cli(data, Path::new(&home)).await?;
+                        prepared.validate_capabilities(cli.capabilities)?;
+                        app::claude::apply_claude_change(data, Path::new(&home), *prepared)
+                    }
+                }
+                PreparedChange::Route(prepared) => {
+                    let workspace = app::claude::claude_workspace(data, Path::new(&home))?;
+                    if prepared.workspace_id() != workspace.id {
+                        return Err("预览属于其他 Claude 工作空间".into());
+                    }
+                    let cli = app::claude::inspect_claude_cli(data, Path::new(&home)).await?;
+                    self.claude_routes
+                        .apply(data, *prepared, cli.capabilities)
+                        .await?;
+                    Ok(Vec::new())
+                }
             }
-            app::claude::apply_claude_change(data, Path::new(&home), prepared)
         }
         .await;
         let snapshot = self
             .data_dir
             .path()
             .and_then(|data| app::claude::load_claude(data, Path::new(&home)));
+        if self.recovery_only && snapshot.is_ok() {
+            self.recovery_only = self
+                .data_dir
+                .path()
+                .and_then(|data| {
+                    switchx::storage::Store::needs_recovery_before_migration(
+                        &data.join("switchx.sqlite"),
+                    )
+                    .map_err(|_| "无法检查恢复状态".into())
+                })
+                .unwrap_or(true);
+        }
+        let recovery_only = self.recovery_only;
         let shown = result.clone();
         let _=self.weak.upgrade_in_event_loop(move |window|{
-            window.set_busy(false);if window.get_claude_home().as_str()!=home{return;}let ui=window.global::<ClaudeUi>();ui.set_preview_ready(false);
+            window.set_busy(false);window.set_recovery_only(recovery_only);if window.get_claude_home().as_str()!=home{return;}let ui=window.global::<ClaudeUi>();ui.set_preview_ready(false);
             if let Ok(snapshot)=snapshot{show_snapshot(&window,snapshot);}
             match shown{Ok(conflicts)=>{ui.set_preview_open(false);ui.set_feedback(if conflicts.is_empty(){"配置操作已完成；当前会话请用 /model 与 /status 核对。".into()}else{format!("已恢复可还原字段，外部修改已保留：{}。可再次预览并选择保留外部值结束管理。",conflicts.join("、")).into()});},Err(error)=>ui.set_feedback(error.into())}
         });
@@ -1113,5 +1321,129 @@ mod tests {
         };
         assert_eq!(workspace_id, "synthetic-workspace");
         assert_eq!(page, 2);
+    }
+    #[test]
+    fn routing_form_keeps_client_targets_and_survives_compact_layouts() {
+        let window = headless::install_with_manual_time();
+        let app = AppWindow::new().unwrap();
+        app.set_app_version(env!("CARGO_PKG_VERSION").into());
+        let (sender, mut receiver) = mpsc::channel(16);
+        connect(&app, &sender);
+        app.set_loading(false);
+        app.set_active_page(6);
+        app.set_active_client(1);
+        app.set_claude_home("/isolated/claude".into());
+        app.set_claude_workspace_id("synthetic-workspace".into());
+        app.set_route_running(true);
+        app.set_config_home("/isolated/codex".into());
+        let ui = app.global::<ClaudeUi>();
+        ui.set_loaded(true);
+        ui.set_managed(true);
+        ui.set_active_mode("aggregate".into());
+        ui.set_route_running(true);
+        ui.set_route_endpoint("http://127.0.0.1:18732".into());
+        ui.set_route_provider_ids(ModelRc::new(VecModel::from(vec![
+            "alpha".into(),
+            "beta".into(),
+        ])));
+        ui.set_route_provider_names(ModelRc::new(VecModel::from(vec![
+            "工作网关".into(),
+            "备用开发网关".into(),
+        ])));
+        ui.set_route_port("18732".into());
+        ui.set_route_default("shared-model".into());
+        ui.set_route_models(ModelRc::new(VecModel::from(vec![
+            ClaudeRouteRow {
+                id: "sx-claude-synthetic-a".into(),
+                label: "Sonnet · 工作网关".into(),
+                provider: "工作网关".into(),
+                upstream: "shared-model".into(),
+                menu: true,
+            },
+            ClaudeRouteRow {
+                id: "sx-claude-synthetic-b".into(),
+                label: "Sonnet · 备用开发网关".into(),
+                provider: "备用开发网关".into(),
+                upstream: "shared-model".into(),
+                menu: true,
+            },
+        ])));
+        ui.set_recent_requests(ModelRc::new(VecModel::from(vec![
+            "正常完成 · 工作网关 · shared-model · 1.2 s".into(),
+        ])));
+        app.show().unwrap();
+        let settle = || {
+            for _ in 0..3 {
+                headless::advance(400);
+                headless::render(&window);
+            }
+        };
+        for (width, height) in [(1000, 680), (1400, 900)] {
+            app.window()
+                .set_size(slint::PhysicalSize::new(width, height));
+            for dark in [false, true] {
+                app.invoke_set_appearance(dark);
+                ui.set_page(3);
+                settle();
+                for label in [
+                    "预览 Claude 模型路由",
+                    "Claude 路由默认连接",
+                    "Claude 路由默认模型",
+                    "预览恢复 Claude 配置",
+                ] {
+                    let item = ElementHandle::find_by_accessible_label(&app, label)
+                        .next()
+                        .unwrap();
+                    let pos = item.absolute_position();
+                    let size = item.size();
+                    assert!(
+                        pos.x >= 0.0 && pos.x + size.width <= width as f32,
+                        "{label} outside width"
+                    );
+                    assert!(
+                        pos.y >= 0.0 && pos.y + size.height <= height as f32,
+                        "{label} outside height"
+                    );
+                }
+                headless::save_snapshot(
+                    "SWITCHX_CLAUDE_ROUTE_SNAPSHOTS",
+                    &format!("routing-{width}-{}", if dark { "dark" } else { "light" }),
+                    &headless::render(&window),
+                );
+            }
+        }
+        ui.invoke_preview_routing();
+        let Command::ClaudeRoutePreview { home, options } = receiver.try_recv().unwrap() else {
+            panic!("expected route preview");
+        };
+        assert_eq!(home, "/isolated/claude");
+        assert_eq!(options.primary, "alpha");
+        assert_eq!(options.mode, claude::publication::Mode::Aggregate);
+        assert_eq!(options.port, 18732);
+        assert!(app.get_route_running());
+        app.set_busy(false);
+        ui.set_route_primary(1);
+        ui.set_route_mode(0);
+        ui.invoke_refresh_route_models();
+        let Command::ClaudeRouteModels { options, .. } = receiver.try_recv().unwrap() else {
+            panic!("expected model refresh");
+        };
+        assert_eq!(options.primary, "beta");
+        assert_eq!(options.mode, claude::publication::Mode::Route);
+        app.set_busy(false);
+        ui.set_page(2);
+        settle();
+        let item = ElementHandle::find_by_accessible_label(&app, "Claude Code 配置目录绝对路径")
+            .next()
+            .unwrap();
+        let pos = item.absolute_position();
+        let size = item.size();
+        headless::click(&window, pos.x + size.width / 2.0, pos.y + size.height / 2.0);
+        headless::key(&window, "x");
+        settle();
+        assert!(app.get_claude_workspace_id().is_empty());
+        assert!(!ui.get_managed());
+        assert!(app.get_route_running());
+        assert_eq!(app.get_config_home(), "/isolated/codex");
     }
 }

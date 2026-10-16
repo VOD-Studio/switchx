@@ -11,7 +11,24 @@ export struct ClaudeConnectionRow {
     native: bool,
     models: [ClaudeModelRow],
 }
+export struct ClaudeRouteRow { id: string, label: string, provider: string, upstream: string, menu: bool }
 export global ClaudeUi {
+    in-out property <string> active-mode: "none";
+    in-out property <bool> route-running: false;
+    in-out property <bool> route-recording-failed: false;
+    in-out property <string> route-endpoint;
+    in-out property <int> route-mode: 1;
+    in-out property <int> route-primary: 0;
+    in-out property <[string]> route-provider-ids;
+    in-out property <[string]> route-provider-names;
+    in-out property <string> route-default;
+    in-out property <string> route-port: "0";
+    in-out property <[ClaudeRouteRow]> route-models;
+    in-out property <[string]> recent-requests;
+    in-out property <string> route-error;
+    in-out property <bool> preview-route: false;
+    callback preview-routing();
+    callback refresh-route-models();
     in-out property <[ClaudeConnectionRow]> connections;
     in-out property <[string]> connection-names;
     in-out property <int> selected-connection: 0;

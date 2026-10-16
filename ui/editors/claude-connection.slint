@@ -58,7 +58,7 @@ export component ClaudeConnectionEditor inherits VerticalLayout {
                     current-index <=> ClaudeUi.edit-auth;
                     accessible-label: "Claude 认证方式";
                     enabled: !root.busy;
-                    selected(index) => { if index == 3 { ClaudeUi.edit-key = ""; } }
+                    selected(_) => { if ClaudeUi.edit-auth == 3 { ClaudeUi.edit-key = ""; } }
                 }
 
                 if ClaudeUi.edit-auth != 3: VerticalLayout {

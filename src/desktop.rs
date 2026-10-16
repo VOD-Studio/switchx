@@ -100,7 +100,7 @@ pub fn run() -> Result<(), Box<dyn std::error::Error>> {
         app.as_weak(),
         directory.clone(),
     ));
-    connect_tray(&app, &tray, &sender);
+    let _tray_status = connect_tray(&app, &tray, &sender);
     #[cfg(target_os = "macos")]
     {
         let quit_sender = sender.clone();
@@ -185,7 +185,33 @@ fn initialize_provider_presets(app: &AppWindow) -> Result<(), slint::LoadImageEr
     Ok(())
 }
 
-fn connect_tray(app: &AppWindow, tray: &SwitchXTray, sender: &mpsc::Sender<Command>) {
+fn connect_tray(
+    app: &AppWindow,
+    tray: &SwitchXTray,
+    sender: &mpsc::Sender<Command>,
+) -> slint::Timer {
+    let timer = slint::Timer::default();
+    let window = app.as_weak();
+    let icon = tray.as_weak();
+    timer.start(
+        slint::TimerMode::Repeated,
+        std::time::Duration::from_secs(1),
+        move || {
+            if let (Some(window), Some(icon)) = (window.upgrade(), icon.upgrade()) {
+                let ui = window.global::<switchx::ui::ClaudeUi>();
+                icon.set_claude_route_status(
+                    if ui.get_route_running() {
+                        "Claude 当前工作空间 · 路由运行中"
+                    } else if ui.get_recovering() {
+                        "Claude 当前工作空间 · 待恢复"
+                    } else {
+                        "Claude 当前工作空间"
+                    }
+                    .into(),
+                );
+            }
+        },
+    );
     let window = app.as_weak();
     tray.on_show_app(move || {
         if let Some(app) = window.upgrade() {
@@ -231,6 +257,7 @@ fn connect_tray(app: &AppWindow, tray: &SwitchXTray, sender: &mpsc::Sender<Comma
             queue(&app, &quit_sender, Command::Quit);
         }
     });
+    timer
 }
 
 /// Opens a provider page or login URL in the system browser.

@@ -49,6 +49,13 @@ pub(super) enum ControlRequest {
     ApplyDirect {
         preview: String,
     },
+    ClaudeStatus {
+        workspace: String,
+    },
+    PreviewClaudeRoute {
+        workspace: String,
+        options: switchx::claude::publication::Options,
+    },
     PreviewClaude {
         workspace: String,
         provider: String,
@@ -60,6 +67,7 @@ pub(super) enum ControlRequest {
     ApplyClaude {
         preview: String,
         restore: bool,
+        route: bool,
     },
     CancelPreview,
     Restore {
@@ -82,6 +90,7 @@ impl ControlRequest {
         matches!(
             self,
             Self::Status { .. }
+                | Self::ClaudeStatus { .. }
                 | Self::Restore { .. }
                 | Self::RestoreClaude { .. }
                 | Self::ApplyClaude { restore: true, .. }
@@ -94,6 +103,7 @@ enum PreviewTarget {
     Claude {
         home: String,
         restore: bool,
+        route: bool,
     },
     Route {
         home: String,
@@ -132,6 +142,7 @@ impl ControlPreviews {
 
     fn pending(&self) -> Option<&'static str> {
         self.0.as_ref().map(|(_, target)| match target {
+            PreviewTarget::Claude { route: true, .. } => "claude_route",
             PreviewTarget::Claude { restore: false, .. } => "claude_direct",
             PreviewTarget::Claude { restore: true, .. } => "claude_restore",
             PreviewTarget::Route { .. } => "route",
@@ -293,6 +304,25 @@ async fn dispatch(
         "apply_direct" => ControlRequest::ApplyDirect {
             preview: required("preview_id")?,
         },
+        "get_claude_status" => ControlRequest::ClaudeStatus {
+            workspace: required("workspace_id")?,
+        },
+        "preview_claude_route" => ControlRequest::PreviewClaudeRoute {
+            workspace: required("workspace_id")?,
+            options: switchx::claude::publication::Options {
+                mode: match required("mode")?.as_str() {
+                    "route" => switchx::claude::publication::Mode::Route,
+                    "aggregate" => switchx::claude::publication::Mode::Aggregate,
+                    _ => return Err("mode 必须是 route 或 aggregate".into()),
+                },
+                primary: required("provider_id")?,
+                default_model: text("default_model")?.unwrap_or_default(),
+                port: text("port")?
+                    .map(|p| p.parse::<u16>().map_err(|_| "port 必须在 0–65535 之间"))
+                    .transpose()?
+                    .unwrap_or(0),
+            },
+        },
         "preview_claude_direct" => ControlRequest::PreviewClaude {
             workspace: required("workspace_id")?,
             provider: required("provider_id")?,
@@ -305,10 +335,13 @@ async fn dispatch(
                 _ => return Err("keep_conflicts 必须是布尔值".into()),
             },
         },
-        "apply_claude_direct" | "apply_claude_restore" => ControlRequest::ApplyClaude {
-            preview: required("preview_id")?,
-            restore: method == "apply_claude_restore",
-        },
+        "apply_claude_direct" | "apply_claude_restore" | "apply_claude_route" => {
+            ControlRequest::ApplyClaude {
+                preview: required("preview_id")?,
+                restore: method == "apply_claude_restore",
+                route: method == "apply_claude_route",
+            }
+        }
         "cancel_preview" => ControlRequest::CancelPreview,
         "restore_config" => ControlRequest::Restore { home },
         _ => return Err(format!("未知的控制方法：{method}")),
@@ -330,6 +363,31 @@ impl Worker {
         }
         match request {
             ControlRequest::Status { home } => self.control_status(&home),
+            ControlRequest::ClaudeStatus { workspace } => {
+                let data = self.data_dir.path()?;
+                let selected = switchx::app::claude::claude_workspace_by_id(data, &workspace)?;
+                Ok(
+                    json!({"workspace_id":workspace,"configuration":switchx::claude::config::status(data,&selected)?,"running":self.claude_routes.is_running(&workspace),"recording_failed":self.claude_routes.recording_failed(&workspace)}),
+                )
+            }
+            ControlRequest::PreviewClaudeRoute { workspace, options } => {
+                self.control_previews.clear();
+                let home = switchx::app::claude::claude_workspace_by_id(
+                    self.data_dir.path()?,
+                    &workspace,
+                )?
+                .key
+                .home
+                .to_string_lossy()
+                .into_owned();
+                let preview = self.preview_claude_route(home.clone(), options).await?;
+                let id = self.control_previews.issue(PreviewTarget::Claude {
+                    home,
+                    restore: false,
+                    route: true,
+                })?;
+                Ok(claude_preview_json(&preview, &id, &workspace))
+            }
             ControlRequest::PreviewClaude {
                 workspace,
                 provider,
@@ -347,6 +405,7 @@ impl Worker {
                 let id = self.control_previews.issue(PreviewTarget::Claude {
                     home,
                     restore: false,
+                    route: false,
                 })?;
                 Ok(claude_preview_json(&preview, &id, &workspace))
             }
@@ -367,24 +426,30 @@ impl Worker {
                 let id = self.control_previews.issue(PreviewTarget::Claude {
                     home,
                     restore: true,
+                    route: false,
                 })?;
                 Ok(claude_preview_json(&preview, &id, &workspace))
             }
-            ControlRequest::ApplyClaude { preview, restore } => {
+            ControlRequest::ApplyClaude {
+                preview,
+                restore,
+                route,
+            } => {
                 let target = self.control_previews.take(&preview)?;
                 let PreviewTarget::Claude {
                     home,
                     restore: expected,
+                    route: expected_route,
                 } = target
                 else {
                     return Err("此预览不属于 Claude；请使用对应的应用工具".into());
                 };
-                if restore != expected {
+                if restore != expected || route != expected_route {
                     return Err("预览操作不匹配，请重新预览并使用对应的应用工具".into());
                 }
                 let conflicts = self.apply_claude(home).await?;
                 Ok(
-                    json!({"applied": if restore {"claude_restore"} else {"claude_direct"},"conflicts":conflicts,
+                    json!({"applied": if restore {"claude_restore"} else if route {"claude_route"} else {"claude_direct"},"conflicts":conflicts,
                     "message":"用户配置已更新；当前 CLI 会话请通过 /model 与 /status 核对。"}),
                 )
             }
@@ -593,9 +658,9 @@ fn claude_preview_json(
     id: &str,
     workspace: &str,
 ) -> Value {
-    json!({"preview_id": id, "kind": if preview.operation == "restore" {"claude_restore"} else {"claude_direct"},
+    json!({"preview_id": id, "kind": match preview.operation {"restore"=>"claude_restore","route"|"aggregate"=>"claude_route",_=>"claude_direct"},
         "workspace_id":workspace, "preview":preview,
-        "next":if preview.operation == "restore" {"说明预览并取得同意后，调用 apply_claude_restore。"} else {"说明预览并取得同意后，调用 apply_claude_direct。"}})
+        "next":if preview.operation == "restore" {"说明预览并取得同意后，调用 apply_claude_restore。"} else if matches!(preview.operation,"route"|"aggregate") {"说明预览并取得同意后，调用 apply_claude_route。"} else {"说明预览并取得同意后，调用 apply_claude_direct。"}})
 }
 
 fn direct_preview_json(preview: &DirectPreview, id: &str) -> Value {
@@ -700,6 +765,7 @@ mod tests {
             let target = PreviewTarget::Claude {
                 home: "/explicit/claude".into(),
                 restore,
+                route: false,
             };
             let id = previews.issue(target.clone()).unwrap();
             assert_eq!(previews.pending(), Some(kind));
@@ -724,7 +790,8 @@ mod tests {
         assert!(
             !ControlRequest::ApplyClaude {
                 preview: "preview".into(),
-                restore: false
+                restore: false,
+                route: false,
             }
             .allowed_during_recovery()
         );

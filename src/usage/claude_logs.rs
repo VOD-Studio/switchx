@@ -194,7 +194,7 @@ fn usage_record(value: &Value) -> Option<UsageRecord> {
         usage,
         duration_ms: None,
         first_event_ms: None,
-        response_id: None,
+        response_id: Some(format!("claude:{id}")),
         session_id: identifier(
             value
                 .get("sessionId")

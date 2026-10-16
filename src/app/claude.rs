@@ -18,6 +18,10 @@ pub struct ClaudeSnapshot {
     pub status: claude::config::Status,
     pub configuration_error: Option<String>,
     pub cli_path: String,
+    pub route_options: claude::publication::Options,
+    pub route_models: Vec<claude::publication::PublishedModel>,
+    pub route_error: String,
+    pub recent_requests: Vec<String>,
 }
 
 pub fn claude_workspace(data_dir: &Path, home: &Path) -> Result<ClientWorkspace, String> {
@@ -50,7 +54,39 @@ pub fn load_claude(data_dir: &Path, home: &Path) -> Result<ClaudeSnapshot, Strin
         .client_cli(&workspace.id)
         .map_err(|_| "无法读取 CLI 路径")?
         .unwrap_or_default();
+    let route_options = store
+        .claude_route_options(&workspace.id)
+        .unwrap_or_default();
+    let plan = claude::publication::build(&store, &workspace.id, route_options.clone());
+    let (route_options, route_models, route_error) = match plan {
+        Ok(plan) => (plan.options, plan.models, String::new()),
+        Err(error) => (route_options, Vec::new(), error),
+    };
+    let recent_requests = store
+        .claude_requests(&workspace.id, 20)
+        .unwrap_or_default()
+        .into_iter()
+        .take(20)
+        .map(|r| {
+            let provider = connections
+                .iter()
+                .find(|c| Some(c.id.as_str()) == r.provider_id.as_deref())
+                .map(|c| c.name.as_str())
+                .unwrap_or("未知连接");
+            format!(
+                "{} · {} · {} · {}",
+                r.status.label(),
+                provider,
+                r.upstream_model.as_deref().unwrap_or("未选模型"),
+                super::format_duration(r.duration_ms)
+            )
+        })
+        .collect();
     Ok(ClaudeSnapshot {
+        route_options,
+        route_models,
+        route_error,
+        recent_requests,
         workspace,
         connections,
         status,
@@ -209,6 +245,9 @@ pub fn apply_claude_change(
     home: &Path,
     prepared: claude::config::Prepared,
 ) -> Result<Vec<String>, String> {
+    if prepared.is_route_publication() {
+        return Err("路由发布必须通过运行状态服务完成".into());
+    }
     let workspace = claude_workspace(data_dir, home)?;
     if prepared.workspace_id() != workspace.id {
         return Err("预览与当前工作空间不匹配，请重新预览".into());
@@ -477,4 +516,15 @@ pub fn claude_connection_key(data_dir: &Path, home: &Path, id: &str) -> Result<S
         .provider_api_key(id)
         .map_err(|_| "无法读取凭据")?
         .ok_or_else(|| "连接尚未配置凭据".into())
+}
+
+/// Read the routing form through the same workspace services as apply.
+pub fn route_plan(
+    data: &Path,
+    home: &Path,
+    options: claude::publication::Options,
+) -> Result<claude::publication::Plan, String> {
+    let workspace = claude_workspace(data, home)?;
+    let store = open_store(data).map_err(|e| e.message())?;
+    claude::publication::build(&store, &workspace.id, options)
 }

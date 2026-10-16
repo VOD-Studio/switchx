@@ -67,6 +67,7 @@ import { ClaudeUi } from "claude-state.slint";
 export {
     ClaudeUi,
     ClaudeConnectionRow,
+    ClaudeRouteRow,
     ClaudeModelRow,
 } from "claude-state.slint";
 import {
@@ -871,7 +872,7 @@ export component AppWindow inherits Window {
                         ClientSwitcher {
                             selected: root.active-page == 6 ? 1 : root.active-page == 0 || root.active-page == 1 || root.active-page == 3 ? 0 : -1;
                             codex-status: root.connection-label;
-                            claude-status: ClaudeUi.recovering ? "配置待恢复" : ClaudeUi.managed ? "直连 · " + ClaudeUi.active-name : ClaudeUi.loaded ? ClaudeUi.connections.length + " 个连接，未启用" : "尚未读取";
+                            claude-status: ClaudeUi.recovering ? "配置待恢复" : ClaudeUi.route-running ? (ClaudeUi.active-mode == "aggregate" ? "聚合运行中" : "路由运行中") : ClaudeUi.managed ? ClaudeUi.active-name : ClaudeUi.loaded ? ClaudeUi.connections.length + " 个连接，未启用" : "尚未读取";
                             enabled: !root.busy;
                             chosen(client) => { root.choose-client(client); }
                         }
@@ -1089,7 +1090,8 @@ export component AppWindow inherits Window {
                                 if root.active-page == 6: ClaudeWorkspacePage {
                                     busy: root.busy;
                                     home <=> root.claude-home;
-                                    status: root.claude-status;
+                                    status <=> root.claude-status;
+                                    workspace-id <=> root.claude-workspace-id;
                                     inspect(home) => { root.inspect-claude(home); }
                                 }
                                 if root.active-page == 0: RoutingPage {
@@ -2010,7 +2012,7 @@ export component AppWindow inherits Window {
 
     Drawer {
         open: ClaudeUi.preview-open;
-        title: ClaudeUi.preview-restore ? "恢复 Claude Code 配置" : "预览 Claude Code 直连";
+        title: ClaudeUi.preview-restore ? "恢复 Claude Code 配置" : ClaudeUi.preview-route ? "预览 Claude Code 路由" : "预览 Claude Code 直连";
         subtitle: root.claude-home;
         panel-width: 670px;
         busy: root.busy;
@@ -2094,7 +2096,8 @@ export component AppWindow inherits Window {
 
 export component SwitchXTray inherits SystemTrayIcon {
     icon: @image-url("../assets/tray.svg");
-    tooltip: "switchx";
+    in property <string> claude-route-status: "Claude Code";
+    tooltip: "switchx · " + root.claude-route-status;
     callback show-app();
     callback restore-config();
     callback restore-claude();
@@ -2111,7 +2114,7 @@ export component SwitchXTray inherits SystemTrayIcon {
         }
 
         MenuItem {
-            title: "恢复 Claude Code 配置";
+            title: root.claude-route-status + " · 恢复配置";
             activated => { root.restore-claude(); }
         }
 

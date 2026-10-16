@@ -162,13 +162,27 @@ impl Server {
             "save_claude_models" if self.access.writes => {
                 self.write(|data, store| claude::save(data, store, arguments))
             }
+            "get_claude_status" => self.control(name, arguments, &["workspace_id"]),
+            "preview_claude_route" if self.access.control => self.control(
+                name,
+                arguments,
+                &[
+                    "workspace_id",
+                    "mode",
+                    "provider_id",
+                    "default_model",
+                    "port",
+                ],
+            ),
             "preview_claude_direct" if self.access.control => {
                 self.control(name, arguments, &["workspace_id", "provider_id"])
             }
             "preview_claude_restore" if self.access.control => {
                 self.control(name, arguments, &["workspace_id", "keep_conflicts"])
             }
-            "apply_claude_direct" | "apply_claude_restore" if self.access.control => {
+            "apply_claude_direct" | "apply_claude_restore" | "apply_claude_route"
+                if self.access.control =>
+            {
                 self.control(name, arguments, &["preview_id"])
             }
             "list_providers" => self.with_store(providers),
@@ -1450,6 +1464,8 @@ mod tests {
             .unwrap();
         let now = Local::now().timestamp_millis();
         let request = |id: &str, status, usage| RequestRecord {
+            client: crate::storage::UsageClient::Unknown,
+            workspace_id: None,
             id: id.into(),
             started_at_ms: now - 1_000,
             public_model: Some("sx-flash".into()),
@@ -1551,7 +1567,8 @@ mod tests {
                 "list_prices",
                 "get_app_status",
                 "list_client_workspaces",
-                "list_claude_connections"
+                "list_claude_connections",
+                "get_claude_status"
             ]
         );
         assert!(tools.iter().all(|tool| {

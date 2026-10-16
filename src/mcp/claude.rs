@@ -37,7 +37,7 @@ pub(super) fn connections(store: &Store, args: &Map<String, Value>) -> Result<Va
     let id = optional_string(args, "workspace_id")?.ok_or("缺少 workspace_id")?;
     workspace(store, id)?;
     Ok(
-        json!({"connections":store.claude_connections(id).map_err(|_|"无法读取 Claude 连接")?.into_iter().map(connection).collect::<Vec<_>>()}),
+        json!({"bindings":store.claude_model_bindings(id).map_err(|_|"无法读取模型绑定")?.into_iter().map(|b|json!({"public_id":b.public_id(),"provider_id":b.provider_id,"upstream_model":b.upstream_model})).collect::<Vec<_>>(),"route_options":store.claude_route_options(id).map_err(|_|"无法读取路由设置")?,"connections":store.claude_connections(id).map_err(|_|"无法读取 Claude 连接")?.into_iter().map(connection).collect::<Vec<_>>()}),
     )
 }
 pub(super) fn save(data: &Path, store: &Store, args: &Map<String, Value>) -> Result<Value, String> {
@@ -95,6 +95,7 @@ pub(super) fn definitions(access: Access) -> Vec<Value> {
             Effect::Read,
         ),
     ];
+    tools.push(described("get_claude_status","Claude 工作空间状态","查询指定 Claude 工作空间的配置模式、运行状态与记录故障；不会返回本地令牌。需要正在运行的应用。",json!({"workspace_id":scope}),&["workspace_id"],Effect::Read));
     if access.writes {
         tools.push(described("save_claude_models","保存 Claude 模型列表","完整替换指定连接的模型菜单、默认模型及角色映射。传入读取时的 revision；保存不会应用配置。托管中的工作空间须先恢复。",json!({
         "workspace_id":scope,"provider_id":provider,"revision":{"type":"integer","minimum":1},
@@ -109,6 +110,9 @@ pub(super) fn definitions(access: Access) -> Vec<Value> {
     }
     if access.control {
         tools.extend([
+            described("preview_claude_route","预览 Claude 路由与聚合","为指定工作空间准备独立监听、显式模型绑定与配置变更。route 仅发布默认连接，aggregate 发布所有 API 连接；本机官方登录仅支持直连。不会应用客户端配置。",json!({"workspace_id":scope,"mode":{"type":"string","enum":["route","aggregate"]},"provider_id":provider,"default_model":{"type":"string","description":"默认连接中已保存的实际模型 ID；省略沿用连接默认值。"},"port":{"type":"integer","minimum":0,"maximum":65535,"description":"0 自动分配；运行时更改端口需要先停止。"}}),&["workspace_id","mode","provider_id"],Effect::Write),
+            described("apply_claude_route","发布 Claude 路由","向用户说明 preview_claude_route 的预览并取得同意后，使用一次性 preview_id 发布；更新后在途请求保留原绑定。SwitchX 需持续运行。停止使用 preview_claude_restore / apply_claude_restore。",preview.clone(),&["preview_id"],Effect::Destructive),
+
         described("preview_claude_direct","预览 Claude 直连","检查 CLI 能力并预览指定 Claude 工作空间的配置变更；不会应用配置，也不执行外部 helper。",json!({"workspace_id":scope,"provider_id":provider}),&["workspace_id","provider_id"],Effect::Write),
         described("preview_claude_restore","预览 Claude 配置恢复","预览指定 Claude 工作空间的字段恢复与冲突。keep_conflicts=true 表示保留外部值并结束管理，须向用户说明后应用。",json!({"workspace_id":scope,"keep_conflicts":{"type":"boolean","default":false}}),&["workspace_id"],Effect::Write),
         described("apply_claude_direct","应用 Claude 直连","向用户说明 preview_claude_direct 的具体变更并取得同意后，用对应 preview_id 应用。再次核对工作空间、文件、连接与凭据快照。",preview.clone(),&["preview_id"],Effect::Destructive),

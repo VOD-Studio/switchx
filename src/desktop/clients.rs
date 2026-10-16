@@ -127,7 +127,7 @@ impl Worker {
                             window.set_claude_workspace_id(workspace.id.into());
                             window
                                 .global::<switchx::ui::ClaudeUi>()
-                                .set_page(workspace.last_page.clamp(0, 2));
+                                .set_page(workspace.last_page.clamp(0, 3));
                         }
                     }
                 }

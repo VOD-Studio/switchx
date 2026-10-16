@@ -1,6 +1,6 @@
 # SwitchX 多客户端与 Claude Code 接入方案
 
-状态：M0 多客户端基础与 M1 Claude 直连、自定义模型列表已落地并完成本地验证。后续从 M2 原生 Messages 路由与聚合继续。
+状态：M0 至 M2 已落地，代码检查与隔离链路验证记录已保存。M2 最终复跑遇到本机 Claude CLI 被系统终止，详见验证记录。后续功能从 M3 协议转换与高级连接继续。
 
 核对日期：2026 年 10 月 16 日。方案源码基线为 SwitchX `eb1bac0`、本地参考仓库 `others/cc-switch` 的 `09bce301`；本机 Claude Code 为 `2.1.301`。除下方进度记录明确列出的部分外，后续模块和表结构仍为拟议设计，实际数据库版本与客户端能力应在实施时重新确认。
 
@@ -18,9 +18,13 @@ SwitchX 将从围绕单个 Codex 工作空间组织功能，扩展为同时管�
 - Codex 的路由、预览和账号同步目录归入 `CodexRuntime`。多工作空间并行路由及完整适配器仍需后续实现。
 - `make check` 通过：364 个 Rust 测试通过，2 个既有 CLI 探针按默认配置忽略；41 项脚本测试中 2 项因缺少平台工具跳过。
 
-以上为 M0 提交时的范围。后续 M1 实施已接入 Claude 连接保存、导入、模型列表、直连预览/应用/恢复、独立 MCP 工具与托盘恢复入口。数据库现为版本 19：新增 `client_connections` 绑定表，模型列表作为有序客户端设置保存，尚未引入 M2 的通用模型路由绑定表。
+以上为 M0 提交时的范围。后续 M1 实施已接入 Claude 连接保存、导入、模型列表、直连预览/应用/恢复、独立 MCP 工具与托盘恢复入口。M1 数据库升级到版本 19：新增 `client_connections` 绑定表，模型列表作为有序客户端设置保存，尚未引入 M2 的通用模型路由绑定表。
 
 M1 使用 `src/claude/config.rs` 实现私有快照和字段恢复，暂不将 Codex 配置写入迁入通用模块。同一 Claude 工作空间托管期间限制已有连接编辑和删除，允许添加新连接及切换。直连不需要路由进程，退出应用时保留；用户显式预览并恢复。验证层次与截图见 [M1 验证记录](claude-code-verification.md)。
+
+M2 已接入原生 Messages 单连接路由与聚合、工作空间独立监听及令牌、稳定模型绑定、发布快照、运行中更新、恢复与退出处理，以及 Claude 路由用量去重。数据库新增版本 20 迁移，保留版本 19 连接资料，并为模型分配稳定公开身份。具体实现放在 `claude/publication.rs`、`claude/router.rs`、`claude/messages.rs`、`claude/route_session.rs`，沿用现有 Codex 路由模块。验证结果见 [M2 路由验证](claude-route-verification.md)。
+
+当前仍保留托管期间已有连接的编辑与删除限制；已经开放默认连接、默认模型和路由模式的预览更新。请求队列故障转移、协议转换及云平台认证继续属于 M3。发布状态、模型菜单和已运行 CLI 会话的状态分别呈现。
 
 界面记录：[Claude 浅色最小窗口](previews/client-workspaces/claude-1000-light.png)、[Claude 深色大窗口](previews/client-workspaces/claude-1400-dark.png)、[Codex 连接页](previews/client-workspaces/codex-1000-light.png)。图片由实际 Slint 界面使用合成资料渲染。
 

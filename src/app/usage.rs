@@ -842,6 +842,8 @@ mod tests {
         store.set_usage_claude_import(false).unwrap();
         store
             .put_request(&RequestRecord {
+                client: crate::storage::UsageClient::Unknown,
+                workspace_id: None,
                 id: "routed".into(),
                 started_at_ms: now.timestamp_millis(),
                 public_model: Some("显示名称".into()),

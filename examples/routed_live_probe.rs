@@ -283,6 +283,8 @@ mod tests {
             fallback_provider_id: None,
         };
         let record = RequestRecord {
+            client: switchx::storage::UsageClient::Unknown,
+            workspace_id: None,
             id: "one".into(),
             started_at_ms: 1,
             public_model: Some(model.public_id.clone()),
