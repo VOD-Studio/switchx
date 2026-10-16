@@ -406,7 +406,7 @@ impl Worker {
         }
         .await;
         if result.is_ok() {
-            self.route_session.discard_preview();
+            self.codex.route_session.discard_preview();
         }
         let snapshot = self.snapshot_after(&result);
         let _ = self.weak.upgrade_in_event_loop(move |app| {
@@ -469,7 +469,7 @@ impl Worker {
         }
         .await;
         if result.is_ok() {
-            self.route_session.discard_preview();
+            self.codex.route_session.discard_preview();
         }
         let snapshot = self.snapshot_after(&result);
         let _ = self.weak.upgrade_in_event_loop(move |app| {
@@ -500,7 +500,7 @@ impl Worker {
             .path()
             .and_then(|data_dir| app::delete_model(data_dir, &public_id));
         if result.is_ok() {
-            self.route_session.discard_preview();
+            self.codex.route_session.discard_preview();
         }
         let snapshot = self.snapshot_after(&result);
         let _ = self.weak.upgrade_in_event_loop(move |app| {
@@ -519,7 +519,7 @@ impl Worker {
             .path()
             .and_then(|data_dir| app::select_models(data_dir, &public_ids, enabled));
         if result.is_ok() {
-            self.route_session.discard_preview();
+            self.codex.route_session.discard_preview();
         }
         let snapshot = self.snapshot_after(&result);
         let _ = self.weak.upgrade_in_event_loop(move |app| {
@@ -540,7 +540,7 @@ impl Worker {
             .path()
             .and_then(|data_dir| app::save_fallback(data_dir, &public_id, fallback.as_deref()));
         if result.is_ok() {
-            self.route_session.discard_preview();
+            self.codex.route_session.discard_preview();
         }
         let snapshot = self.snapshot_after(&result);
         let _ = self.weak.upgrade_in_event_loop(move |app| {

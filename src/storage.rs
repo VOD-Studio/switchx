@@ -4,7 +4,7 @@ use rusqlite::{Connection, OpenFlags, Result, Transaction, TransactionBehavior, 
 
 use crate::{credentials::Secret, usage::TokenUsage};
 
-const SCHEMA_VERSION: i64 = 17;
+const SCHEMA_VERSION: i64 = 18;
 
 /// Usage, log import and price tables; every statement is safe to repeat.
 const USAGE_SCHEMA: &str = "CREATE TABLE IF NOT EXISTS usage_records (
@@ -223,7 +223,7 @@ impl Store {
         let version: i64 = connection.query_row("PRAGMA user_version", [], |row| row.get(0))?;
         if !matches!(
             version,
-            8 | 9 | 10 | 11 | 12 | 13 | 14 | 15 | 16 | SCHEMA_VERSION
+            8 | 9 | 10 | 11 | 12 | 13 | 14 | 15 | 16 | 17 | SCHEMA_VERSION
         ) {
             return Err(rusqlite::Error::InvalidQuery);
         }
@@ -252,6 +252,9 @@ impl Store {
         let version: i64 = connection.query_row("PRAGMA user_version", [], |row| row.get(0))?;
         if version > SCHEMA_VERSION {
             return Err(rusqlite::Error::InvalidQuery);
+        }
+        if version > 0 && version < 18 {
+            workspaces::backup_before_migration(&connection, path, version)?;
         }
         if version < 2 {
             Self::migrate_step(&connection, 2, |transaction, current| {
@@ -541,6 +544,11 @@ impl Store {
                     // Rebuilding the table preserves older log and route records verbatim.
                 }
                 Ok(())
+            })?;
+        }
+        if version < 18 {
+            Self::migrate_step(&connection, 18, |transaction, _| {
+                transaction.execute_batch(workspaces::SCHEMA)
             })?;
         }
         Ok(Self { connection })
@@ -1468,6 +1476,7 @@ fn validate_api_key(key: &str) -> Result<()> {
 }
 
 mod usage;
+mod workspaces;
 
 use usage::usage_columns;
 pub use usage::{

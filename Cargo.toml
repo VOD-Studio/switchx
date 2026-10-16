@@ -25,7 +25,7 @@ chrono = { version = "0.4.45", default-features = false, features = ["clock", "s
 futures-util = "0.3.34"
 getrandom = "0.3.4"
 reqwest = { version = "0.13.5", default-features = false, features = ["rustls", "stream", "system-proxy"] }
-rusqlite = { version = "0.40.2", features = ["bundled"] }
+rusqlite = { version = "0.40.2", features = ["bundled", "backup"] }
 serde = { version = "1.0.228", features = ["derive"] }
 serde_json = "1.0.151"
 slint.workspace = true

@@ -335,7 +335,7 @@ impl Worker {
             ControlRequest::CancelPreview => {
                 let had = self.control_previews.pending();
                 self.control_previews.clear();
-                self.prepared = None;
+                self.codex.prepared = None;
                 self.cancel_route_preview();
                 Ok(json!({ "cancelled": had }))
             }
@@ -417,7 +417,7 @@ impl Worker {
     /// Live router and Codex configuration state, without addresses' tokens or credentials.
     fn control_status(&self, home: &str) -> Result<Value, String> {
         let data_dir = self.data_dir.path()?;
-        let route = &self.route_session;
+        let route = &self.codex.route_session;
         let mut status = json!({
             "router": {
                 "running": route.is_running(),

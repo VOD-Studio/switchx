@@ -599,7 +599,7 @@ impl Worker {
         let accounts = self
             .data_dir
             .ok()
-            .zip(self.account_home.as_ref())
+            .zip(self.codex.account_home.as_ref())
             .map(|(path, home)| account_view(path, home));
         let _ = self.weak.upgrade_in_event_loop(move |app| {
             let created_connection = snapshot

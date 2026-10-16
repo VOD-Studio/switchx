@@ -10,6 +10,12 @@ use tokio::sync::{
 use super::{control::ControlRequest, feedback::show_action};
 
 pub(super) enum Command {
+    InitializeClients,
+    ClientNavigation {
+        workspace_id: String,
+        page: i32,
+    },
+    InspectClaude(String),
     Refresh(bool),
     RefreshRequests,
     ClearRequests,
@@ -154,6 +160,9 @@ impl Command {
         matches!(
             self,
             Self::PollRouteStatus
+                | Self::InitializeClients
+                | Self::ClientNavigation { .. }
+                | Self::InspectClaude(_)
                 | Self::InspectConfig(_)
                 | Self::RestoreConfig(_)
                 | Self::Control { .. }

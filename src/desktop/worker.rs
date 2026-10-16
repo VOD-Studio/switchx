@@ -88,17 +88,32 @@ pub(super) type PreparedDirect = (
     app::ProviderConfigState,
 );
 
+/// Codex owns its prepared switch, live router, and account synchronization home.
+/// Selecting another client's view never replaces this running context.
+pub(super) struct CodexRuntime {
+    pub(super) prepared: Option<PreparedDirect>,
+    pub(super) route_session: RouteSession,
+    pub(super) account_home: Option<PathBuf>,
+}
+
+impl Default for CodexRuntime {
+    fn default() -> Self {
+        Self {
+            prepared: None,
+            route_session: RouteSession::default(),
+            account_home: client::default_home().ok(),
+        }
+    }
+}
+
 pub(super) struct Worker {
     pub(super) weak: slint::Weak<AppWindow>,
     pub(super) data_dir: DataDir,
-    pub(super) prepared: Option<PreparedDirect>,
-    pub(super) route_session: RouteSession,
+    pub(super) codex: CodexRuntime,
     pub(super) pending_login: Option<PendingLogin>,
     pub(super) pending_xai_login: Option<PendingLogin>,
     pub(super) xai_manager: Option<xai::AccountManager>,
     pub(super) quota_account_manager: Option<AccountManager>,
-    /// The last valid Codex home a command targeted; exit syncs its owned account.
-    pub(super) account_home: Option<PathBuf>,
     pub(super) subscription_auth: Option<SubscriptionAuthDraft>,
     /// The directory the connection editor opened, compared again on save.
     pub(super) connection_models_snapshot: Option<(String, Vec<ModelRecord>)>,
@@ -123,13 +138,11 @@ pub(super) async fn run(
     Worker {
         weak,
         data_dir: DataDir(directory),
-        prepared: None,
-        route_session: RouteSession::default(),
+        codex: CodexRuntime::default(),
         pending_login: None,
         pending_xai_login: None,
         xai_manager: None,
         quota_account_manager: None,
-        account_home: client::default_home().ok(),
         subscription_auth: None,
         connection_models_snapshot: None,
         provider_checks: JoinSet::new(),
@@ -160,7 +173,7 @@ impl Worker {
                 continue;
             }
             if let Some(home) = command.codex_home().and_then(|text| codex_home(text).ok()) {
-                self.account_home = Some(home);
+                self.codex.account_home = Some(home);
             }
             self.handle(command).await?;
             self.publish_route_status();
@@ -185,6 +198,11 @@ impl Worker {
             self.control_previews.clear();
         }
         match command {
+            Command::InitializeClients => self.initialize_client_workspaces(),
+            Command::ClientNavigation { workspace_id, page } => {
+                self.client_navigation(workspace_id, page)
+            }
+            Command::InspectClaude(home) => self.inspect_claude(home),
             Command::PollRouteStatus => {}
             Command::RefreshRequests => self.refresh_requests(),
             Command::ClearRequests => self.clear_requests(),
@@ -315,8 +333,8 @@ impl Worker {
 
     /// Previews depend on saved connections, so any change invalidates them.
     pub(super) fn discard_previews(&mut self) {
-        self.prepared = None;
-        self.route_session.discard_preview();
+        self.codex.prepared = None;
+        self.codex.route_session.discard_preview();
     }
 
     /// The snapshot to show after a change; failed changes keep the window as is.
@@ -373,19 +391,20 @@ impl Worker {
         if let Some(data_dir) = self.data_dir.ok()
             && let Some(recovery) = route_switch::recovery(data_dir)?
         {
-            self.route_session
+            self.codex
+                .route_session
                 .restore(data_dir, recovery.config_path.parent().unwrap())
                 .await?;
         }
         // Recovery pauses and stops new requests before waiting for
         // any detached refresh to save its rotated credentials.
-        self.route_session.wait_for_accounts().await?;
+        self.codex.route_session.wait_for_accounts().await?;
         if !recovery_only
-            && let (Some(data_dir), Some(home)) = (self.data_dir.ok(), &self.account_home)
+            && let (Some(data_dir), Some(home)) = (self.data_dir.ok(), &self.codex.account_home)
         {
             AccountManager::open(data_dir)?.wait_for_idle().await?;
             sync_owned_account(data_dir, home)?;
         }
-        self.route_session.drain_for_exit().await
+        self.codex.route_session.drain_for_exit().await
     }
 }

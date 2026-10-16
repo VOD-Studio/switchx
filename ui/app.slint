@@ -61,6 +61,8 @@ import { ToolboxPage } from "pages/toolbox.slint";
 export { McpSetup } from "pages/toolbox.slint";
 import { ConnectionStatusDialog } from "connection-status.slint";
 import { WorkspaceMenu } from "workspace-menu.slint";
+import { ClientSwitcher } from "client-switcher.slint";
+import { ClaudeWorkspacePage } from "pages/claude-workspace.slint";
 import { FallbackEditor } from "editors/fallback-editor.slint";
 import {
     AccountLoginConfirm,
@@ -122,6 +124,35 @@ export component AppWindow inherits Window {
     }
 
     in-out property <int> active-page: 0;
+    in-out property <int> active-client: 0;
+    in-out property <int> codex-last-page: 0;
+    in-out property <string> codex-workspace-id;
+    in-out property <string> claude-workspace-id;
+    in-out property <string> claude-home;
+    in-out property <string> claude-status: "目录尚未检查";
+    callback client-navigation(int, int);
+    callback inspect-claude(string);
+    public function choose-client(client: int) {
+        if (client < 0 || client > 1) { return; }
+        root.client-navigation(root.active-client, root.active-page);
+        if (root.active-client == 0 && (root.active-page == 0 || root.active-page == 1 || root.active-page == 3)) {
+            root.codex-last-page = root.active-page;
+        }
+        root.active-client = client;
+        root.workspace-open = false;
+        root.drawer-open = false;
+        root.publish-drawer-open = false;
+        root.direct-drawer-open = false;
+        root.route-preview-ready = false;
+        root.direct-preview-ready = false;
+        if (!root.recovery-only) {
+            root.action-message = "";
+            root.error-code = "";
+            root.error-message = "";
+            root.error-action = "";
+        }
+        root.active-page = client == 1 ? 6 : root.codex-last-page;
+    }
     in-out property <bool> drawer-open: false;
     in-out property <bool> workspace-open: false;
     in-out property <bool> status-directories-expanded: false;
@@ -449,6 +480,11 @@ export component AppWindow inherits Window {
         if (root.subscription-editor-open || root.subscription-editor-pending) { root.cancel-subscription-editor(); }
     }
     changed active-page => {
+        if (root.active-page == 0 || root.active-page == 1 || root.active-page == 3) {
+            root.active-client = 0;
+            root.codex-last-page = root.active-page;
+        }
+        if (root.active-page == 6) { root.active-client = 1; }
         root.workspace-open = false;
         root.page-entered = Theme.page-motion == 0ms;
         if (root.active-page == 1 && root.connections-tab == 1) { root.xai-account-action(5, ""); root.account-action(6, ""); }
@@ -721,8 +757,8 @@ export component AppWindow inherits Window {
     }
 
     property <bool> modal-open: root.request-clear-open || root.usage-sources-open || root.usage-prices-open || root.workspace-open || root.account-removing-id != "" || root.account-login-confirm-open || root.drawer-open || root.connection-picker-open || root.connection-models-open || root.xai-editor-open || root.editor-open || root.subscription-editor-open || root.common-config-editor-open || root.icon-picker-open || root.model-editor-open || root.fallback-editor-open || root.publish-drawer-open || root.direct-drawer-open || root.delete-account-confirm;
-    property <string> page-title: root.active-page == 0 ? "模型，随手可用。" : root.active-page == 1 ? "连接" : root.active-page == 2 ? "用量，心中有数。" : root.active-page == 3 ? "每次请求，有迹可循。" : root.active-page == 4 ? "让工作流更顺手。" : "设置";
-    property <string> page-subtitle: root.active-page == 0 ? "配好连接，整组模型随手可用。" : root.active-page == 1 ? "账号与上游，集中管理。" : root.active-page == 2 ? "Token、缓存与估算费用，按连接和模型细看。" : root.active-page == 3 ? "查看模型、耗时与结果。" : root.active-page == 4 ? "让 agent 直接使用 SwitchX，一句话完成接入。" : "把工作空间调成你喜欢的样子。";
+    property <string> page-title: root.active-page == 6 ? "Claude Code" : root.active-page == 0 ? "模型，随手可用。" : root.active-page == 1 ? "连接" : root.active-page == 2 ? "用量，心中有数。" : root.active-page == 3 ? "每次请求，有迹可循。" : root.active-page == 4 ? "让工作流更顺手。" : "设置";
+    property <string> page-subtitle: root.active-page == 6 ? "连接与模型，按客户端独立管理。" : root.active-page == 0 ? "Codex · 配好连接，整组模型随手可用。" : root.active-page == 1 ? "Codex · 账号与上游，集中管理。" : root.active-page == 2 ? "Token、缓存与估算费用，按连接和模型细看。" : root.active-page == 3 ? "Codex · 查看模型、耗时与结果。" : root.active-page == 4 ? "让 agent 直接使用 SwitchX，一句话完成接入。" : "把工作空间调成你喜欢的样子。";
     animate background { duration: Theme.page-motion; }
     Timer {
         interval: 16ms;
@@ -740,7 +776,7 @@ export component AppWindow inherits Window {
                 Rectangle {
                     // Measured from the first item so titlebar padding changes never animate.
                     property <length> nav-offset: (root.active-page == 0 ? nav-workbench.y : root.active-page == 1 ? nav-connections.y : root.active-page == 2 ? nav-usage.y : root.active-page == 3 ? nav-activity.y : root.active-page == 4 ? nav-toolbox.y : nav-settings.y) - nav-workbench.y;
-                    width: 180px;
+                    width: 200px;
                     background: Theme.sidebar;
                     animate background { duration: Theme.page-motion; }
                     Rectangle {
@@ -756,10 +792,11 @@ export component AppWindow inherits Window {
 
                     Rectangle {
                         property <length> offset: parent.nav-offset;
-                        x: nav-workbench.x;
+                        visible: root.active-page != 6;
+                        x: 14px;
                         y: nav-workbench.y + self.offset;
-                        width: nav-workbench.width;
-                        height: nav-workbench.height;
+                        width: parent.width - 28px;
+                        height: 34px;
                         border-radius: 8px;
                         background: Theme.panel;
                         animate offset {
@@ -773,7 +810,7 @@ export component AppWindow inherits Window {
                         padding-top: root.native-titlebar-overlay && !root.full-screen ? 44px : 26px;
                         spacing: 6px;
                         HorizontalLayout {
-                            height: 42px;
+                            height: 36px;
                             padding-left: 8px;
                             spacing: 8px;
                             cross-axis-alignment: center;
@@ -794,44 +831,55 @@ export component AppWindow inherits Window {
                         }
 
                         Rectangle {
-                            height: 12px;
+                            height: 8px;
+                        }
+
+                        ClientSwitcher {
+                            selected: root.active-page == 6 ? 1 : root.active-page == 0 || root.active-page == 1 || root.active-page == 3 ? 0 : -1;
+                            codex-status: root.connection-label;
+                            claude-status: "尚未接入";
+                            enabled: !root.busy;
+                            chosen(client) => { root.choose-client(client); }
                         }
 
                         nav-workbench := QuietButton {
+                            visible: root.active-client == 0;
                             text: "工作台";
                             icon: @image-url("../assets/ui/workbench.svg");
                             icon-color: Theme.muted-text;
                             navigation: true;
                             selected: root.active-page == 0;
                             left-aligned: true;
-                            height: 40px;
+                            height: root.active-client == 0 ? 34px : 0px;
                             clicked => { root.active-page = 0; }
                         }
 
                         nav-connections := QuietButton {
+                            visible: root.active-client == 0;
                             text: "连接";
                             icon: @image-url("../assets/ui/connections.svg");
                             icon-color: Theme.muted-text;
                             navigation: true;
                             selected: root.active-page == 1;
                             left-aligned: true;
-                            height: 40px;
+                            height: root.active-client == 0 ? 34px : 0px;
                             clicked => { root.active-page = 1; }
                         }
 
                         nav-activity := QuietButton {
+                            visible: root.active-client == 0;
                             text: "活动";
                             icon: @image-url("../assets/ui/activity.svg");
                             icon-color: Theme.muted-text;
                             navigation: true;
                             selected: root.active-page == 3;
                             left-aligned: true;
-                            height: 40px;
+                            height: root.active-client == 0 ? 34px : 0px;
                             clicked => { root.active-page = 3; }
                         }
 
                         nav-usage := Rectangle {
-                            height: 40px;
+                            height: 34px;
                             QuietButton {
                                 width: parent.width;
                                 height: parent.height;
@@ -858,7 +906,7 @@ export component AppWindow inherits Window {
                         }
 
                         Rectangle {
-                            height: 20px;
+                            height: 12px;
                         }
 
                         nav-toolbox := QuietButton {
@@ -868,7 +916,7 @@ export component AppWindow inherits Window {
                             navigation: true;
                             selected: root.active-page == 4;
                             left-aligned: true;
-                            height: 40px;
+                            height: 34px;
                             clicked => { root.active-page = 4; }
                         }
 
@@ -879,7 +927,7 @@ export component AppWindow inherits Window {
                             navigation: true;
                             selected: root.active-page == 5;
                             left-aligned: true;
-                            height: 40px;
+                            height: 34px;
                             clicked => { root.active-page = 5; }
                         }
 
@@ -888,7 +936,7 @@ export component AppWindow inherits Window {
                         }
 
                         QuietButton {
-                            text: "●  " + root.connection-label;
+                            text: "Codex · " + root.connection-label;
                             ghost: true;
                             left-aligned: true;
                             clicked => { root.drawer-open = true; }
@@ -903,10 +951,11 @@ export component AppWindow inherits Window {
 
                     Rectangle {
                         // The leading edge arrives first; the trailing edge follows the highlight.
+                        visible: root.active-page != 6;
                         property <length> lead: parent.nav-offset;
                         property <length> trail: parent.nav-offset;
                         x: nav-workbench.x;
-                        y: nav-workbench.y + (nav-workbench.height - 14px) / 2 + min(self.lead, self.trail);
+                        y: nav-workbench.y + 10px + min(self.lead, self.trail);
                         width: 3px;
                         height: 14px + abs(self.lead - self.trail);
                         border-radius: 2px;
@@ -981,7 +1030,7 @@ export component AppWindow inherits Window {
                                 horizontal-stretch: 1;
                             }
 
-                            if root.active-page != 1 && root.active-page != 5: StatusPill {
+                            if root.active-page != 1 && root.active-page != 5 && root.active-page != 6: StatusPill {
                                 width: 98px;
                                 label: root.loading ? "读取中…" : "● " + root.connection-label;
                                 ink: root.route-running || root.direct-active ? Theme.success : Theme.warning;
@@ -1002,6 +1051,12 @@ export component AppWindow inherits Window {
                                 animate y {
                                     duration: root.page-entered ? Theme.page-motion : 0ms;
                                     easing: ease-out;
+                                }
+                                if root.active-page == 6: ClaudeWorkspacePage {
+                                    busy: root.busy;
+                                    home <=> root.claude-home;
+                                    status: root.claude-status;
+                                    inspect(home) => { root.inspect-claude(home); }
                                 }
                                 if root.active-page == 0: RoutingPage {
                                     busy: root.busy;

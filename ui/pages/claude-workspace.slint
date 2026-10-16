@@ -1,0 +1,84 @@
+import { QuietScrollView } from "../scroll-view.slint";
+import { QuietButton, QuietLineEdit, SurfaceCard } from "../components.slint";
+import { Theme } from "../tokens.slint";
+
+export component ClaudeWorkspacePage inherits QuietScrollView {
+    in property <bool> busy;
+    in-out property <string> home;
+    in property <string> status;
+    callback inspect(string);
+    horizontal-scrollbar-policy: always-off;
+
+    VerticalLayout {
+        spacing: 18px;
+        padding-bottom: 10px;
+        SurfaceCard {
+            height: 218px;
+            VerticalLayout {
+                padding: 24px;
+                spacing: 14px;
+                Text {
+                    text: "Claude Code 工作空间";
+                    color: Theme.primary-text;
+                    font-size: 17px;
+                    font-weight: 600;
+                }
+
+                Text {
+                    text: "选择这个客户端使用的配置目录。";
+                    color: Theme.muted-text;
+                    font-size: 13px;
+                }
+
+                QuietLineEdit {
+                    text <=> root.home;
+                    accessible-label: "Claude Code 配置目录绝对路径";
+                    icon: @image-url("../../assets/ui/folder.svg");
+                    enabled: !root.busy;
+                }
+
+                HorizontalLayout {
+                    spacing: 12px;
+                    QuietButton {
+                        text: "检查目录";
+                        width: 120px;
+                        primary: true;
+                        horizontal-stretch: 0;
+                        enabled: !root.busy;
+                        clicked => { root.inspect(root.home); }
+                    }
+
+                    Text {
+                        text: root.status;
+                        horizontal-stretch: 1;
+                        color: Theme.muted-text;
+                        font-size: 12px;
+                        wrap: word-wrap;
+                        vertical-alignment: center;
+                    }
+                }
+            }
+        }
+
+        SurfaceCard {
+            height: 142px;
+            VerticalLayout {
+                padding: 24px;
+                spacing: 10px;
+                Text {
+                    text: "连接管理尚未启用";
+                    color: Theme.primary-text;
+                    font-size: 16px;
+                    font-weight: 500;
+                }
+
+                Text {
+                    text: "当前可独立管理客户端目录。Claude 连接与模型发布将在后续接入；目录检查不会改写 settings.json。";
+                    color: Theme.muted-text;
+                    font-size: 13px;
+                    wrap: word-wrap;
+                }
+            }
+        }
+    }
+}

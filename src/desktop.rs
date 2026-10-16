@@ -5,6 +5,7 @@
 mod accounts;
 mod activity;
 mod batch_picker;
+mod clients;
 mod codex_config;
 mod command;
 mod common_config;
@@ -90,6 +91,7 @@ pub fn run() -> Result<(), Box<dyn std::error::Error>> {
             .unwrap_or_default()
             .into(),
     );
+    clients::initialize(&app);
     let (sender, receiver) = mpsc::channel::<Command>(8);
     let background = runtime.spawn(worker::run(
         receiver,
@@ -110,8 +112,7 @@ pub fn run() -> Result<(), Box<dyn std::error::Error>> {
     }
     let usage_service = usage::UsageService::start(app.as_weak());
     usage::connect(&app, &usage_service);
-    // Read new session-log usage at launch; the usage thread repeats it each minute.
-    usage_service.sync(&app.get_config_home(), false);
+    // Client initialization starts log syncing after restoring the saved directory.
     if let Ok(path) = &directory {
         workbench::watch_external_changes(&app, &usage_service, path.clone());
     }
@@ -129,13 +130,10 @@ pub fn run() -> Result<(), Box<dyn std::error::Error>> {
     models::connect(&app, &sender);
     batch_picker::connect(&app, &sender);
     codex_config::connect(&app, &sender);
+    clients::connect(&app, &sender);
     toolbox::connect(&app, &sender);
+    queue(&app, &sender, Command::InitializeClients);
     queue(&app, &sender, Command::Refresh(false));
-    queue(
-        &app,
-        &sender,
-        Command::InspectConfig(app.get_config_home().to_string()),
-    );
     let weak = app.as_weak();
     app.window().on_close_requested(move || {
         if let Some(app) = weak.upgrade() {

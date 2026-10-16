@@ -348,7 +348,7 @@ impl Worker {
             AccountAction::SetDefault => {
                 ensure_accounts_editable(data_dir)?;
                 manager.set_default(&id)?;
-                self.route_session.discard_preview();
+                self.codex.route_session.discard_preview();
                 let _ = self
                     .weak
                     .upgrade_in_event_loop(|app| app.set_route_preview_ready(false));
@@ -360,7 +360,7 @@ impl Worker {
                 } else {
                     id
                 };
-                restore_connections(&mut self.route_session, data_dir, &target_home).await?;
+                restore_connections(&mut self.codex.route_session, data_dir, &target_home).await?;
                 self.discard_previews();
                 let _ = self.weak.upgrade_in_event_loop(|app| clear_previews(&app));
                 manager.activate(&id, &target_home).await?;
@@ -449,7 +449,7 @@ impl Worker {
             SubscriptionAction::AddConnection => {
                 let models = chatgpt::catalog().await?;
                 chatgpt::save_connection(data_dir, &models)?;
-                self.route_session.discard_preview();
+                self.codex.route_session.discard_preview();
                 let snapshot = load_snapshot(data_dir, false).map_err(|error| error.message())?;
                 let _ = self.weak.upgrade_in_event_loop(move |app| {
                     show_result(&app, Ok(snapshot));
@@ -461,10 +461,10 @@ impl Worker {
             }
             SubscriptionAction::Login => {
                 // Reauthentication is an explicit restore-then-login operation.
-                restore_connections(&mut self.route_session, data_dir, &target_home).await?;
+                restore_connections(&mut self.codex.route_session, data_dir, &target_home).await?;
                 sync_owned_account(data_dir, &target_home)?;
-                self.prepared = None;
-                self.route_session.discard_preview();
+                self.codex.prepared = None;
+                self.codex.route_session.discard_preview();
                 let _ = self.weak.upgrade_in_event_loop(move |app| {
                     app.set_direct_preview_ready(false);
                     app.set_route_preview_ready(false);
@@ -550,15 +550,16 @@ impl Worker {
                     .ok_or("请先保存并选择至少一个 API 模型；当前路由与配置已保留")?
                     .public_id
                     .clone();
-                restore_connections(&mut self.route_session, data_dir, &target_home).await?;
-                self.prepared = None;
-                self.route_session.discard_preview();
+                restore_connections(&mut self.codex.route_session, data_dir, &target_home).await?;
+                self.codex.prepared = None;
+                self.codex.route_session.discard_preview();
                 let _ = self.weak.upgrade_in_event_loop(move |app| {
                     app.set_direct_preview_ready(false);
                     app.set_route_preview_ready(false);
                 });
                 chatgpt::deselect_models(data_dir)?;
                 let summary = self
+                    .codex
                     .route_session
                     .prepare(data_dir, &target_home, port, &model, &helper)
                     .await;

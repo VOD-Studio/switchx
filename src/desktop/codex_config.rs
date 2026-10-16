@@ -204,7 +204,7 @@ impl Worker {
         id: String,
         target: String,
     ) -> Result<DirectPreview, String> {
-        self.route_session.discard_preview();
+        self.codex.route_session.discard_preview();
         let _ = self
             .weak
             .upgrade_in_event_loop(|app| app.set_route_preview_ready(false));
@@ -241,7 +241,7 @@ impl Worker {
                     preview.model,
                     preview.changes.join("、")
                 );
-                self.prepared = Some((switch, provider, state));
+                self.codex.prepared = Some((switch, provider, state));
                 let _ = self.weak.upgrade_in_event_loop(move |app| {
                     app.set_busy(false);
                     app.set_direct_preview(summary.into());
@@ -251,7 +251,7 @@ impl Worker {
                 Ok(preview)
             }
             Err(error) => {
-                self.prepared = None;
+                self.codex.prepared = None;
                 let shown = error.clone();
                 let _ = self.weak.upgrade_in_event_loop(move |app| {
                     app.set_direct_preview_ready(false);
@@ -265,7 +265,7 @@ impl Worker {
     pub(super) async fn apply_direct(&mut self, target: String) -> Result<String, String> {
         let result = async {
             let (switch, selected, selected_config) =
-                self.prepared.take().ok_or("请先预览直连变更")?;
+                self.codex.prepared.take().ok_or("请先预览直连变更")?;
             let (data_dir, provider, token) = (|| {
                 let target_path = client::config_path(&codex_home(&target)?)?;
                 if target_path != switch.target() {
@@ -312,14 +312,17 @@ impl Worker {
     }
 
     pub(super) async fn restore_config(&mut self, target: String) -> Result<(), String> {
-        self.prepared = None;
+        self.codex.prepared = None;
         let result = async {
             let data_dir = self.data_dir.path()?;
             let target_home = codex_home(&target)?;
             if route_switch::recovery(data_dir)?.is_some() {
-                self.route_session.restore(data_dir, &target_home).await?;
+                self.codex
+                    .route_session
+                    .restore(data_dir, &target_home)
+                    .await?;
             } else {
-                self.route_session.discard_preview();
+                self.codex.route_session.discard_preview();
                 let result = direct_switch::restore(&client::config_path(&target_home)?, data_dir)?;
                 if !result.conflicts.is_empty() {
                     return Err(format!(
@@ -389,20 +392,31 @@ impl Worker {
             if !recovery_only {
                 common_config_for_home(data_dir, &target.to_string_lossy())?;
             }
-            client::inspect(&target, data_dir).map(|status| (status, target))
+            let status = client::inspect(&target, data_dir)?;
+            let workspace = if recovery_only {
+                None
+            } else {
+                Some(app::remember_client_workspace(
+                    data_dir,
+                    switchx::clients::ClientKind::Codex,
+                    &target,
+                )?)
+            };
+            Ok((status, target, workspace))
         })();
-        let accounts = result
-            .as_ref()
-            .ok()
-            .filter(|_| !recovery_only)
-            .and_then(|(_, target)| {
-                self.account_home = Some(target.clone());
-                self.data_dir
-                    .ok()
-                    .map(|data_dir| account_view(data_dir, target))
-            });
+        let accounts =
+            result
+                .as_ref()
+                .ok()
+                .filter(|_| !recovery_only)
+                .and_then(|(_, target, _)| {
+                    self.codex.account_home = Some(target.clone());
+                    self.data_dir
+                        .ok()
+                        .map(|data_dir| account_view(data_dir, target))
+                });
         let _ = self.weak.upgrade_in_event_loop(move |app| match result {
-            Ok((status, target)) => {
+            Ok((status, target, workspace)) => {
                 app.set_recovery_only(recovery_only);
                 if recovery_only {
                     app.set_active_page(5);
@@ -411,6 +425,9 @@ impl Worker {
                     show_accounts(&app, accounts);
                 }
                 let config_exists = status.config_exists;
+                if let Some(workspace) = workspace {
+                    app.set_codex_workspace_id(workspace.id.into());
+                }
                 app.set_config_home(target.to_string_lossy().into_owned().into());
                 show_config_status(&app, status);
                 show_action(
@@ -433,12 +450,13 @@ impl Worker {
         port: String,
         model: String,
     ) -> Result<RoutePreview, String> {
-        self.prepared = None;
+        self.codex.prepared = None;
         let result = async {
             let data_dir = self.data_dir.path()?;
             let target = codex_home(&target)?;
             let helper = switchx::credential_helper::executable()?;
-            self.route_session
+            self.codex
+                .route_session
                 .prepare(data_dir, &target, route_port(&port)?, &model, &helper)
                 .await
         }
@@ -476,7 +494,8 @@ impl Worker {
     ) -> Result<(), String> {
         let result = async {
             let data_dir = self.data_dir.path()?;
-            self.route_session
+            self.codex
+                .route_session
                 .apply(data_dir, &codex_home(&target)?, route_port(&port)?, &model)
                 .await
         }
@@ -502,7 +521,7 @@ impl Worker {
     }
 
     pub(super) fn cancel_route_preview(&mut self) {
-        self.route_session.discard_preview();
+        self.codex.route_session.discard_preview();
         let _ = self.weak.upgrade_in_event_loop(|app| {
             app.set_route_preview_ready(false);
             app.set_route_preview(Default::default());
@@ -512,9 +531,9 @@ impl Worker {
 
     /// Reports the router and journal state after every command.
     pub(super) fn publish_route_status(&self) {
-        let running = self.route_session.is_running();
-        let recording_failed = self.route_session.recording_failed();
-        let chatgpt_error = self.route_session.chatgpt_error();
+        let running = self.codex.route_session.is_running();
+        let recording_failed = self.codex.route_session.recording_failed();
+        let chatgpt_error = self.codex.route_session.chatgpt_error();
         let provider_errors = self
             .data_dir
             .ok()
@@ -526,6 +545,7 @@ impl Worker {
             .filter(|provider| provider.kind == ProviderKind::Chatgpt)
             .map(|provider| {
                 let error = self
+                    .codex
                     .route_session
                     .chatgpt_error_for(&provider.id)
                     .unwrap_or("")
@@ -534,6 +554,7 @@ impl Worker {
             })
             .collect::<Vec<_>>();
         let address = self
+            .codex
             .route_session
             .address()
             .map(|address| format!("http://{address}/v1"))

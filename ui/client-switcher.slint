@@ -1,0 +1,62 @@
+import { Theme } from "tokens.slint";
+import { QuietButton } from "components.slint";
+
+export component ClientSwitcher inherits Rectangle {
+    in property <int> selected: 0;
+    in property <string> codex-status;
+    in property <string> claude-status: "尚未接入";
+    in property <bool> enabled: true;
+    callback chosen(int);
+    height: 126px;
+    vertical-stretch: 0;
+
+    Rectangle {
+        y: root.selected == 1 ? 66px : 0px;
+        height: 60px;
+        border-radius: 10px;
+        background: Theme.panel;
+        border-width: 1px;
+        border-color: Theme.border;
+        opacity: root.selected >= 0 ? 1 : 0;
+        animate y {
+            duration: Theme.page-motion;
+            easing: cubic-bezier(0.22, 1, 0.36, 1);
+        }
+        animate opacity { duration: Theme.fast; }
+    }
+
+    VerticalLayout {
+        spacing: 6px;
+        QuietButton {
+            text: "Codex";
+            description: root.codex-status;
+            icon: @image-url("../assets/providers/icons/openai.svg");
+            icon-color: root.selected == 0 ? Theme.brand : Theme.muted-text;
+            icon-width: 24px;
+            icon-height: 24px;
+            height: 60px;
+            left-aligned: true;
+            navigation: true;
+            selected: root.selected == 0;
+            enabled: root.enabled;
+            accessible-label: "管理 Codex";
+            clicked => { root.chosen(0); }
+        }
+
+        QuietButton {
+            text: "Claude Code";
+            description: root.claude-status;
+            icon: @image-url("../assets/providers/icons/claude.svg");
+            icon-color: root.selected == 1 ? Theme.brand : Theme.muted-text;
+            icon-width: 24px;
+            icon-height: 24px;
+            height: 60px;
+            left-aligned: true;
+            navigation: true;
+            selected: root.selected == 1;
+            enabled: root.enabled;
+            accessible-label: "管理 Claude Code";
+            clicked => { root.chosen(1); }
+        }
+    }
+}

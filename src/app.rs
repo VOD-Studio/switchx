@@ -9,6 +9,7 @@ use std::{
 use crate::{codex, storage::Store};
 
 mod activity;
+mod clients;
 mod common_config;
 mod models;
 mod presets;
@@ -22,6 +23,7 @@ pub(crate) use activity::requests_from;
 pub use activity::{
     RequestStats, RequestView, clear_requests, format_duration, load_requests, request_stats,
 };
+pub use clients::{remember_client_workspace, save_client_page, selected_client_workspace};
 pub use common_config::{
     extract_and_save_common_config, initialize_common_config, load_common_config,
     save_common_config,

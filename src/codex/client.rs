@@ -38,19 +38,7 @@ pub struct ImportCandidate {
 }
 
 pub fn default_home() -> Result<PathBuf, String> {
-    if let Some(path) = env::var_os("CODEX_HOME") {
-        let path = PathBuf::from(path);
-        return if path.is_absolute() {
-            Ok(path)
-        } else {
-            Err("CODEX_HOME 必须是绝对路径".into())
-        };
-    }
-    env::var_os("HOME")
-        .map(PathBuf::from)
-        .filter(|path| path.is_absolute())
-        .map(|path| path.join(".codex"))
-        .ok_or_else(|| "找不到 Codex 配置目录".into())
+    crate::clients::ClientKind::Codex.default_home()
 }
 
 pub fn config_path(home: &Path) -> Result<PathBuf, String> {
