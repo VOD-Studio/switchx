@@ -665,12 +665,25 @@ pub fn detail_row(
         .into(),
         speed: row
             .speed
-            .map(|speed| format!("{speed:.0} tok/s"))
+            .map(|speed| {
+                if row.estimated_timing {
+                    format!("≈{speed:.0} tok/s")
+                } else {
+                    format!("{speed:.0} tok/s")
+                }
+            })
             .unwrap_or_else(|| "—".into())
             .into(),
         duration: row
             .duration_ms
-            .map(app::format_duration)
+            .map(|duration| {
+                let text = app::format_duration(duration);
+                if row.estimated_timing {
+                    format!("≈{text}")
+                } else {
+                    text
+                }
+            })
             .unwrap_or_else(|| "—".into())
             .into(),
         source: format!(

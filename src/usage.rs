@@ -1,5 +1,6 @@
-//! Token usage reported by Responses upstreams and Codex session logs.
-//! Only counts, model IDs, and opaque response IDs are kept; never prompts or output.
+//! Token usage reported by Responses upstreams and session logs.
+//! Only counts, model IDs, opaque response IDs, and request timing are kept;
+//! never prompts or output.
 
 use serde_json::Value;
 
@@ -134,6 +135,15 @@ impl TokenUsage {
             reasoning: self.reasoning.saturating_sub(earlier.reasoning),
         }
     }
+}
+
+/// A session log has no measured generation window. Keep a start-to-end span only
+/// when it is long enough to be a real request and short enough to exclude idle time.
+pub(crate) fn plausible_latency_ms(start_ms: i64, end_ms: i64) -> Option<i64> {
+    const MIN_MS: i64 = 100;
+    const MAX_MS: i64 = 60 * 60 * 1000;
+    let latency = end_ms.checked_sub(start_ms)?;
+    (MIN_MS..=MAX_MS).contains(&latency).then_some(latency)
 }
 
 /// Upstream response IDs are opaque; keep only short printable ASCII ones.

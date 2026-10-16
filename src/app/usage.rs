@@ -25,6 +25,36 @@ use crate::{
 pub const USAGE_PAGE: usize = 60;
 pub const USAGE_ROW_LIMIT: usize = 1_000;
 
+/// Estimated speed includes time to first token, so short replies understate it.
+const ESTIMATED_SPEED_MIN_OUTPUT: u64 = 200;
+const ESTIMATED_SPEED_MIN_DURATION_MS: i64 = 1_000;
+
+/// Router rows use measured generation speed. Every other source divides output
+/// tokens by the whole estimated duration, and only past the thresholds above.
+fn output_speed(record: &crate::storage::UsageRecord) -> (Option<f64>, bool) {
+    if record.source == UsageSource::Router {
+        let speed = match (record.duration_ms, record.first_event_ms) {
+            (Some(duration), Some(first))
+                if duration >= first && duration - first >= 50 && record.usage.output > 0 =>
+            {
+                Some(record.usage.output as f64 * 1_000.0 / (duration - first) as f64)
+            }
+            _ => None,
+        };
+        return (speed, false);
+    }
+    let speed = match record.duration_ms {
+        Some(duration)
+            if duration >= ESTIMATED_SPEED_MIN_DURATION_MS
+                && record.usage.output >= ESTIMATED_SPEED_MIN_OUTPUT =>
+        {
+            Some(record.usage.output as f64 * 1_000.0 / duration as f64)
+        }
+        _ => None,
+    };
+    (speed, record.duration_ms.is_some())
+}
+
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct UsageQuery {
     pub period: Period,
@@ -47,6 +77,8 @@ pub struct UsageRow {
     /// `None` when the model has no price.
     pub cost: Option<(Currency, u128)>,
     pub speed: Option<f64>,
+    /// The duration and speed were estimated from session-log timestamps.
+    pub estimated_timing: bool,
     pub duration_ms: Option<i64>,
     pub routed: bool,
     pub source: UsageSource,
@@ -172,14 +204,7 @@ pub(crate) fn usage_from(store: &Store, query: &UsageQuery) -> Result<UsageView,
             } else {
                 cost.api
             };
-            let speed = match (record.duration_ms, record.first_event_ms) {
-                (Some(duration), Some(first))
-                    if duration - first >= 50 && record.usage.output > 0 =>
-                {
-                    Some(record.usage.output as f64 * 1_000.0 / (duration - first) as f64)
-                }
-                _ => None,
-            };
+            let (speed, estimated_timing) = output_speed(&record);
             UsageRow {
                 clock: report::clock(record.started_at_ms, now),
                 started_at_ms: record.started_at_ms,
@@ -194,6 +219,7 @@ pub(crate) fn usage_from(store: &Store, query: &UsageQuery) -> Result<UsageView,
                 public_model: record.public_model,
                 usage: record.usage,
                 speed,
+                estimated_timing,
                 duration_ms: record.duration_ms,
                 routed: record.source == UsageSource::Router,
                 source: record.source,
@@ -912,6 +938,80 @@ mod tests {
             2
         );
         std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn claude_log_speed_uses_the_whole_estimated_duration() {
+        use crate::storage::UsageRecord;
+        let record = UsageRecord {
+            reported_cost_micros: None,
+            request_count: 1,
+            id: "claude:msg".into(),
+            source: UsageSource::ClaudeLog,
+            client: UsageClient::ClaudeCode,
+            started_at_ms: 0,
+            provider_id: None,
+            codex_provider: None,
+            public_model: None,
+            model: "claude-opus".into(),
+            usage: TokenUsage {
+                output: 900,
+                ..Default::default()
+            },
+            duration_ms: Some(9_000),
+            first_event_ms: Some(2_000),
+            response_id: None,
+            session_id: None,
+        };
+        assert_eq!(output_speed(&record), (Some(100.0), true));
+        let short = UsageRecord {
+            usage: TokenUsage {
+                output: 199,
+                ..Default::default()
+            },
+            ..record.clone()
+        };
+        assert_eq!(output_speed(&short), (None, true));
+        let brief = UsageRecord {
+            usage: TokenUsage {
+                output: 200,
+                ..Default::default()
+            },
+            duration_ms: Some(999),
+            ..record.clone()
+        };
+        assert_eq!(output_speed(&brief), (None, true));
+        let routed = UsageRecord {
+            source: UsageSource::Router,
+            duration_ms: Some(2_100),
+            first_event_ms: Some(100),
+            usage: TokenUsage {
+                output: 40,
+                ..Default::default()
+            },
+            ..record.clone()
+        };
+        assert_eq!(output_speed(&routed), (Some(20.0), false));
+        let session = UsageRecord {
+            source: UsageSource::SessionLog,
+            client: UsageClient::GrokBuild,
+            usage: TokenUsage {
+                output: 400,
+                ..Default::default()
+            },
+            duration_ms: Some(2_000),
+            first_event_ms: Some(500),
+            ..record
+        };
+        assert_eq!(output_speed(&session), (Some(200.0), true));
+        let untimed = UsageRecord {
+            source: UsageSource::CodexLog,
+            client: UsageClient::Codex,
+            duration_ms: None,
+            first_event_ms: None,
+            ..session
+        };
+        assert_eq!(output_speed(&untimed), (None, false));
     }
 
     #[test]

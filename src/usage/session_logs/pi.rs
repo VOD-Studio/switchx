@@ -45,11 +45,13 @@ fn parse(line: &[u8], state: &mut State) -> Vec<UsageRecord> {
         _ => return vec![],
     };
     let Some(tokens) = tokens else { return vec![] };
-    let Some(at) = entry.timestamp.as_ref().and_then(timestamp).or_else(|| {
-        message
-            .and_then(|m| m.timestamp.as_ref())
-            .and_then(timestamp)
-    }) else {
+    // An assistant message's timestamp is set before the request; the entry
+    // timestamp is message_end. The span includes time to first token.
+    let entry_at = entry.timestamp.as_ref().and_then(timestamp);
+    let message_at = message
+        .and_then(|m| m.timestamp.as_ref())
+        .and_then(timestamp);
+    let Some(at) = entry_at.or(message_at) else {
         return vec![];
     };
     let model = message
@@ -106,6 +108,12 @@ fn parse(line: &[u8], state: &mut State) -> Vec<UsageRecord> {
     row.response_id = message
         .and_then(|m| m.response_id.as_ref())
         .and_then(|id| super::super::response_id(&Value::String(id.clone())));
+    if kind == "assistant" {
+        row.duration_ms = match (message_at, entry_at) {
+            (Some(start), Some(end)) => crate::usage::plausible_latency_ms(start, end),
+            _ => None,
+        };
+    }
     vec![row]
 }
 

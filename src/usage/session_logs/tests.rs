@@ -104,12 +104,13 @@ fn gemini_json_jsonl_migration_updates_checkpoints_and_partial_tail() {
 fn grok_turns_are_independent_count_model_calls_and_keep_only_complete_native_costs() {
     let f = Fixture::new();
     let path = "grok/sessions/project/session/updates.jsonl";
-    let turn = |prompt, partial, ticks| json!({"timestamp":TIME,"method":"_x.ai/session/update","params":{"update":{"sessionUpdate":"turn_completed","prompt_id":prompt,"usage":{"costIsPartial":partial,"modelUsage":{"grok-test":{"inputTokens":100,"cachedReadTokens":80,"outputTokens":20,"reasoningTokens":10,"modelCalls":3,"costUsdTicks":ticks}}}}}});
+    let turn = |prompt, partial, ticks| json!({"timestamp":TIME,"method":"_x.ai/session/update","params":{"update":{"sessionUpdate":"turn_completed","prompt_id":prompt,"usage":{"costIsPartial":partial,"modelUsage":{"grok-test":{"inputTokens":100,"cachedReadTokens":80,"outputTokens":20,"reasoningTokens":10,"modelCalls":3,"apiDurationMs":2500,"costUsdTicks":ticks}}}}}});
     f.line(path, turn("p1", false, 12_345_000));
     f.line(path, turn("p2", true, 5_000_000));
     assert_eq!(f.scan(UsageClient::GrokBuild, "grok").added, 2);
     let rows = f.rows();
     assert_eq!(rows.iter().map(|r| r.request_count).sum::<u64>(), 6);
+    assert!(rows.iter().all(|r| r.duration_ms == Some(2_500)));
     assert_eq!(rows.iter().map(|r| r.usage.total()).sum::<u64>(), 240);
     assert_eq!(
         rows.iter()
@@ -144,6 +145,7 @@ fn pi_forked_ancestors_and_all_usage_carriers_are_deduplicated() {
     f.line(path, json!({"type":"session","id":"session"}));
     f.line(path, message(10, "1.2345675"));
     assert_eq!(f.scan(UsageClient::Pi, "pi").added, 1);
+    assert_eq!(f.rows()[0].duration_ms, None);
     assert_eq!(f.rows()[0].reported_cost_micros, Some(1_234_568));
     assert_eq!(f.rows()[0].model, "actual");
     assert_eq!(f.rows()[0].public_model.as_deref(), Some("requested"));
@@ -179,6 +181,27 @@ fn pi_forked_ancestors_and_all_usage_carriers_are_deduplicated() {
     );
 }
 
+#[test]
+fn pi_assistant_duration_uses_message_start_and_entry_end() {
+    let f = Fixture::new();
+    let path = "pi/s.jsonl";
+    f.line(path, json!({"type":"session","id":"s"}));
+    f.line(path, json!({"type":"message","id":"slow","timestamp":"2026-10-15T08:00:04Z","message":{"role":"assistant","timestamp":"2026-10-15T08:00:00Z","model":"m","usage":{"input":1,"output":2}}}));
+    f.line(path, json!({"type":"message","id":"fast","timestamp":"2026-10-15T08:00:01.050Z","message":{"role":"assistant","timestamp":"2026-10-15T08:00:01.000Z","model":"m","usage":{"input":1,"output":2}}}));
+    f.line(path, json!({"type":"message","id":"tool","timestamp":"2026-10-15T08:00:09Z","message":{"role":"toolResult","timestamp":"2026-10-15T08:00:00Z","toolCallId":"c","usage":{"input":1,"output":1}}}));
+    assert_eq!(f.scan(UsageClient::Pi, "pi").added, 3);
+    let duration = |id: &str| {
+        f.rows()
+            .into_iter()
+            .find(|row| row.id.contains(id))
+            .unwrap()
+            .duration_ms
+    };
+    assert_eq!(duration("slow"), Some(4_000));
+    assert_eq!(duration("fast"), None);
+    assert_eq!(duration("tool"), None);
+}
+
 fn opencode_db(f: &Fixture) -> Connection {
     let db = Connection::open(f.root.join("opencode.db")).unwrap();
     db.execute_batch("PRAGMA journal_mode=WAL; CREATE TABLE session(id TEXT PRIMARY KEY,time_updated INTEGER);CREATE TABLE message(id TEXT PRIMARY KEY,session_id TEXT,time_created INTEGER,time_updated INTEGER,data TEXT);INSERT INTO session VALUES ('s',1);").unwrap();
@@ -212,6 +235,7 @@ fn opencode_reads_wal_completion_cost_changes_and_v2_compaction_without_v1_dupli
         ),
         (145, 13, Some(250000))
     );
+    assert_eq!(f.rows()[0].duration_ms, Some(1_000));
     db.execute(
         "UPDATE message SET data=?1 WHERE id='m'",
         [opencode_message(true, 0.5).to_string()],
@@ -231,7 +255,12 @@ fn opencode_reads_wal_completion_cost_changes_and_v2_compaction_without_v1_dupli
     assert!(
         f.rows()
             .iter()
-            .any(|r| r.model == "compact-model" && r.usage.output == 3)
+            .any(|r| r.model == "compact-model" && r.usage.output == 3 && r.duration_ms.is_none())
+    );
+    assert!(
+        f.rows()
+            .iter()
+            .any(|r| r.model == "model" && r.duration_ms == Some(1_000))
     );
     assert_eq!(f.scan(UsageClient::OpenCode, "opencode.db").read, 0);
     assert_eq!(

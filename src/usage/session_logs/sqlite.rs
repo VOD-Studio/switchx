@@ -62,7 +62,8 @@ pub fn import(
         vec![]
     };
     scan(paths, cancel, progress, |path| {
-        let version = revision(path)?;
+        // `t1` forces one reread of cursors saved before request timing was imported.
+        let version = format!("t1:{}", revision(path)?);
         let key = format!("{}:database:{}", client.as_str(), path.display());
         let previous = store
             .usage_log_file(&key)
@@ -167,15 +168,14 @@ fn opencode(
                         .and_then(|s| label(Some(s.into())))
                 })
                 .unwrap_or_default();
-            let at = message
-                .time
-                .as_ref()
-                .and_then(|t| t.created)
-                .unwrap_or(row.get(3)?);
+            let times = message.time.as_ref();
+            let at = times.and_then(|t| t.created).unwrap_or(row.get(3)?);
             if !(0..=253_402_300_799_999).contains(&at) {
                 continue;
             }
             let mut target = record(UsageClient::OpenCode, &session, &id, model, at, usage);
+            target.duration_ms =
+                times.and_then(|t| crate::usage::plausible_latency_ms(t.created?, t.completed?));
             target.reported_cost_micros = cost;
             target.response_id = message
                 .response_id

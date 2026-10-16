@@ -24,7 +24,7 @@ pub(crate) fn usage_sources_from(store: &Store) -> Result<Vec<UsageSourceView>, 
             let (default, hint) = match client {
                 UsageClient::Gemini => (
                     home.join(".gemini"),
-                    "配置目录；读取 tmp/*/chats 下的会话 JSON / JSONL。",
+                    "配置目录；读取 tmp/*/chats 下的会话 JSON / JSONL。日志没有单次请求的起止时间，速度留空。",
                 ),
                 UsageClient::OpenCode => (
                     absolute_env("OPENCODE_DB").unwrap_or_else(|| {
@@ -32,11 +32,11 @@ pub(crate) fn usage_sources_from(store: &Store) -> Result<Vec<UsageSourceView>, 
                             .unwrap_or_else(|| home.join(".local/share"))
                             .join("opencode/opencode.db")
                     }),
-                    "选择 opencode.db；自动读取会话与压缩用量，未完成消息会稍后补齐。",
+                    "选择 opencode.db；自动读取会话与压缩用量，未完成消息会稍后补齐。已完成消息按创建到完成估算耗时，速度带 ≈。",
                 ),
                 UsageClient::GrokBuild => (
                     home.join(".grok"),
-                    "配置目录；读取 sessions 和 archived_sessions，按轮汇总模型调用。",
+                    "配置目录；读取 sessions 和 archived_sessions，按轮汇总模型调用。耗时来自日志中的接口耗时，速度带 ≈。",
                 ),
                 UsageClient::Pi => (
                     absolute_env("PI_CODING_AGENT_SESSION_DIR").unwrap_or_else(|| {
@@ -44,13 +44,13 @@ pub(crate) fn usage_sources_from(store: &Store) -> Result<Vec<UsageSourceView>, 
                             .unwrap_or_else(|| home.join(".pi/agent"))
                             .join("sessions")
                     }),
-                    "会话目录；包含助手、工具、压缩与分支摘要的用量，不读取对话正文。",
+                    "会话目录；包含助手、工具、压缩与分支摘要的用量，不读取对话正文。助手消息按开始到写完估算耗时，速度带 ≈。",
                 ),
                 UsageClient::Mcode => (
                     absolute_env("MINIMAX_DATA_DIR")
                         .unwrap_or_else(|| home.join(".minimax"))
                         .join("v2/sqlite/runtime-state.sqlite"),
-                    "选择 runtime-state.sqlite；读取模型调用与费用，保留客户端上报的零费用。",
+                    "选择 runtime-state.sqlite；读取模型调用与费用，保留客户端上报的零费用。日志没有请求耗时，速度留空。",
                 ),
                 _ => unreachable!(),
             };

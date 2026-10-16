@@ -218,7 +218,7 @@ export component UsageSourcesSheet inherits ScrollView {
                 }
 
                 Body {
-                    text: "覆盖直连、原生登录与其他提供方的会话。启动时扫描一次，之后每分钟只读取新增内容；经路由的会话以路由记录为准，不重复计入。";
+                    text: "覆盖直连、原生登录与其他提供方的会话。启动时扫描一次，之后每分钟只读取新增内容；经路由的会话以路由记录为准，不重复计入。能从事件顺序估出的耗时和速度带 ≈；输出少于 200 token 或不足 1 秒的不显示速度。";
                 }
 
                 Rectangle {
@@ -283,7 +283,7 @@ export component UsageSourcesSheet inherits ScrollView {
                 }
 
                 Body {
-                    text: "每分钟增量读取主会话、子 agent 与 Workflow 日志。按回复去重，后续用量自动补全；会话不自动关联供应商或订阅账号。";
+                    text: "每分钟增量读取主会话、子 agent 与 Workflow 日志。按回复去重，后续用量自动补全。完整回复按日志时间戳估算耗时和速度，数字前带 ≈；输出少于 200 token 或不足 1 秒的不显示速度。会话不自动关联供应商或订阅账号。";
                 }
 
                 QuietLineEdit {

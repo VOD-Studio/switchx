@@ -3,7 +3,8 @@
 //! Rollout files are append-only JSONL. Only four record kinds are decoded —
 //! session metadata (session ID and provider key), turn context (model), and the
 //! two usage records — and only counts, IDs, model IDs, and times are kept.
-//! Paths, prompts, instructions, and tool output are never stored.
+//! Timing peeks event types and timestamps from the start of each line; paths,
+//! prompts, instructions, and tool output are never stored.
 
 use std::{
     fs::File,
@@ -24,6 +25,14 @@ const DIRECT_PROVIDER_PREFIX: &str = "switchx_direct_";
 // The record kind is among the first or last fields of every line, so other
 // lines are skipped without decoding them. Escaped text cannot match.
 const KIND_WINDOW: usize = 512;
+/// Cursors written before estimated timing lack this version and are reread once.
+const TIMING_VERSION: u8 = 1;
+/// Two lines this close were flushed together, not separated by a real request.
+const SAME_FLUSH_SLACK_MS: i64 = 100;
+/// Event type, role, and timestamp sit in the line head. Tool bodies are not parsed.
+const LINE_HEAD: usize = 512;
+/// `item_completed` lines are short; skip a full parse past this size.
+const ITEM_COMPLETED_LIMIT: usize = 8 * 1024;
 const KINDS: [&[u8]; 4] = [
     b"\"type\":\"token_usage_record\"",
     b"\"type\":\"token_count\"",
@@ -66,6 +75,11 @@ struct FileState {
     records: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     total: Option<[u64; 5]>,
+    /// `TIMING_VERSION` once this cursor has observed event order. Missing forces a reread.
+    #[serde(default)]
+    timing: u8,
+    #[serde(default)]
+    timer: RequestTimer,
 }
 
 #[derive(Deserialize)]
@@ -212,13 +226,22 @@ fn read_file(
         .map_or(0, |time| time.as_millis() as i64);
     // A shorter file was replaced; read it again and let record IDs deduplicate.
     let resume = known.filter(|file| file.read_offset <= size);
-    if resume.is_some_and(|file| file.size == size && file.modified_ms == modified_ms) {
+    let saved = resume.and_then(|file| serde_json::from_str::<FileState>(&file.state).ok());
+    let current = saved
+        .as_ref()
+        .is_some_and(|state| state.timing == TIMING_VERSION);
+    if current && resume.is_some_and(|file| file.size == size && file.modified_ms == modified_ms) {
         return Ok(None);
     }
-    let mut state = resume
-        .and_then(|file| serde_json::from_str::<FileState>(&file.state).ok())
-        .unwrap_or_default();
-    let mut offset = resume.map_or(0, |file| file.read_offset);
+    // An older cursor has no timer. Reread from the start so existing rows gain timing.
+    let (mut state, mut offset) = if current {
+        (
+            saved.unwrap_or_default(),
+            resume.map_or(0, |file| file.read_offset),
+        )
+    } else {
+        (FileState::default(), 0)
+    };
     let mut reader =
         BufReader::with_capacity(1 << 20, File::open(path).map_err(|_| ReadError::Io)?);
     reader
@@ -243,6 +266,7 @@ fn read_file(
             records.push(record);
         }
     }
+    state.timing = TIMING_VERSION;
     let file = UsageLogFile {
         path: key.into(),
         size,
@@ -263,13 +287,211 @@ fn wanted(line: &[u8]) -> bool {
     })
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum TimingKind {
+    /// The next request can only start after this line: a user message or `turn_context`.
+    Boundary,
+    /// A tool result, which is also a start boundary for the next request.
+    ToolOutput,
+    /// One finished model item (reasoning, assistant text, or a tool call).
+    ModelOutput,
+    /// `token_usage_record`, written when the response ends.
+    UsageRecord,
+    /// `task_started` or `turn_aborted`. A request that never reached a usage line ends here.
+    TurnReset,
+    /// Earliest `started_at_ms` of a reasoning or assistant item in this response.
+    OutputStarted(i64),
+}
+
+/// Estimates one request from event order. Codex logs have no per-request timer.
+/// The end is `token_usage_record` when present, otherwise `token_count`; if a tool
+/// result landed after the last model item and the count was flushed with it, the
+/// end is that model item (slightly early). The start is the latest boundary before
+/// the first model item. Model items flushed within 100 ms after a count belong to
+/// the previous response and are ignored.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+struct RequestTimer {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    last_boundary_ms: Option<i64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    last_token_count_ms: Option<i64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    request_start_ms: Option<i64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    last_model_output_ms: Option<i64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    tool_output_after_model_output_ms: Option<i64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    usage_end_ms: Option<i64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    first_output_ms: Option<i64>,
+}
+
+impl RequestTimer {
+    fn observe(&mut self, line: &[u8]) -> Option<TimingKind> {
+        let (timestamp_ms, kind) = classify(line)?;
+        match kind {
+            TimingKind::Boundary => {
+                self.last_boundary_ms = self.last_boundary_ms.max(Some(timestamp_ms));
+            }
+            TimingKind::ToolOutput => {
+                self.last_boundary_ms = self.last_boundary_ms.max(Some(timestamp_ms));
+                if self.last_model_output_ms.is_some() {
+                    self.tool_output_after_model_output_ms = Some(timestamp_ms);
+                }
+            }
+            TimingKind::ModelOutput => {
+                let trails = self.request_start_ms.is_none()
+                    && self
+                        .last_token_count_ms
+                        .is_some_and(|at| timestamp_ms.saturating_sub(at) <= SAME_FLUSH_SLACK_MS);
+                if trails {
+                    return Some(kind);
+                }
+                if self.request_start_ms.is_none() {
+                    self.request_start_ms = self.last_boundary_ms;
+                }
+                self.last_model_output_ms = Some(timestamp_ms);
+                self.tool_output_after_model_output_ms = None;
+            }
+            TimingKind::UsageRecord => self.usage_end_ms = Some(timestamp_ms),
+            TimingKind::OutputStarted(started) => {
+                self.first_output_ms =
+                    Some(self.first_output_ms.map_or(started, |at| at.min(started)));
+            }
+            TimingKind::TurnReset => {
+                let boundary = self.last_boundary_ms.max(Some(timestamp_ms));
+                let last_count = self.last_token_count_ms;
+                *self = Self {
+                    last_boundary_ms: boundary,
+                    last_token_count_ms: last_count,
+                    ..Self::default()
+                };
+            }
+        }
+        Some(kind)
+    }
+
+    /// Closes the current request. `token_count_ms` is the usage line's own timestamp
+    /// and becomes the next request's boundary. Returns `(duration_ms, first_event_ms)`.
+    fn finish(&mut self, token_count_ms: Option<i64>) -> Option<(i64, Option<i64>)> {
+        let start = self.request_start_ms.or(self.last_boundary_ms);
+        let first = self.first_output_ms;
+        let waited = match (self.tool_output_after_model_output_ms, token_count_ms) {
+            (Some(tool), Some(count)) => count.saturating_sub(tool) <= SAME_FLUSH_SLACK_MS,
+            (Some(_), None) => true,
+            _ => false,
+        };
+        let end = self.usage_end_ms.or(if waited {
+            self.last_model_output_ms
+        } else {
+            token_count_ms
+        });
+        let boundary = self.last_boundary_ms.max(token_count_ms);
+        let last_count = token_count_ms.or(self.last_token_count_ms);
+        *self = Self {
+            last_boundary_ms: boundary,
+            last_token_count_ms: last_count,
+            ..Self::default()
+        };
+        let start = start?;
+        let latency = crate::usage::plausible_latency_ms(start, end?)?;
+        let first_token = first.and_then(|at| {
+            let offset = at.checked_sub(start)?;
+            (offset > 0 && offset <= latency).then_some(offset)
+        });
+        Some((latency, first_token))
+    }
+}
+
+fn find_bytes(haystack: &[u8], needle: &[u8]) -> Option<usize> {
+    haystack
+        .windows(needle.len())
+        .position(|window| window == needle)
+}
+
+fn head_str<'a>(head: &'a [u8], key: &str) -> Option<&'a str> {
+    let needle = format!("\"{key}\":\"");
+    let start = find_bytes(head, needle.as_bytes())? + needle.len();
+    let rest = &head[start..];
+    let len = rest.iter().position(|byte| *byte == b'"')?;
+    std::str::from_utf8(&rest[..len]).ok()
+}
+
+fn classify(line: &[u8]) -> Option<(i64, TimingKind)> {
+    let head = &line[..line.len().min(LINE_HEAD)];
+    let (envelope, payload) = match find_bytes(head, b"\"payload\":{") {
+        Some(at) => head.split_at(at),
+        None => (head, &[][..]),
+    };
+    let timestamp_ms = head_str(envelope, "timestamp").and_then(parse_timestamp_ms)?;
+    let kind = match head_str(envelope, "type")? {
+        "turn_context" => TimingKind::Boundary,
+        "token_usage_record" => TimingKind::UsageRecord,
+        "response_item" => match head_str(payload, "type")? {
+            "message" => match head_str(payload, "role")? {
+                "assistant" => TimingKind::ModelOutput,
+                _ => TimingKind::Boundary,
+            },
+            "reasoning" => TimingKind::ModelOutput,
+            item if item.ends_with("_output") => TimingKind::ToolOutput,
+            item if item.ends_with("_call") => TimingKind::ModelOutput,
+            _ => return None,
+        },
+        "event_msg" => match head_str(payload, "type")? {
+            "task_started" | "turn_aborted" => TimingKind::TurnReset,
+            "item_completed" => output_started(line, payload)?,
+            _ => return None,
+        },
+        _ => return None,
+    };
+    Some((timestamp_ms, kind))
+}
+
+fn output_started(line: &[u8], payload_head: &[u8]) -> Option<TimingKind> {
+    let item_at = find_bytes(payload_head, b"\"item\":{")?;
+    match head_str(&payload_head[item_at..], "type")? {
+        "Reasoning" | "AgentMessage" => {}
+        _ => return None,
+    }
+    if line.len() > ITEM_COMPLETED_LIMIT {
+        return None;
+    }
+    let value: Value = serde_json::from_slice(line).ok()?;
+    let started = value.pointer("/payload/started_at_ms")?.as_i64()?;
+    Some(TimingKind::OutputStarted(started))
+}
+
+fn parse_timestamp_ms(text: &str) -> Option<i64> {
+    chrono::DateTime::parse_from_rfc3339(text)
+        .ok()
+        .map(|time| time.timestamp_millis())
+}
+
+fn entry_millis(entry: &Entry) -> Option<i64> {
+    parse_timestamp_ms(entry.timestamp.as_deref()?)
+}
+
+fn apply_timing(row: &mut UsageRecord, timing: Option<(i64, Option<i64>)>) {
+    if let Some((duration, first)) = timing {
+        row.duration_ms = Some(duration);
+        row.first_event_ms = first;
+    }
+}
+
 impl FileState {
     /// Applies one log line, returning a usage row when it reports new counts.
     fn line(&mut self, line: &[u8], since: i64) -> Option<UsageRecord> {
+        let observed = self.timer.observe(line);
         if !wanted(line) {
             return None;
         }
-        let entry: Entry = serde_json::from_slice(line).ok()?;
+        let Ok(entry) = serde_json::from_slice::<Entry>(line) else {
+            if observed == Some(TimingKind::UsageRecord) {
+                self.timer.finish(None);
+            }
+            return None;
+        };
         let payload = &entry.payload;
         match entry.kind.as_str() {
             "session_meta" => {
@@ -283,7 +505,8 @@ impl FileState {
             }
             "token_usage_record" => {
                 self.records = true;
-                let usage = TokenUsage::from_codex(payload.usage.as_ref()?)?;
+                let timing = self.timer.finish(entry_millis(&entry));
+                let usage = payload.usage.as_ref().and_then(TokenUsage::from_codex)?;
                 let response_id = payload.response_id.as_ref().and_then(super::response_id);
                 let thread = text(&payload.thread_id)
                     .or_else(|| text(&payload.session_id))
@@ -291,30 +514,44 @@ impl FileState {
                 let key = response_id
                     .clone()
                     .or_else(|| entry.ordinal.map(|ordinal| format!("o{ordinal}")))?;
-                self.record(
+                let mut row = self.record(
                     &entry,
                     usage,
                     format!("codex:{thread}:{key}"),
                     response_id,
                     thread,
                     since,
-                )
+                )?;
+                apply_timing(&mut row, timing);
+                Some(row)
             }
             "event_msg"
                 if !self.records
                     && payload.kind.as_ref().and_then(Value::as_str) == Some("token_count") =>
             {
-                let total =
-                    TokenUsage::from_codex(payload.info.as_ref()?.get("total_token_usage")?)?;
+                let at = entry_millis(&entry);
+                let Some(total) = payload
+                    .info
+                    .as_ref()
+                    .and_then(|info| info.get("total_token_usage"))
+                    .and_then(TokenUsage::from_codex)
+                else {
+                    self.timer.finish(at);
+                    return None;
+                };
                 let earlier = self.total.map(from_array).unwrap_or_default();
                 // Repeated events carry the same total; only growth is new usage.
                 if total.total() <= earlier.total() {
                     return None;
                 }
+                let timing = self.timer.finish(at);
                 self.total = Some(to_array(total));
                 let session = self.session.clone()?;
                 let id = format!("codex:{session}:t{}", total.total());
-                self.record(&entry, total.since(earlier), id, None, session, since)
+                let mut row =
+                    self.record(&entry, total.since(earlier), id, None, session, since)?;
+                apply_timing(&mut row, timing);
+                Some(row)
             }
             _ => None,
         }
@@ -413,6 +650,16 @@ mod tests {
         }
 
         fn append(&self, name: &str, lines: &[Value]) -> PathBuf {
+            self.append_lines(name, lines.iter().map(|line| line.to_string()))
+        }
+
+        /// Writes lines as given. Codex puts `timestamp` and `type` before `payload`;
+        /// `serde_json::Value` sorts keys and would hide those fields behind a long body.
+        fn append_lines(
+            &self,
+            name: &str,
+            lines: impl IntoIterator<Item = impl AsRef<str>>,
+        ) -> PathBuf {
             let path = self.0.join(name);
             std::fs::create_dir_all(path.parent().unwrap()).unwrap();
             let mut file = std::fs::OpenOptions::new()
@@ -421,7 +668,7 @@ mod tests {
                 .open(&path)
                 .unwrap();
             for line in lines {
-                writeln!(file, "{line}").unwrap();
+                writeln!(file, "{}", line.as_ref()).unwrap();
             }
             path
         }
@@ -710,6 +957,171 @@ mod tests {
             .collect::<Vec<_>>();
         assert!(!ids.contains(&"codex:thread-1:resp_unrecorded".to_owned()));
         assert!(ids.contains(&"late-router".to_owned()));
+    }
+
+    fn millis(stamp: &str) -> i64 {
+        chrono::DateTime::parse_from_rfc3339(stamp)
+            .unwrap()
+            .timestamp_millis()
+    }
+
+    #[test]
+    fn event_order_estimates_timing_backfills_it_and_leaves_router_rows_measured() {
+        let home = Home::new();
+        let db_path = std::env::temp_dir().join(format!(
+            "switchx-codex-timing-{}.sqlite",
+            crate::id::new_id().unwrap()
+        ));
+        let store = Store::open(&db_path).unwrap();
+        let secret = "secret-prompt";
+        let started = millis("2026-10-13T08:00:02.000Z");
+        let later = millis("2026-10-13T08:00:03.500Z");
+        home.append_lines(
+            ROLLOUT,
+            [
+                r#"{"timestamp":"2026-10-13T08:00:00.000Z","type":"session_meta","payload":{"id":"session-1","model_provider":"openai"}}"#,
+                r#"{"timestamp":"2026-10-13T08:00:00.500Z","type":"turn_context","payload":{"model":"gpt-synthetic"}}"#,
+                &format!(r#"{{"timestamp":"2026-10-13T08:00:01.000Z","type":"response_item","payload":{{"type":"message","role":"user","content":"{secret}"}}}}"#),
+                &format!(r#"{{"timestamp":"2026-10-13T08:00:03.000Z","type":"event_msg","payload":{{"type":"item_completed","item":{{"type":"Reasoning","id":"i1"}},"started_at_ms":{started}}}}}"#),
+                r#"{"timestamp":"2026-10-13T08:00:03.000Z","type":"response_item","payload":{"type":"reasoning","summary":[]}}"#,
+                &format!(r#"{{"timestamp":"2026-10-13T08:00:04.000Z","type":"event_msg","payload":{{"type":"item_completed","item":{{"type":"AgentMessage","id":"i2"}},"started_at_ms":{later}}}}}"#),
+                r#"{"timestamp":"2026-10-13T08:00:04.000Z","type":"response_item","payload":{"type":"message","role":"assistant","content":"secret-reply"}}"#,
+                r#"{"timestamp":"2026-10-13T08:00:05.000Z","type":"token_usage_record","payload":{"thread_id":"thread-1","response_id":"resp_a","usage":{"input_tokens":100,"cached_input_tokens":0,"output_tokens":400,"reasoning_output_tokens":0,"total_tokens":500}}}"#,
+            ],
+        );
+        let long_output = "x".repeat(2_000);
+        home.append_lines(
+            "sessions/2026/10/13/rollout-legacy.jsonl",
+            [
+                r#"{"timestamp":"2026-10-13T08:00:00.000Z","type":"session_meta","payload":{"id":"legacy","model_provider":"openai"}}"#,
+                &format!(r#"{{"timestamp":"2026-10-13T08:00:01.000Z","type":"response_item","payload":{{"type":"message","role":"user","content":"{secret}"}}}}"#),
+                &format!(r#"{{"timestamp":"2026-10-13T08:00:03.000Z","type":"response_item","payload":{{"type":"custom_tool_call","name":"shell","input":"{secret}"}}}}"#),
+                &format!(r#"{{"timestamp":"2026-10-13T08:00:10.000Z","type":"response_item","payload":{{"type":"custom_tool_call_output","output":"{long_output}"}}}}"#),
+                r#"{"timestamp":"2026-10-13T08:00:10.050Z","type":"event_msg","payload":{"type":"token_count","info":{"total_token_usage":{"input_tokens":100,"cached_input_tokens":0,"output_tokens":10,"reasoning_output_tokens":0,"total_tokens":110}}}}"#,
+                &format!(r#"{{"timestamp":"2026-10-13T08:00:10.080Z","type":"response_item","payload":{{"type":"reasoning","summary":["{secret}"]}}}}"#),
+                r#"{"timestamp":"2026-10-13T08:00:11.000Z","type":"event_msg","payload":{"type":"token_count","info":{"total_token_usage":{"input_tokens":100,"cached_input_tokens":0,"output_tokens":10,"reasoning_output_tokens":0,"total_tokens":110}}}}"#,
+                &format!(r#"{{"timestamp":"2026-10-13T08:01:40.000Z","type":"response_item","payload":{{"type":"message","role":"user","content":"{secret}"}}}}"#),
+                r#"{"timestamp":"2026-10-13T08:01:50.000Z","type":"event_msg","payload":{"type":"token_count","info":{"total_token_usage":{"input_tokens":160,"cached_input_tokens":0,"output_tokens":30,"reasoning_output_tokens":0,"total_tokens":190}}}}"#,
+            ],
+        );
+        run(&store, &home);
+        let timed = rows(&store);
+        let row = |id: &str| timed.iter().find(|row| row.id == id).unwrap();
+        assert_eq!(
+            (
+                row("codex:thread-1:resp_a").duration_ms,
+                row("codex:thread-1:resp_a").first_event_ms
+            ),
+            (Some(4_000), Some(1_000))
+        );
+        assert_eq!(row("codex:thread-1:resp_a").usage.output, 400);
+        // The count was flushed with the tool result, so the span ends at the tool call.
+        assert_eq!(row("codex:legacy:t110").duration_ms, Some(2_000));
+        // The reasoning line flushed just after the count is not the next request.
+        assert_eq!(row("codex:legacy:t190").duration_ms, Some(10_000));
+        assert_eq!(row("codex:legacy:t190").usage.output, 20);
+        let state = store.usage_log_files().unwrap();
+        assert!(state.iter().all(|file| {
+            !file.state.contains(secret) && !format!("{timed:?}").contains(secret)
+        }));
+
+        store
+            .put_request(&RequestRecord {
+                id: "router-request".into(),
+                started_at_ms: millis("2026-10-13T08:00:30.000Z"),
+                public_model: Some("显示名称".into()),
+                provider_id: Some("one".into()),
+                upstream_model: Some("actual".into()),
+                generation: "generation".into(),
+                http_status: Some(200),
+                headers_ms: None,
+                first_event_ms: Some(4),
+                duration_ms: 10,
+                status: RequestStatus::Completed,
+                error_code: None,
+                fallback_from: None,
+                usage: Some(TokenUsage {
+                    input: 9,
+                    output: 1,
+                    ..Default::default()
+                }),
+                response_id: Some("resp_keep".into()),
+            })
+            .unwrap();
+        home.append_lines(
+            ROLLOUT,
+            [
+                &format!(r#"{{"timestamp":"2026-10-13T08:00:30.000Z","type":"response_item","payload":{{"type":"message","role":"user","content":"{secret}"}}}}"#),
+                r#"{"timestamp":"2026-10-13T08:00:34.000Z","type":"token_usage_record","payload":{"thread_id":"thread-1","response_id":"resp_keep","usage":{"input_tokens":9,"cached_input_tokens":0,"output_tokens":1,"reasoning_output_tokens":0,"total_tokens":10}}}"#,
+                &format!(r#"{{"timestamp":"2026-10-13T08:00:40.000Z","type":"response_item","payload":{{"type":"message","role":"user","content":"{secret}"}}}}"#),
+                r#"{"timestamp":"2026-10-13T08:00:42.000Z","type":"token_usage_record","payload":{"thread_id":"thread-1","response_id":"resp_b","usage":{"input_tokens":10,"cached_input_tokens":0,"output_tokens":20,"reasoning_output_tokens":0,"total_tokens":30}}}"#,
+            ],
+        );
+        // One new logged row, plus the router row's client attribution.
+        assert_eq!(run(&store, &home).added, 2);
+        let timed = rows(&store);
+        let row = |id: &str| timed.iter().find(|row| row.id == id).unwrap();
+        assert_eq!(row("codex:thread-1:resp_b").duration_ms, Some(2_000));
+        assert_eq!(row("codex:thread-1:resp_b").first_event_ms, None);
+        let router = row("router-request");
+        assert_eq!(
+            (router.source, router.duration_ms, router.first_event_ms),
+            (UsageSource::Router, Some(10), Some(4))
+        );
+        assert!(
+            !timed
+                .iter()
+                .any(|row| row.response_id.as_deref() == Some("resp_keep")
+                    && row.source == UsageSource::CodexLog)
+        );
+        assert_eq!(run(&store, &home).read, 0);
+
+        let counts: Vec<_> = timed
+            .iter()
+            .filter(|row| row.source == UsageSource::CodexLog)
+            .map(|row| (row.id.clone(), row.usage.output))
+            .collect();
+        let files = store.usage_log_files().unwrap();
+        drop(store);
+        let poke = rusqlite::Connection::open(&db_path).unwrap();
+        poke.execute(
+            "UPDATE usage_records SET duration_ms = NULL, first_event_ms = NULL WHERE source = 'codex_log'",
+            [],
+        )
+        .unwrap();
+        for file in &files {
+            let mut value: Value = serde_json::from_str(&file.state).unwrap();
+            let object = value.as_object_mut().unwrap();
+            object.remove("timing");
+            object.remove("timer");
+            poke.execute(
+                "UPDATE usage_log_files SET state = ?1 WHERE path = ?2",
+                rusqlite::params![value.to_string(), file.path],
+            )
+            .unwrap();
+        }
+        drop(poke);
+        let store = Store::open(&db_path).unwrap();
+        assert_eq!(run(&store, &home).added, counts.len());
+        let restored = rows(&store);
+        assert_eq!(restored.len(), timed.len());
+        for (id, output) in counts {
+            let row = restored.iter().find(|row| row.id == id).unwrap();
+            assert_eq!(row.usage.output, output);
+            assert!(row.duration_ms.is_some(), "{id}");
+        }
+        let router = restored
+            .iter()
+            .find(|row| row.id == "router-request")
+            .unwrap();
+        assert_eq!(
+            (router.duration_ms, router.first_event_ms),
+            (Some(10), Some(4))
+        );
+        drop(store);
+        let _ = std::fs::remove_file(&db_path);
+        let _ = std::fs::remove_file(format!("{}-wal", db_path.display()));
+        let _ = std::fs::remove_file(format!("{}-shm", db_path.display()));
     }
 
     #[test]

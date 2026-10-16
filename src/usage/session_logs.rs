@@ -204,8 +204,9 @@ fn fingerprint(file: &mut File, offset: u64) -> std::io::Result<String> {
     file.seek(SeekFrom::Start(offset - len))?;
     let mut bytes = vec![0; len as usize];
     file.read_exact(&mut bytes)?;
+    // `t1` forces one reread of cursors saved before request timing was imported.
     Ok(format!(
-        "{:016x}",
+        "t1:{:016x}",
         bytes
             .iter()
             .fold(0xcbf29ce484222325u64, |h, b| (h ^ u64::from(*b))

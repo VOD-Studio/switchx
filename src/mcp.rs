@@ -407,7 +407,8 @@ fn tools(access: Access) -> Value {
             "get_usage",
             "用量统计",
             "按时间段汇总 token 用量和估算费用，包括与上一同长时段的对比、按连接和按模型的分布、未定价模型，\
-             以及最近的明细行。费用只按用户填写的价格估算；订阅连接的费用是等价 API 价格。",
+             以及最近的明细行。费用只按用户填写的价格估算；订阅连接的费用是等价 API 价格。\
+             路由请求的 output_tokens_per_second 是首字之后的生成速度。会话日志能估出耗时的速度按整段耗时计算，此时 timing 为 estimated。",
             json!({
                 "period": {
                     "type": "string",
@@ -910,6 +911,9 @@ fn usage(store: &Store, arguments: &Map<String, Value>) -> Result<Value, String>
             }
             if let Some(duration) = row.duration_ms {
                 value["duration_ms"] = duration.into();
+            }
+            if row.estimated_timing {
+                value["timing"] = "estimated".into();
             }
             if let Some(speed) = row.speed {
                 value["output_tokens_per_second"] = round(speed, 1).into();

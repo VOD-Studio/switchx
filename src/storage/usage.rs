@@ -282,6 +282,19 @@ impl super::Store {
                         params![record.response_id, record.client.as_str(), record.reported_cost_micros.map(|n|n.min(i64::MAX as u64) as i64)],
                     )?;
                 }
+                if record.source == UsageSource::CodexLog {
+                    // Backfill estimated timing onto the logged row only. Router rows that
+                    // share a response ID keep the measured duration.
+                    added += transaction.execute(
+                        "UPDATE usage_records SET
+                            duration_ms = COALESCE(MAX(duration_ms, ?2), duration_ms, ?2),
+                            first_event_ms = COALESCE(first_event_ms, ?3)
+                         WHERE id = ?1 AND source = 'codex_log' AND
+                            ((?2 IS NOT NULL AND (duration_ms IS NULL OR duration_ms < ?2))
+                             OR (first_event_ms IS NULL AND ?3 IS NOT NULL))",
+                        params![record.id, record.duration_ms, record.first_event_ms],
+                    )?;
+                }
                 if matches!(
                     record.source,
                     UsageSource::ClaudeLog | UsageSource::SessionLog
@@ -301,12 +314,13 @@ impl super::Store {
                             reasoning_tokens = MAX(reasoning_tokens, ?10),
                             reported_cost_micros = CASE WHEN ?6 >= output_tokens AND ?2 + ?3 + ?4 >= input_tokens THEN COALESCE(?11, reported_cost_micros) ELSE reported_cost_micros END,
                             request_count = MAX(request_count, ?12),
-                            duration_ms = COALESCE(MAX(duration_ms, ?13), duration_ms, ?13)
+                            duration_ms = COALESCE(MAX(duration_ms, ?13), duration_ms, ?13),
+                            first_event_ms = COALESCE(first_event_ms, ?14)
                          WHERE id = ?1 AND source IN ('claude_log', 'session_log') AND
-                            (input_tokens - cached_input_tokens - cache_write_tokens < ?2 OR cached_input_tokens < ?3 OR cache_write_tokens < ?4 OR cache_write_1h_tokens < ?5 OR output_tokens < ?6 OR started_at_ms > ?7 OR (model != ?8 AND ?8 != '' AND ?6 >= output_tokens AND ?2 + ?3 + ?4 >= input_tokens) OR (session_id IS NULL AND ?9 IS NOT NULL) OR reasoning_tokens < ?10 OR (?11 IS NOT NULL AND reported_cost_micros IS NOT ?11 AND ?6 >= output_tokens AND ?2 + ?3 + ?4 >= input_tokens) OR request_count < ?12 OR (?13 IS NOT NULL AND (duration_ms IS NULL OR duration_ms < ?13)))",
+                            (input_tokens - cached_input_tokens - cache_write_tokens < ?2 OR cached_input_tokens < ?3 OR cache_write_tokens < ?4 OR cache_write_1h_tokens < ?5 OR output_tokens < ?6 OR started_at_ms > ?7 OR (model != ?8 AND ?8 != '' AND ?6 >= output_tokens AND ?2 + ?3 + ?4 >= input_tokens) OR (session_id IS NULL AND ?9 IS NOT NULL) OR reasoning_tokens < ?10 OR (?11 IS NOT NULL AND reported_cost_micros IS NOT ?11 AND ?6 >= output_tokens AND ?2 + ?3 + ?4 >= input_tokens) OR request_count < ?12 OR (?13 IS NOT NULL AND (duration_ms IS NULL OR duration_ms < ?13)) OR (first_event_ms IS NULL AND ?14 IS NOT NULL))",
                         params![record.id, record.usage.fresh_input() as i64, record.usage.cached_input as i64,
                             record.usage.cache_write as i64, record.usage.cache_write_1h as i64,
-                            record.usage.output as i64, record.started_at_ms, record.model, record.session_id, record.usage.reasoning as i64, record.reported_cost_micros.map(|v| v.min(i64::MAX as u64) as i64), record.request_count.clamp(1,1_000_000) as i64, record.duration_ms],
+                            record.usage.output as i64, record.started_at_ms, record.model, record.session_id, record.usage.reasoning as i64, record.reported_cost_micros.map(|v| v.min(i64::MAX as u64) as i64), record.request_count.clamp(1,1_000_000) as i64, record.duration_ms, record.first_event_ms],
                     )?;
                 }
                 added += insert.execute(params![

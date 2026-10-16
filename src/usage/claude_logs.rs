@@ -1,7 +1,9 @@
 //! Incremental Claude Code transcript import. Only counters, model/message/session
-//! IDs and timestamps are decoded; conversation contents and credentials are ignored.
+//! IDs, parent links, and timestamps are decoded. A content block's type is read
+//! when estimating time to first token; conversation text and credentials are ignored.
 
 use std::{
+    collections::HashMap,
     fs::{self, File},
     io::{BufRead, BufReader, Read, Seek, SeekFrom},
     path::{Path, PathBuf},
@@ -9,7 +11,6 @@ use std::{
     time::UNIX_EPOCH,
 };
 
-use serde::Deserialize;
 use serde_json::Value;
 
 use super::{
@@ -18,41 +19,160 @@ use super::{
 };
 use crate::storage::{Store, UsageClient, UsageLogFile, UsageRecord, UsageSource};
 
-#[derive(Deserialize)]
-struct Entry {
-    #[serde(rename = "type")]
-    kind: String,
-    timestamp: Option<String>,
-    #[serde(rename = "sessionId")]
-    session: Option<String>,
-    message: Option<Message>,
-}
-
-#[derive(Deserialize)]
-struct Message {
-    id: Option<String>,
-    model: Option<String>,
-    usage: Option<Value>,
-}
-
 fn identifier(value: Option<String>) -> Option<String> {
     value.filter(|id| !id.is_empty() && id.len() <= 256 && !id.chars().any(char::is_control))
 }
 
-fn record(line: &[u8]) -> Option<UsageRecord> {
-    let entry: Entry = serde_json::from_slice(line).ok()?;
-    if entry.kind != "assistant" {
+/// Shorter than this is not a real request; longer than this includes sleep or a retry.
+const MIN_PLAUSIBLE_LATENCY_MS: i64 = 100;
+const MAX_PLAUSIBLE_LATENCY_MS: i64 = 60 * 60 * 1000;
+/// The user or tool line that started a reply is usually already behind the read cursor.
+const CHAIN_SEED_BYTES: i64 = 256 * 1024;
+const MAX_CHAIN_HOPS: usize = 32;
+
+struct ChainNode {
+    parent: Option<String>,
+    timestamp_ms: Option<i64>,
+    attachment: bool,
+}
+
+/// Timing clues for one reply. Blocks that share a message ID belong together.
+struct BlockTiming {
+    first_parent: Option<String>,
+    /// False when the first block is outside the lookback window. Estimating from a
+    /// later block starts too late and inflates speed.
+    starts_at_first_block: bool,
+    /// When the reply started producing output. Only a leading thinking block records
+    /// this, as its write time minus `thinkingDurationMs`.
+    first_output_ms: Option<i64>,
+    end_ms: Option<i64>,
+    finished: bool,
+}
+
+fn line_id(value: &Value, key: &str) -> Option<String> {
+    identifier(value.get(key).and_then(Value::as_str).map(str::to_owned))
+}
+
+fn timestamp_ms(value: &Value) -> Option<i64> {
+    chrono::DateTime::parse_from_rfc3339(value.get("timestamp").and_then(Value::as_str)?)
+        .ok()
+        .map(|time| time.timestamp_millis())
+}
+
+fn record_chain(chain: &mut HashMap<String, ChainNode>, value: &Value) {
+    let Some(id) = line_id(value, "uuid") else {
+        return;
+    };
+    chain.insert(
+        id,
+        ChainNode {
+            parent: line_id(value, "parentUuid"),
+            timestamp_ms: timestamp_ms(value),
+            attachment: value.get("type").and_then(Value::as_str) == Some("attachment"),
+        },
+    );
+}
+
+fn thinking_start_ms(value: &Value, block_end_ms: i64) -> Option<i64> {
+    let duration_ms = value.get("thinkingDurationMs")?.as_i64()?;
+    let kind = value.pointer("/message/content/0/type")?.as_str()?;
+    (kind == "thinking" && duration_ms > 0).then_some(block_end_ms - duration_ms)
+}
+
+fn record_block(timings: &mut HashMap<String, BlockTiming>, value: &Value, msg_id: &str) {
+    let block_end_ms = timestamp_ms(value);
+    let timing = timings.entry(msg_id.to_owned()).or_insert_with(|| {
+        let starts_at_first_block = value
+            .get("apiBlockIndex")
+            .is_none_or(|index| index.as_u64() == Some(0));
+        BlockTiming {
+            first_parent: line_id(value, "parentUuid"),
+            starts_at_first_block,
+            first_output_ms: starts_at_first_block
+                .then(|| block_end_ms.and_then(|end| thinking_start_ms(value, end)))
+                .flatten(),
+            end_ms: None,
+            finished: false,
+        }
+    });
+    if let Some(end) = block_end_ms {
+        timing.end_ms = Some(timing.end_ms.map_or(end, |current| current.max(end)));
+    }
+    timing.finished |= value
+        .pointer("/message/stop_reason")
+        .and_then(Value::as_str)
+        .is_some_and(|reason| !reason.is_empty());
+}
+
+fn observe(
+    value: &Value,
+    chain: &mut HashMap<String, ChainNode>,
+    timings: &mut HashMap<String, BlockTiming>,
+) {
+    record_chain(chain, value);
+    if value.get("type").and_then(Value::as_str) != Some("assistant") {
+        return;
+    }
+    let Some(id) = value
+        .get("message")
+        .and_then(|message| line_id(message, "id"))
+    else {
+        return;
+    };
+    record_block(timings, value, &id);
+}
+
+/// Request start: walk up from the first block's parent, skip attachments, and take
+/// the first user message, tool result, or retry line.
+fn resolve_start(chain: &HashMap<String, ChainNode>, first_parent: Option<&str>) -> Option<i64> {
+    let mut cursor = first_parent?.to_owned();
+    for _ in 0..MAX_CHAIN_HOPS {
+        let node = chain.get(&cursor)?;
+        if !node.attachment {
+            return node.timestamp_ms;
+        }
+        cursor = node.parent.clone()?;
+    }
+    None
+}
+
+fn apply_timing(
+    record: &mut UsageRecord,
+    timing: &BlockTiming,
+    chain: &HashMap<String, ChainNode>,
+) {
+    if !timing.finished || !timing.starts_at_first_block {
+        return;
+    }
+    let Some(start) = resolve_start(chain, timing.first_parent.as_deref()) else {
+        return;
+    };
+    let Some(end) = timing.end_ms else {
+        return;
+    };
+    let Some(latency) = end.checked_sub(start) else {
+        return;
+    };
+    if !(MIN_PLAUSIBLE_LATENCY_MS..=MAX_PLAUSIBLE_LATENCY_MS).contains(&latency) {
+        return;
+    }
+    record.duration_ms = Some(latency);
+    record.first_event_ms = timing.first_output_ms.and_then(|first| {
+        let offset = first.checked_sub(start)?;
+        (offset > 0 && offset <= latency).then_some(offset)
+    });
+}
+
+fn usage_record(value: &Value) -> Option<UsageRecord> {
+    if value.get("type").and_then(Value::as_str) != Some("assistant") {
         return None;
     }
-    let message = entry.message?;
-    let id = identifier(message.id)?;
-    let usage = TokenUsage::from_claude(message.usage.as_ref()?)?;
+    let message = value.get("message")?;
+    let id = identifier(message.get("id").and_then(Value::as_str).map(str::to_owned))?;
+    let usage = TokenUsage::from_claude(message.get("usage")?)?;
     if usage.is_empty() {
         return None;
     }
-    let started_at_ms = chrono::DateTime::parse_from_rfc3339(entry.timestamp.as_deref()?)
-        .ok()?
-        .timestamp_millis();
     Some(UsageRecord {
         reported_cost_micros: None,
         request_count: 1,
@@ -60,17 +180,59 @@ fn record(line: &[u8]) -> Option<UsageRecord> {
         id: format!("claude:{id}"),
         source: UsageSource::ClaudeLog,
         client: UsageClient::ClaudeCode,
-        started_at_ms,
+        started_at_ms: timestamp_ms(value)?,
         provider_id: None,
         codex_provider: None,
         public_model: None,
-        model: identifier(message.model).unwrap_or_default(),
+        model: identifier(
+            message
+                .get("model")
+                .and_then(Value::as_str)
+                .map(str::to_owned),
+        )
+        .unwrap_or_default(),
         usage,
         duration_ms: None,
         first_event_ms: None,
         response_id: None,
-        session_id: identifier(entry.session),
+        session_id: identifier(
+            value
+                .get("sessionId")
+                .and_then(Value::as_str)
+                .map(str::to_owned),
+        ),
     })
+}
+
+/// Reads the lines just before `offset` for parent links and earlier blocks.
+/// A failure only skips the estimate; the cursor itself stays put.
+fn seed_chain(
+    file: &mut File,
+    offset: i64,
+    chain: &mut HashMap<String, ChainNode>,
+    timings: &mut HashMap<String, BlockTiming>,
+) -> std::io::Result<()> {
+    let len = offset.clamp(0, CHAIN_SEED_BYTES);
+    if len == 0 {
+        return Ok(());
+    }
+    file.seek(SeekFrom::Start((offset - len) as u64))?;
+    let mut window = vec![0u8; len as usize];
+    let read_ok = file.read_exact(&mut window).is_ok();
+    file.seek(SeekFrom::Start(offset as u64))?;
+    if !read_ok {
+        return Ok(());
+    }
+    let mut lines = window.split(|byte| *byte == b'\n');
+    if offset > len {
+        lines.next();
+    }
+    for line in lines {
+        if let Ok(value) = serde_json::from_slice::<Value>(line) {
+            observe(&value, chain, timings);
+        }
+    }
+    Ok(())
 }
 
 /// Fixed-depth traversal includes regular and workflow subagents, without following
@@ -126,7 +288,9 @@ fn fingerprint(file: &mut File, offset: u64) -> std::io::Result<String> {
     let hash = bytes.iter().fold(0xcbf29ce484222325u64, |hash, byte| {
         (hash ^ u64::from(*byte)).wrapping_mul(0x100000001b3)
     });
-    Ok(format!("claude-v1:{hash:016x}"))
+    // v2 cursors force a reread of transcripts imported before duration estimates.
+    // Message IDs keep that reread from counting the same reply twice.
+    Ok(format!("claude-v2:{hash:016x}"))
 }
 
 enum ReadError {
@@ -168,6 +332,9 @@ fn read_file(
     }
     let mut offset = resume.map_or(0, |cursor| cursor.read_offset);
     file.seek(SeekFrom::Start(offset as u64))?;
+    let mut chain = HashMap::new();
+    let mut timings = HashMap::new();
+    seed_chain(&mut file, offset, &mut chain, &mut timings)?;
     let mut reader = BufReader::new(file);
     let mut line = Vec::new();
     let mut records = Vec::new();
@@ -182,9 +349,22 @@ fn read_file(
             break;
         }
         offset += read as i64;
-        if let Some(record) = record(&line) {
-            records.push(record);
+        let Ok(value) = serde_json::from_slice::<Value>(&line) else {
+            continue;
+        };
+        observe(&value, &mut chain, &mut timings);
+        let Some(mut record) = usage_record(&value) else {
+            continue;
+        };
+        let msg_id = record
+            .id
+            .strip_prefix("claude:")
+            .unwrap_or(&record.id)
+            .to_owned();
+        if let Some(timing) = timings.get(&msg_id) {
+            apply_timing(&mut record, timing, &chain);
         }
+        records.push(record);
     }
     let state = fingerprint(reader.get_mut(), offset as u64)?;
     Ok(Some((
@@ -337,7 +517,7 @@ mod tests {
         assert!(
             cursors
                 .iter()
-                .all(|cursor| cursor.state.starts_with("claude-v1:")
+                .all(|cursor| cursor.state.starts_with("claude-v2:")
                     && !cursor.state.contains("private"))
         );
     }
@@ -422,5 +602,269 @@ mod tests {
         )
         .unwrap();
         assert_eq!(log_files(&home.0).len(), 2);
+    }
+
+    fn chain_uuid(n: u8) -> String {
+        format!("00000000-0000-4000-8000-0000000000{n:02x}")
+    }
+
+    fn chain_line(kind: &str, id: u8, parent: Option<u8>, timestamp: &str) -> Value {
+        json!({
+            "parentUuid": parent.map(chain_uuid),
+            "type": kind,
+            "uuid": chain_uuid(id),
+            "timestamp": timestamp,
+            "sessionId": "session-t",
+        })
+    }
+
+    fn assistant_block(
+        msg_id: &str,
+        id: u8,
+        parent: u8,
+        block_index: u32,
+        timestamp: &str,
+        output: u64,
+        stop: Option<&str>,
+    ) -> Value {
+        json!({
+            "parentUuid": chain_uuid(parent),
+            "type": "assistant",
+            "uuid": chain_uuid(id),
+            "apiBlockIndex": block_index,
+            "timestamp": timestamp,
+            "sessionId": "session-t",
+            "message": {
+                "id": msg_id,
+                "model": "claude-opus-4-8",
+                "usage": {
+                    "input_tokens": 10,
+                    "output_tokens": output,
+                    "cache_read_input_tokens": 0,
+                    "cache_creation_input_tokens": 0
+                },
+                "stop_reason": stop,
+            }
+        })
+    }
+
+    fn thinking_block(
+        msg_id: &str,
+        id: u8,
+        parent: u8,
+        timestamp: &str,
+        thinking_ms: i64,
+        output: u64,
+        stop: Option<&str>,
+    ) -> Value {
+        let mut value = assistant_block(msg_id, id, parent, 0, timestamp, output, stop);
+        value["thinkingDurationMs"] = json!(thinking_ms);
+        value["message"]["content"] = json!([{ "type": "thinking", "thinking": "" }]);
+        value
+    }
+
+    fn message_row(store: &Store, id: &str) -> UsageRecord {
+        rows(store)
+            .into_iter()
+            .find(|row| row.id == format!("claude:{id}"))
+            .unwrap()
+    }
+
+    #[test]
+    fn estimated_latency_follows_the_parent_chain_across_scans() {
+        let home = Home::new();
+        let store = Store::open(&home.0.join("scratch.sqlite")).unwrap();
+        home.line(
+            MAIN,
+            chain_line("user", 1, None, "2026-06-07T13:00:00.000Z"),
+        );
+        home.line(
+            MAIN,
+            chain_line("attachment", 2, Some(1), "2026-06-07T13:00:00.003Z"),
+        );
+        home.line(
+            MAIN,
+            chain_line("attachment", 3, Some(2), "2026-06-07T13:00:05.001Z"),
+        );
+        home.line(
+            MAIN,
+            assistant_block("msg_t", 4, 3, 0, "2026-06-07T13:00:05.000Z", 100, None),
+        );
+        assert_eq!(scan(&store, &home).added, 1);
+        assert_eq!(message_row(&store, "msg_t").duration_ms, None);
+
+        home.line(
+            MAIN,
+            assistant_block("msg_t", 5, 4, 1, "2026-06-07T13:00:07.000Z", 400, None),
+        );
+        home.line(
+            MAIN,
+            chain_line("user", 6, Some(5), "2026-06-07T13:00:08.000Z"),
+        );
+        home.line(
+            MAIN,
+            assistant_block(
+                "msg_t",
+                7,
+                6,
+                2,
+                "2026-06-07T13:00:12.500Z",
+                900,
+                Some("tool_use"),
+            ),
+        );
+        assert!(scan(&store, &home).added >= 1);
+        let row = message_row(&store, "msg_t");
+        assert_eq!(
+            (row.duration_ms, row.first_event_ms, row.usage.output),
+            (Some(12_500), None, 900)
+        );
+
+        // A copied block without its parent chain must not erase the estimate.
+        home.line(
+            AGENT,
+            assistant_block(
+                "msg_t",
+                8,
+                6,
+                0,
+                "2026-06-07T13:00:12.500Z",
+                1,
+                Some("end_turn"),
+            ),
+        );
+        scan(&store, &home);
+        let row = message_row(&store, "msg_t");
+        assert_eq!((row.duration_ms, row.usage.output), (Some(12_500), 900));
+    }
+
+    #[test]
+    fn leading_thinking_block_estimates_time_to_first_token() {
+        let home = Home::new();
+        let store = Store::open(&home.0.join("scratch.sqlite")).unwrap();
+        home.line(
+            MAIN,
+            chain_line("user", 1, None, "2026-06-07T13:00:00.000Z"),
+        );
+        home.line(
+            MAIN,
+            thinking_block(
+                "msg_think",
+                2,
+                1,
+                "2026-06-07T13:00:05.000Z",
+                3_000,
+                900,
+                Some("tool_use"),
+            ),
+        );
+        home.line(
+            MAIN,
+            assistant_block(
+                "msg_think",
+                3,
+                2,
+                1,
+                "2026-06-07T13:00:09.000Z",
+                900,
+                Some("tool_use"),
+            ),
+        );
+        home.line(
+            MAIN,
+            chain_line("user", 4, Some(3), "2026-06-07T13:00:10.000Z"),
+        );
+        home.line(
+            MAIN,
+            assistant_block(
+                "msg_tool",
+                5,
+                4,
+                0,
+                "2026-06-07T13:00:14.000Z",
+                50,
+                Some("end_turn"),
+            ),
+        );
+        home.line(
+            MAIN,
+            chain_line("user", 6, Some(5), "2026-06-07T13:00:20.000Z"),
+        );
+        home.line(
+            MAIN,
+            thinking_block(
+                "msg_bad",
+                7,
+                6,
+                "2026-06-07T13:00:22.000Z",
+                5_000,
+                900,
+                Some("end_turn"),
+            ),
+        );
+        home.line(
+            MAIN,
+            chain_line("user", 8, Some(7), "2026-06-07T13:00:30.000Z"),
+        );
+        home.line(
+            MAIN,
+            assistant_block(
+                "msg_late",
+                9,
+                8,
+                1,
+                "2026-06-07T13:00:31.000Z",
+                900,
+                Some("end_turn"),
+            ),
+        );
+        home.line(
+            MAIN,
+            chain_line("user", 10, Some(9), "2026-06-07T13:00:40.000Z"),
+        );
+        home.line(
+            MAIN,
+            assistant_block(
+                "msg_fast",
+                11,
+                10,
+                0,
+                "2026-06-07T13:00:40.050Z",
+                900,
+                Some("end_turn"),
+            ),
+        );
+        home.line(
+            MAIN,
+            chain_line("user", 12, Some(11), "2026-06-07T15:00:00.000Z"),
+        );
+        home.line(
+            MAIN,
+            assistant_block(
+                "msg_slow",
+                13,
+                12,
+                0,
+                "2026-06-07T16:00:01.000Z",
+                900,
+                Some("end_turn"),
+            ),
+        );
+        assert!(scan(&store, &home).added >= 5);
+        let think = message_row(&store, "msg_think");
+        assert_eq!(
+            (think.duration_ms, think.first_event_ms),
+            (Some(9_000), Some(2_000))
+        );
+        let tool = message_row(&store, "msg_tool");
+        assert_eq!(
+            (tool.duration_ms, tool.first_event_ms, tool.usage.output),
+            (Some(4_000), None, 50)
+        );
+        let bad = message_row(&store, "msg_bad");
+        assert_eq!((bad.duration_ms, bad.first_event_ms), (Some(2_000), None));
+        assert_eq!(message_row(&store, "msg_late").duration_ms, None);
+        assert_eq!(message_row(&store, "msg_fast").duration_ms, None);
+        assert_eq!(message_row(&store, "msg_slow").duration_ms, None);
     }
 }
