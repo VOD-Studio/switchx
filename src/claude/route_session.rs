@@ -131,6 +131,7 @@ impl Sessions {
                 model: model.clone(),
                 base_url: connection.base_url.clone(),
                 auth: connection.settings.auth,
+                protocol: connection.settings.protocol,
                 key,
             });
         }
@@ -169,15 +170,36 @@ impl Sessions {
         preview.notes.push(
             "SwitchX 需保持运行；恢复冲突时保留监听和令牌。未知模型不会发送到默认连接。".into(),
         );
-        preview
-            .notes
-            .push("本次不启用故障转移或协议转换；上游必须原生支持 Anthropic Messages。".into());
+        preview.notes.push(
+            "本次不启用故障转移；Responses 连接由 SwitchX 转换，原生 Messages 连接直接转发。"
+                .into(),
+        );
+        if plan
+            .connections
+            .iter()
+            .any(|connection| connection.settings.protocol == super::UpstreamProtocol::Responses)
+        {
+            preview.notes.push(
+                "Responses 转换暂会等待完整上游响应后生成 Claude SSE；Anthropic beta、缓存提示和用户元数据不转发，缓存费用可能变化；不支持 token 计数、Claude Thinking 请求与带注释的输出。Responses reasoning 内容不显示，用量保留总输出数。"
+                    .into(),
+            );
+            preview.notes.push(
+                "Claude CLI 需关闭 Thinking，例如 MAX_THINKING_TOKENS=0。Effort 映射为上游 reasoning.effort，上游需支持所选级别；此时默认 temperature=1 不转发，其他采样设置会报错。".into(),
+            );
+        }
         for model in &plan.models {
+            let protocol = plan
+                .connections
+                .iter()
+                .find(|connection| connection.id == model.provider_id)
+                .map(|connection| connection.settings.protocol.label())
+                .unwrap_or("未知协议");
             preview.notes.push(format!(
-                "{} → {} / {}{}",
+                "{} → {} / {} [{}]{}",
                 model.public_id,
                 model.provider_name,
                 model.upstream_model,
+                protocol,
                 if model.menu {
                     ""
                 } else {

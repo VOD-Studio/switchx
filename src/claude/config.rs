@@ -458,6 +458,9 @@ fn prepare_inner(
         return Err("目标不是 Claude Code 工作空间".into());
     }
     connection.settings.validate_client(capabilities)?;
+    if route.is_none() && connection.settings.protocol == super::UpstreamProtocol::Responses {
+        return Err("Responses 连接需要 SwitchX 路由转换，不能作为 Claude 直连启用".into());
+    }
     if connection.workspace_id != workspace.id {
         return Err("连接不属于当前工作空间".into());
     }

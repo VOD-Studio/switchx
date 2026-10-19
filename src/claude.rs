@@ -5,8 +5,11 @@ pub mod config;
 mod json_edit;
 mod messages;
 pub mod publication;
+mod responses;
 pub mod route_session;
 pub mod router;
 mod types;
 
-pub use types::{AuthMode, Connection, ConnectionSettings, ModelOption, PickerPolicy, Roles};
+pub use types::{
+    AuthMode, Connection, ConnectionSettings, ModelOption, PickerPolicy, Roles, UpstreamProtocol,
+};

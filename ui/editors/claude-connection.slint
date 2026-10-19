@@ -58,18 +58,55 @@ export component ClaudeConnectionEditor inherits VerticalLayout {
                     current-index <=> ClaudeUi.edit-auth;
                     accessible-label: "Claude 认证方式";
                     enabled: !root.busy;
-                    selected(_) => { if ClaudeUi.edit-auth == 3 { ClaudeUi.edit-key = ""; } }
+                    selected(_) => {
+                        if ClaudeUi.edit-auth == 3 {
+                            ClaudeUi.edit-key = "";
+                            ClaudeUi.edit-protocol = 0;
+                        } else if ClaudeUi.edit-protocol == 1 {
+                            ClaudeUi.edit-auth = 2;
+                        }
+                    }
                 }
 
                 if ClaudeUi.edit-auth != 3: VerticalLayout {
                     spacing: 12px;
                     FieldLabel {
-                        text: "Anthropic 兼容 API 根地址";
+                        text: "上游协议";
+                    }
+
+                    QuietComboBox {
+                        model: ["Anthropic Messages", "OpenAI Responses"];
+                        current-index <=> ClaudeUi.edit-protocol;
+                        accessible-label: "Claude 连接上游协议";
+                        enabled: !root.busy;
+                        selected(_) => {
+                            if ClaudeUi.edit-protocol == 1 {
+                                ClaudeUi.edit-auth = 2;
+                                if ClaudeUi.edit-url == "https://api.anthropic.com" {
+                                    ClaudeUi.edit-url = "https://api.openai.com";
+                                }
+                            } else if ClaudeUi.edit-url == "https://api.openai.com" {
+                                ClaudeUi.edit-url = "https://api.anthropic.com";
+                            }
+                        }
+                    }
+
+                    Text {
+                        text: ClaudeUi.edit-protocol == 1
+                            ? "Responses 连接使用 Bearer Token，经 SwitchX 路由转换；直连不可用。"
+                            : "Messages 连接可直连，也可加入 SwitchX 路由。";
+                        color: Theme.muted-text;
+                        font-size: 12px;
+                        wrap: word-wrap;
+                    }
+
+                    FieldLabel {
+                        text: ClaudeUi.edit-protocol == 1 ? "Responses API 根地址" : "Anthropic 兼容 API 根地址";
                     }
 
                     QuietLineEdit {
                         text <=> ClaudeUi.edit-url;
-                        placeholder-text: "https://api.anthropic.com";
+                        placeholder-text: ClaudeUi.edit-protocol == 1 ? "https://api.openai.com" : "https://api.anthropic.com";
                         accessible-label: "Claude API 地址";
                         enabled: !root.busy;
                     }
@@ -104,7 +141,9 @@ export component ClaudeConnectionEditor inherits VerticalLayout {
                 }
 
                 Text {
-                    text: "保存只更新连接资料。需要使用这份配置时，在连接列表中预览并启用。";
+                    text: ClaudeUi.edit-protocol == 1
+                        ? "保存只更新连接资料。保存后在连接卡片选择「设置路由」，预览并发布。"
+                        : "保存只更新连接资料。需要使用这份配置时，在连接列表中预览并启用。";
                     color: Theme.muted-text;
                     font-size: 12px;
                     wrap: word-wrap;
@@ -370,7 +409,7 @@ export component ClaudeConnectionEditor inherits VerticalLayout {
     HorizontalLayout {
         spacing: 10px;
         Text {
-            text: "保存后在连接页预览并启用";
+            text: ClaudeUi.edit-protocol == 1 ? "保存后设置路由并预览发布" : "保存后在连接页预览并启用";
             color: Theme.muted-text;
             font-size: 11px;
             vertical-alignment: center;

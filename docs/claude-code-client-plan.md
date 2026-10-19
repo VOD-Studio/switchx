@@ -1,6 +1,6 @@
 # SwitchX 多客户端与 Claude Code 接入方案
 
-状态：M0 至 M2 已落地，代码检查与隔离链路验证记录已保存。2026 年 10 月 19 日使用隔离的 Claude Code 2.1.303 副本复验 M2 成功，详见验证记录。后续功能从 M3 协议转换与高级连接继续。
+状态：M0 至 M2 已落地，代码检查与隔离链路验证记录已保存。2026 年 10 月 19 日使用隔离的 Claude Code 2.1.303 副本复验 M2 成功。M3 已接入 Messages → Responses 的缓冲转换，范围与验证见 [Responses 验证记录](claude-responses-verification.md)；其余协议与高级连接继续按阶段实施。
 
 核对日期：2026 年 10 月 16 日。方案源码基线为 SwitchX `eb1bac0`、本地参考仓库 `others/cc-switch` 的 `09bce301`；本机 Claude Code 为 `2.1.301`。除下方进度记录明确列出的部分外，后续模块和表结构仍为拟议设计，实际数据库版本与客户端能力应在实施时重新确认。
 
@@ -24,7 +24,7 @@ M1 使用 `src/claude/config.rs` 实现私有快照和字段恢复，暂不将 C
 
 M2 已接入原生 Messages 单连接路由与聚合、工作空间独立监听及令牌、稳定模型绑定、发布快照、运行中更新、恢复与退出处理，以及 Claude 路由用量去重。数据库新增版本 20 迁移，保留版本 19 连接资料，并为模型分配稳定公开身份。具体实现放在 `claude/publication.rs`、`claude/router.rs`、`claude/messages.rs`、`claude/route_session.rs`，沿用现有 Codex 路由模块。验证结果见 [M2 路由验证](claude-route-verification.md)。
 
-当前仍保留托管期间已有连接的编辑与删除限制；已经开放默认连接、默认模型和路由模式的预览更新。请求队列故障转移、协议转换及云平台认证继续属于 M3。发布状态、模型菜单和已运行 CLI 会话的状态分别呈现。
+当前仍保留托管期间已有连接的编辑与删除限制；已经开放默认连接、默认模型和路由模式的预览更新。M3 的 Responses 连接使用显式协议与 Bearer 认证，支持文字、图片和函数工具的缓冲转换。Chat Completions、Gemini、请求队列故障转移及云平台认证仍属后续 M3 工作。发布状态、模型菜单和已运行 CLI 会话的状态分别呈现。
 
 界面记录：[Claude 浅色最小窗口](previews/client-workspaces/claude-1000-light.png)、[Claude 深色大窗口](previews/client-workspaces/claude-1400-dark.png)、[Codex 连接页](previews/client-workspaces/codex-1000-light.png)。图片由实际 Slint 界面使用合成资料渲染。
 

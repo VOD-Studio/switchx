@@ -89,7 +89,7 @@ pub(super) fn definitions(access: Access) -> Vec<Value> {
         described(
             "list_claude_connections",
             "Claude 连接与模型",
-            "读取指定 Claude 工作空间的连接、认证方式、模型菜单与版本号；不返回凭据。",
+            "读取指定 Claude 工作空间的连接、上游协议、认证方式、模型菜单与版本号；不返回凭据。",
             json!({"workspace_id":scope}),
             &["workspace_id"],
             Effect::Read,
@@ -113,7 +113,7 @@ pub(super) fn definitions(access: Access) -> Vec<Value> {
             described("preview_claude_route","预览 Claude 路由与聚合","为指定工作空间准备独立监听、显式模型绑定与配置变更。route 仅发布默认连接，aggregate 发布所有 API 连接；本机官方登录仅支持直连。不会应用客户端配置。",json!({"workspace_id":scope,"mode":{"type":"string","enum":["route","aggregate"]},"provider_id":provider,"default_model":{"type":"string","description":"默认连接中已保存的实际模型 ID；省略沿用连接默认值。"},"port":{"type":"integer","minimum":0,"maximum":65535,"description":"0 自动分配；运行时更改端口需要先停止。"}}),&["workspace_id","mode","provider_id"],Effect::Write),
             described("apply_claude_route","发布 Claude 路由","向用户说明 preview_claude_route 的预览并取得同意后，使用一次性 preview_id 发布；更新后在途请求保留原绑定。SwitchX 需持续运行。停止使用 preview_claude_restore / apply_claude_restore。",preview.clone(),&["preview_id"],Effect::Destructive),
 
-        described("preview_claude_direct","预览 Claude 直连","检查 CLI 能力并预览指定 Claude 工作空间的配置变更；不会应用配置，也不执行外部 helper。",json!({"workspace_id":scope,"provider_id":provider}),&["workspace_id","provider_id"],Effect::Write),
+        described("preview_claude_direct","预览 Claude 直连","检查 CLI 能力并预览指定 Claude 工作空间的配置变更；Responses 连接须使用 preview_claude_route。不会应用配置，也不执行外部 helper。",json!({"workspace_id":scope,"provider_id":provider}),&["workspace_id","provider_id"],Effect::Write),
         described("preview_claude_restore","预览 Claude 配置恢复","预览指定 Claude 工作空间的字段恢复与冲突。keep_conflicts=true 表示保留外部值并结束管理，须向用户说明后应用。",json!({"workspace_id":scope,"keep_conflicts":{"type":"boolean","default":false}}),&["workspace_id"],Effect::Write),
         described("apply_claude_direct","应用 Claude 直连","向用户说明 preview_claude_direct 的具体变更并取得同意后，用对应 preview_id 应用。再次核对工作空间、文件、连接与凭据快照。",preview.clone(),&["preview_id"],Effect::Destructive),
         described("apply_claude_restore","恢复 Claude 配置","向用户说明 preview_claude_restore 的内容并取得同意后，用对应 preview_id 恢复；冲突保留外部值。",preview,&["preview_id"],Effect::Destructive),
@@ -126,11 +126,18 @@ pub(super) fn definitions(access: Access) -> Vec<Value> {
 mod tests {
     use super::*;
     use crate::{
-        claude::{AuthMode, ConnectionSettings},
+        claude::{AuthMode, ConnectionSettings, UpstreamProtocol},
         credentials::Secret,
     };
     #[test]
     fn scoped_tools_edit_models_without_credentials_or_codex_retargeting() {
+        scoped_edit(UpstreamProtocol::Messages);
+    }
+    #[test]
+    fn responses_model_edits_preserve_protocol_and_require_routing() {
+        scoped_edit(UpstreamProtocol::Responses);
+    }
+    fn scoped_edit(protocol: UpstreamProtocol) {
         let root = std::env::temp_dir().join(format!(
             "switchx-claude-mcp-{}",
             crate::id::new_id().unwrap()
@@ -147,7 +154,12 @@ mod tests {
                 name: "synthetic".into(),
                 base_url: "https://example.test".into(),
                 settings: ConnectionSettings {
-                    auth: AuthMode::Helper,
+                    auth: if protocol == UpstreamProtocol::Responses {
+                        AuthMode::Bearer
+                    } else {
+                        AuthMode::Helper
+                    },
+                    protocol,
                     default_model: "manual".into(),
                     ..Default::default()
                 },
@@ -166,10 +178,18 @@ mod tests {
         let args = json!({"workspace_id":workspace.id});
         let list = connections(&store, args.as_object().unwrap()).unwrap();
         assert_eq!(list["connections"][0]["credential_configured"], true);
+        assert_eq!(
+            list["connections"][0]["settings"]["protocol"],
+            json!(protocol)
+        );
         assert!(!list.to_string().contains("synthetic-mcp-claude-key"));
         assert!(store.providers().unwrap().is_empty());
         let mut edit = json!({"workspace_id":workspace.id,"provider_id":c.id,"revision":c.revision,"models":[{"model":"manual/menu","label":"Custom","enabled":false}],"default_model":"manual/outside","picker":"replace","roles":{"sonnet":"manual/role"}});
         let result = save(&data, &store, edit.as_object().unwrap()).unwrap();
+        assert_eq!(
+            result["connection"]["settings"]["protocol"],
+            json!(protocol)
+        );
         assert_eq!(
             result["connection"]["settings"]["models"][0]["enabled"],
             false
@@ -193,15 +213,18 @@ mod tests {
             &c.id,
             &root.join("switchx"),
             crate::clients::ClaudeCapabilities::from_version("2.1.301"),
-        )
-        .unwrap();
-        app::claude::apply_claude_change(&data, &home, preview).unwrap();
-        edit["models"][0].as_object_mut().unwrap().remove("api_key");
-        assert!(
-            save(&data, &store, edit.as_object().unwrap())
-                .unwrap_err()
-                .contains("恢复")
         );
+        if protocol == UpstreamProtocol::Responses {
+            assert!(preview.err().unwrap().contains("路由"));
+        } else {
+            app::claude::apply_claude_change(&data, &home, preview.unwrap()).unwrap();
+            edit["models"][0].as_object_mut().unwrap().remove("api_key");
+            assert!(
+                save(&data, &store, edit.as_object().unwrap())
+                    .unwrap_err()
+                    .contains("恢复")
+            );
+        }
         drop(store);
         std::fs::remove_dir_all(root).unwrap();
     }

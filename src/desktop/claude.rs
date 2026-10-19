@@ -7,7 +7,10 @@ use slint::{ComponentHandle, Model, ModelRc, VecModel};
 use std::path::{Path, PathBuf};
 use switchx::{
     app,
-    claude::{self, AuthMode, Connection, ConnectionSettings, ModelOption, PickerPolicy, Roles},
+    claude::{
+        self, AuthMode, Connection, ConnectionSettings, ModelOption, PickerPolicy, Roles,
+        UpstreamProtocol,
+    },
     credentials::Secret,
     ui::{AppWindow, ClaudeConnectionRow, ClaudeModelRow, ClaudeRouteRow, ClaudeUi},
 };
@@ -76,6 +79,7 @@ pub(super) struct FetchClaude {
     pub id: String,
     pub url: String,
     pub auth: AuthMode,
+    pub protocol: UpstreamProtocol,
     pub key: Option<Secret>,
     pub generation: i32,
 }
@@ -115,6 +119,7 @@ fn edit_row(ui: &ClaudeUi, index: i32, edit: impl FnOnce(&mut ClaudeModelRow)) {
 fn form(window: &AppWindow) -> Result<SaveClaude, String> {
     let ui = window.global::<ClaudeUi>();
     let auth = AuthMode::from_index(ui.get_edit_auth())?;
+    let protocol = UpstreamProtocol::from_index(ui.get_edit_protocol())?;
     let picker = PickerPolicy::from_index(ui.get_edit_picker())?;
     let id = ui.get_edit_id().to_string();
     let expected = if id.is_empty() {
@@ -137,6 +142,7 @@ fn form(window: &AppWindow) -> Result<SaveClaude, String> {
         base_url: ui.get_edit_url().into(),
         settings: ConnectionSettings {
             auth,
+            protocol,
             picker,
             default_model: ui.get_edit_default().trim().into(),
             models: models(&ui)
@@ -175,6 +181,23 @@ fn form(window: &AppWindow) -> Result<SaveClaude, String> {
 pub(super) fn connect(window: &AppWindow, sender: &mpsc::Sender<Command>) {
     let ui = window.global::<ClaudeUi>();
     ui.on_matches_query(|text, query| text.to_lowercase().contains(&query.to_lowercase()));
+    let weak = window.as_weak();
+    ui.on_configure_routing(move |id| {
+        if let Some(window) = weak.upgrade() {
+            let ui = window.global::<ClaudeUi>();
+            if let Some(index) = ui
+                .get_route_provider_ids()
+                .iter()
+                .position(|value| value == id)
+            {
+                ui.set_route_primary(index as i32);
+                ui.set_route_mode(0);
+                ui.set_route_default("".into());
+                ui.set_page(3);
+                ui.invoke_refresh_route_models();
+            }
+        }
+    });
     macro_rules! action {
         ($method:ident,$build:expr) => {{
             let weak = window.as_weak();
@@ -244,6 +267,7 @@ pub(super) fn connect(window: &AppWindow, sender: &mpsc::Sender<Command>) {
             id: ui.get_edit_id().into(),
             url: ui.get_edit_url().into(),
             auth: AuthMode::from_index(ui.get_edit_auth())?,
+            protocol: UpstreamProtocol::from_index(ui.get_edit_protocol())?,
             key: (!key.trim().is_empty()).then(|| Secret::new(key.trim().into())),
             generation: ui.get_editor_generation(),
         };
@@ -417,6 +441,8 @@ fn show_snapshot(window: &AppWindow, snapshot: app::claude::ClaudeSnapshot) {
             id: connection.id.as_str().into(),
             name: connection.name.as_str().into(),
             endpoint: connection.base_url.as_str().into(),
+            protocol: connection.settings.protocol.label().into(),
+            route_only: connection.settings.protocol == UpstreamProtocol::Responses,
             authentication: connection.settings.auth.label().into(),
             default_model: connection.settings.default_model.as_str().into(),
             picker: match connection.settings.picker {
@@ -572,6 +598,7 @@ fn show_editor(
     ui.set_edit_url(url.into());
     ui.set_edit_key("".into());
     ui.set_edit_auth(settings.auth.index());
+    ui.set_edit_protocol(settings.protocol.index());
     ui.set_edit_picker(settings.picker.index());
     ui.set_edit_default(settings.default_model.into());
     ui.set_role_sonnet(settings.roles.sonnet.into());
@@ -839,7 +866,18 @@ impl Worker {
                         .position(|row| row.id.as_str() == id)
                         .unwrap_or(0);
                     ui.set_selected_connection(index as i32);
-                    ui.set_feedback("连接已保存；在连接页预览并启用。".into());
+                    let route_only = ui
+                        .get_connections()
+                        .row_data(index)
+                        .is_some_and(|row| row.route_only);
+                    ui.set_feedback(
+                        if route_only {
+                            "连接已保存；选择「设置路由」后预览发布。"
+                        } else {
+                            "连接已保存；在连接页预览并启用。"
+                        }
+                        .into(),
+                    );
                 }
                 Err(error) => ui.set_editor_error(error.into()),
             }
@@ -900,7 +938,15 @@ impl Worker {
             .upgrade_in_event_loop(|window| window.set_busy(false));
         self.provider_checks.spawn(async move {
             let result = match key {
-                Ok(key) => app::claude::discover_claude_models(&fetch.url, fetch.auth, &key).await,
+                Ok(key) => {
+                    app::claude::discover_claude_models(
+                        &fetch.url,
+                        fetch.protocol,
+                        fetch.auth,
+                        &key,
+                    )
+                    .await
+                }
                 Err(error) => Err(error),
             };
             let _ = weak.upgrade_in_event_loop(move |window| {
@@ -1144,6 +1190,110 @@ mod tests {
     use switchx::{headless, ui::Theme};
 
     #[test]
+    fn responses_editor_selects_bearer_and_opens_route_settings() {
+        let window = headless::install_with_manual_time();
+        let app = AppWindow::new().unwrap();
+        let (sender, mut receiver) = mpsc::channel(16);
+        connect(&app, &sender);
+        app.set_loading(false);
+        app.set_active_client(1);
+        app.set_active_page(6);
+        app.set_claude_home("/isolated/claude".into());
+        let ui = app.global::<ClaudeUi>();
+        ui.set_loaded(true);
+        app.show().unwrap();
+        let settle = || {
+            for _ in 0..3 {
+                headless::advance(400);
+                headless::render(&window);
+            }
+        };
+        for (width, height) in [(1000, 680), (1400, 900)] {
+            app.window()
+                .set_size(slint::PhysicalSize::new(width, height));
+            for dark in [false, true] {
+                app.invoke_set_appearance(dark);
+                show_editor(&app, "synthetic-workspace", None, false, 0);
+                ui.set_edit_name("Responses 工作网关".into());
+                ui.invoke_model_edit(0, 0, "synthetic-model".into());
+                settle();
+                let item = ElementHandle::find_by_accessible_label(&app, "Claude 连接上游协议")
+                    .next()
+                    .unwrap();
+                let pos = item.absolute_position();
+                let size = item.size();
+                headless::click(&window, pos.x + size.width / 2.0, pos.y + size.height / 2.0);
+                headless::key(&window, slint::platform::Key::DownArrow);
+                headless::key(&window, slint::platform::Key::Return);
+                settle();
+                assert_eq!(ui.get_edit_protocol(), UpstreamProtocol::Responses.index());
+                assert_eq!(ui.get_edit_auth(), AuthMode::Bearer.index());
+                assert_eq!(ui.get_edit_url(), "https://api.openai.com");
+                let save = ElementHandle::find_by_accessible_label(&app, "保存 Claude 连接")
+                    .next()
+                    .unwrap();
+                let pos = save.absolute_position();
+                assert!(pos.y + save.size().height <= height as f32);
+                headless::save_snapshot(
+                    "SWITCHX_CLAUDE_RESPONSES_SNAPSHOTS",
+                    &format!("responses-{width}-{}", if dark { "dark" } else { "light" }),
+                    &headless::render(&window),
+                );
+                let form = form(&app).unwrap();
+                assert_eq!(
+                    form.connection.settings.protocol,
+                    UpstreamProtocol::Responses
+                );
+            }
+        }
+        ui.set_edit_key("synthetic-responses-key".into());
+        ui.invoke_save();
+        let Command::ClaudeSave(saved) = receiver.try_recv().unwrap() else {
+            panic!("expected save")
+        };
+        assert_eq!(
+            saved.connection.settings.protocol,
+            UpstreamProtocol::Responses
+        );
+        assert!(ui.get_edit_key().is_empty());
+        app.set_busy(false);
+        ui.set_editor_open(false);
+        ui.set_page(0);
+        ui.set_route_provider_ids(ModelRc::new(VecModel::from(vec![
+            "alpha".into(),
+            "beta".into(),
+        ])));
+        ui.set_route_provider_names(ModelRc::new(VecModel::from(vec![
+            "Alpha".into(),
+            "Responses 工作网关".into(),
+        ])));
+        ui.set_connections(ModelRc::new(VecModel::from(vec![ClaudeConnectionRow {
+            id: "beta".into(),
+            name: "Responses 工作网关".into(),
+            protocol: "OpenAI Responses".into(),
+            route_only: true,
+            ..Default::default()
+        }])));
+        settle();
+        let button =
+            ElementHandle::find_by_accessible_label(&app, "预览 Claude 连接 Responses 工作网关")
+                .next()
+                .unwrap();
+        let pos = button.absolute_position();
+        headless::click(
+            &window,
+            pos.x + button.size().width / 2.0,
+            pos.y + button.size().height / 2.0,
+        );
+        assert_eq!(ui.get_page(), 3);
+        let Command::ClaudeRouteModels { options, .. } = receiver.try_recv().unwrap() else {
+            panic!("expected route models")
+        };
+        assert_eq!(options.primary, "beta");
+        assert_eq!(options.mode, claude::publication::Mode::Route);
+    }
+
+    #[test]
     fn editor_preserves_order_defaults_and_drops_secrets_on_navigation() {
         let window = headless::install_with_manual_time();
         let app = AppWindow::new().unwrap();
@@ -1184,6 +1334,8 @@ mod tests {
             id: connection.id.as_str().into(),
             name: connection.name.as_str().into(),
             endpoint: connection.base_url.as_str().into(),
+            protocol: "Anthropic Messages".into(),
+            route_only: false,
             authentication: "SwitchX 凭据 helper".into(),
             default_model: "team/sonnet".into(),
             picker: "由 SwitchX 管理菜单".into(),

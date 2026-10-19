@@ -3,6 +3,8 @@ export struct ClaudeConnectionRow {
     id: string,
     name: string,
     endpoint: string,
+    protocol: string,
+    route-only: bool,
     authentication: string,
     default-model: string,
     picker: string,
@@ -29,6 +31,7 @@ export global ClaudeUi {
     in-out property <bool> preview-route: false;
     callback preview-routing();
     callback refresh-route-models();
+    callback configure-routing(string);
     in-out property <[ClaudeConnectionRow]> connections;
     in-out property <[string]> connection-names;
     in-out property <int> selected-connection: 0;
@@ -57,6 +60,7 @@ export global ClaudeUi {
     in-out property <string> edit-name;
     in-out property <string> edit-url;
     in-out property <int> edit-auth: 0;
+    in-out property <int> edit-protocol: 0;
     in-out property <string> edit-key;
     in-out property <int> edit-picker: 1;
     in-out property <string> edit-default;

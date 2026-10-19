@@ -1,6 +1,9 @@
 //! Explicit Claude model bindings and immutable publication plans.
 use crate::{
-    claude::{AuthMode, Connection, ConnectionSettings, ModelOption, PickerPolicy, Roles},
+    claude::{
+        AuthMode, Connection, ConnectionSettings, ModelOption, PickerPolicy, Roles,
+        UpstreamProtocol,
+    },
     storage::Store,
 };
 use serde::{Deserialize, Serialize};
@@ -71,7 +74,7 @@ pub fn build(store: &Store, workspace: &str, mut options: Options) -> Result<Pla
             .iter()
             .find(|c| c.settings.auth != AuthMode::Native)
             .map(|c| c.id.clone())
-            .ok_or("请先添加有凭据的 Anthropic 兼容连接")?;
+            .ok_or("请先添加有凭据的 Messages 或 Responses 连接")?;
     }
     let primary = connections
         .iter()
@@ -199,6 +202,7 @@ pub fn build(store: &Store, workspace: &str, mut options: Options) -> Result<Pla
     ]);
     let settings = ConnectionSettings {
         auth: AuthMode::Helper,
+        protocol: UpstreamProtocol::Messages,
         picker: PickerPolicy::Replace,
         default_model: default,
         roles,

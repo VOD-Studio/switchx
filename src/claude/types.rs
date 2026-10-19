@@ -45,6 +45,38 @@ impl AuthMode {
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
+pub enum UpstreamProtocol {
+    #[default]
+    Messages,
+    Responses,
+}
+
+impl UpstreamProtocol {
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Messages => "Anthropic Messages",
+            Self::Responses => "OpenAI Responses",
+        }
+    }
+
+    pub fn index(self) -> i32 {
+        match self {
+            Self::Messages => 0,
+            Self::Responses => 1,
+        }
+    }
+
+    pub fn from_index(index: i32) -> Result<Self, String> {
+        match index {
+            0 => Ok(Self::Messages),
+            1 => Ok(Self::Responses),
+            _ => Err("请选择上游协议".into()),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum PickerPolicy {
     Preserve,
     #[default]
@@ -146,6 +178,8 @@ pub struct ConnectionSettings {
     #[serde(default)]
     pub auth: AuthMode,
     #[serde(default)]
+    pub protocol: UpstreamProtocol,
+    #[serde(default)]
     pub picker: PickerPolicy,
     #[serde(default)]
     pub models: Vec<ModelOption>,
@@ -183,6 +217,9 @@ pub fn validate_model(model: &str) -> Result<(), String> {
 
 impl ConnectionSettings {
     pub fn validate(&self) -> Result<(), String> {
+        if self.protocol == UpstreamProtocol::Responses && self.auth != AuthMode::Bearer {
+            return Err("Responses 路由需要 Bearer Token；请先选择对应认证方式".into());
+        }
         if self.models.len() > 200 {
             return Err("一个连接最多保存 200 个模型".into());
         }
@@ -235,6 +272,25 @@ impl ConnectionSettings {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn legacy_settings_keep_messages_and_responses_require_bearer() {
+        let mut settings: ConnectionSettings = serde_json::from_value(serde_json::json!({
+            "default_model":"synthetic-model"
+        }))
+        .unwrap();
+        assert_eq!(settings.protocol, UpstreamProtocol::Messages);
+        assert!(settings.validate().is_ok());
+        settings.protocol = UpstreamProtocol::Responses;
+        for auth in [AuthMode::Helper, AuthMode::ApiKey, AuthMode::Native] {
+            settings.auth = auth;
+            assert!(settings.validate().is_err());
+        }
+        settings.auth = AuthMode::Bearer;
+        assert!(settings.validate().is_ok());
+        let restored: ConnectionSettings =
+            serde_json::from_value(serde_json::to_value(&settings).unwrap()).unwrap();
+        assert_eq!(restored.protocol, UpstreamProtocol::Responses);
+    }
     #[test]
     fn menus_preserve_order_labels_and_capability_gates() {
         let mut settings = ConnectionSettings {

@@ -1,5 +1,5 @@
-//! A loopback-only native Messages router, independent from the Codex listener.
-use super::{AuthMode, messages, publication::PublishedModel};
+//! A loopback-only Claude router with explicit per-connection upstream protocols.
+use super::{AuthMode, UpstreamProtocol, messages, publication::PublishedModel, responses};
 use crate::{
     credentials::Secret,
     requests::{REQUEST_ID_HEADER, RequestLog, RequestTracker},
@@ -37,6 +37,7 @@ pub struct Destination {
     pub model: PublishedModel,
     pub base_url: String,
     pub auth: AuthMode,
+    pub protocol: UpstreamProtocol,
     pub key: Secret,
 }
 pub struct Snapshot {
@@ -57,6 +58,9 @@ impl Snapshot {
             crate::app::claude::validate_claude_endpoint(&dest.base_url)?;
             if dest.auth == AuthMode::Native || dest.key.expose().is_empty() {
                 return Err("路由需要明确的 API 凭据".into());
+            }
+            if dest.protocol == UpstreamProtocol::Responses && dest.auth != AuthMode::Bearer {
+                return Err("Responses 路由需要 Bearer Token".into());
             }
             if mapped.insert(dest.model.public_id.clone(), dest).is_some() {
                 return Err("路由模型 ID 重复".into());
@@ -256,7 +260,34 @@ fn tracked_error(mut tracker: RequestTracker, status: StatusCode, code: &'static
         Some(code),
     );
     let id = tracker.record.id.clone();
-    let mut response = error(status, code);
+    let message = match code {
+        "invalid_responses_input" => "The Claude request is invalid for Responses conversion.",
+        "unsupported_responses_input" => {
+            "This Claude request contains content the Responses adapter cannot preserve."
+        }
+        "unsupported_responses_image" => "This image source cannot be sent to Responses.",
+        "unsupported_responses_tool_error" => {
+            "Failed Claude tool results cannot be represented by this Responses adapter."
+        }
+        "unsupported_responses_tool_choice" => {
+            "This Claude tool choice cannot be represented by Responses."
+        }
+        "unsupported_responses_max_tokens" => {
+            "This max_tokens value is below the Responses minimum."
+        }
+        "responses_count_unsupported" => {
+            "This Responses connection does not support Anthropic token counting."
+        }
+        "responses_query_unsupported" => {
+            "Claude request query parameters cannot be sent to Responses."
+        }
+        "responses_upstream_incomplete" => "The Responses upstream did not complete its output.",
+        "invalid_responses_output" | "unsupported_responses_output" | "invalid_responses_usage" => {
+            "The Responses upstream returned content this adapter cannot preserve."
+        }
+        _ => code,
+    };
+    let mut response = error(status, message);
     response
         .headers_mut()
         .insert(REQUEST_ID_HEADER, HeaderValue::from_str(&id).unwrap());
@@ -341,10 +372,30 @@ async fn forward(State(state): State<Arc<Shared>>, request: Request) -> Response
         return tracked_error(tracker, StatusCode::BAD_REQUEST, "messages_required");
     }
     value["model"] = destination.model.upstream_model.clone().into();
+    if count && destination.protocol == UpstreamProtocol::Responses {
+        return tracked_error(
+            tracker,
+            StatusCode::NOT_IMPLEMENTED,
+            "responses_count_unsupported",
+        );
+    }
+    let body = if destination.protocol == UpstreamProtocol::Responses {
+        match responses::request(&value) {
+            Ok(body) => body,
+            Err(code) => return tracked_error(tracker, StatusCode::BAD_REQUEST, code),
+        }
+    } else {
+        value
+    };
+    let upstream_path = if destination.protocol == UpstreamProtocol::Responses {
+        "/v1/responses"
+    } else {
+        parts.uri.path()
+    };
     let mut url = reqwest::Url::parse(&format!(
         "{}{}",
         destination.base_url.trim_end_matches('/'),
-        parts.uri.path()
+        upstream_path
     ))
     .unwrap();
     if parts
@@ -361,19 +412,33 @@ async fn forward(State(state): State<Arc<Shared>>, request: Request) -> Response
     {
         return tracked_error(tracker, StatusCode::BAD_REQUEST, "credential_in_query");
     }
+    if destination.protocol == UpstreamProtocol::Responses {
+        // The Anthropic beta Messages SDK adds this marker to ordinary CLI calls.
+        // It describes the client protocol, so it must not reach a Responses server.
+        if parts.uri.query().is_some_and(|query| query != "beta=true") {
+            return tracked_error(
+                tracker,
+                StatusCode::BAD_REQUEST,
+                "responses_query_unsupported",
+            );
+        }
+        url.set_query(None);
+    }
     let mut outgoing = state
         .client
         .post(url)
         .header(header::CONTENT_TYPE, "application/json")
-        .body(value.to_string());
+        .body(body.to_string());
     // Only protocol headers cross the trust boundary; credentials are rebuilt per destination.
-    for name in ["anthropic-version", "anthropic-beta"] {
-        for value in parts.headers.get_all(name) {
-            outgoing = outgoing.header(name, value.clone());
+    if destination.protocol == UpstreamProtocol::Messages {
+        for name in ["anthropic-version", "anthropic-beta"] {
+            for value in parts.headers.get_all(name) {
+                outgoing = outgoing.header(name, value.clone());
+            }
         }
-    }
-    if !parts.headers.contains_key("anthropic-version") {
-        outgoing = outgoing.header("anthropic-version", "2023-06-01");
+        if !parts.headers.contains_key("anthropic-version") {
+            outgoing = outgoing.header("anthropic-version", "2023-06-01");
+        }
     }
     if destination.auth != AuthMode::ApiKey {
         outgoing = outgoing.bearer_auth(destination.key.expose());
@@ -381,13 +446,80 @@ async fn forward(State(state): State<Arc<Shared>>, request: Request) -> Response
     if destination.auth != AuthMode::Bearer {
         outgoing = outgoing.header("x-api-key", destination.key.expose());
     }
-    let upstream = tokio::select! {_ = cancel.changed()=>return tracked_error(tracker,StatusCode::SERVICE_UNAVAILABLE,"router_stopping"),result=tokio::time::timeout(HEADER_TIMEOUT,outgoing.send())=>match result {Ok(Ok(response))=>response,Ok(Err(_))=>return tracked_error(tracker,StatusCode::BAD_GATEWAY,"upstream_connection_failed"),Err(_)=>return tracked_error(tracker,StatusCode::GATEWAY_TIMEOUT,"upstream_headers_timeout")}};
+    // A buffered Responses server may send its headers only after generation.
+    let header_timeout = if destination.protocol == UpstreamProtocol::Responses {
+        IDLE_TIMEOUT
+    } else {
+        HEADER_TIMEOUT
+    };
+    let upstream = tokio::select! {_ = cancel.changed()=>return tracked_error(tracker,StatusCode::SERVICE_UNAVAILABLE,"router_stopping"),result=tokio::time::timeout(header_timeout,outgoing.send())=>match result {Ok(Ok(response))=>response,Ok(Err(_))=>return tracked_error(tracker,StatusCode::BAD_GATEWAY,"upstream_connection_failed"),Err(_)=>return tracked_error(tracker,StatusCode::GATEWAY_TIMEOUT,"upstream_headers_timeout")}};
     tracker.record.headers_ms = Some(tracker.elapsed_ms());
     tracker.record.http_status = Some(upstream.status().as_u16());
     if !upstream.status().is_success() {
         let status = upstream.status();
         let headers = upstream.headers().clone();
         let mut response = tracked_error(tracker, status, "upstream_rejected");
+        response_headers(&headers, response.headers_mut());
+        return response;
+    }
+    if destination.protocol == UpstreamProtocol::Responses {
+        let headers = upstream.headers().clone();
+        let mut upstream = upstream;
+        let mut bytes = Vec::new();
+        loop {
+            let chunk = tokio::select! {_ = cancel.changed()=>return tracked_error(tracker,StatusCode::SERVICE_UNAVAILABLE,"router_stopping"),chunk=tokio::time::timeout(IDLE_TIMEOUT,upstream.chunk())=>match chunk{Ok(Ok(c))=>c,Ok(Err(_))=>return tracked_error(tracker,StatusCode::BAD_GATEWAY,"upstream_body_failed"),Err(_)=>return tracked_error(tracker,StatusCode::GATEWAY_TIMEOUT,"upstream_idle_timeout")}};
+            let Some(chunk) = chunk else { break };
+            if bytes.len() + chunk.len() > BODY_LIMIT {
+                return tracked_error(tracker, StatusCode::BAD_GATEWAY, "upstream_body_too_large");
+            }
+            bytes.extend_from_slice(&chunk);
+        }
+        let upstream: Value = match serde_json::from_slice(&bytes) {
+            Ok(value) => value,
+            Err(_) => {
+                return tracked_error(tracker, StatusCode::BAD_GATEWAY, "invalid_upstream_json");
+            }
+        };
+        let mut converted = match responses::message(&upstream) {
+            Ok(value) => value,
+            Err(code) => return tracked_error(tracker, StatusCode::BAD_GATEWAY, code),
+        };
+        let mut response = if stream {
+            let events = match responses::sse(&converted) {
+                Ok(events) => events,
+                Err(code) => return tracked_error(tracker, StatusCode::BAD_GATEWAY, code),
+            };
+            let mut observer = messages::Stream::default();
+            let events = match observer.feed(&events, &public, &mut tracker) {
+                Ok(events) if observer.done => events,
+                Ok(_) => {
+                    return tracked_error(
+                        tracker,
+                        StatusCode::BAD_GATEWAY,
+                        "incomplete_responses_stream",
+                    );
+                }
+                Err(code) => return tracked_error(tracker, StatusCode::BAD_GATEWAY, code),
+            };
+            let mut response = Body::from(events).into_response();
+            response.headers_mut().insert(
+                header::CONTENT_TYPE,
+                HeaderValue::from_static("text/event-stream"),
+            );
+            response
+                .headers_mut()
+                .insert(header::CACHE_CONTROL, HeaderValue::from_static("no-cache"));
+            response
+        } else {
+            if let Err(code) = messages::message(&mut converted, &public, &mut tracker) {
+                return tracked_error(tracker, StatusCode::BAD_GATEWAY, code);
+            }
+            Json(converted).into_response()
+        };
+        response.headers_mut().insert(
+            REQUEST_ID_HEADER,
+            HeaderValue::from_str(&tracker.record.id).unwrap(),
+        );
         response_headers(&headers, response.headers_mut());
         return response;
     }

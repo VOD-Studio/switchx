@@ -6,11 +6,12 @@
 
 ### Added
 
+- Claude 连接可显式选择 Anthropic Messages 或 OpenAI Responses 上游。Responses 连接通过 SwitchX 路由转换文字、图片和函数工具请求与回复，并生成 Claude SSE；暂采用完整上游响应缓冲，无法转换的内容会明确报错。
 - Claude Code 新增单连接 Messages 路由与多连接模型聚合：按工作空间分配本地端口和令牌，使用稳定公开模型 ID 精确转发，支持默认连接、模型角色和运行中预览更新。在途请求保留原绑定；配置恢复冲突时保留服务，正常退出会恢复并停止本实例运行的路由。
 - Claude 路由支持 JSON、SSE、模型目录和上游 token 计数，保留版本、beta 头及查询参数，隔离客户端与上游认证。路由用量与 Claude 本地日志按消息 ID 去重；界面、MCP 和托盘增加工作空间状态与恢复入口。
 
 - Claude Code 支持 Anthropic 兼容直连：连接保存与导入、SwitchX 凭据 helper / API Key / Bearer / 本机官方登录、自定义 `modelPicker` 列表、排序与默认模型、角色映射、CLI 版本检查，以及配置预览、应用和按字段恢复。凭据不进入预览与恢复日志；完整备份仅存入私有文件，外部修改保留并报告。
-- MCP 新增明确指定工作空间的 Claude 连接读取、模型编辑和直连/恢复控制；托盘新增独立的 Claude 配置恢复入口。Claude 协议转换将在后续阶段接入。
+- MCP 新增明确指定工作空间的 Claude 连接读取、模型编辑和直连/恢复控制；托盘新增独立的 Claude 配置恢复入口。其他协议转换将在后续阶段接入。
 
 - 新增 Codex 与 Claude Code 客户端导航和独立工作空间记录，切换视图保留 Codex 路由并清理过期预览与凭据编辑内容；Claude 支持独立的连接、模型和配置页面。工作空间升级前保存权限受限的 SQLite 备份。
 

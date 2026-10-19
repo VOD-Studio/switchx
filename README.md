@@ -93,7 +93,7 @@ sh scripts/bundle-macos.sh --release  # target/release/SwitchX.app
 
 当前支持用户级 `settings.json`，保留权限、Hooks、MCP 等无关字段。直连可在 SwitchX 退出后继续使用；helper 模式需保留 SwitchX 程序与资料目录。API Key/Bearer 模式会把凭据写入权限受限的客户端设置，helper 模式只写入读取命令。原配置完整快照保存于私有备份，预览、MCP 输出和恢复日志不包含凭据。
 
-同一 Claude 工作空间托管期间，可添加连接并预览切换；编辑、删除已有连接前需要恢复。其他工作空间与 Codex 不受此限制。协议转换、云平台认证及多账号登录管理在后续阶段实现。
+同一 Claude 工作空间托管期间，可添加连接并预览切换；编辑、删除已有连接前需要恢复。其他工作空间与 Codex 不受此限制。Chat Completions、Gemini 等后续协议转换、云平台认证及多账号登录管理仍在后续阶段。
 
 [界面截图与隔离 CLI 验证](docs/claude-code-verification.md) · [完整实施方案](docs/claude-code-client-plan.md)
 
@@ -112,11 +112,13 @@ sh scripts/bundle-macos.sh --release  # target/release/SwitchX.app
 
 配置目录可以切换，其他工作空间的路由继续运行。当前仍需先恢复才能编辑或删除已有连接；默认连接、默认模型与路由模式支持运行中预览更新。可以添加新连接后重新发布聚合。
 
-支持原生 `POST /v1/messages`、JSON/SSE、`GET /v1/models` 和转发 `/v1/messages/count_tokens`。token 计数由上游提供，上游不支持时返回错误；不生成估算成功结果。请求与非流式响应各限 16 MiB，SSE 单个事件限 2 MiB，每个工作空间最多 8 个并发转发。当前不做协议转换或自动备用切换。
+原生 Messages 连接支持 `POST /v1/messages`、JSON/SSE、`GET /v1/models` 和转发 `/v1/messages/count_tokens`。token 计数由上游提供，上游不支持时返回错误；不生成估算成功结果。请求与非流式响应各限 16 MiB，SSE 单个事件限 2 MiB，每个工作空间最多 8 个并发转发。当前不做自动备用切换。
+
+连接编辑器可显式选择 **OpenAI Responses**，使用 Bearer Token 和 Responses API 根地址。这类连接只能通过 SwitchX 路由使用；旧连接默认保持 Anthropic Messages。转换覆盖文字、常见图片来源和函数工具调用，包括多轮历史与工具结果。Claude CLI 需关闭 Thinking，例如 `MAX_THINKING_TOKENS=0 claude`；Effort 映射为上游 `reasoning.effort`，上游需支持所选级别。无法保留的 Thinking、带注释输出及其他未知字段会报错。Responses 上游暂以非流式请求完整返回，SwitchX 再生成 Claude SSE，所以客户端不会逐字看到上游增量；`count_tokens` 不支持。Anthropic beta 请求头、缓存提示和用户元数据不会转发到 Responses，缓存费用可能不同。发布预览会列出连接协议与这些限制。
 
 路由页可查看当前工作空间的最近请求；用量页可筛选 Claude Code。消息 ID 由路由生成并返回 CLI，使路由记录与导入的本地日志对应，同一响应只统计一次。
 
-[路由验证与界面截图](docs/claude-route-verification.md)
+[原生路由验证](docs/claude-route-verification.md) · [Responses 转换范围与验证](docs/claude-responses-verification.md)
 
 ## 供 AI Agent 使用（MCP）
 

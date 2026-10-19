@@ -33,6 +33,7 @@ impl Fixture {
         } else {
             ConnectionSettings {
                 auth,
+                protocol: crate::claude::UpstreamProtocol::Messages,
                 picker: PickerPolicy::Replace,
                 default_model: "custom/sonnet".into(),
                 models: vec![
@@ -402,26 +403,65 @@ async fn discovery_honors_auth_choice_and_redacts_error_bodies() {
             Json(serde_json::json!({"data":[{"id":"prefixed/model"}]}))
         }),
     );
+    let router = router.route(
+        "/responses/v1/models",
+        get(|headers: HeaderMap| async move {
+            assert_eq!(headers["authorization"], "Bearer synthetic-key");
+            assert!(!headers.contains_key("x-api-key"));
+            assert!(!headers.contains_key("anthropic-version"));
+            Json(serde_json::json!({"data":[{"id":"responses/model"}]}))
+        }),
+    );
     let task = tokio::spawn(async move {
         axum::serve(listener, router).await.unwrap();
     });
     let key = Secret::new("synthetic-key".into());
-    let models = discover_claude_models(&format!("http://{address}"), AuthMode::ApiKey, &key)
-        .await
-        .unwrap();
+    let models = discover_claude_models(
+        &format!("http://{address}"),
+        UpstreamProtocol::Messages,
+        AuthMode::ApiKey,
+        &key,
+    )
+    .await
+    .unwrap();
     assert_eq!(models.len(), 1);
     assert_eq!(models[0].label, "My model");
     let prefixed = discover_claude_models(
         &format!("http://{address}/gateway/v1"),
+        UpstreamProtocol::Messages,
         AuthMode::Bearer,
         &key,
     )
     .await
     .unwrap();
     assert_eq!(prefixed[0].model, "prefixed/model");
-    let error = discover_claude_models(&format!("http://{address}/bad"), AuthMode::ApiKey, &key)
+    let responses = discover_claude_models(
+        &format!("http://{address}/responses"),
+        UpstreamProtocol::Responses,
+        AuthMode::Bearer,
+        &key,
+    )
+    .await
+    .unwrap();
+    assert_eq!(responses[0].model, "responses/model");
+    assert!(
+        discover_claude_models(
+            &format!("http://{address}/responses"),
+            UpstreamProtocol::Responses,
+            AuthMode::Helper,
+            &key,
+        )
         .await
-        .unwrap_err();
+        .is_err()
+    );
+    let error = discover_claude_models(
+        &format!("http://{address}/bad"),
+        UpstreamProtocol::Messages,
+        AuthMode::ApiKey,
+        &key,
+    )
+    .await
+    .unwrap_err();
     assert!(error.contains("401"));
     assert!(!error.contains("synthetic-private"));
     task.abort();

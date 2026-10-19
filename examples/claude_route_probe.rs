@@ -1,5 +1,5 @@
 //! Isolated Claude CLI -> SwitchX -> synthetic Messages servers. Never calls a real provider.
-//! macOS: cargo run --example claude_route_probe -- /absolute/new/probe-directory
+//! macOS: cargo run --example claude_route_probe -- /absolute/new/probe-directory [--responses]
 use axum::{
     Json, Router,
     extract::State,
@@ -16,6 +16,7 @@ use switchx::{
     app,
     claude::{
         self, AuthMode, Connection, ConnectionSettings, ModelOption, PickerPolicy,
+        UpstreamProtocol,
         publication::{Mode, Options},
         route_session::Sessions,
     },
@@ -27,7 +28,9 @@ struct Mock {
     name: &'static str,
     key: &'static str,
     bearer: bool,
+    responses: bool,
     hits: Arc<Mutex<Vec<String>>>,
+    shapes: Arc<Mutex<Vec<Value>>>,
 }
 async fn answer(State(mock): State<Mock>, headers: HeaderMap, Json(body): Json<Value>) -> Response {
     let authorized = if mock.bearer {
@@ -42,7 +45,39 @@ async fn answer(State(mock): State<Mock>, headers: HeaderMap, Json(body): Json<V
         return axum::http::StatusCode::BAD_REQUEST.into_response();
     }
     mock.hits.lock().unwrap().push(mock.name.into());
+    if let Some(fields) = body.as_object() {
+        // Keep only envelope names and known protocol option enums, never text or auth.
+        let known = |value: &Value| {
+            value
+                .as_str()
+                .filter(|value| {
+                    [
+                        "disabled", "enabled", "adaptive", "low", "medium", "high", "max",
+                    ]
+                    .contains(value)
+                })
+                .map(str::to_owned)
+        };
+        mock.shapes.lock().unwrap().push(json!({
+            "fields":fields.keys().collect::<Vec<_>>(),
+            "thinking_type":known(&body["thinking"]["type"]),
+            "thinking_fields":body["thinking"].as_object().map(|value|value.keys().collect::<Vec<_>>()),
+            "output_config_fields":body["output_config"].as_object().map(|value|value.keys().collect::<Vec<_>>()),
+            "effort":known(&body["output_config"]["effort"]),
+            "temperature_is_default":body["temperature"].as_f64() == Some(1.0),
+            "metadata_fields":body["metadata"].as_object().map(|value|value.keys().collect::<Vec<_>>()),
+        }));
+    }
     let reply = format!("SWITCHX_M2_{}", mock.name);
+    if mock.responses {
+        if body["stream"] != false
+            || headers.contains_key("anthropic-version")
+            || headers.contains_key("anthropic-beta")
+        {
+            return axum::http::StatusCode::BAD_REQUEST.into_response();
+        }
+        return Json(json!({"id":"resp_synthetic_upstream","status":"completed","model":"same-model","output":[{"type":"message","role":"assistant","status":"completed","content":[{"type":"output_text","text":reply,"annotations":[]}]}],"usage":{"input_tokens":3,"output_tokens":7}})).into_response();
+    }
     let message = json!({"id":"msg_synthetic_upstream","type":"message","role":"assistant","model":"same-model","content":[{"type":"text","text":reply}],"stop_reason":"end_turn","stop_sequence":null,"usage":{"input_tokens":3,"output_tokens":7}});
     if body["stream"] != true {
         return Json(message).into_response();
@@ -74,12 +109,15 @@ async fn mock(
     name: &'static str,
     key: &'static str,
     bearer: bool,
+    responses: bool,
     hits: Arc<Mutex<Vec<String>>>,
+    shapes: Arc<Mutex<Vec<Value>>>,
 ) -> (String, tokio::task::JoinHandle<()>) {
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let url = format!("http://{}", listener.local_addr().unwrap());
     let app = Router::new()
         .route("/v1/messages", post(answer))
+        .route("/v1/responses", post(answer))
         .route(
             "/v1/messages/count_tokens",
             post(|| async { Json(json!({"input_tokens":12})) }),
@@ -88,7 +126,9 @@ async fn mock(
             name,
             key,
             bearer,
+            responses,
             hits,
+            shapes,
         });
     let task = tokio::spawn(async move {
         axum::serve(listener, app).await.unwrap();
@@ -141,6 +181,7 @@ async fn cli(cli: &Path, root: &Path, private_home: &Path, expected: &str) -> Re
         .env("CLAUDE_CONFIG_DIR", private_home)
         .env("TMPDIR", root.join("tmp"))
         .env("DISABLE_AUTOUPDATER", "1")
+        .env("MAX_THINKING_TOKENS", "0")
         .env("CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC", "1");
     let output = tokio::time::timeout(std::time::Duration::from_secs(60), command.output())
         .await
@@ -196,6 +237,11 @@ async fn cli(_: &Path, _: &Path, _: &Path, _: &str) -> Result<(), String> {
 }
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let responses = match std::env::args().nth(2).as_deref() {
+        None => false,
+        Some("--responses") => true,
+        Some(_) => return Err("optional argument must be --responses".into()),
+    };
     let root = std::env::args()
         .nth(1)
         .map(PathBuf::from)
@@ -239,8 +285,25 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
     let workspace = app::claude::claude_workspace(&data, &private_home)?;
     let hits = Arc::new(Mutex::new(Vec::new()));
-    let (url_a, task_a) = mock("A", "synthetic-probe-a", false, hits.clone()).await;
-    let (url_b, task_b) = mock("B", "synthetic-probe-b", true, hits.clone()).await;
+    let shapes = Arc::new(Mutex::new(Vec::new()));
+    let (url_a, task_a) = mock(
+        "A",
+        "synthetic-probe-a",
+        false,
+        false,
+        hits.clone(),
+        shapes.clone(),
+    )
+    .await;
+    let (url_b, task_b) = mock(
+        "B",
+        "synthetic-probe-b",
+        true,
+        responses,
+        hits.clone(),
+        shapes.clone(),
+    )
+    .await;
     let save = |name: &str, url: String, auth, key: &str| -> Result<Connection, String> {
         let mut model = ModelOption::new("same-model");
         model.behaves_as = "claude-sonnet-4-6".into();
@@ -254,6 +317,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 base_url: url,
                 settings: ConnectionSettings {
                     auth,
+                    protocol: if responses && auth == AuthMode::Bearer {
+                        UpstreamProtocol::Responses
+                    } else {
+                        UpstreamProtocol::Messages
+                    },
                     picker: PickerPolicy::Replace,
                     models: vec![model],
                     default_model: "same-model".into(),
@@ -280,7 +348,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         let imported=switchx::usage::claude_logs::import(&store,&private_home,&AtomicBool::new(false),|_|{}).map_err(|_|"cannot import probe CLI logs")?;
         let after=store.usage_page(0,i64::MAX,&Default::default(),0,100).map_err(|_|"cannot read imported usage")?.1;
         if before!=after{return Err("CLI logs duplicated router usage".into());}
-        Ok::<_,String>(json!({"claude_version":info.version,"routes_seen":hits.lock().unwrap().clone(),"routed_usage_rows":before,"usage_rows_after_log_import":after,"cli_log_files":imported.files,"upstream":"synthetic loopback only"}))
+        Ok::<_,String>(json!({"claude_version":info.version,"routes_seen":hits.lock().unwrap().clone(),"responses":responses,"routed_usage_rows":before,"usage_rows_after_log_import":after,"cli_log_files":imported.files,"upstream":"synthetic loopback only"}))
     }.await;
     let cleanup = match app::claude::preview_claude_restore(&data, &private_home, false) {
         Ok(prepared) => sessions
@@ -291,7 +359,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     };
     task_a.abort();
     task_b.abort();
-    let mut report = outcome?;
+    let mut report = outcome.map_err(|error| {
+        format!(
+            "{error}; synthetic upstream envelope fields {:?}",
+            shapes.lock().unwrap()
+        )
+    })?;
     if !cleanup? {
         return Err("probe restoration has conflicts".into());
     }

@@ -147,7 +147,7 @@ export component ClaudeWorkspacePage inherits VerticalLayout {
                     }
 
                     Text {
-                        text: "添加 Anthropic 兼容 API 或使用本机官方登录，再选择要显示的模型。";
+                        text: "添加 Messages 或 Responses API 连接，也可使用本机官方登录，再选择要显示的模型。";
                         color: Theme.muted-text;
                         font-size: 13px;
                         wrap: word-wrap;
@@ -188,7 +188,7 @@ export component ClaudeWorkspacePage inherits VerticalLayout {
                         }
 
                         Text {
-                            text: connection.authentication + " · " + connection.model-count + " 个菜单模型";
+                            text: connection.protocol + " · " + connection.authentication + " · " + connection.model-count + " 个菜单模型";
                             color: Theme.muted-text;
                             font-size: 11px;
                             overflow: elide;
@@ -212,12 +212,18 @@ export component ClaudeWorkspacePage inherits VerticalLayout {
                     }
 
                     QuietButton {
-                        text: "预览启用";
+                        text: connection.route-only ? "设置路由" : "预览启用";
                         width: 96px;
                         primary: true;
                         enabled: !root.busy && !ClaudeUi.recovering;
                         accessible-label: "预览 Claude 连接 " + connection.name;
-                        clicked => { ClaudeUi.preview(connection.id); }
+                        clicked => {
+                            if connection.route-only {
+                                ClaudeUi.configure-routing(connection.id);
+                            } else {
+                                ClaudeUi.preview(connection.id);
+                            }
+                        }
                     }
 
                     QuietButton {

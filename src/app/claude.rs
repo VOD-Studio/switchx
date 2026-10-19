@@ -4,7 +4,10 @@ use super::open_store;
 #[cfg(test)]
 mod tests;
 use crate::{
-    claude::{self, AuthMode, Connection, ConnectionSettings, ModelOption, PickerPolicy, Roles},
+    claude::{
+        self, AuthMode, Connection, ConnectionSettings, ModelOption, PickerPolicy, Roles,
+        UpstreamProtocol,
+    },
     clients::{ClientKind, ClientWorkspace, WorkspaceKey},
     credentials::Secret,
     storage::Store,
@@ -383,6 +386,7 @@ pub fn import_claude_current(data_dir: &Path, home: &Path) -> Result<Connection,
     }
     let settings = ConnectionSettings {
         auth,
+        protocol: crate::claude::UpstreamProtocol::Messages,
         picker,
         models,
         default_model,
@@ -417,22 +421,28 @@ pub fn import_claude_current(data_dir: &Path, home: &Path) -> Result<Connection,
 
 pub async fn discover_claude_models(
     base: &str,
+    protocol: UpstreamProtocol,
     auth: AuthMode,
     key: &Secret,
 ) -> Result<Vec<ModelOption>, String> {
     if auth == AuthMode::Native {
         return Err("官方登录的模型由 Claude Code 提供，也可以手动添加".into());
     }
+    if protocol == UpstreamProtocol::Responses && auth != AuthMode::Bearer {
+        return Err("Responses 模型目录需要 Bearer Token".into());
+    }
     let base = validate_claude_endpoint(base)?;
-    // Match the Anthropic SDK: append the resource path to the exact base URL.
-    // Do not reinterpret a gateway prefix ending in /v1 as an OpenAI base URL.
+    // The saved base is a root; append the resource path without guessing from its name.
     let url = format!("{base}/v1/models");
     let client = reqwest::Client::builder()
         .redirect(reqwest::redirect::Policy::none())
         .timeout(std::time::Duration::from_secs(15))
         .build()
         .map_err(|_| "无法初始化模型查询")?;
-    let mut request = client.get(url).header("anthropic-version", "2023-06-01");
+    let mut request = client.get(url);
+    if protocol == UpstreamProtocol::Messages {
+        request = request.header("anthropic-version", "2023-06-01");
+    }
     if auth != AuthMode::ApiKey {
         request = request.bearer_auth(key.expose());
     }
@@ -460,7 +470,7 @@ pub async fn discover_claude_models(
     let rows = value
         .get("data")
         .and_then(Value::as_array)
-        .ok_or("上游没有提供 Anthropic 模型目录，可手动添加")?;
+        .ok_or("上游没有提供模型目录，可手动添加")?;
     let mut models = Vec::new();
     for row in rows {
         let Some(id) = row.get("id").and_then(Value::as_str) else {
