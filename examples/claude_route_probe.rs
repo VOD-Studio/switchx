@@ -208,12 +208,22 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let data = root.join("data");
     let private_home = root.join("claude");
     std::fs::create_dir(&private_home)?;
+    let private_bin = root.join("bin");
+    std::fs::create_dir(&private_bin)?;
+    // Freeze the CLI executable for this probe so an active user session and
+    // its installation can continue independently while the probe runs.
+    let private_cli = private_bin.join(if cfg!(windows) {
+        "claude.exe"
+    } else {
+        "claude"
+    });
+    std::fs::copy(claude::client::executable(None)?, &private_cli)?;
+    let info = claude::client::inspect(private_cli.to_str(), &private_home).await?;
     std::fs::write(
         private_home.join(".claude.json"),
-        json!({"hasCompletedOnboarding":true,"theme":"dark","lastOnboardingVersion":"2.1.301"})
+        json!({"hasCompletedOnboarding":true,"theme":"dark","lastOnboardingVersion":info.version})
             .to_string(),
     )?;
-    let info = claude::client::inspect(None, &private_home).await?;
     let helper = std::env::current_exe()?
         .parent()
         .unwrap()
