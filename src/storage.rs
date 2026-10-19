@@ -202,6 +202,7 @@ impl Store {
             return Ok(false);
         }
         let connection = Connection::open_with_flags(path, OpenFlags::SQLITE_OPEN_READ_ONLY)?;
+        connection.busy_timeout(Duration::from_secs(5))?;
         let version: i64 = connection.query_row("PRAGMA user_version", [], |row| row.get(0))?;
         let parent = path.parent().ok_or(rusqlite::Error::InvalidQuery)?;
         Ok(version < SCHEMA_VERSION
@@ -1675,6 +1676,34 @@ mod tests {
             assert_eq!(version, SCHEMA_VERSION);
             std::fs::remove_dir_all(dir).unwrap();
         }
+    }
+
+    #[test]
+    fn recovery_check_waits_for_a_concurrent_schema_writer() {
+        let dir = std::env::temp_dir().join(format!(
+            "switchx-recovery-lock-{}",
+            crate::id::new_id().unwrap()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("switchx.sqlite");
+        let writer = Connection::open(&path).unwrap();
+        writer
+            .execute_batch("PRAGMA user_version = 1; BEGIN EXCLUSIVE;")
+            .unwrap();
+        let gate = std::sync::Arc::new(std::sync::Barrier::new(2));
+        let reader = std::thread::spawn({
+            let (path, gate) = (path.clone(), gate.clone());
+            move || {
+                gate.wait();
+                Store::needs_recovery_before_migration(&path)
+            }
+        });
+        gate.wait();
+        std::thread::sleep(Duration::from_millis(100));
+        writer.execute_batch("COMMIT;").unwrap();
+        assert!(!reader.join().unwrap().unwrap());
+        drop(writer);
+        std::fs::remove_dir_all(dir).unwrap();
     }
 
     #[test]
