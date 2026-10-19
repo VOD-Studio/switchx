@@ -196,6 +196,27 @@ pub struct Store {
 }
 
 impl Store {
+    fn lock_migration(path: &Path) -> Result<std::fs::File> {
+        let lock_path = path.with_extension("migration.lock");
+        if std::fs::symlink_metadata(&lock_path)
+            .is_ok_and(|metadata| !metadata.is_file() || metadata.file_type().is_symlink())
+        {
+            return Err(rusqlite::Error::InvalidQuery);
+        }
+        let mut options = std::fs::OpenOptions::new();
+        options.read(true).write(true).create(true).truncate(false);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt;
+            options.mode(0o600);
+        }
+        let file = options
+            .open(lock_path)
+            .map_err(|_| rusqlite::Error::InvalidQuery)?;
+        file.lock().map_err(|_| rusqlite::Error::InvalidQuery)?;
+        Ok(file)
+    }
+
     /// Old recovery journals must be settled before changing their database schema.
     pub fn needs_recovery_before_migration(path: &Path) -> Result<bool> {
         if !path.exists() {
@@ -248,6 +269,15 @@ impl Store {
     }
 
     pub fn open(path: &Path) -> Result<Self> {
+        // The recovery check, private backup, and schema steps form one opener's
+        // migration. Serialize them across threads and processes, including the
+        // first opener before the database file exists.
+        let _migration_lock = if path == Path::new(":memory:") {
+            // SQLite gives each in-memory connection its own database.
+            None
+        } else {
+            Some(Self::lock_migration(path)?)
+        };
         if Self::needs_recovery_before_migration(path)? {
             return Err(rusqlite::Error::InvalidQuery);
         }
@@ -1703,6 +1733,32 @@ mod tests {
         writer.execute_batch("COMMIT;").unwrap();
         assert!(!reader.join().unwrap().unwrap());
         drop(writer);
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn first_open_waits_for_the_whole_migration_lock() {
+        let dir = std::env::temp_dir().join(format!(
+            "switchx-migration-lock-{}",
+            crate::id::new_id().unwrap()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("switchx.sqlite");
+        let lock = Store::lock_migration(&path).unwrap();
+        let (started, ready) = std::sync::mpsc::channel();
+        let opener = std::thread::spawn({
+            let path = path.clone();
+            move || {
+                started.send(()).unwrap();
+                Store::open(&path).map(drop)
+            }
+        });
+        ready.recv().unwrap();
+        std::thread::sleep(Duration::from_millis(100));
+        assert!(!path.exists());
+        drop(lock);
+        opener.join().unwrap().unwrap();
+        assert!(path.exists());
         std::fs::remove_dir_all(dir).unwrap();
     }
 
